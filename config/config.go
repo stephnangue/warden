@@ -475,6 +475,29 @@ type ListenerBlock struct {
 	TLSSPIFFE               bool   `hcl:"tls_spiffe,optional"`
 	TLSSPIFFESocket         string `hcl:"tls_spiffe_socket,optional"`          // Workload API endpoint; empty => SPIFFE_ENDPOINT_SOCKET
 	TLSSPIFFEStartupTimeout string `hcl:"tls_spiffe_startup_timeout,optional"` // max wait/retry for the first SVID at boot (duration; default 10s)
+
+	// HTTP server deadlines. Empty means the listener's built-in default,
+	// which is the value each carried before they became configurable.
+	//
+	// These govern the control plane only. The read and write deadlines are
+	// absolute from the moment request headers are read, so they bound a
+	// handler's whole execution rather than merely the write of its
+	// response; proxied gateway traffic therefore clears both per-connection
+	// and answers to the mount's own timeout instead.
+	HTTPReadTimeout  string `hcl:"http_read_timeout,optional"`  // duration; default 5s
+	HTTPWriteTimeout string `hcl:"http_write_timeout,optional"` // duration; default 10s
+	HTTPIdleTimeout  string `hcl:"http_idle_timeout,optional"`  // duration; default 1m
+}
+
+// HTTPTimeouts parses the listener's HTTP deadline fields. validateConfig
+// rejects an unparseable or non-positive value at load, so a zero returned
+// here means the field was left empty and the listener applies its
+// built-in default.
+func (l ListenerBlock) HTTPTimeouts() (read, write, idle time.Duration) {
+	read, _ = time.ParseDuration(l.HTTPReadTimeout)
+	write, _ = time.ParseDuration(l.HTTPWriteTimeout)
+	idle, _ = time.ParseDuration(l.HTTPIdleTimeout)
+	return read, write, idle
 }
 
 // LoadConfig reads a single HCL config file and returns a validated *Config.
@@ -659,6 +682,27 @@ func validateConfig(config *Config) error {
 	// SPIFFE serving is an alternative TLS mode, mutually exclusive with the
 	// file-based cert/key fields.
 	for i, ln := range config.Listeners {
+		// HTTP deadlines apply in every TLS mode, so they are checked before
+		// the mode switch. Zero is not accepted: net/http reads it as "no
+		// deadline at all", which an operator setting an explicit value is
+		// never asking for — leave the key out to get the default.
+		for _, f := range []struct{ name, value string }{
+			{"http_read_timeout", ln.HTTPReadTimeout},
+			{"http_write_timeout", ln.HTTPWriteTimeout},
+			{"http_idle_timeout", ln.HTTPIdleTimeout},
+		} {
+			if f.value == "" {
+				continue
+			}
+			d, err := time.ParseDuration(f.value)
+			if err != nil {
+				return fmt.Errorf("listener[%d]: invalid %s %q: %w", i, f.name, f.value, err)
+			}
+			if d <= 0 {
+				return fmt.Errorf("listener[%d]: %s must be positive, got %s", i, f.name, d)
+			}
+		}
+
 		spiffeSubKeySet := ln.TLSSPIFFESocket != "" || ln.TLSSPIFFEStartupTimeout != ""
 		switch {
 		case ln.TLSDisable:

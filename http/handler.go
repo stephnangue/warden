@@ -18,12 +18,18 @@ import (
 	"github.com/stephnangue/warden/core"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 const (
 	// defaultForwardingTimeout is the maximum time for a forwarded request to
 	// the active node before timing out, when not explicitly configured.
 	defaultForwardingTimeout = 60 * time.Second
+
+	// sysMCPPath is Warden's own MCP discovery endpoint. It is the one
+	// control-plane route that can answer with an open-ended SSE stream
+	// (subscriptions/listen), so the standby forwarder treats it specially.
+	sysMCPPath = "/v1/sys/mcp"
 )
 
 // HandlerProperties contains configuration for the HTTP handler
@@ -91,7 +97,7 @@ func Handler(props *HandlerProperties) http.Handler {
 	// capabilities (list_roles, get_skill). Registered before the /v1/sys/
 	// catch-all. Not in standbyAllowedPaths: it reads live mount/skill/
 	// introspection state, so standby nodes forward it to the active node.
-	mux.Handle("/v1/sys/mcp", handleSysMCP(core, log))
+	mux.Handle(sysMCPPath, handleSysMCP(core, log))
 
 	// System backend endpoints - catch-all for /v1/sys/
 	// Handles providers, auth, namespaces, credentials, etc.
@@ -405,6 +411,49 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 	})
 }
 
+// isForwardedGatewayRequest reports whether r is provider gateway traffic —
+// what Warden proxies to an upstream, as opposed to its own control plane.
+//
+// Two shapes qualify, because a standby sees the request before core has
+// canonicalised it. The path shape matches the segment rule the providers'
+// own patterns use ("gateway" and "gateway/..."), so "/v1/mcp/gateway" and
+// "/v1/mcp/role/agent/gateway/foo" qualify while a mount named
+// "gateway-config" does not. The header shape catches header-routed clients:
+// wrapGenericHandler only prepends "/v1" to those, and the
+// "<mount>/role/<role>/gateway/<api>" path is synthesised later, on the
+// active node — so a header-routed request reaches here carrying the bare
+// upstream path and no gateway segment at all.
+//
+// sys/ is excluded outright: it is control plane whatever its last segment
+// happens to be, and X-Warden-Provider is rejected on it upstream of here.
+func isForwardedGatewayRequest(r *http.Request) bool {
+	// The origin-root well-known documents are resolved and forwarded ahead
+	// of the X-Warden-Provider rewrite, so they are the one shape that
+	// reaches here carrying the header without having been through it. A
+	// client that sets the header as a connection-wide default would
+	// otherwise have its discovery fetch classified as gateway traffic.
+	if isOIDCIssuerPath(r.URL.Path) || isPRMPath(r.URL.Path) {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/sys/") || r.URL.Path == "/v1/sys" {
+		return false
+	}
+	if r.Header.Get("X-Warden-Provider") != "" {
+		return true
+	}
+	for rest := r.URL.Path; rest != ""; {
+		i := strings.Index(rest, "/gateway")
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+len("/gateway"):]
+		if rest == "" || rest[0] == '/' {
+			return true
+		}
+	}
+	return false
+}
+
 // forwardToActive forwards a request to the active node via the shared
 // reverse proxy. Falls back to a 307 redirect if the proxy is unavailable.
 func forwardToActive(c *core.Core, forwarder *standbyForwarder, w http.ResponseWriter, r *http.Request) {
@@ -418,6 +467,27 @@ func forwardToActive(c *core.Core, forwarder *standbyForwarder, w http.ResponseW
 
 	if clusterAddr != "" {
 		if proxy := forwarder.getProxy(clusterAddr, leaderAddr); proxy != nil {
+			// Traffic proxied from a standby is written on the standby's own
+			// listener, with the standby's deadlines armed. The active node
+			// clears its own when it takes the streaming branch, but that says
+			// nothing about this connection — without the same clear here an
+			// HA stream still dies at the standby's http_write_timeout.
+			//
+			// Gateway traffic and the MCP discovery endpoint both qualify:
+			// whatever the former proxies may run long, streaming or not, and
+			// the latter answers subscriptions/listen with an open-ended SSE
+			// stream. Both deadlines go, not just the write one — once the
+			// body is forwarded, an armed read deadline cancels the request
+			// context and tears down an idle stream. Everything else forwards
+			// under the standby's caps.
+			if isForwardedGatewayRequest(r) || r.URL.Path == sysMCPPath {
+				if err := logical.ClearStreamDeadlines(w); err != nil {
+					c.Logger().Warn("could not clear connection deadlines for forwarded request",
+						logger.Err(err),
+						logger.String("path", r.URL.Path),
+					)
+				}
+			}
 			proxy.ServeHTTP(w, r)
 			metrics.MeasureSince([]string{"ha", "forward", "duration"}, start)
 			metrics.IncrCounter([]string{"ha", "forward", "success"}, 1)

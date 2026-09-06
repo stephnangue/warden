@@ -1,15 +1,19 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -42,6 +46,61 @@ const mcpServerVersion = "1.0.0"
 // so credential detection (detectIntrospectCredentialFormat) needs the
 // request threaded through the context.
 type mcpRequestKey struct{}
+
+// maxSysMCPBody caps a discovery request body. The two tools this endpoint
+// exposes take an empty input and a single skill name, so anything near this
+// is already pathological; the cap exists so buffering the body cannot be
+// turned into a memory cost.
+const maxSysMCPBody = 1 << 20 // 1 MiB
+
+// sysMCPTimeout is this endpoint's answer to a gateway mount's
+// listen_timeout: the ceiling on one discovery request once the listener's
+// deadlines have been shed.
+//
+// It has to exist. The endpoint authorizes on the presented identity inside
+// each tool handler, so the SDK accepts and holds a subscriptions/listen
+// stream before any credential is checked — with no ceiling, unauthenticated
+// callers could park goroutines and connections here indefinitely. It is
+// generous because a listen stream is meant to live: Warden's tool list never
+// changes, so such a stream only ever idles, and a client that wants another
+// reconnects.
+const sysMCPTimeout = 10 * time.Minute
+
+// errSysMCPBodyTooLarge marks the oversize case so the handler can answer 413
+// rather than folding it in with a read failure.
+var errSysMCPBodyTooLarge = errors.New("sys/mcp request body too large")
+
+// bufferMCPRequestBody reads r's body into memory and puts it back, so the
+// request can be handed to a handler that may hold the response open
+// indefinitely without a connection read deadline still being armed. A body
+// over the cap is refused rather than truncated — a truncated JSON-RPC body
+// would surface as a confusing parse error.
+// sysMCPContext builds the context one discovery request runs under: the
+// caller's namespace and the raw request threaded through for the tool
+// handlers, bounded by sysMCPTimeout. The caller must call the returned
+// cancel.
+func sysMCPContext(r *http.Request, ns *namespace.Namespace) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(r.Context(), sysMCPTimeout)
+	ctx = namespace.ContextWithNamespace(ctx, ns)
+	ctx = withMCPRequest(ctx, r)
+	return ctx, cancel
+}
+
+func bufferMCPRequestBody(r *http.Request) error {
+	if r.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSysMCPBody+1))
+	_ = r.Body.Close()
+	if err != nil {
+		return err
+	}
+	if len(body) > maxSysMCPBody {
+		return errSysMCPBodyTooLarge
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return nil
+}
 
 func withMCPRequest(ctx context.Context, r *http.Request) context.Context {
 	return context.WithValue(ctx, mcpRequestKey{}, r)
@@ -105,8 +164,35 @@ func (c *Core) MCPServerHandler() http.Handler {
 		// Authorization header and the forwarded client cert — the listener's
 		// certForwardingMiddleware injected the latter before routing — so
 		// stashing r preserves both for detectIntrospectCredentialFormat.
-		ctx := namespace.ContextWithNamespace(r.Context(), ns)
-		ctx = withMCPRequest(ctx, r)
+		// JSONResponse does not make every response here a buffered one: the
+		// SDK forces SSE for subscriptions/listen, which has no synchronous
+		// result and stays open until the client cancels, and a v1.7.0 client
+		// opens one during Connect whenever it registers a list-changed
+		// handler. Under the listener's deadlines such a stream is severed
+		// seconds in — and not only by the write deadline: once the body is
+		// drained, an armed read deadline cancels the request context, which
+		// is exactly what the SDK blocks on.
+		//
+		// The deadlines cannot be shed reactively, on seeing the response
+		// declare itself an event stream, because the SDK sets that
+		// Content-Type on the header map and then blocks without writing a
+		// byte. So read the body first — under the deadlines the listener
+		// armed, which is what bounds a dribbling client — and shed them
+		// before handing over to a handler that may never return.
+		if err := bufferMCPRequestBody(r); err != nil {
+			if errors.Is(err, errSysMCPBodyTooLarge) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "could not read request body", http.StatusBadRequest)
+			return
+		}
+		if err := logical.ClearStreamDeadlines(w); err != nil {
+			c.logger.Warn("could not clear connection deadlines for sys/mcp", logger.Err(err))
+		}
+
+		ctx, cancel := sysMCPContext(r, ns)
+		defer cancel()
 		streamable.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

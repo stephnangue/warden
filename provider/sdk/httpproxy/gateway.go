@@ -20,18 +20,26 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Framework-side fields are atomic — read directly.
 	timeout := b.Timeout()
 	maxBody := b.MaxBodySize()
-	// Provider-local fields still need the RLock.
+	// Provider-local fields still need the RLock. extraState comes out of the
+	// same snapshot the spec hooks below read; it must not be mutated here.
 	b.mu.RLock()
 	providerURL := b.providerURL
 	proxy := b.Proxy
+	state := b.extraState
 	b.mu.RUnlock()
+
+	// A spec may pick a different deadline for this request shape than the
+	// mount-wide one — an MCP subscription is open-ended where a tool call is
+	// not. Zero means "keep the mount timeout".
+	if b.spec.SelectTimeout != nil {
+		if d := b.spec.SelectTimeout(req, state); d > 0 {
+			timeout = d
+		}
+	}
 
 	credExtractor := b.spec.ExtractCredentials
 	var dispatch Dispatch
 	if b.spec.ResolveUpstream != nil {
-		b.mu.RLock()
-		state := b.extraState
-		b.mu.RUnlock()
 		if d, ok := b.spec.ResolveUpstream(req.HTTPRequest, providerURL, state); ok {
 			dispatch = d
 			if d.UpstreamURL != "" {

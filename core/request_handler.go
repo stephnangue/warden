@@ -841,6 +841,35 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	} else {
 		req.Streamed = true
 
+		// Shed the listener's write deadline for the whole of this request. It
+		// is armed when request headers are read and absolute from that
+		// moment, so on a streaming path it caps the proxied call itself: a
+		// response over it dies with a bare EOF and no status, and a stream is
+		// truncated mid-flight. The mount's own timeout is the real ceiling
+		// for this traffic. Control-plane requests take the branch above and
+		// keep their caps.
+		if err := logical.ClearStreamWriteDeadline(req.ResponseWriter); err != nil {
+			c.logger.Warn("could not clear connection write deadline for streaming request",
+				logger.Err(err),
+				logger.String("path", req.Path),
+			)
+		}
+
+		// The read deadline gets a window rather than a clear, because the
+		// body buffering below runs BEFORE the caller is authenticated: the
+		// stream-body parser and the MCP extractor both read the body, and
+		// the mount timeout that would otherwise bound them is not armed
+		// until the backend handler runs. Clearing it here would let an
+		// unauthenticated client dribble a body forever, holding a goroutine
+		// and a buffer with nothing to push back. The window is generous
+		// enough for a legitimately slow upload of a capped body and is
+		// removed as soon as the body is in hand.
+		//
+		// This is also why the clear cannot live in the providers' gateway
+		// handlers, where the plan first put it: by the time one runs, the
+		// body has already been read under whatever deadline was in force.
+		c.setStreamReadWindow(req, time.Now().Add(streamBodyBufferTimeout))
+
 		// Set AuditPath for consistent audit logging between request and response entries.
 		// For streaming requests, this is the path relative to the mount point
 		// (e.g., "role/operator/gateway/v1/...") before routing transforms req.Path.
@@ -876,6 +905,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// downstream proxy reads it unchanged. Non-MCP backends fail
 		// the type assertion and skip the extractor entirely.
 		c.extractMCPDescriptor(ctx, req, matchingBackend)
+
+		// The body is in hand, so the window closes: from here the response
+		// may stream for as long as the mount allows, and an armed read
+		// deadline would tear it down even while idle — net/http reads the
+		// connection in the background once the body is drained and cancels
+		// the request context when that read fails.
+		c.setStreamReadWindow(req, time.Time{})
 
 		// Resolve the secondary (user) auth config once, before extraction:
 		// whether this mount is a protected resource decides how the extractor
@@ -1171,6 +1207,27 @@ func (c *Core) PopulateTokenEntry(ctx context.Context, req *logical.Request) err
 		req.SetTokenEntry(te)
 	}
 	return nil
+}
+
+// streamBodyBufferTimeout bounds the pre-authentication body buffering on a
+// streaming path — the stream-body parser and the MCP extractor. It is the
+// only thing standing between an unauthenticated client and a goroutine plus
+// a max_body_size buffer held open indefinitely, since the mount timeout is
+// not armed until the backend handler runs. Generous enough that a capped
+// body on a slow link finishes comfortably.
+const streamBodyBufferTimeout = 60 * time.Second
+
+// setStreamReadWindow moves the connection read deadline for a streaming
+// request; the zero time removes it. Failure is logged, not fatal: the
+// request is still correct without the adjustment, it is merely bounded by
+// whatever the listener armed.
+func (c *Core) setStreamReadWindow(req *logical.Request, deadline time.Time) {
+	if err := logical.SetStreamReadDeadline(req.ResponseWriter, deadline); err != nil {
+		c.logger.Warn("could not adjust connection read deadline for streaming request",
+			logger.Err(err),
+			logger.String("path", req.Path),
+		)
+	}
 }
 
 // isStreamingRequest checks if the request path is a streaming path

@@ -196,6 +196,22 @@ type ProviderSpec struct {
 	// the framework's stream-body parser would consume the body before
 	// the MCP extractor runs.
 	ShouldEnforceMCPPolicy func(req *logical.Request) bool
+
+	// SelectTimeout optionally picks a per-request deadline in place of the
+	// mount's timeout, from whatever the gateway already knows about the
+	// request — for MCP providers, the parsed method on req.MCPDescriptor.
+	//
+	// Return 0 for "use the mount timeout"; that is also the behaviour when
+	// the hook is unset, so a provider that does not set it is untouched.
+	// state is the backend's extraState, handed off under the same read-lock
+	// snapshot as ResolveUpstream and subject to the same rule: read it,
+	// never mutate it.
+	//
+	// This exists so one mount can bound an open-ended subscription and an
+	// ordinary call differently. Raising the mount timeout to hold a stream
+	// open would instead give every hung call on the mount that same
+	// ceiling.
+	SelectTimeout func(req *logical.Request, state map[string]any) time.Duration
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.

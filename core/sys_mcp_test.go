@@ -13,11 +13,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 )
 
@@ -325,4 +327,82 @@ func TestMCPServer_GetSkill_Errors(t *testing.T) {
 			assert.Contains(t, txt.Text, tc.want)
 		})
 	}
+}
+
+// TestMCPServerHandler_ShedsConnectionDeadlines pins the ordering the
+// discovery endpoint depends on. The SDK forces SSE for subscriptions/listen
+// and then blocks in hangResponse without writing a byte, so the deadlines
+// cannot be shed reactively on seeing an event-stream Content-Type — by the
+// time anything is written they have already fired, and an armed read
+// deadline cancels the very context the SDK is blocked on. The body is read
+// first, under the deadlines the listener armed, so a dribbling client stays
+// bounded; only then are they shed.
+func TestMCPServerHandler_ShedsConnectionDeadlines(t *testing.T) {
+	c := createTestCore(t)
+	w := newDeadlineRecordingWriter()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json, text/event-stream")
+
+	c.MCPServerHandler().ServeHTTP(w, r)
+
+	require.Len(t, w.read, 1, "an armed read deadline tears down an idle listen stream")
+	require.Len(t, w.write, 1, "an armed write deadline severs the stream on its first notification")
+	assert.True(t, w.read[0].IsZero())
+	assert.True(t, w.write[0].IsZero())
+}
+
+// Buffering the body must leave it readable by the SDK, or every discovery
+// call would fail as an empty request.
+func TestMCPServerHandler_BufferedBodyStillReaches(t *testing.T) {
+	c := createTestCore(t)
+	rec := httptest.NewRecorder()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json, text/event-stream")
+
+	c.MCPServerHandler().ServeHTTP(rec, r)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "list_roles", "the buffered body must reach the SDK unchanged")
+}
+
+func TestMCPServerHandler_RejectsOversizedBody(t *testing.T) {
+	c := createTestCore(t)
+	rec := httptest.NewRecorder()
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(strings.Repeat("a", maxSysMCPBody+1)))
+	r.Header.Set("Content-Type", "application/json")
+
+	c.MCPServerHandler().ServeHTTP(rec, r)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+}
+
+// Shedding the listener's deadlines leaves this endpoint with no ceiling of
+// its own, and it accepts a subscriptions/listen stream before any credential
+// is checked — so it must impose one, the way a gateway mount imposes
+// listen_timeout. Without it an unauthenticated caller could park goroutines
+// and connections here indefinitely.
+func TestSysMCPContext_ImposesItsOwnCeiling(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader("{}"))
+
+	ctx, cancel := sysMCPContext(r, namespace.RootNamespace)
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "the SDK blocks on this context; with no deadline nothing ends a stalled request")
+	assert.InDelta(t, sysMCPTimeout, time.Until(deadline), float64(5*time.Second))
+
+	// The namespace and raw request must survive the wrapping — the tool
+	// handlers resolve mounts through the first and recover the caller's
+	// credentials from the second.
+	ns, err := namespace.FromContext(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, namespace.RootNamespaceID, ns.ID)
+	assert.Same(t, r, mcpRequestFromContext(ctx))
 }

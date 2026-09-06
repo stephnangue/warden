@@ -65,9 +65,11 @@ func (b *mcpAWSBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int6
 // DefaultMCPAWSURL is the GA endpoint for AWS's hosted MCP Server.
 const DefaultMCPAWSURL = "https://aws-mcp.us-east-1.api.aws/mcp"
 
-// DefaultMCPAWSTimeout caps a single MCP session. MCP responses may stream
-// over SSE across many tool calls, so the default matches the generic mcp provider.
-const DefaultMCPAWSTimeout = 10 * time.Minute
+// DefaultMCPAWSTimeout caps a single call other than subscriptions/listen.
+// Streaming subscriptions answer to listen_timeout instead, so this is a
+// unary ceiling; it matches the generic mcp provider so operators learn one
+// knob across every MCP mount.
+const DefaultMCPAWSTimeout = 60 * time.Second
 
 // mcpAWSBackend is the streaming backend for mcp_aws.
 //
@@ -95,7 +97,11 @@ type mcpAWSBackend struct {
 	configRegion string
 	// region is the resolved signing region: coalesce(configRegion, URL-inferred).
 	// This is the value passed to sigv4.ResignRequest.
-	region        string
+	region string
+	// listenTimeout is the deadline for a subscriptions/listen stream. Held
+	// here rather than on the embedded StreamingBackend, which carries only
+	// the one mount-wide timeout.
+	listenTimeout time.Duration
 	tlsSkipVerify bool
 	caData        string
 }
@@ -187,6 +193,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	// Defaults until Initialize loads persisted config.
 	b.SetMaxBodySize(framework.DefaultMaxBodySize)
 	b.SetTimeout(DefaultMCPAWSTimeout)
+	b.listenTimeout = httpproxy.DefaultListenTimeout
 	if u, err := url.Parse(DefaultMCPAWSURL); err == nil {
 		b.upstreamURL = u
 		_, b.region = serviceAndRegion(u)
@@ -262,12 +269,14 @@ func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, 
 	if timeout == 0 {
 		timeout = DefaultMCPAWSTimeout
 	}
+	listenTimeout := httpproxy.ParseListenTimeout(conf)
 
 	persist := map[string]any{
 		"mcp_aws_url":     u.String(),
 		"region":          configRegion,
 		"max_body_size":   maxBody,
 		"timeout":         timeout.String(),
+		"listen_timeout":  listenTimeout.String(),
 		"auto_auth_path":  parsed.AutoAuthPath,
 		"default_role":    parsed.DefaultAuthRole,
 		"user_auth_path":  parsed.UserAuthPath,
@@ -280,6 +289,7 @@ func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, 
 	b.upstreamURL = u
 	b.configRegion = configRegion
 	b.region = resolvedRegion
+	b.listenTimeout = listenTimeout
 	b.tlsSkipVerify = parsed.TLSSkipVerify
 	b.caData = parsed.CAData
 	b.mu.Unlock()
@@ -343,21 +353,26 @@ type backendSnapshot struct {
 	region      string
 	maxBody     int64
 	timeout     time.Duration
-	transport   http.RoundTripper
+	// listenTimeout caps a subscriptions/listen stream, which is open-ended
+	// by design; every other call takes timeout above.
+	listenTimeout time.Duration
+	transport     http.RoundTripper
 }
 
 func (b *mcpAWSBackend) snapshot() backendSnapshot {
 	b.mu.RLock()
 	upstream := b.upstreamURL
 	region := b.region
+	listenTimeout := b.listenTimeout
 	b.mu.RUnlock()
 	// Framework-side fields are atomic; no lock needed.
 	return backendSnapshot{
-		upstreamURL: upstream,
-		region:      region,
-		maxBody:     b.MaxBodySize(),
-		timeout:     b.Timeout(),
-		transport:   b.Transport(),
+		upstreamURL:   upstream,
+		region:        region,
+		maxBody:       b.MaxBodySize(),
+		timeout:       b.Timeout(),
+		listenTimeout: listenTimeout,
+		transport:     b.Transport(),
 	}
 }
 
@@ -398,7 +413,13 @@ Configuration:
                   via DNS-label inference; required for hosts that don't
                   (GovCloud, China partition, custom test hosts).
 - max_body_size:  Maximum request body size (default: 10MB, max: 100MB)
-- timeout:        Session timeout (default: 10m)
+- timeout:        Deadline for a single call — a tool call, a listing, a
+                  resource read (default: 60s). It is also how long a hung
+                  call on this mount keeps its goroutine and its two
+                  connections alive.
+- listen_timeout: Deadline for a subscriptions/listen stream (default: 10m).
+                  It governs that method only: a long-running tool call
+                  streaming progress is still capped by timeout.
 - auto_auth_path: Auth mount path for implicit authentication (required)
 - default_role:   Fallback role when not specified by header or URL path
 `

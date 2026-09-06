@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -332,6 +333,125 @@ listener "tcp" {
 	assert.True(t, ln.TLSSPIFFE)
 	assert.Equal(t, "unix:///run/spire/agent.sock", ln.TLSSPIFFESocket)
 	assert.Equal(t, "20s", ln.TLSSPIFFEStartupTimeout)
+}
+
+func TestLoadConfig_ListenerHTTPTimeouts(t *testing.T) {
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr string // substring; "" means expect success
+	}{
+		{
+			name: "all three set — ok",
+			extra: `
+listener "tcp" {
+  address            = ":8520"
+  tls_disable        = true
+  http_read_timeout  = "10s"
+  http_write_timeout = "30s"
+  http_idle_timeout  = "2m"
+}
+`,
+		},
+		{
+			name: "unset — ok, listener applies its defaults",
+			extra: `
+listener "tcp" {
+  address     = ":8521"
+  tls_disable = true
+}
+`,
+		},
+		{
+			name: "unparseable write timeout — error",
+			extra: `
+listener "tcp" {
+  address            = ":8522"
+  tls_disable        = true
+  http_write_timeout = "soon"
+}
+`,
+			wantErr: "invalid http_write_timeout",
+		},
+		{
+			// Zero is net/http's "no deadline at all", which is never what an
+			// operator writing an explicit value is asking for.
+			name: "zero read timeout — error",
+			extra: `
+listener "tcp" {
+  address           = ":8523"
+  tls_disable       = true
+  http_read_timeout = "0s"
+}
+`,
+			wantErr: "http_read_timeout must be positive",
+		},
+		{
+			name: "negative idle timeout — error",
+			extra: `
+listener "tcp" {
+  address           = ":8524"
+  tls_disable       = true
+  http_idle_timeout = "-1m"
+}
+`,
+			wantErr: "http_idle_timeout must be positive",
+		},
+		{
+			// The deadlines are independent of the TLS mode, so they must be
+			// validated on a SPIFFE listener too — not only in the default arm.
+			name: "invalid timeout on a SPIFFE listener — still rejected",
+			extra: `
+listener "tcp" {
+  address           = ":8525"
+  tls_spiffe        = true
+  http_idle_timeout = "later"
+}
+`,
+			wantErr: "invalid http_idle_timeout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFromHCL(t, minimalConfigHCL+tt.extra)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestLoadConfig_ListenerHTTPTimeoutsDecode guards the HCL tag names and the
+// accessor initListeners uses: an empty field must yield zero, which the
+// listener reads as "use the built-in default".
+func TestLoadConfig_ListenerHTTPTimeoutsDecode(t *testing.T) {
+	body := `
+storage "postgres" {
+  connection_url = "postgres://u:p@db:5432/warden"
+}
+
+listener "tcp" {
+  address            = ":8530"
+  tls_disable        = true
+  http_read_timeout  = "10s"
+  http_write_timeout = "30s"
+}
+`
+	cfg, err := loadFromHCL(t, body)
+	require.NoError(t, err)
+	require.Len(t, cfg.Listeners, 1)
+	ln := cfg.Listeners[0]
+	assert.Equal(t, "10s", ln.HTTPReadTimeout)
+	assert.Equal(t, "30s", ln.HTTPWriteTimeout)
+	assert.Empty(t, ln.HTTPIdleTimeout)
+
+	read, write, idle := ln.HTTPTimeouts()
+	assert.Equal(t, 10*time.Second, read)
+	assert.Equal(t, 30*time.Second, write)
+	assert.Zero(t, idle, "an unset field must not manufacture a deadline")
 }
 
 func TestLoadConfig_ClusterAddrValidation(t *testing.T) {

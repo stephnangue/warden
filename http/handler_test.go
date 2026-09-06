@@ -1044,3 +1044,59 @@ func TestWrapGenericHandler_StandbyAllowedPath(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "yes", w.Header().Get("X-Inner"))
 }
+
+// TestIsForwardedGatewayRequest pins which forwarded traffic sheds the
+// standby's connection deadlines. Too narrow and an HA stream dies at the
+// standby's http_write_timeout; too broad and forwarded control-plane calls
+// silently lose their cap.
+func TestIsForwardedGatewayRequest(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		provider string // X-Warden-Provider
+		want     bool
+	}{
+		{name: "gateway root", path: "/v1/mcp/gateway", want: true},
+		{name: "gateway slash", path: "/v1/mcp/gateway/", want: true},
+		{name: "gateway suffix", path: "/v1/mcp/gateway/tools", want: true},
+		{name: "role-embedded gateway", path: "/v1/mcp/role/agent/gateway/", want: true},
+		{name: "git smart-HTTP", path: "/v1/github/gateway/repos/o/r/git-upload-pack", want: true},
+
+		// Header-routed clients never carry a gateway segment: the standby
+		// only prepends /v1, and core synthesises the canonical gateway path
+		// on the active node. Classifying on the path alone would leave every
+		// header-routed HA stream dying at the standby's write deadline.
+		{name: "header-routed, no gateway segment", path: "/v1/chat/completions", provider: "openai/", want: true},
+		{name: "header-routed git", path: "/v1/myorg/myrepo.git/info/refs", provider: "github/", want: true},
+
+		{name: "health", path: "/v1/sys/health", want: false},
+		{name: "login", path: "/v1/auth/cert/login", want: false},
+		{name: "policy read", path: "/v1/sys/policies/mcp/github-tools", want: false},
+		// sys/ is control plane whatever its last segment is, and
+		// X-Warden-Provider is rejected on it before forwarding.
+		{name: "sys path ending in gateway", path: "/v1/sys/policies/acl/gateway", want: false},
+		{name: "sys/mcp", path: "/v1/sys/mcp", want: false},
+		// A mount whose name merely begins with "gateway" is not a gateway
+		// path — the match is on the whole segment.
+		{name: "gateway-prefixed mount", path: "/v1/gateway-config/read", want: false},
+		{name: "gatewayish segment", path: "/v1/mcp/gatewayish/foo", want: false},
+		{name: "empty", path: "", want: false},
+
+		// The well-known documents are forwarded before the header rewrite
+		// runs, so a client carrying X-Warden-Provider as a connection-wide
+		// default must not have its discovery fetch read as gateway traffic.
+		{name: "oidc discovery with stray header", path: "/.well-known/openid-configuration", provider: "openai/", want: false},
+		{name: "jwks with stray header", path: "/oidc/jwks", provider: "openai/", want: false},
+		{name: "prm subtree with stray header", path: "/.well-known/oauth-protected-resource/mcp/gateway", provider: "mcp/", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "http://warden.example.com/", nil)
+			r.URL.Path = tt.path
+			if tt.provider != "" {
+				r.Header.Set("X-Warden-Provider", tt.provider)
+			}
+			assert.Equal(t, tt.want, isForwardedGatewayRequest(r))
+		})
+	}
+}

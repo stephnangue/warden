@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -369,4 +370,94 @@ func TestHandleGateway_FiltersToolsList(t *testing.T) {
 	out := rec.Body.String()
 	assert.Contains(t, out, "get_x")
 	assert.NotContains(t, out, "delete_x", "denied tool must be pruned from the mcp_aws tools/list response")
+}
+
+// --- shape-aware deadline ---
+
+// mcp_aws implements MCPPolicyEnforced directly rather than going through
+// httpproxy's spec hooks, so its deadline selection is its own code path and
+// needs its own coverage.
+func TestHandleGateway_ListenTakesTheListenTimeout(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+	b.SetTimeout(30 * time.Second)
+	b.mu.Lock()
+	b.listenTimeout = time.Hour
+	b.mu.Unlock()
+
+	req, _ := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen"}`, stsCredential())
+	req.MCPDescriptor = &logical.MCPRequestDescriptor{
+		Calls: []logical.MCPCall{{Method: "subscriptions/listen"}},
+	}
+
+	b.handleGateway(context.Background(), req)
+
+	assert.Greater(t, remainingDeadline(t, req), 55*time.Minute,
+		"a subscriptions/listen stream must answer to listen_timeout, not the unary ceiling")
+}
+
+func TestHandleGateway_UnaryKeepsTheMountTimeout(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name  string
+		calls []logical.MCPCall
+	}{
+		{"tools/call", []logical.MCPCall{{Method: "tools/call", Name: "get_x"}}},
+		{"batch containing a listen", []logical.MCPCall{
+			{Method: "tools/call", BatchIndex: 0},
+			{Method: "subscriptions/listen", BatchIndex: 1},
+		}},
+		{"empty sentinel — the body-less GET/DELETE verbs", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := setupBackend(t)
+			configureBackendForUpstream(t, b, srv)
+			b.SetTimeout(30 * time.Second)
+			b.mu.Lock()
+			b.listenTimeout = time.Hour
+			b.mu.Unlock()
+
+			req, _ := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`, stsCredential())
+			req.MCPDescriptor = &logical.MCPRequestDescriptor{Calls: tc.calls}
+
+			b.handleGateway(context.Background(), req)
+
+			assert.LessOrEqual(t, remainingDeadline(t, req), 30*time.Second)
+		})
+	}
+}
+
+// A provider with no MCP descriptor at all — nothing parsed this request as
+// MCP — must keep the mount timeout untouched.
+func TestHandleGateway_NoDescriptorKeepsTheMountTimeout(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+	b.SetTimeout(30 * time.Second)
+	b.mu.Lock()
+	b.listenTimeout = time.Hour
+	b.mu.Unlock()
+
+	req, _ := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
+
+	b.handleGateway(context.Background(), req)
+
+	assert.LessOrEqual(t, remainingDeadline(t, req), 30*time.Second)
+}
+
+// remainingDeadline reads the deadline handleGateway armed on the outgoing
+// request. The cancel func has already fired by the time the handler returns,
+// but a context's Deadline outlives its cancellation.
+func remainingDeadline(t *testing.T, req *logical.Request) time.Duration {
+	t.Helper()
+	dl, ok := req.HTTPRequest.Context().Deadline()
+	require.True(t, ok, "handleGateway must arm a deadline on the proxied request")
+	return time.Until(dl)
 }

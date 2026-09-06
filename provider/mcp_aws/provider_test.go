@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
@@ -372,4 +373,102 @@ func TestConfigWrite_ExplicitRegionWins(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "us-west-2", b.region)
+}
+
+// --- listen_timeout ---
+
+// mcp_aws persists and reloads its own config rather than using httpproxy's
+// spec hooks, so the new field needs its own round-trip: a write must reach
+// the backend, be readable back, and survive a restart.
+func TestConfigWrite_ListenTimeoutRoundTrip(t *testing.T) {
+	b := setupBackend(t)
+	storage := newInmemStorage()
+	b.StorageView = storage
+
+	path := b.pathConfig()
+	fd := makeFieldData(path, map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"auto_auth_path": "auth/cert/",
+		"listen_timeout": "2h",
+	})
+	resp, err := b.handleConfigWrite(context.Background(), nil, fd)
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	b.mu.RLock()
+	applied := b.listenTimeout
+	b.mu.RUnlock()
+	assert.Equal(t, 2*time.Hour, applied)
+
+	readResp, err := b.handleConfigRead(context.Background(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "2h0m0s", readResp.Data["listen_timeout"])
+
+	// Restart: a fresh backend must come back on the configured value, not
+	// the default.
+	fresh := setupBackend(t)
+	fresh.StorageView = storage
+	require.NoError(t, fresh.Initialize(context.Background()))
+	fresh.mu.RLock()
+	defer fresh.mu.RUnlock()
+	assert.Equal(t, 2*time.Hour, fresh.listenTimeout)
+}
+
+// A partial update must not silently reset the other deadline — the merge
+// base carries listen_timeout forward.
+func TestConfigWrite_ListenTimeoutSurvivesUnrelatedUpdate(t *testing.T) {
+	b := setupBackend(t)
+	path := b.pathConfig()
+
+	resp, err := b.handleConfigWrite(context.Background(), nil, makeFieldData(path, map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"auto_auth_path": "auth/cert/",
+		"listen_timeout": "45m",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	resp, err = b.handleConfigWrite(context.Background(), nil, makeFieldData(path, map[string]any{
+		"auto_auth_path": "auth/cert/",
+		"default_role":   "s3-reader",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	assert.Equal(t, 45*time.Minute, b.listenTimeout)
+}
+
+func TestConfigWrite_ListenTimeoutRejectsNonPositive(t *testing.T) {
+	b := setupBackend(t)
+	path := b.pathConfig()
+
+	resp, err := b.handleConfigWrite(context.Background(), nil, makeFieldData(path, map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"auto_auth_path": "auth/cert/",
+		"listen_timeout": "0s",
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, 400, resp.StatusCode, "substituting the default would hide the operator's mistake")
+}
+
+// A mount configured before listen_timeout existed comes up with the default
+// rather than a zero deadline, which would mean "no ceiling at all".
+func TestInitialize_ListenTimeoutDefaultsForOlderConfig(t *testing.T) {
+	storage := newInmemStorage()
+	entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"timeout":        "5m",
+		"auto_auth_path": "auth/cert/",
+	})
+	require.NoError(t, storage.Put(context.Background(), entry))
+
+	b := setupBackend(t)
+	b.StorageView = storage
+	require.NoError(t, b.Initialize(context.Background()))
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	assert.Equal(t, httpproxy.DefaultListenTimeout, b.listenTimeout)
 }
