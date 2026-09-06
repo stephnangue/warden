@@ -22,18 +22,24 @@ import (
 // tri-state contract:
 //
 //  1. Nil — backend does not implement MCPPolicyEnforced at all. If an
-//     mcp{} block is bound to such a path that's an operator misconfig
+//     MCP contract is bound to such a path that's an operator misconfig
 //     and decideMCP fails closed with missing_body.
 //
 //  2. Non-nil, empty (Calls nil, ParseErr nil) — backend implements
 //     the interface but ShouldEnforceMCPPolicy returned enforce=false
-//     for THIS request (typically a non-POST verb on a multi-method
-//     MCP endpoint, or a non-JSON Content-Type). mcp{} is body-
-//     authoritative and cannot meaningfully gate a body-less request,
-//     so decideMCP skips evaluation and lets the cap-level policy
-//     decide. This is the path that lets MCP Streamable HTTP's GET
-//     (notification SSE stream) and DELETE (session terminate) verbs
-//     share the same URL with the POST that carries JSON-RPC.
+//     for THIS request (a non-POST verb on a multi-method MCP endpoint,
+//     or a non-JSON Content-Type). A contract is body-authoritative and
+//     cannot meaningfully gate a body-less request, so decideMCP skips
+//     evaluation and lets the cap-level policy decide.
+//
+//     This is what lets Streamable HTTP's GET (notification stream) and
+//     DELETE (session terminate) share a URL with the POST that carries
+//     JSON-RPC. Both verbs are legacy-era: 2026-07-28 removed the GET
+//     endpoint in favour of subscriptions/listen and has no session to
+//     terminate, so a modern server answers them 405. The sentinel stays
+//     because Warden still fronts upstreams that serve them — and the
+//     GET, being the legacy notification channel, takes listen_timeout
+//     rather than the unary one.
 //
 //  3. Non-nil with Calls or ParseErr populated — backend opted in and
 //     extraction either succeeded (Calls) or failed in a typed way

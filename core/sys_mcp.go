@@ -118,8 +118,12 @@ func mcpRequestFromContext(ctx context.Context) *http.Request {
 // /v1/sys/mcp. It runs the official SDK's Streamable HTTP transport in
 // stateless JSON mode: each POST is a self-contained request/response with no
 // Mcp-Session-Id affinity, so a standby node can forward it to the active node
-// without session-stickiness concerns. The SDK still performs the full
-// initialize + protocol-version negotiation on every call.
+// without session-stickiness concerns.
+//
+// A modern client needs no handshake to get there — under 2026-07-28 the
+// per-request _meta carries what initialize used to negotiate — while a legacy
+// client's initialize is still answered, with an ephemeral session, so both
+// eras reach the same two tools.
 func (c *Core) MCPServerHandler() http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "warden",

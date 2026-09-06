@@ -178,6 +178,12 @@ canonical server URL. JSON-RPC bodies, the Accept header, and the
 Mcp-Session-Id header pass through unchanged. Streamable HTTP responses
 (JSON or SSE) are streamed without buffering.
 
+Mcp-Session-Id is legacy-era and is forwarded for the upstreams that still
+use it; a server speaking 2026-07-28 holds no session and ignores it. The
+transport headers that revision introduced — MCP-Protocol-Version, Mcp-Method
+and Mcp-Name — are validated against the parsed body when a client sends
+them, and required of a client that announces the revision.
+
 The role can be provided via the X-Warden-Role header, or embedded in
 the URL path:
   /mcp/role/{role}/gateway/
@@ -213,9 +219,28 @@ against the parsed body, never against client-supplied request headers. The
 parser rejects malformed bodies, duplicate keys at any depth, empty batches, and
 oversized payloads; on any structural failure the request denies with a specific
 rule_type (malformed_jsonrpc, duplicate_key, oversized_body, batch_empty,
-missing_body, malformed_params). Denied requests return HTTP 403 with an RFC
-6750 WWW-Authenticate header and a small JSON body the agent SDK surfaces as a
-structured tool-call failure.
+missing_body, malformed_params, batch_unsupported, header_mismatch). Denied
+requests return HTTP 403 with an RFC 6750 WWW-Authenticate header and a small
+JSON body the agent SDK surfaces as a structured tool-call failure.
+
+Two refusals are protocol faults rather than authorization decisions and are
+answered differently. A request whose transport headers contradict its body
+gets HTTP 400 and a JSON-RPC -32020 with the request id echoed, so a client
+that speaks both eras corrects its headers instead of reading a 403 as "not
+permitted" and downgrading to initialize. A batch from a client announcing
+2026-07-28 is refused as batch_unsupported — batching left the spec in
+2025-06-18 — while a legacy client's batch is still accepted and every element
+policy-checked.
+
+The methods a contract governs span both eras. server/discover joins
+initialize, ping and notifications/* as exempt from the method allow-list:
+a modern client sends it as the first request of every connection, and it
+discloses protocol versions, coarse capabilities and serverInfo, never tool or
+resource names. Naming it in denied_methods still blocks it. Subscribing to a
+resource's updates answers to the resources family exactly as reading it does,
+whether the caller subscribes with the modern subscriptions/listen or the
+legacy resources/subscribe — the content never arrives either way, but the
+resource's existence and the timing of every change would.
 
 Body parsing runs only for POST requests carrying Content-Type
 application/json. Other request shapes do not produce a parsed body descriptor:
@@ -225,6 +250,25 @@ stanzas to paths they expect to carry JSON-RPC POSTs.
 
 Paths with no MCP stanza in scope skip the strict parser entirely — no body
 buffering or parsing is performed on them.
+
+Deadlines:
+Two knobs, chosen by what the request is rather than by how it responds.
+subscriptions/listen — and the legacy SSE GET it replaced — take
+listen_timeout, because a subscription is open-ended by design. Everything
+else takes timeout.
+
+The boundary surprises people, so state it plainly: a long-running tool call
+that streams progress notifications is still capped by timeout, not by
+listen_timeout. Raising listen_timeout will not save it. That is the intended
+split — a unary call should be bounded more tightly than an open-ended
+subscription — and the alternative is worse: raising timeout far enough to
+hold a stream open would hand every hung call on the mount the same ceiling,
+each one holding a goroutine and two connections for the duration.
+
+A severed stream is survivable. The spec treats an abrupt drop as a reconnect
+trigger, and a modern server holds no cross-connection subscription state, so
+the client reconnects with a fresh subscription. Notifications that would have
+arrived in the gap are lost.
 
 Configuration:
 - mcp_url: MCP server base URL (required; no default)
