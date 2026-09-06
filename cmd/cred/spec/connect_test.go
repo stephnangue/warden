@@ -78,7 +78,7 @@ func TestAwaitCallback_Success(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	fireCallback(t, port, "code=the-code&state=the-state")
-	code, err := awaitCallback(context.Background(), ln, "the-state", 5*time.Second)
+	code, err := awaitCallback(context.Background(), ln, "the-state", "", 5*time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, "the-code", code)
 }
@@ -89,7 +89,7 @@ func TestAwaitCallback_StateMismatch(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	fireCallback(t, port, "code=the-code&state=attacker-state")
-	_, err = awaitCallback(context.Background(), ln, "the-state", 5*time.Second)
+	_, err = awaitCallback(context.Background(), ln, "the-state", "", 5*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "state parameter mismatch")
 }
@@ -100,7 +100,7 @@ func TestAwaitCallback_ProviderError(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	fireCallback(t, port, "error=access_denied&error_description=user+declined")
-	_, err = awaitCallback(context.Background(), ln, "the-state", 5*time.Second)
+	_, err = awaitCallback(context.Background(), ln, "the-state", "", 5*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "access_denied")
 }
@@ -113,7 +113,7 @@ func TestAwaitCallback_EmptyCode(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	fireCallback(t, port, "state=the-state&code=")
-	_, err = awaitCallback(context.Background(), ln, "the-state", 5*time.Second)
+	_, err = awaitCallback(context.Background(), ln, "the-state", "", 5*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no authorization code")
 }
@@ -123,7 +123,7 @@ func TestAwaitCallback_Timeout(t *testing.T) {
 	require.NoError(t, err)
 	defer ln.Close()
 
-	_, err = awaitCallback(context.Background(), ln, "the-state", 150*time.Millisecond)
+	_, err = awaitCallback(context.Background(), ln, "the-state", "", 150*time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out")
 }
@@ -138,7 +138,7 @@ func TestAwaitCallback_ContextCanceled(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
-	_, err = awaitCallback(ctx, ln, "the-state", 5*time.Second)
+	_, err = awaitCallback(ctx, ln, "the-state", "", 5*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "canceled")
 }
@@ -161,7 +161,7 @@ func TestAwaitCallback_IgnoresNonCallbackRequest(t *testing.T) {
 		}
 	}()
 
-	code, err := awaitCallback(context.Background(), ln, "the-state", 5*time.Second)
+	code, err := awaitCallback(context.Background(), ln, "the-state", "", 5*time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, "real", code)
 }
@@ -242,4 +242,101 @@ func TestRunConnect_PortConflict(t *testing.T) {
 	err := runConnect(cmd, []string{"gh"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conflicts with the spec's pinned redirect_uri port 8765")
+}
+
+// =============================================================================
+// RFC 9207 issuer validation
+// =============================================================================
+
+// The mix-up defense: a code that came from an authorization server other
+// than the one we sent the user to was issued to someone else's client, and
+// redeeming it would hand our credentials to them. The abort has to happen
+// here, before the code goes back for redemption — afterwards it defends
+// nothing.
+func TestAwaitCallback_IssuerMismatchAbortsBeforeRedemption(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	fireCallback(t, port, "code=the-code&state=the-state&iss=https%3A%2F%2Fattacker.example")
+	code, err := awaitCallback(context.Background(), ln, "the-state", "https://github.com/login/oauth", 5*time.Second)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "issuer mismatch")
+	assert.Empty(t, code, "the code must not be returned for redemption")
+}
+
+func TestAwaitCallback_IssuerMatchProceeds(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	fireCallback(t, port, "code=the-code&state=the-state&iss=https%3A%2F%2Fgithub.com%2Flogin%2Foauth")
+	code, err := awaitCallback(context.Background(), ln, "the-state", "https://github.com/login/oauth", 5*time.Second)
+
+	require.NoError(t, err)
+	assert.Equal(t, "the-code", code)
+}
+
+// Byte-exact: an issuer identifier is an opaque string, and normalising a
+// trailing slash or a case difference would be inventing an equivalence the
+// spec does not grant.
+func TestAwaitCallback_IssuerComparisonIsExact(t *testing.T) {
+	for _, iss := range []string{
+		"https%3A%2F%2Fgithub.com%2Flogin%2Foauth%2F", // trailing slash
+		"https%3A%2F%2FGitHub.com%2Flogin%2Foauth",    // case
+	} {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := ln.Addr().(*net.TCPAddr).Port
+
+		fireCallback(t, port, "code=the-code&state=the-state&iss="+iss)
+		_, err = awaitCallback(context.Background(), ln, "the-state", "https://github.com/login/oauth", 5*time.Second)
+
+		require.Error(t, err, "iss=%s should not be treated as equivalent", iss)
+		assert.Contains(t, err.Error(), "issuer mismatch")
+	}
+}
+
+// Fail open when the source records no issuer: no existing source does, and
+// refusing would break every flow that works today to enforce something the
+// operator has not configured. The flow proceeds and the operator is told.
+func TestAwaitCallback_NoRecordedIssuerProceeds(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	fireCallback(t, port, "code=the-code&state=the-state&iss=https%3A%2F%2Fanything.example")
+	code, err := awaitCallback(context.Background(), ln, "the-state", "", 5*time.Second)
+
+	require.NoError(t, err)
+	assert.Equal(t, "the-code", code)
+}
+
+// RFC 9207 only binds when the server sends iss. A server that does not
+// support it must keep working against a source that records an issuer.
+func TestAwaitCallback_AbsentIssParamProceeds(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	fireCallback(t, port, "code=the-code&state=the-state")
+	code, err := awaitCallback(context.Background(), ln, "the-state", "https://github.com/login/oauth", 5*time.Second)
+
+	require.NoError(t, err)
+	assert.Equal(t, "the-code", code)
+}
+
+// The state check runs first: a callback that fails both must be reported as
+// the CSRF it is.
+func TestAwaitCallback_StateCheckPrecedesIssuerCheck(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	fireCallback(t, port, "code=the-code&state=attacker-state&iss=https%3A%2F%2Fattacker.example")
+	_, err = awaitCallback(context.Background(), ln, "the-state", "https://github.com/login/oauth", 5*time.Second)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "state parameter mismatch")
 }

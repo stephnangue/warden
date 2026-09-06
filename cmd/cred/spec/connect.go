@@ -148,7 +148,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	code, err := awaitCallback(cmd.Context(), ln, state, connectTimeout)
+	code, err := awaitCallback(cmd.Context(), ln, state, authzOut.Issuer, connectTimeout)
 	if err != nil {
 		return err
 	}
@@ -176,9 +176,13 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	})
 }
 
-// awaitCallback serves a single request on the loopback listener, validates the
-// state, and returns the authorization code. It always shuts the server down.
-func awaitCallback(parent context.Context, ln net.Listener, state string, timeout time.Duration) (string, error) {
+// awaitCallback serves a single request on the loopback listener, validates
+// the state and (when the source records one) the RFC 9207 issuer, and
+// returns the authorization code. It always shuts the server down.
+//
+// issuer is "" when the source records none, which downgrades the issuer
+// check to a warning — see the callback handler.
+func awaitCallback(parent context.Context, ln net.Listener, state, issuer string, timeout time.Duration) (string, error) {
 	type result struct {
 		code string
 		err  error
@@ -220,6 +224,34 @@ func awaitCallback(parent context.Context, ln net.Listener, state string, timeou
 				writeCallbackPage(w, false, "state parameter mismatch")
 				send(result{err: errors.New("state parameter mismatch — possible CSRF, aborting")})
 				return
+			}
+			// RFC 9207 mix-up defense. An authorization server that supports it
+			// names itself in the callback; if that is not the server we sent
+			// the user to, the code in hand was issued by someone else and
+			// redeeming it would hand our client credentials to them. So the
+			// check sits here, before the code is sent back for redemption —
+			// after the fact it defends nothing.
+			//
+			// Compared byte-exactly: an issuer identifier is an opaque string,
+			// and normalising it (trailing slash, case, percent-encoding)
+			// would be inventing equivalences the spec does not grant.
+			if gotIss := q.Get("iss"); gotIss != "" {
+				switch {
+				case issuer == "":
+					// Fail open, deliberately: no existing source records an
+					// issuer, and refusing here would break every flow that
+					// works today to enforce something the operator has not
+					// configured. Say so loudly instead.
+					fmt.Fprintf(os.Stderr,
+						"warning: the authorization server identified itself as %q, but this credential source records no issuer.\n"+
+							"         Set issuer on the source to have Warden verify it.\n", gotIss)
+				case gotIss != issuer:
+					writeCallbackPage(w, false, "issuer mismatch")
+					send(result{err: fmt.Errorf(
+						"issuer mismatch — the callback came from %q but this source expects %q; aborting before the code is redeemed",
+						gotIss, issuer)})
+					return
+				}
 			}
 			if gotCode == "" {
 				writeCallbackPage(w, false, "missing authorization code")

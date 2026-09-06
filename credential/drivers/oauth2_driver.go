@@ -113,6 +113,16 @@ func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
 			Describe("OAuth2 authorization endpoint (HTTPS) — required for authorization_code specs").
 			Example("https://github.com/login/oauth/authorize"),
 
+		credential.StringField("issuer").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				return validateOAuth2SafeURL(v, "issuer", credential.GetBool(config, "tls_skip_verify", false))
+			}).
+			Describe("Authorization server issuer identifier (HTTPS). When set, a connect callback carrying RFC 9207 'iss' must match it exactly before the authorization code is redeemed — the mix-up defense. Never guessed from auth_url: issuers routinely differ from the authorization endpoint's origin (realm and tenant paths), and a wrong guess would refuse legitimate flows").
+			Example("https://github.com/login/oauth"),
+
 		credential.StringField("introspection_url").
 			Custom(func(v string) error {
 				if v == "" {
@@ -616,6 +626,17 @@ func (d *OAuth2Driver) ExchangeAuthorizationCode(ctx context.Context, spec *cred
 		return nil, fmt.Errorf("%s OAuth2 authorization-code exchange returned neither refresh_token nor access_token", name)
 	}
 	return sealed, nil
+}
+
+// AuthorizationIssuer returns the source's recorded issuer identifier, empty
+// when the operator recorded none.
+//
+// Source-only, like auth_url and token_url: they describe the authorization
+// server, not the identity being authorized, and splitting the issuer from
+// its siblings would leave one half of a pair configurable in a different
+// place from the other.
+func (d *OAuth2Driver) AuthorizationIssuer() string {
+	return credential.GetString(d.credSource.Config, "issuer", "")
 }
 
 // BuildAuthorizeURL assembles the provider authorize URL. Scopes are read as

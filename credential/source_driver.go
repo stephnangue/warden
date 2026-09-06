@@ -276,6 +276,13 @@ type OAuth2Authorizer interface {
 	// returns the spec-config keys to seal (notably "refresh_token", or a static
 	// "access_token" for providers that do not issue refresh tokens).
 	ExchangeAuthorizationCode(ctx context.Context, spec *CredSpec, code, redirectURI, codeVerifier string) (map[string]string, error)
+
+	// AuthorizationIssuer returns the issuer identifier the caller must find in
+	// an RFC 9207 "iss" callback parameter, or "" when the source records
+	// none. It travels with the authorize URL because the check it enables
+	// happens in the CLI, at the callback, before the code is sent back for
+	// redemption — which is the whole of the mix-up defense.
+	AuthorizationIssuer() string
 }
 
 // ExchangeMinter is an optional interface for drivers that consume caller-derived
