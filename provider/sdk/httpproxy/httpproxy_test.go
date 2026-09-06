@@ -1440,3 +1440,124 @@ func TestCloneExtraState(t *testing.T) {
 		assert.False(t, hasC, "original must not gain new keys")
 	})
 }
+
+// =============================================================================
+// SelectTimeout — per-request deadline by request shape
+// =============================================================================
+
+// selectTimeoutProbe stands up a backend whose credential extractor reports
+// the deadline actually in force. The extractor runs after handleGateway has
+// applied the timeout to the outgoing request, so it observes the deadline
+// the proxied call will really live under.
+func selectTimeoutProbe(t *testing.T, spec *ProviderSpec) (*proxyBackend, *time.Duration) {
+	t.Helper()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	var seen time.Duration
+	spec.DefaultURL = upstream.URL
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		if dl, ok := req.HTTPRequest.Context().Deadline(); ok {
+			seen = time.Until(dl)
+		}
+		return map[string]string{"Authorization": "Bearer test"}, nil
+	}
+
+	pb := setupBackend(t, spec).(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.SetTimeout(30 * time.Second)
+	return pb, &seen
+}
+
+func gatewayCall(pb *proxyBackend, calls ...string) {
+	desc := &logical.MCPRequestDescriptor{}
+	for i, m := range calls {
+		desc.Calls = append(desc.Calls, logical.MCPCall{Method: m, BatchIndex: i})
+	}
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httptest.NewRequest("POST", "/v1/test/gateway/", nil),
+		ResponseWriter: httptest.NewRecorder(),
+		MCPDescriptor:  desc,
+	})
+}
+
+func TestHandleGateway_SelectTimeout_ListenTakesTheLongerDeadline(t *testing.T) {
+	spec := testSpec()
+	spec.SelectTimeout = SelectListenTimeout
+	pb, seen := selectTimeoutProbe(t, spec)
+	pb.extraState = map[string]any{ListenTimeoutKey: time.Hour}
+
+	gatewayCall(pb, "subscriptions/listen")
+
+	assert.Greater(t, *seen, 55*time.Minute,
+		"a subscriptions/listen stream must answer to listen_timeout, not the unary ceiling")
+}
+
+// This is the row that fails if the shape-aware deadline is ever collapsed
+// back into a single knob: a hung tool call on the same mount must still die
+// at the unary timeout, whatever listen_timeout says.
+func TestHandleGateway_SelectTimeout_UnaryKeepsTheMountTimeout(t *testing.T) {
+	spec := testSpec()
+	spec.SelectTimeout = SelectListenTimeout
+	pb, seen := selectTimeoutProbe(t, spec)
+	pb.extraState = map[string]any{ListenTimeoutKey: time.Hour}
+
+	gatewayCall(pb, "tools/call")
+
+	assert.Greater(t, *seen, 20*time.Second)
+	assert.LessOrEqual(t, *seen, 30*time.Second)
+}
+
+// A batch is not characterised by one of its elements, and the body-less
+// GET/DELETE sentinel carries no method at all. Both take the unary ceiling.
+func TestHandleGateway_SelectTimeout_BatchAndSentinelKeepTheMountTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		calls []string
+	}{
+		{"batch containing a listen", []string{"tools/call", "subscriptions/listen"}},
+		{"empty sentinel", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec()
+			spec.SelectTimeout = SelectListenTimeout
+			pb, seen := selectTimeoutProbe(t, spec)
+			pb.extraState = map[string]any{ListenTimeoutKey: time.Hour}
+
+			gatewayCall(pb, tc.calls...)
+
+			assert.LessOrEqual(t, *seen, 30*time.Second)
+		})
+	}
+}
+
+// Every non-MCP provider leaves the hook unset and must be untouched.
+func TestHandleGateway_SelectTimeout_UnsetHookIsANoOp(t *testing.T) {
+	spec := testSpec()
+	require.Nil(t, spec.SelectTimeout)
+	pb, seen := selectTimeoutProbe(t, spec)
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httptest.NewRequest("POST", "/v1/test/gateway/", nil),
+		ResponseWriter: httptest.NewRecorder(),
+	})
+
+	assert.Greater(t, *seen, 20*time.Second)
+	assert.LessOrEqual(t, *seen, 30*time.Second)
+}
+
+// Returning 0 is the hook's "keep the mount timeout" answer, and must not be
+// mistaken for "no deadline".
+func TestHandleGateway_SelectTimeout_ZeroKeepsTheMountTimeout(t *testing.T) {
+	spec := testSpec()
+	spec.SelectTimeout = func(*logical.Request, map[string]any) time.Duration { return 0 }
+	pb, seen := selectTimeoutProbe(t, spec)
+
+	gatewayCall(pb, "subscriptions/listen")
+
+	assert.Greater(t, *seen, 20*time.Second)
+	assert.LessOrEqual(t, *seen, 30*time.Second)
+}

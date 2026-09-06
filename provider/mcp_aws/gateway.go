@@ -9,6 +9,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 	"github.com/stephnangue/warden/provider/sdk/mcpfilter"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
@@ -64,11 +65,22 @@ func (b *mcpAWSBackend) handleGateway(ctx context.Context, req *logical.Request)
 		return
 	}
 
+	// Pick the deadline by request shape. A notification stream — modern
+	// subscriptions/listen, or the legacy standalone SSE GET — is open-ended
+	// by design and takes listen_timeout; everything else, a batch and the
+	// session-closing DELETE included, takes the unary timeout. Giving the
+	// whole mount the subscription's ceiling instead would let any hung call
+	// hold its goroutine and both connections just as long.
+	timeout := snap.timeout
+	if httpproxy.OpensNotificationStream(req) && snap.listenTimeout > 0 {
+		timeout = snap.listenTimeout
+	}
+
 	// Apply the timeout BEFORE reading the body so a slow client upload
 	// can't stall a worker indefinitely.
-	if snap.timeout > 0 {
+	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, snap.timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 		r = r.WithContext(ctx)
 		req.HTTPRequest = r

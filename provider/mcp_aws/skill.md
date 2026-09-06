@@ -88,8 +88,10 @@ convention. A `401` means the JWT expired (typical TTL 5–60 min) — refresh i
   (malformed JSON-RPC, duplicate keys, oversized body) also fail closed.
 - **Streamable HTTP / SSE flows through transparently.** The `Mcp-Session-Id`
   response header round-trips so follow-up requests reach the same session.
-- **Session timeout is mount-wide** (default 10 minutes); ask the operator to
-  raise it for longer sessions.
+- **Two mount-wide deadlines, picked by method.** `timeout` caps a single call
+  (default 60 seconds); `listen_timeout` caps a `subscriptions/listen` stream
+  (default 10 minutes), and only that method. Ask the operator to raise
+  whichever one your workload actually hits.
 - **STS credentials are short-lived.** A signed request is valid 15 minutes from
   `X-Amz-Date`; tool calls beyond that fail with a SigV4 expiration error rather
   than refreshing — restart the session for very long operations.

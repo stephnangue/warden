@@ -703,11 +703,15 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 	for _, lnConfig := range conf.Listeners {
 		switch lnConfig.Type {
 		case listenerTypeTCP, listenerTypeUnix:
+			readTimeout, writeTimeout, idleTimeout := lnConfig.HTTPTimeouts()
 			apiCfg := api.ApiListenerConfig{
 				Logger:         logger.WithSystem(subsystemListener),
 				Address:        lnConfig.Address,
 				TLSDisable:     lnConfig.TLSDisable,
 				TrustedProxies: lnConfig.TrustedProxies,
+				ReadTimeout:    readTimeout,
+				WriteTimeout:   writeTimeout,
+				IdleTimeout:    idleTimeout,
 			}
 
 			typeLabel := lnConfig.Type

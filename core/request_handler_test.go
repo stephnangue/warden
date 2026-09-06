@@ -1872,6 +1872,121 @@ func (m *mockStreamBodyParserBackend) ShouldParseStreamBody(_ *http.Request) boo
 	return m.parseStreamBody
 }
 
+// deadlineRecordingWriter records the connection deadlines set on it.
+// httptest.ResponseRecorder supports neither, so it cannot tell "cleared"
+// apart from "never attempted".
+type deadlineRecordingWriter struct {
+	http.ResponseWriter
+	read  []time.Time
+	write []time.Time
+}
+
+func newDeadlineRecordingWriter() *deadlineRecordingWriter {
+	return &deadlineRecordingWriter{ResponseWriter: httptest.NewRecorder()}
+}
+
+func (d *deadlineRecordingWriter) SetReadDeadline(t time.Time) error {
+	d.read = append(d.read, t)
+	return nil
+}
+
+func (d *deadlineRecordingWriter) SetWriteDeadline(t time.Time) error {
+	d.write = append(d.write, t)
+	return nil
+}
+
+// bodyReadRecordingBackend records the deadlines in force at the moment the
+// request body is buffered, which is the ordering the fix depends on and
+// which asserting only the end state would not catch.
+type bodyReadRecordingBackend struct {
+	*mockStreamBodyParserBackend
+	w             *deadlineRecordingWriter
+	readAtBuffer  []time.Time
+	writeAtBuffer []time.Time
+}
+
+func (b *bodyReadRecordingBackend) ShouldParseStreamBody(r *http.Request) bool {
+	b.readAtBuffer = append([]time.Time{}, b.w.read...)
+	b.writeAtBuffer = append([]time.Time{}, b.w.write...)
+	return b.mockStreamBodyParserBackend.ShouldParseStreamBody(r)
+}
+
+// TestHandleNonLoginRequest_StreamingClearsConnectionDeadlines pins the fix
+// for the listener deadlines severing proxied traffic, including the ordering
+// it turns on: the write deadline goes immediately, while the read deadline
+// is held to a finite window across the pre-authentication body buffering and
+// only removed once the body is in hand. Clearing the read deadline up front
+// would leave an unauthenticated dribbler unbounded; leaving it armed would
+// tear down an idle stream.
+func TestHandleNonLoginRequest_StreamingClearsConnectionDeadlines(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	w := newDeadlineRecordingWriter()
+	backend := &bodyReadRecordingBackend{
+		mockStreamBodyParserBackend: &mockStreamBodyParserBackend{parseStreamBody: true},
+		w:                           w,
+	}
+	entry := &MountEntry{
+		Path:        "vault/",
+		Type:        "vault",
+		Class:       mountClassProvider,
+		UUID:        "vault-deadline-uuid",
+		Accessor:    "vault_deadline",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+	}
+	view := &mockBarrierView{prefix: "provider/vault-deadline-uuid/"}
+	require.NoError(t, core.router.Mount("vault/", backend, entry, view))
+
+	t.Run("streaming request sheds the write deadline and windows the read", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/vault/gateway/v1/pki/issue/my-role", strings.NewReader(`{"key":"value"}`))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{
+			Path:           "vault/gateway/v1/pki/issue/my-role",
+			Operation:      logical.CreateOperation,
+			HTTPRequest:    httpReq,
+			ResponseWriter: logical.NewStatusRecordingWriter(w),
+		}
+
+		// Authorization fails after this point; the deadline work is all
+		// ahead of it.
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+
+		require.True(t, req.Streamed)
+
+		require.Len(t, w.write, 1, "the write deadline truncates a proxied response mid-flight")
+		assert.True(t, w.write[0].IsZero())
+
+		require.Len(t, w.read, 2, "the read deadline is windowed across the buffering, then removed")
+		assert.False(t, w.read[0].IsZero(), "an unauthenticated dribbler must stay bounded while the body is read")
+		assert.True(t, w.read[1].IsZero(), "an armed read deadline tears down an idle stream")
+
+		// The ordering is the point: at the moment the body was buffered the
+		// window was already in force and had not yet been lifted.
+		require.Len(t, backend.writeAtBuffer, 1, "the write deadline must be gone before the body is read")
+		require.Len(t, backend.readAtBuffer, 1, "the body must be read inside the window, not after it lifts")
+		assert.False(t, backend.readAtBuffer[0].IsZero())
+	})
+
+	t.Run("control-plane request keeps its caps", func(t *testing.T) {
+		w := newDeadlineRecordingWriter()
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/seal-status", nil)
+		req := &logical.Request{
+			Path:           "sys/seal-status",
+			Operation:      logical.ReadOperation,
+			HTTPRequest:    httpReq,
+			ResponseWriter: logical.NewStatusRecordingWriter(w),
+		}
+
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+
+		assert.False(t, req.Streamed)
+		assert.Empty(t, w.write, "clearing the write deadline for the whole API would remove the control plane's bound")
+		assert.Empty(t, w.read)
+	})
+}
+
 // TestHandleNonLoginRequest_StreamingBodyParsing tests opt-in body parsing for streaming requests
 func TestHandleNonLoginRequest_StreamingBodyParsing(t *testing.T) {
 	core := createTestCore(t)

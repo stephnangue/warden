@@ -7,16 +7,25 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
-// DefaultMCPTimeout caps a single MCP session. MCP responses can stream over
-// SSE for many tool calls, so the default sits well above the per-request
-// shapes that govern REST providers; operators raise this for longer sessions.
-// The value matches mcp_aws (the other MCP provider) so operators learn one
-// timeout knob across every MCP mount.
-const DefaultMCPTimeout = 10 * time.Minute
+// DefaultMCPTimeout caps a single call other than subscriptions/listen —
+// a tool call, a listing, a resource read. Open-ended streaming is no longer
+// its job: listen_timeout took that over, so this is a unary ceiling and
+// nothing more, and it dropped from ten minutes to sixty seconds when it
+// stopped having to cover a subscription.
+//
+// A ceiling is not a delay, but a long one multiplies how long a stalled
+// call holds its goroutine and both connections, and the transport caps
+// neither the number of upstream connections nor a peer that sends headers
+// and then dribbles. A tool that genuinely runs for minutes is meant to
+// report progress and be polled, not to hold a request open; mounts that
+// front one anyway raise timeout explicitly. The value matches mcp_aws so
+// operators learn one timeout knob across every MCP mount.
+const DefaultMCPTimeout = 60 * time.Second
 
 // Spec defines the generic mcp provider configuration for the httpproxy
 // framework.
@@ -54,6 +63,28 @@ var Spec = &httpproxy.ProviderSpec{
 	// here would break one-shot JSON clients.
 
 	ShouldEnforceMCPPolicy: shouldEnforceMCPPolicy,
+
+	// A subscriptions/listen stream is open-ended by design and answers to
+	// listen_timeout; every other call keeps the unary ceiling above.
+	SelectTimeout: httpproxy.SelectListenTimeout,
+	ExtraConfigFields: map[string]*framework.FieldSchema{
+		httpproxy.ListenTimeoutKey: httpproxy.ListenTimeoutField(),
+	},
+	OnConfigRead: func(state map[string]any) map[string]any {
+		return map[string]any{
+			httpproxy.ListenTimeoutKey: httpproxy.ReadListenTimeout(state).String(),
+		}
+	},
+	OnConfigWrite: func(d *framework.FieldData, state map[string]any) (map[string]any, error) {
+		if err := httpproxy.WriteListenTimeout(d, state); err != nil {
+			return nil, err
+		}
+		return state, nil
+	},
+	OnInitialize: func(config map[string]any, state map[string]any) map[string]any {
+		httpproxy.InitializeListenTimeout(config, state)
+		return state
+	},
 }
 
 // extractBearerToken injects the minted credential as Authorization: Bearer.
@@ -198,8 +229,13 @@ buffering or parsing is performed on them.
 Configuration:
 - mcp_url: MCP server base URL (required; no default)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
-- timeout: Session timeout (default: 10m). Raise for long agent sessions
-    that keep an SSE stream open across many tool calls.
+- timeout: Deadline for a single call — a tool call, a listing, a resource
+    read (default: 60s). Raise it for a mount fronting a genuinely slow tool;
+    it is also how long a hung call on this mount keeps its goroutine and its
+    two connections alive.
+- listen_timeout: Deadline for a subscriptions/listen stream (default: 10m).
+    Raise it for long-lived subscriptions. It governs that method only: a
+    long-running tool call streaming progress is still capped by timeout.
 - auto_auth_path: Auth mount path for implicit authentication (e.g.,
     'auth/jwt/')
 - default_role: Fallback role when not specified by header or URL path

@@ -79,9 +79,12 @@ JWT expired (typical TTL 5–60 min) — refresh it in the client config.
 - **Streamable HTTP / SSE flows through transparently.** The server's framing
   comes back unchanged, and the `Mcp-Session-Id` response header round-trips
   automatically so follow-up requests reach the same upstream session.
-- **Session timeout is mount-wide.** The mount's `timeout` config caps an entire
-  SSE session (default 10 minutes). For longer sessions, ask the operator to
-  raise it.
+- **Two mount-wide deadlines, picked by method.** `timeout` caps a single call —
+  a tool call, a listing, a resource read (default 60 seconds).
+  `listen_timeout` caps a `subscriptions/listen` stream (default 10 minutes),
+  and only that method: a long-running tool call streaming progress is still
+  bounded by `timeout`. Ask the operator to raise whichever one your workload
+  actually hits.
 - **Static-key upstreams that expect a non-`Authorization` header** (e.g.
   `x-api-key`) are not served by this provider — they need a dedicated one.
 - **Not in scope:** client-initiated OAuth (Dynamic Client Registration, PRM

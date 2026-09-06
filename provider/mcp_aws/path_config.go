@@ -31,9 +31,10 @@ func (b *mcpAWSBackend) pathConfig() *framework.Path {
 			},
 			"timeout": {
 				Type:        framework.TypeDurationSecond,
-				Description: "Session timeout duration (default: 10m)",
+				Description: "Deadline for a single call other than subscriptions/listen (default: 60s)",
 				Default:     DefaultMCPAWSTimeout.String(),
 			},
+			httpproxy.ListenTimeoutKey: httpproxy.ListenTimeoutField(),
 			"auto_auth_path": {
 				Type:        framework.TypeString,
 				Description: "Path to auth mount for implicit authentication (e.g., 'auth/jwt/'). Required.",
@@ -84,6 +85,7 @@ func (b *mcpAWSBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 		"region":          b.region,
 		"max_body_size":   b.MaxBodySize(),
 		"timeout":         b.Timeout().String(),
+		"listen_timeout":  b.listenTimeout.String(),
 		"auto_auth_path":  tc.AutoAuthPath,
 		"default_role":    tc.DefaultAuthRole,
 		"user_auth_path":  tc.UserAuthPath,
@@ -109,12 +111,24 @@ func (b *mcpAWSBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 	conf := b.snapshotForMerge()
 
 	for _, k := range []string{
-		"mcp_aws_url", "region", "max_body_size", "timeout",
+		"mcp_aws_url", "region", "max_body_size", "timeout", httpproxy.ListenTimeoutKey,
 		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role",
 		"tls_skip_verify", "ca_data",
 	} {
 		if val, ok := d.GetOk(k); ok {
 			conf[k] = val
+		}
+	}
+
+	// Reject a non-positive listen_timeout rather than letting the parse fall
+	// back to the default: an operator asking for "0" is asking for something
+	// the mount cannot give, and silently substituting ten minutes hides that.
+	if val, ok := d.GetOk(httpproxy.ListenTimeoutKey); ok {
+		if secs, isInt := val.(int); !isInt || secs <= 0 {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest(httpproxy.ListenTimeoutKey + " must be greater than 0"),
+			}, nil
 		}
 	}
 
@@ -171,6 +185,7 @@ func (b *mcpAWSBackend) snapshotForMerge() map[string]any {
 		"region":          b.configRegion,
 		"max_body_size":   b.MaxBodySize(),
 		"timeout":         b.Timeout().String(),
+		"listen_timeout":  b.listenTimeout.String(),
 		"auto_auth_path":  tc.AutoAuthPath,
 		"default_role":    tc.DefaultAuthRole,
 		"user_auth_path":  tc.UserAuthPath,

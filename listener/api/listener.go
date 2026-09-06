@@ -15,6 +15,15 @@ import (
 	"github.com/stephnangue/warden/logger"
 )
 
+// Built-in HTTP server deadlines, applied when the corresponding
+// ApiListenerConfig field is zero. These are the values the listener carried
+// before they became configurable.
+const (
+	DefaultReadTimeout  = 5 * time.Second
+	DefaultWriteTimeout = 10 * time.Second
+	DefaultIdleTimeout  = time.Minute
+)
+
 type ApiListener struct {
 	logger      *logger.GatedLogger
 	server      *http.Server
@@ -33,6 +42,20 @@ type ApiListenerConfig struct {
 	TLSDisable           bool     // default false => TLS on; requires TLSCertFile + TLSKeyFile
 	TLSRequireClientCert *bool    // nil = default (true when TLSClientCAFile set)
 	TrustedProxies       []string // CIDR ranges for LB cert forwarding
+
+	// ReadTimeout, WriteTimeout and IdleTimeout override the built-in HTTP
+	// server deadlines. Zero means use the default (5s read, 10s write,
+	// 1m idle).
+	//
+	// Read and write are armed when request headers are read and are
+	// absolute from that moment, so they cap the handler's whole execution
+	// rather than the response write alone. Streaming and proxied paths
+	// clear both per-connection via http.ResponseController — see
+	// logical.ClearStreamDeadlines — so these values govern the control
+	// plane, not gateway traffic.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
 
 	// TLSConfig, when non-nil, is used verbatim as the server's TLS config and
 	// supersedes the file-based TLS fields above (TLSCertFile/TLSKeyFile and the
@@ -56,12 +79,25 @@ func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListen
 	handler = middleware.RequestID(handler)
 	handler = middleware.Recoverer(handler)
 
+	readTimeout := cfg.ReadTimeout
+	if readTimeout == 0 {
+		readTimeout = DefaultReadTimeout
+	}
+	writeTimeout := cfg.WriteTimeout
+	if writeTimeout == 0 {
+		writeTimeout = DefaultWriteTimeout
+	}
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = DefaultIdleTimeout
+	}
+
 	server := &http.Server{
 		Addr:         cfg.Address,
 		Handler:      handler,
-		IdleTimeout:  time.Minute,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  idleTimeout,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
 	}
 
 	switch {
