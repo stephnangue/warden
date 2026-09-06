@@ -1336,3 +1336,88 @@ func TestBuildRequestAuditEntry_WithError(t *testing.T) {
 	entry := core.buildRequestAuditEntry(ctx, req, nil, nil, assert.AnError)
 	assert.Equal(t, assert.AnError.Error(), entry.Error)
 }
+
+// The client's self-description rides the request descriptor, not the
+// authorization result, because it decided nothing — so it is stamped onto
+// the entry separately, and must survive a request that never reached policy
+// evaluation.
+func TestStampMCPClient(t *testing.T) {
+	t.Run("stamped from the descriptor", func(t *testing.T) {
+		entry := &audit.LogEntry{}
+		req := &logical.Request{MCPDescriptor: &logical.MCPRequestDescriptor{
+			ClientInfoName:    "claude-code",
+			ClientInfoVersion: "2.1.0",
+		}}
+
+		stampMCPClient(entry, req)
+
+		require.NotNil(t, entry.Auth)
+		require.NotNil(t, entry.Auth.PolicyResults, "a refusal before policy evaluation has no PolicyResults yet")
+		require.NotNil(t, entry.Auth.PolicyResults.MCPClient)
+		assert.Equal(t, "claude-code", entry.Auth.PolicyResults.MCPClient.Name)
+		assert.Equal(t, "2.1.0", entry.Auth.PolicyResults.MCPClient.Version)
+	})
+
+	t.Run("absent client info stamps nothing", func(t *testing.T) {
+		entry := &audit.LogEntry{}
+		stampMCPClient(entry, &logical.Request{MCPDescriptor: &logical.MCPRequestDescriptor{}})
+		assert.Nil(t, entry.Auth)
+	})
+
+	t.Run("non-MCP request stamps nothing", func(t *testing.T) {
+		entry := &audit.LogEntry{}
+		stampMCPClient(entry, &logical.Request{})
+		assert.Nil(t, entry.Auth)
+	})
+
+	t.Run("nil-safe", func(t *testing.T) {
+		stampMCPClient(nil, nil)
+	})
+}
+
+// The async audit writer works from a clone, so a field the clone drops is a
+// field that never reaches the log.
+func TestLogEntry_CloneCarriesMCPClient(t *testing.T) {
+	entry := &audit.LogEntry{Auth: &audit.Auth{PolicyResults: &audit.PolicyResults{
+		MCPClient: &audit.MCPClientInfo{Name: "claude-code", Version: "2.1.0"},
+	}}}
+
+	clone := entry.Clone()
+
+	require.NotNil(t, clone.Auth.PolicyResults.MCPClient)
+	assert.Equal(t, "claude-code", clone.Auth.PolicyResults.MCPClient.Name)
+
+	clone.Auth.PolicyResults.MCPClient.Name = "mutated"
+	assert.Equal(t, "claude-code", entry.Auth.PolicyResults.MCPClient.Name,
+		"the clone must not share the struct with the live entry")
+}
+
+// The stamp is only useful if the entry builders call it. Asserting through
+// them rather than through stampMCPClient directly means removing the call
+// site fails the test.
+func TestAuditEntries_CarryMCPClient(t *testing.T) {
+	c := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	req := &logical.Request{
+		Path:      "mcp/gateway/",
+		Operation: logical.UpdateOperation,
+		MCPDescriptor: &logical.MCPRequestDescriptor{
+			ClientInfoName:    "claude-code",
+			ClientInfoVersion: "2.1.0",
+		},
+	}
+
+	t.Run("request entry", func(t *testing.T) {
+		entry := c.buildRequestAuditEntry(ctx, req, nil, nil, nil)
+		require.NotNil(t, entry.Auth)
+		require.NotNil(t, entry.Auth.PolicyResults.MCPClient)
+		assert.Equal(t, "claude-code", entry.Auth.PolicyResults.MCPClient.Name)
+	})
+
+	t.Run("response entry", func(t *testing.T) {
+		entry := c.buildResponseAuditEntry(ctx, req, &logical.Response{StatusCode: 403}, nil, nil, nil)
+		require.NotNil(t, entry.Auth)
+		require.NotNil(t, entry.Auth.PolicyResults.MCPClient)
+		assert.Equal(t, "2.1.0", entry.Auth.PolicyResults.MCPClient.Version)
+	})
+}

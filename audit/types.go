@@ -143,16 +143,38 @@ type PolicyResults struct {
 	Allowed          bool     `json:"allowed"`
 	GrantingPolicies []string `json:"granting_policies,omitempty"`
 
-	// MCPDecision carries the MCP-specific policy decision when an
-	// mcp { } block was consulted during CBP evaluation. nil when no
-	// such block applied. The field is omitempty so non-MCP audit
-	// records remain byte-identical to today's output.
+	// MCPDecision carries the decision an MCP-shaped request reached,
+	// populated on both outcomes: a contract was consulted and allowed or
+	// denied the call, or no contract was in scope at all and the request
+	// was refused with no_mcp_policy. The absence case is the one worth
+	// recording loudest — it is an operator misconfiguration, not a caller
+	// overstepping.
+	//
+	// nil for everything else: every non-MCP provider, and the body-less
+	// verbs an MCP mount serves alongside its JSON-RPC POSTs. The field is
+	// omitempty so those records stay byte-identical to today's output.
 	MCPDecision *logical.MCPDecision `json:"mcp_decision,omitempty"`
+
+	// MCPClient carries the client's self-description, taken from the
+	// request body's _meta. It sits beside MCPDecision rather than on it
+	// because it decided nothing: it is unverified, unauthenticated and
+	// trivially forged, useful for telling one agent build from another in
+	// a log and for nothing else. Never gate on it.
+	MCPClient *MCPClientInfo `json:"mcp_client,omitempty"`
 
 	// Condition carries the path-level CEL condition decision when a condition
 	// was evaluated for a non-MCP request (the MCP per-call condition is
 	// recorded on MCPDecision.Condition instead). nil when none applied.
 	Condition *logical.ConditionResult `json:"condition,omitempty"`
+}
+
+// MCPClientInfo is a client's self-reported identity. Control characters are
+// stripped and each field length-capped at extraction, so a caller cannot
+// use it to inject line breaks into an audit record or to grow one without
+// bound.
+type MCPClientInfo struct {
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
 }
 
 // AuthResult contains authentication result from login operations
@@ -325,6 +347,10 @@ func (e *LogEntry) Clone() *LogEntry {
 				Allowed:     e.Auth.PolicyResults.Allowed,
 				MCPDecision: e.Auth.PolicyResults.MCPDecision.Clone(),
 				Condition:   e.Auth.PolicyResults.Condition.Clone(),
+			}
+			if mc := e.Auth.PolicyResults.MCPClient; mc != nil {
+				mcCopy := *mc
+				clone.Auth.PolicyResults.MCPClient = &mcCopy
 			}
 			if e.Auth.PolicyResults.GrantingPolicies != nil {
 				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))

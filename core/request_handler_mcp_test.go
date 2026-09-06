@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -417,5 +418,218 @@ func TestExtractMCPDescriptor_ListenWithoutSubscriptions(t *testing.T) {
 
 	if got := req.MCPDescriptor.Calls[0].URIs; got != nil {
 		t.Errorf("URIs = %v, want nil", got)
+	}
+}
+
+// =============================================================================
+// Modern-era batch rejection
+// =============================================================================
+
+func batchReq(t *testing.T, version string) *logical.Request {
+	t.Helper()
+	req := newReq(t, `[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"x"}}]`)
+	if version != "" {
+		req.HTTPRequest.Header.Set(mcpProtocolVersionHeader, version)
+	}
+	return req
+}
+
+// Batching left the spec in 2025-06-18, so a client announcing a revision
+// that postdates its removal while sending one is contradicting itself.
+func TestExtractMCPDescriptor_ModernBatchRejected(t *testing.T) {
+	c := &Core{}
+	req := batchReq(t, "2026-07-28")
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	desc := req.MCPDescriptor
+	if desc.ParseErr == nil {
+		t.Fatal("ParseErr = nil, want a batch refusal")
+	}
+	if desc.ParseErr.Kind != logical.MCPParseKindBatchUnsupported {
+		t.Errorf("Kind = %q, want %q", desc.ParseErr.Kind, logical.MCPParseKindBatchUnsupported)
+	}
+	if desc.Calls != nil {
+		t.Error("Calls must be unspecified when ParseErr is set")
+	}
+}
+
+// The fail-open branch that keeps dual-era support working, and the one that
+// most needs a test that fails when it is taken wrongly: a legacy client's
+// batch must still be accepted and every element policy-checked.
+func TestExtractMCPDescriptor_LegacyBatchStillAccepted(t *testing.T) {
+	for _, version := range []string{"", "2025-11-25", "2025-06-18"} {
+		t.Run("version="+version, func(t *testing.T) {
+			c := &Core{}
+			req := batchReq(t, version)
+			b := &mcpBackend{}
+			b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+			c.extractMCPDescriptor(context.Background(), req, b)
+
+			desc := req.MCPDescriptor
+			if desc.ParseErr != nil {
+				t.Fatalf("ParseErr = %v, want nil — legacy batches must keep working", desc.ParseErr)
+			}
+			if len(desc.Calls) != 2 {
+				t.Fatalf("Calls len = %d, want 2 — every element must be policy-checked", len(desc.Calls))
+			}
+			if !desc.IsBatch {
+				t.Error("IsBatch = false, want true")
+			}
+		})
+	}
+}
+
+// A one-element array is a batch that looks like a single call in Calls
+// alone. Tracking the outer shape is the only way to tell them apart.
+func TestExtractMCPDescriptor_SingleElementBatchIsStillABatch(t *testing.T) {
+	c := &Core{}
+	req := newReq(t, `[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`)
+	req.HTTPRequest.Header.Set(mcpProtocolVersionHeader, "2026-07-28")
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	if req.MCPDescriptor.ParseErr == nil {
+		t.Fatal("a one-element batch must be refused like any other batch")
+	}
+}
+
+// A version Warden cannot place is not read as modern, matching how the
+// header validator treats it — guessing "latest" would refuse legacy traffic.
+func TestExtractMCPDescriptor_UnparseableVersionKeepsBatches(t *testing.T) {
+	c := &Core{}
+	req := batchReq(t, "latest")
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	if req.MCPDescriptor.ParseErr != nil {
+		t.Fatalf("ParseErr = %v, want nil", req.MCPDescriptor.ParseErr)
+	}
+}
+
+// =============================================================================
+// clientInfo
+// =============================================================================
+
+func TestExtractMCPDescriptor_CarriesClientInfo(t *testing.T) {
+	c := &Core{}
+	req := newReq(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"deploy","_meta":{"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"2.1.0"}}}}`)
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	desc := req.MCPDescriptor
+	if desc.ClientInfoName != "claude-code" || desc.ClientInfoVersion != "2.1.0" {
+		t.Errorf("client info = %q/%q, want claude-code/2.1.0", desc.ClientInfoName, desc.ClientInfoVersion)
+	}
+}
+
+// The value is self-reported and unverified, so it must not be able to break
+// the log it lands in.
+func TestExtractMCPDescriptor_ClientInfoIsBounded(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	c := &Core{}
+	req := newReq(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","_meta":{"io.modelcontextprotocol/clientInfo":{"name":"`+long+`","version":"1.0\ninjected: line"}}}}`)
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	desc := req.MCPDescriptor
+	if len(desc.ClientInfoName) > maxClientInfoField {
+		t.Errorf("name length = %d, want <= %d", len(desc.ClientInfoName), maxClientInfoField)
+	}
+	if strings.ContainsAny(desc.ClientInfoVersion, "\n\r") {
+		t.Errorf("version = %q still carries control characters", desc.ClientInfoVersion)
+	}
+}
+
+// Decoration must never cost a working call: a shape that will not decode
+// records nothing and the request proceeds.
+func TestExtractMCPDescriptor_MalformedClientInfoIsNotAnError(t *testing.T) {
+	c := &Core{}
+	req := newReq(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","_meta":{"io.modelcontextprotocol/clientInfo":"not-an-object"}}}`)
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	desc := req.MCPDescriptor
+	if desc.ParseErr != nil {
+		t.Fatalf("ParseErr = %v, want nil", desc.ParseErr)
+	}
+	if desc.ClientInfoName != "" {
+		t.Errorf("ClientInfoName = %q, want empty", desc.ClientInfoName)
+	}
+}
+
+// The header is not the only place a client can announce its era. The header
+// validator skips batches — it has no single method to compare against — so
+// reading only the header here would leave one combination through: declare
+// modernity in params._meta, send two elements, and be neither refused as a
+// batch nor caught as a mismatch.
+func TestExtractMCPDescriptor_MetaDeclaredModernBatchRejected(t *testing.T) {
+	const elem = `{"jsonrpc":"2.0","id":%d,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`
+
+	c := &Core{}
+	// No transport version header at all — the shape that used to slip past.
+	req := newReq(t, "["+fmt.Sprintf(elem, 1)+","+fmt.Sprintf(elem, 2)+"]")
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	desc := req.MCPDescriptor
+	if desc.ParseErr == nil {
+		t.Fatal("ParseErr = nil, want a batch refusal")
+	}
+	if desc.ParseErr.Kind != logical.MCPParseKindBatchUnsupported {
+		t.Errorf("Kind = %q, want %q", desc.ParseErr.Kind, logical.MCPParseKindBatchUnsupported)
+	}
+}
+
+// A legacy body declaring a legacy revision in _meta is still a legacy
+// batch — the era test must read the declared value, not merely its presence.
+func TestExtractMCPDescriptor_MetaDeclaredLegacyBatchAccepted(t *testing.T) {
+	const elem = `{"jsonrpc":"2.0","id":%d,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25"}}}`
+
+	c := &Core{}
+	req := newReq(t, "["+fmt.Sprintf(elem, 1)+","+fmt.Sprintf(elem, 2)+"]")
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	if req.MCPDescriptor.ParseErr != nil {
+		t.Fatalf("ParseErr = %v, want nil", req.MCPDescriptor.ParseErr)
+	}
+}
+
+// The refusal this PR introduces must still attribute the client: the one
+// that sent a body Warden rejected is exactly the one an operator wants
+// named.
+func TestExtractMCPDescriptor_BatchRefusalStillCarriesClientInfo(t *testing.T) {
+	c := &Core{}
+	req := newReq(t, `[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"2.1.0"}}}},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]`)
+	req.HTTPRequest.Header.Set(mcpProtocolVersionHeader, "2026-07-28")
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	desc := req.MCPDescriptor
+	if desc.ParseErr == nil {
+		t.Fatal("expected the batch to be refused")
+	}
+	if desc.ClientInfoName != "claude-code" {
+		t.Errorf("ClientInfoName = %q, want claude-code — a refused request still names its client", desc.ClientInfoName)
 	}
 }

@@ -18,6 +18,19 @@ import "encoding/json"
 type MCPRequestDescriptor struct {
 	Calls    []MCPCall
 	ParseErr *MCPParseError
+
+	// IsBatch records that the body's top-level value was an array. Not
+	// recoverable from Calls, since a one-element array and a single
+	// object both yield one call — and that is exactly the pair the
+	// modern-era batch rejection has to tell apart.
+	IsBatch bool
+
+	// ClientInfoName and ClientInfoVersion are the client's
+	// self-description, carried for the audit record. Unverified,
+	// unauthenticated, and trivially forged: never consult them in a
+	// gate.
+	ClientInfoName    string
+	ClientInfoVersion string
 }
 
 // MCPCall is one strictly-parsed JSON-RPC request extracted from the
@@ -108,6 +121,14 @@ const (
 	MCPParseKindOversizedBody    = "oversized_body"
 	MCPParseKindBatchEmpty       = "batch_empty"
 	MCPParseKindMalformedParams  = "malformed_params"
+
+	// MCPParseKindBatchUnsupported refuses a batch from a client announcing
+	// a protocol revision that postdates batching's removal from the spec.
+	// Distinct from MCPParseKindBatchEmpty, and distinct from a header
+	// mismatch: the body is well-formed and the headers describe it
+	// correctly — the two claims it makes about itself simply cannot both
+	// be true.
+	MCPParseKindBatchUnsupported = "batch_unsupported"
 )
 
 // Clone returns a deep copy of the MCPRequestDescriptor. Safe to call
@@ -120,7 +141,11 @@ func (d *MCPRequestDescriptor) Clone() *MCPRequestDescriptor {
 	if d == nil {
 		return nil
 	}
-	clone := &MCPRequestDescriptor{}
+	clone := &MCPRequestDescriptor{
+		IsBatch:           d.IsBatch,
+		ClientInfoName:    d.ClientInfoName,
+		ClientInfoVersion: d.ClientInfoVersion,
+	}
 	if d.Calls != nil {
 		clone.Calls = make([]MCPCall, len(d.Calls))
 		for i, c := range d.Calls {

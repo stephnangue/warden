@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"strings"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
@@ -112,7 +114,7 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 		return
 	}
 
-	reqs, perr := ParseJSONRPCStrict(body)
+	reqs, isBatch, perr := ParseJSONRPCStrictBody(body)
 	if perr != nil {
 		desc.ParseErr = &logical.MCPParseError{
 			Kind: string(perr.Kind),
@@ -120,8 +122,55 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 		}
 		return
 	}
+	desc.IsBatch = isBatch
+	if len(reqs) > 0 {
+		// One body, one client: the self-description rides every call, so the
+		// first is as good as any and the descriptor carries it once. Recorded
+		// before any refusal below — the client that sent a body Warden
+		// rejected is exactly the one an operator wants named.
+		desc.ClientInfoName = reqs[0].ClientInfoName
+		desc.ClientInfoVersion = reqs[0].ClientInfoVersion
+	}
+
+	// JSON-RPC batching left the spec in 2025-06-18, so a client announcing a
+	// revision that postdates its removal while sending one is contradicting
+	// itself. Refuse it here, in the extractor, so it is refused as a batch
+	// rather than reaching the header validator and being reported as a
+	// header mismatch — the client would then go looking at its headers, which
+	// are not the problem.
+	//
+	// The parser itself is untouched: an upstream of the legacy era still
+	// gets its batches, which is most of why Warden can front both eras.
+	if isBatch && announcesHeaderEra(req.HTTPRequest, reqs) {
+		desc.ParseErr = &logical.MCPParseError{
+			Kind: logical.MCPParseKindBatchUnsupported,
+			Msg:  "batch request from a client announcing a revision that dropped batching",
+		}
+		return
+	}
 
 	desc.Calls = mcpCallsFromParsed(reqs)
+}
+
+// announcesHeaderEra reports whether a client claimed a modern revision, in
+// either place it can make that claim.
+//
+// The body counts, not only the transport header. The header validator
+// refuses a single call that declares a modern revision in params._meta while
+// the transport declares none — but it skips batches, having no single method
+// to compare against. Reading only the header here would leave that exact
+// combination as the way through: declare modernity in _meta, send two
+// elements, and be neither refused as a batch nor caught as a mismatch.
+func announcesHeaderEra(r *http.Request, reqs []JSONRPCRequest) bool {
+	if r != nil && isHeaderEraRevision(strings.TrimSpace(r.Header.Get(mcpProtocolVersionHeader))) {
+		return true
+	}
+	for _, req := range reqs {
+		if isHeaderEraRevision(req.MetaProtocolVersion) {
+			return true
+		}
+	}
+	return false
 }
 
 // mcpCallsFromParsed maps strictly-parsed JSON-RPC requests onto the

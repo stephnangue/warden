@@ -153,10 +153,9 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 				}
 				auditAuth.PolicyResults.GrantingPolicies = policies
 			}
-			// Surface the MCP decision into the audit record when an
-			// mcp { } rule-set was consulted. The audit's PolicyResults
-			// owns the wire shape; the in-memory MCPDecision flows in
-			// from logical.Auth.MCPDecision via the request handler.
+			// Surface the MCP decision into the audit record. The audit's
+			// PolicyResults owns the wire shape; the in-memory MCPDecision
+			// flows in from logical.Auth.MCPDecision via the request handler.
 			if auth.MCPDecision != nil {
 				auditAuth.PolicyResults.MCPDecision = auth.MCPDecision
 			}
@@ -294,6 +293,7 @@ func (c *Core) buildRequestAuditEntry(
 		Auth:      buildAuditAuth(auth, te),
 	}
 	stampUserAttribution(entry, req)
+	stampMCPClient(entry, req)
 
 	if outerErr != nil {
 		entry.Error = outerErr.Error()
@@ -321,6 +321,38 @@ func stampUserAttribution(entry *audit.LogEntry, req *logical.Request) {
 	}
 }
 
+// stampMCPClient records the client's self-description on the audit entry.
+//
+// It rides the request descriptor rather than the authorization result
+// because it took no part in one: the value is unverified, unauthenticated,
+// and set by the caller. It is here so an operator reading a denial can tell
+// which agent build produced it, and for nothing else.
+//
+// Stamped even when the request was refused — the client that sent a body
+// Warden rejected is exactly the one an operator wants named.
+func stampMCPClient(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.MCPDescriptor == nil {
+		return
+	}
+	desc := req.MCPDescriptor
+	if desc.ClientInfoName == "" && desc.ClientInfoVersion == "" {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	// PolicyResults is allocated only when policy evaluation produced
+	// results, and a request refused before that — which is exactly a
+	// request worth attributing — has none.
+	if entry.Auth.PolicyResults == nil {
+		entry.Auth.PolicyResults = &audit.PolicyResults{}
+	}
+	entry.Auth.PolicyResults.MCPClient = &audit.MCPClientInfo{
+		Name:    desc.ClientInfoName,
+		Version: desc.ClientInfoVersion,
+	}
+}
+
 // buildResponseAuditEntry creates an audit.LogEntry for a response
 func (c *Core) buildResponseAuditEntry(
 	ctx context.Context,
@@ -345,6 +377,7 @@ func (c *Core) buildResponseAuditEntry(
 		Response:  buildAuditResponse(resp, req, cred),
 	}
 	stampUserAttribution(entry, req)
+	stampMCPClient(entry, req)
 
 	// Capture error from multiple sources:
 	// 1. outerErr - errors from request processing (e.g., routing errors)

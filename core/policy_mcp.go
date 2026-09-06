@@ -58,6 +58,7 @@ const (
 	mcpRuleTypeOversizedBody    = "oversized_body"
 	mcpRuleTypeBatchEmpty       = "batch_empty"
 	mcpRuleTypeMalformedParams  = "malformed_params"
+	mcpRuleTypeBatchUnsupported = "batch_unsupported"
 
 	// mcpRuleTypeBatchListUnfilterable denies an otherwise-allowed batch
 	// that contains a list method. A batched JSON-RPC list response can't
@@ -793,6 +794,7 @@ func mcpDenyRank(ruleType string) int {
 		mcpRuleTypeBatchEmpty,
 		mcpRuleTypeMalformedParams,
 		mcpRuleTypeBatchListUnfilterable,
+		mcpRuleTypeBatchUnsupported,
 		mcpRuleTypeHeaderMismatch,
 		// Never actually competes — it is produced outside evaluateMCPCall,
 		// where there are no rule-sets to rank against. Listed so the ranking
@@ -879,6 +881,8 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 		return "Request params have unexpected shape."
 	case mcpRuleTypeBatchListUnfilterable:
 		return "Batched list requests are not supported."
+	case mcpRuleTypeBatchUnsupported:
+		return "Batched requests are not supported at the requested protocol version."
 	case mcpRuleTypeMissingMethod:
 		return "Request method required."
 	case mcpRuleTypeHeaderMismatch:

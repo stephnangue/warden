@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // maxJSONDepth bounds the recursion of the strict JSON-RPC body walker
@@ -52,6 +53,12 @@ type JSONRPCRequest struct {
 	// MetaProtocolVersion is the revision the body itself declares in
 	// params._meta, empty when it declares none.
 	MetaProtocolVersion string
+
+	// ClientInfoName and ClientInfoVersion are the client's self-description
+	// from params._meta. Unverified and unauthenticated — recorded for
+	// operators, never consulted by a gate.
+	ClientInfoName    string
+	ClientInfoVersion string
 }
 
 // ParseErrorKind enumerates structural-failure deny reasons. Each kind
@@ -112,58 +119,72 @@ func (e *ParseError) Error() string {
 // callers that need to map their own size-cap failure into the same
 // rule_type vocabulary.
 func ParseJSONRPCStrict(body []byte) ([]JSONRPCRequest, *ParseError) {
+	reqs, _, perr := ParseJSONRPCStrictBody(body)
+	return reqs, perr
+}
+
+// ParseJSONRPCStrictBody is ParseJSONRPCStrict plus the body's outer shape:
+// isBatch reports whether the top-level value was an array.
+//
+// The shape is not recoverable from the returned slice — a one-element array
+// and a single object both yield one request — and callers that must
+// distinguish them need it. A batch is a legacy-only shape: it was dropped
+// from the spec in 2025-06-18, so a modern client sending one is
+// self-contradictory in a way only this flag can see.
+func ParseJSONRPCStrictBody(body []byte) ([]JSONRPCRequest, bool, *ParseError) {
 	if hasUTF8BOM(body) {
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "body has UTF-8 BOM"}
+		return nil, false, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "body has UTF-8 BOM"}
 	}
 
 	first, ok := firstNonWS(body)
 	if !ok {
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "empty body"}
+		return nil, false, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "empty body"}
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 
 	var requests []JSONRPCRequest
+	isBatch := first == '['
 
 	switch first {
 	case '{':
 		req, perr := parseJSONRPCRequest(dec)
 		if perr != nil {
-			return nil, perr
+			return nil, isBatch, perr
 		}
 		requests = []JSONRPCRequest{*req}
 	case '[':
 		// Consume the opening '['.
 		if _, err := dec.Token(); err != nil {
-			return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
+			return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
 		}
 		for dec.More() {
 			req, perr := parseJSONRPCRequest(dec)
 			if perr != nil {
-				return nil, perr
+				return nil, isBatch, perr
 			}
 			requests = append(requests, *req)
 		}
 		// Consume the closing ']'.
 		if _, err := dec.Token(); err != nil {
-			return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
+			return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
 		}
 		if len(requests) == 0 {
-			return nil, &ParseError{Kind: ErrKindBatchEmpty, Msg: "empty batch"}
+			return nil, isBatch, &ParseError{Kind: ErrKindBatchEmpty, Msg: "empty batch"}
 		}
 	default:
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "top-level value must be object or array"}
+		return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "top-level value must be object or array"}
 	}
 
 	// No trailing data after the top-level value. dec.Token() returning
 	// io.EOF means clean end; anything else (including a successful
 	// token read) is trailing data.
 	if _, err := dec.Token(); err != io.EOF {
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "trailing data after JSON-RPC payload"}
+		return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "trailing data after JSON-RPC payload"}
 	}
 
-	return requests, nil
+	return requests, isBatch, nil
 }
 
 // parseJSONRPCRequest parses one JSON-RPC request object from the
@@ -306,6 +327,10 @@ func decodeParamsObject(raw json.RawMessage) (map[string]json.RawMessage, bool) 
 // rejection.
 const metaProtocolVersionKey = "io.modelcontextprotocol/protocolVersion"
 
+// metaClientInfoKey carries the client's self-description, which the
+// stateless protocol moved onto every request from the initialize handshake.
+const metaClientInfoKey = "io.modelcontextprotocol/clientInfo"
+
 // extractMetaProtocolVersion peeks params._meta for the client's declared
 // protocol revision, so the header validator can cross-check the transport
 // header against what the body itself claims.
@@ -330,6 +355,8 @@ func extractMetaProtocolVersion(req *JSONRPCRequest, top map[string]json.RawMess
 	if err := json.Unmarshal(metaRaw, &meta); err != nil {
 		return nil
 	}
+	extractMetaClientInfo(req, meta)
+
 	verRaw, ok, perr := lookupParamKey(meta, metaProtocolVersionKey, req.Method)
 	if perr != nil {
 		return perr
@@ -343,6 +370,52 @@ func extractMetaProtocolVersion(req *JSONRPCRequest, top map[string]json.RawMess
 	}
 	req.MetaProtocolVersion = ver
 	return nil
+}
+
+// maxClientInfoField bounds each recorded clientInfo string. The value is
+// self-reported and unverified, so it is capped rather than trusted not to
+// arrive as a megabyte of text aimed at the audit log.
+const maxClientInfoField = 128
+
+// extractMetaClientInfo reads the client's self-description out of _meta.
+// Under the stateless protocol it rides every request, having previously come
+// from the initialize handshake.
+//
+// Never an error: this is decoration. A shape that will not decode simply
+// records nothing, because refusing a request over the contents of a field
+// nothing is authorised by would be trading a working call for a log line.
+func extractMetaClientInfo(req *JSONRPCRequest, meta map[string]json.RawMessage) {
+	infoRaw, ok, perr := lookupParamKey(meta, metaClientInfoKey, req.Method)
+	if perr != nil || !ok {
+		return
+	}
+	var info struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(infoRaw, &info); err != nil {
+		return
+	}
+	req.ClientInfoName = boundedField(info.Name)
+	req.ClientInfoVersion = boundedField(info.Version)
+}
+
+// boundedField strips ASCII control characters and truncates, so a
+// self-reported value cannot inject line breaks into an audit record or grow
+// it without limit.
+//
+// Truncation backs off to a rune boundary rather than cutting mid-sequence,
+// which would leave a dangling byte for stripCTL to substitute and put the
+// result over the cap it was just held to.
+func boundedField(s string) string {
+	if len(s) > maxClientInfoField {
+		cut := maxClientInfoField
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
+	}
+	return stripCTL(s)
 }
 
 // extractMethodShape populates Name and (for tools/call) Arguments
