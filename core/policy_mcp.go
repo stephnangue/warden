@@ -4,6 +4,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -44,6 +45,12 @@ const (
 	mcpRuleTypeCondition        = "condition"
 	mcpRuleTypeConditionError   = "condition_error"
 	mcpRuleTypeMissingMethod    = "missing_method_header"
+
+	// mcpRuleTypeHeaderMismatch denies a request whose MCP transport headers
+	// contradict, or fail to describe, the body Warden parsed. Structural
+	// rather than a policy decision: no contract was consulted to reach it,
+	// and no contract can permit it.
+	mcpRuleTypeHeaderMismatch = "header_mismatch"
 
 	mcpRuleTypeMissingBody      = "missing_body"
 	mcpRuleTypeMalformedJSONRPC = "malformed_jsonrpc"
@@ -116,6 +123,33 @@ func (e *ErrMCPPolicyDenied) Error() string {
 }
 
 func (e *ErrMCPPolicyDenied) Unwrap() error {
+	return sdklogical.ErrPermissionDenied
+}
+
+// ErrMCPHeaderMismatch carries a transport-header refusal, which the HTTP
+// layer renders as a protocol-level JSON-RPC error rather than the
+// OAuth-shaped 403 a policy denial gets.
+//
+// It is a separate type from ErrMCPPolicyDenied precisely so it can be
+// branched on ahead of it: both denials arrive through the same MCPDecision
+// channel, and without the distinction a header mismatch would be reported
+// to the client as an authorization failure — which would send a dual-era
+// client downgrading to initialize instead of correcting its headers.
+//
+// RawID travels on the error rather than on MCPDecision, which has no id
+// field and should not grow one: the decision is a fingerprint-hygiene
+// surface, and an echoed id is adversary-controlled bytes.
+type ErrMCPHeaderMismatch struct {
+	Decision  *logical.MCPDecision
+	RawID     json.RawMessage
+	IDPresent bool
+}
+
+func (e *ErrMCPHeaderMismatch) Error() string {
+	return sdklogical.ErrPermissionDenied.Error()
+}
+
+func (e *ErrMCPHeaderMismatch) Unwrap() error {
 	return sdklogical.ErrPermissionDenied
 }
 
@@ -362,6 +396,18 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry
 			RuleType: desc.ParseErr.Kind,
 		}
 	default:
+		// Transport headers before contract evaluation: a body whose headers
+		// contradict it is refused on its own terms, without asking any
+		// contract whether the call it claims to be would have been allowed.
+		//
+		// This sits inside decideMCP, which runs only when a contract is in
+		// scope, so absence-deny still wins on a path with none — the
+		// validation result is simply never computed there, and the request
+		// is refused either way.
+		if hd := validateMCPHeaders(req, desc); hd != nil {
+			d = hd
+			break
+		}
 		d = evaluateMCPDescriptor(sets, desc, req, te, now, nsPath)
 		if d == nil {
 			// Defence in depth: evaluateMCPDescriptor returns nil
@@ -747,6 +793,7 @@ func mcpDenyRank(ruleType string) int {
 		mcpRuleTypeBatchEmpty,
 		mcpRuleTypeMalformedParams,
 		mcpRuleTypeBatchListUnfilterable,
+		mcpRuleTypeHeaderMismatch,
 		// Never actually competes — it is produced outside evaluateMCPCall,
 		// where there are no rule-sets to rank against. Listed so the ranking
 		// stays total over the rule-type domain.
@@ -834,6 +881,13 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 		return "Batched list requests are not supported."
 	case mcpRuleTypeMissingMethod:
 		return "Request method required."
+	case mcpRuleTypeHeaderMismatch:
+		// Names no header and no value: the client already knows what it
+		// sent, and saying which half disagreed would hand an attacker a
+		// probe for the shape of the check. The HTTP layer answers this one
+		// with a JSON-RPC error rather than this description; the text is
+		// here for audit and for any path that renders a decision generically.
+		return "MCP transport headers do not match the request body."
 	case mcpRuleTypeNoMCPPolicy:
 		// Names the misconfiguration rather than the call. Every other message
 		// answers "what did I ask for that was refused?"; this one answers

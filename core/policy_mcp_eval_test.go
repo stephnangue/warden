@@ -40,11 +40,12 @@ func newMCPRequest(tb testing.TB, path, body string) *logical.Request {
 	return req
 }
 
-// synthesizeMCPDescriptorFromBody mirrors what extractMCPDescriptor
-// does on the production streaming branch: strict-parse the body,
-// then map every parsed JSONRPCRequest to an MCPCall. Lives next to
-// the matcher tests so they exercise the real pipeline without
-// dragging in the request_handler extractor's I/O concerns.
+// synthesizeMCPDescriptorFromBody runs the production pipeline on a body —
+// the strict parser, then the same mcpCallsFromParsed mapping
+// extractMCPDescriptor uses — without dragging in that extractor's I/O
+// concerns. It calls the real mapping rather than restating it, so a field
+// added to the descriptor cannot be gated in tests while production sees a
+// zero value.
 func synthesizeMCPDescriptorFromBody(body []byte) *logical.MCPRequestDescriptor {
 	desc := &logical.MCPRequestDescriptor{}
 	reqs, perr := ParseJSONRPCStrict(body)
@@ -55,16 +56,7 @@ func synthesizeMCPDescriptorFromBody(body []byte) *logical.MCPRequestDescriptor 
 		}
 		return desc
 	}
-	desc.Calls = make([]logical.MCPCall, len(reqs))
-	for i, r := range reqs {
-		desc.Calls[i] = logical.MCPCall{
-			Method:     r.Method,
-			Name:       r.Name,
-			MatchArgs:  classifyArgs(r.Arguments),
-			URIs:       r.URIs,
-			BatchIndex: i,
-		}
-	}
+	desc.Calls = mcpCallsFromParsed(reqs)
 	return desc
 }
 

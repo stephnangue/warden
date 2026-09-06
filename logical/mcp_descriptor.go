@@ -3,6 +3,8 @@
 
 package logical
 
+import "encoding/json"
+
 // MCPRequestDescriptor carries the result of strictly parsing an
 // MCP-enforced backend's request body. Stashed on *Request by the core
 // handler's extractor; consumed by the policy evaluator in a later
@@ -34,12 +36,26 @@ type MCPRequestDescriptor struct {
 // matcher gates each one against the resources family, so subscribing
 // to a resource's update stream requires the same grant as reading it.
 // nil for other methods, and for a listen that names no resource.
+// RawID carries the JSON-RPC id verbatim so a protocol-level error
+// response can echo it, and IDPresent separates a request from a
+// notification — JSON-RPC permits a null id, which is present-but-null
+// and not the same as absent. Neither is ever matched against; they
+// exist so a refusal can be rendered as a well-formed JSON-RPC error
+// rather than an opaque HTTP status.
 type MCPCall struct {
 	Method     string
 	Name       string
 	MatchArgs  map[string]ParamValue
 	URIs       []string
+	RawID      json.RawMessage
+	IDPresent  bool
 	BatchIndex int
+
+	// MetaProtocolVersion is the protocol revision the body declares in
+	// params._meta, empty when it declares none. Compared against the
+	// transport header so a request cannot claim one revision to Warden
+	// and another to whatever reads the body next.
+	MetaProtocolVersion string
 }
 
 // ParamKind classifies the JSON type of a tools/call argument value
@@ -125,9 +141,15 @@ func (d *MCPRequestDescriptor) Clone() *MCPRequestDescriptor {
 // request.
 func (c MCPCall) Clone() MCPCall {
 	out := MCPCall{
-		Method:     c.Method,
-		Name:       c.Name,
-		BatchIndex: c.BatchIndex,
+		Method:              c.Method,
+		Name:                c.Name,
+		IDPresent:           c.IDPresent,
+		MetaProtocolVersion: c.MetaProtocolVersion,
+		BatchIndex:          c.BatchIndex,
+	}
+	if c.RawID != nil {
+		out.RawID = make(json.RawMessage, len(c.RawID))
+		copy(out.RawID, c.RawID)
 	}
 	if c.MatchArgs != nil {
 		out.MatchArgs = make(map[string]ParamValue, len(c.MatchArgs))

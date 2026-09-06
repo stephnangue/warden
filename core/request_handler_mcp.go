@@ -121,16 +121,32 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 		return
 	}
 
-	desc.Calls = make([]logical.MCPCall, len(reqs))
+	desc.Calls = mcpCallsFromParsed(reqs)
+}
+
+// mcpCallsFromParsed maps strictly-parsed JSON-RPC requests onto the
+// descriptor's calls, stamping BatchIndex in array order.
+//
+// It is a named function rather than a loop inlined above because tests
+// build descriptors from a body too, and a second copy of this mapping is a
+// trap: a field added to one and not the other still passes every evaluator
+// test while production sees a zero value. For URIs in particular that zero
+// value means "subscribes to nothing", which allows.
+func mcpCallsFromParsed(reqs []JSONRPCRequest) []logical.MCPCall {
+	calls := make([]logical.MCPCall, len(reqs))
 	for i, r := range reqs {
-		desc.Calls[i] = logical.MCPCall{
-			Method:     r.Method,
-			Name:       r.Name,
-			MatchArgs:  classifyArgs(r.Arguments),
-			URIs:       r.URIs,
-			BatchIndex: i,
+		calls[i] = logical.MCPCall{
+			Method:              r.Method,
+			Name:                r.Name,
+			MatchArgs:           classifyArgs(r.Arguments),
+			URIs:                r.URIs,
+			RawID:               r.RawID,
+			IDPresent:           r.IDPresent,
+			MetaProtocolVersion: r.MetaProtocolVersion,
+			BatchIndex:          i,
 		}
 	}
+	return calls
 }
 
 // classifyArgs typifies each tools/call argument from raw JSON bytes
