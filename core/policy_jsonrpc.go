@@ -28,6 +28,11 @@ const maxJSONDepth = 32
 // tools/call only (raw bytes per argument key so callers can do their
 // own type discrimination); nil for any other method.
 //
+// URIs is populated for subscriptions/listen only, from
+// params.notifications.resourceSubscriptions — the resource URIs whose
+// update notifications the caller is asking to receive. nil for any other
+// method, and for a listen that subscribes only to list-changed events.
+//
 // RawParams retains the verbatim params bytes for matcher-internal use.
 // It is descriptor-only and MUST NOT be copied to MCPDecision, the
 // audit record, or the client response.
@@ -35,6 +40,7 @@ type JSONRPCRequest struct {
 	Method    string
 	Name      string
 	Arguments map[string]json.RawMessage
+	URIs      []string
 	RawParams json.RawMessage
 }
 
@@ -86,7 +92,9 @@ func (e *ParseError) Error() string {
 //   - Nesting deeper than maxJSONDepth inside params.
 //   - method-specific shape mismatches: tools/call without params.name
 //     or with non-object params.arguments, resources/read without
-//     params.uri, prompts/get without params.name.
+//     params.uri, prompts/get without params.name,
+//     subscriptions/listen with a non-array or over-long
+//     params.notifications.resourceSubscriptions.
 //
 // Callers are responsible for bounding the input size (Content-Length
 // and io.LimitReader at the handler boundary) — this function does NOT
@@ -273,12 +281,114 @@ func extractMethodShape(req *JSONRPCRequest) *ParseError {
 	switch strings.ToLower(req.Method) {
 	case "tools/call":
 		return extractToolsCall(req)
-	case "resources/read":
+	case "resources/read", "resources/subscribe":
 		return extractByParamKey(req, "uri")
 	case "prompts/get":
 		return extractByParamKey(req, "name")
+	case "subscriptions/listen":
+		return extractSubscriptionsListen(req)
 	}
 	return nil
+}
+
+// maxResourceSubscriptions caps how many URIs one subscriptions/listen may
+// name. Each one is matched against the resources family's deny- and
+// allow-lists, so an unbounded array is an unbounded amount of pattern
+// matching bought with a single request. Far above any real client: the
+// go-sdk opens one listen stream per session.
+const maxResourceSubscriptions = 256
+
+// extractSubscriptionsListen populates URIs from
+// params.notifications.resourceSubscriptions, the resource URIs whose update
+// notifications the caller wants pushed on the stream it is opening.
+//
+// Everything here is optional, because a listen has legitimate shapes that
+// name no resource at all — subscribing only to tools/prompts/resources
+// list-changed events. Absent params, absent notifications, or an absent
+// array all yield nil URIs, and the request is then governed by the method
+// gate alone. A present-but-wrong type is a different matter and fails
+// closed, matching extractToolsCall's strictness: the alternative is
+// silently ignoring a field that decides what the caller gets to watch.
+func extractSubscriptionsListen(req *JSONRPCRequest) *ParseError {
+	if len(req.RawParams) == 0 {
+		return nil
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(req.RawParams, &top); err != nil {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen params must be an object"}
+	}
+
+	notifRaw, ok, perr := lookupParamKey(top, "notifications", "subscriptions/listen")
+	if perr != nil {
+		return perr
+	}
+	if !ok || string(notifRaw) == "null" {
+		return nil
+	}
+	var notif map[string]json.RawMessage
+	if err := json.Unmarshal(notifRaw, &notif); err != nil {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen params.notifications must be an object"}
+	}
+
+	subsRaw, ok, perr := lookupParamKey(notif, "resourceSubscriptions", "subscriptions/listen")
+	if perr != nil {
+		return perr
+	}
+	if !ok || string(subsRaw) == "null" {
+		return nil
+	}
+	var uris []string
+	if err := json.Unmarshal(subsRaw, &uris); err != nil {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen params.notifications.resourceSubscriptions must be an array of strings"}
+	}
+	// Checked after decoding rather than before: the array has already been
+	// tokenised by the duplicate-key walk and is bounded by the handler's body
+	// cap, so the allocation is not the cost this guards. What it bounds is the
+	// per-URI matching against every rule-set's resource patterns below.
+	if len(uris) > maxResourceSubscriptions {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen names too many resource subscriptions"}
+	}
+	for _, u := range uris {
+		if u == "" {
+			return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen resource subscription must be non-empty"}
+		}
+	}
+	req.URIs = uris
+	return nil
+}
+
+// lookupParamKey finds key in a decoded params object, accepting any casing,
+// and reports an ambiguity when more than one spelling is present.
+//
+// The reason is that Warden judges the body and then forwards it verbatim.
+// Go's encoding/json matches object keys to struct fields case-insensitively,
+// so an upstream built on it — the go-sdk included — honours "Arguments" and
+// "Notifications" exactly as it honours the canonical spelling. An
+// exact-match lookup here would read neither, and for the fields that are
+// optional that means the gate silently passes something the upstream then
+// acts on. Matching the same way the decoder downstream will is what closes
+// that; two spellings at once is unresolvable, since the decoder picks one by
+// map order, so it fails closed.
+//
+// This mirrors the reasoning already applied to method names above: be more
+// permissive in what is recognised, so a case-mismatch cannot route around
+// the policy.
+func lookupParamKey(obj map[string]json.RawMessage, key, method string) (json.RawMessage, bool, *ParseError) {
+	var found json.RawMessage
+	var seen bool
+	for k, v := range obj {
+		if !strings.EqualFold(k, key) {
+			continue
+		}
+		if seen {
+			return nil, false, &ParseError{
+				Kind: ErrKindMalformedParams,
+				Msg:  method + " params has more than one spelling of " + key,
+			}
+		}
+		found, seen = v, true
+	}
+	return found, seen, nil
 }
 
 // extractToolsCall populates Name from params.name (required, non-empty
@@ -293,7 +403,10 @@ func extractToolsCall(req *JSONRPCRequest) *ParseError {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: "tools/call params must be an object"}
 	}
 
-	nameRaw, ok := top["name"]
+	nameRaw, ok, perr := lookupParamKey(top, "name", "tools/call")
+	if perr != nil {
+		return perr
+	}
 	if !ok {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: "tools/call missing params.name"}
 	}
@@ -306,7 +419,15 @@ func extractToolsCall(req *JSONRPCRequest) *ParseError {
 	}
 	req.Name = name
 
-	if argsRaw, ok := top["arguments"]; ok {
+	// arguments is optional, which is what makes reading it case-insensitively
+	// load-bearing rather than cosmetic: MatchArgs feeds the CEL activation's
+	// call.args and the param gates, so a spelling Warden cannot see is a
+	// condition evaluated against arguments that were never there.
+	argsRaw, ok, perr := lookupParamKey(top, "arguments", "tools/call")
+	if perr != nil {
+		return perr
+	}
+	if ok {
 		var args map[string]json.RawMessage
 		if err := json.Unmarshal(argsRaw, &args); err != nil {
 			return &ParseError{Kind: ErrKindMalformedParams, Msg: "tools/call params.arguments must be an object"}
@@ -329,7 +450,10 @@ func extractByParamKey(req *JSONRPCRequest, key string) *ParseError {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: req.Method + " params must be an object"}
 	}
 
-	raw, ok := top[key]
+	raw, ok, perr := lookupParamKey(top, key, req.Method)
+	if perr != nil {
+		return perr
+	}
 	if !ok {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: req.Method + " missing params." + key}
 	}

@@ -87,6 +87,21 @@ const (
 // without establishing one.
 const mcpMethodServerDiscover = "server/discover"
 
+// mcpMethodSubscriptionsListen opens a stream of server notifications. It is
+// name-bearing in a shape of its own: not one name, but a list of resource
+// URIs in params.notifications.resourceSubscriptions, each gated against the
+// resources family.
+const mcpMethodSubscriptionsListen = "subscriptions/listen"
+
+// mcpMethodResourcesSubscribe is the legacy-era way to obtain the same
+// notifications/resources/updated stream that subscriptions/listen carries in
+// 2026-07-28. It names one URI in params.uri and belongs to the resources
+// family for the same reason: subscribing to a resource's update stream leaks
+// its existence and the timing of every change, so it answers to the grant
+// that governs reading it. Warden fronts both eras, so gating only the modern
+// spelling would leave the leak reachable one method name over.
+const mcpMethodResourcesSubscribe = "resources/subscribe"
+
 // ErrMCPPolicyDenied carries the MCPDecision that produced a deny so
 // the HTTP response layer can render the OAuth-shaped 403 body and the
 // WWW-Authenticate header. Unwraps to sdklogical.ErrPermissionDenied
@@ -140,7 +155,7 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 	switch method {
 	case mcpMethodToolsCall:
 		return set.DeniedTools, set.AllowedTools
-	case mcpMethodResourcesRead:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe:
 		return set.DeniedResources, set.AllowedResources
 	case mcpMethodPromptsGet:
 		return set.DeniedPrompts, set.AllowedPrompts
@@ -153,6 +168,11 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 // survives iff a tools/call for it would pass, and likewise resources/list →
 // resources/read and prompts/list → prompts/get. A method absent from this map
 // is not a filterable list method.
+//
+// resources/subscribe is name-bearing under the same family but deliberately
+// absent as a target: a listed resource survives filtering iff a read of it
+// would pass, and checking a subscribe instead would prune listings by the
+// wrong gate.
 var mcpListMethodToCall = map[string]string{
 	"tools/list":     mcpMethodToolsCall,
 	"resources/list": mcpMethodResourcesRead,
@@ -499,7 +519,7 @@ func isLifecycleMethod(method string) bool {
 // this predicate — not "is a list present" — drives the gate.
 func isNameBearingMethod(method string) bool {
 	switch method {
-	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodPromptsGet:
+	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodPromptsGet:
 		return true
 	}
 	return false
@@ -558,6 +578,39 @@ func evaluateMCPGates(set *CBPMCPRules, method, name string) *logical.MCPDecisio
 	return nil
 }
 
+// evaluateMCPResourceSubscriptions gates the resource URIs a
+// subscriptions/listen asks to watch, against the same deny- and allow-lists
+// that govern resources/read. Returns a deny decision for the first URI that
+// fails, or nil when every URI passes — including when the call names none,
+// which is a list-changed-only listen and is governed by the method gate
+// alone.
+//
+// The refusing URI is stamped as Name so audit can say which one it was.
+// Unlike the name gate, which stamps the value it compared, this stamps the
+// URI verbatim from the wire — matching is case-folded, and an audit record
+// should show what the caller actually sent.
+func evaluateMCPResourceSubscriptions(set *CBPMCPRules, method string, call *logical.MCPCall) *logical.MCPDecision {
+	if call == nil || len(call.URIs) == 0 || method != mcpMethodSubscriptionsListen {
+		return nil
+	}
+	for _, uri := range call.URIs {
+		luri := strings.ToLower(uri)
+		if m := matchMCPAny(luri, set.DeniedResources); m != "" {
+			return &logical.MCPDecision{
+				Method: method, Name: uri, Decision: "deny",
+				RuleType: mcpRuleTypeDeniedResources, MatchedRule: m,
+			}
+		}
+		if m := matchMCPAny(luri, set.AllowedResources); m == "" {
+			return &logical.MCPDecision{
+				Method: method, Name: uri, Decision: "deny",
+				RuleType: mcpRuleTypeAllowedResources,
+			}
+		}
+	}
+	return nil
+}
+
 // evaluateMCPSetForCall runs one rule-set against the canonicalised
 // method, name, and call. Returns the set's MCPDecision (always non-
 // nil) — either an allow with the matching pattern stamped, or a
@@ -568,6 +621,31 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 	// a binding deny; nil means the structured gates passed and the CEL
 	// gate + allow-stamp below decide.
 	if d := evaluateMCPGates(set, method, name); d != nil {
+		return d
+	}
+
+	// Resource-subscription gate. A subscriptions/listen names the resource
+	// URIs whose update notifications it wants pushed, and the server then
+	// sends notifications/resources/updated for each. Gating only
+	// resources/read would let a caller denied read on a URI still watch it:
+	// the content never arrives, but its existence and the timing of every
+	// change do. So each URI answers to the resources family exactly as a
+	// read would — deny-by-default included, which is what makes a contract
+	// with no resources{} block refuse a URI-bearing listen. The legacy-era
+	// resources/subscribe reaches the same stream naming one URI in
+	// params.uri, and is gated by the ordinary name gate instead.
+	//
+	// Note the OR is per call, not per URI: a listen naming [a, b] where one
+	// contract grants only a and another only b denies, though two separate
+	// listens would each succeed. Fail-closed, and the alternative — assembling
+	// a grant from fragments of different contracts — is not something a
+	// contract author can reason about.
+	//
+	// Runs after the structural gates and before CEL, so a listen the method
+	// gate already refused never reaches it. Living inside the per-set
+	// function preserves cross-set OR for free: another set that grants the
+	// URIs still allows the call.
+	if d := evaluateMCPResourceSubscriptions(set, method, call); d != nil {
 		return d
 	}
 
@@ -622,7 +700,7 @@ func mcpDenyRuleTypeForName(method string) string {
 	switch method {
 	case mcpMethodToolsCall:
 		return mcpRuleTypeDeniedTools
-	case mcpMethodResourcesRead:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe:
 		return mcpRuleTypeDeniedResources
 	case mcpMethodPromptsGet:
 		return mcpRuleTypeDeniedPrompts
@@ -636,7 +714,7 @@ func mcpAllowRuleTypeForName(method string) string {
 	switch method {
 	case mcpMethodToolsCall:
 		return mcpRuleTypeAllowedTools
-	case mcpMethodResourcesRead:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe:
 		return mcpRuleTypeAllowedResources
 	case mcpMethodPromptsGet:
 		return mcpRuleTypeAllowedPrompts

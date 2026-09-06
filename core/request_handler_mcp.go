@@ -127,6 +127,7 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 			Method:     r.Method,
 			Name:       r.Name,
 			MatchArgs:  classifyArgs(r.Arguments),
+			URIs:       r.URIs,
 			BatchIndex: i,
 		}
 	}

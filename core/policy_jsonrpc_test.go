@@ -512,3 +512,228 @@ func BenchmarkParseJSONRPCStrict_UnknownTopLevel(b *testing.B) {
 		}
 	}
 }
+
+// =============================================================================
+// subscriptions/listen resource subscriptions
+// =============================================================================
+
+func TestParseJSONRPCStrict_SubscriptionsListen(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "resource subscriptions extracted",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["repo://a","repo://b"]}},"id":1}`,
+			want: []string{"repo://a", "repo://b"},
+		},
+		{
+			// A list-changed-only listen names no resource. Legitimate and
+			// common — it is what the go-sdk opens when a client registers a
+			// list-changed handler — and it is governed by the method gate
+			// alone.
+			name: "list-changed only yields no URIs",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}},"id":1}`,
+			want: nil,
+		},
+		{
+			name: "notifications absent",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{},"id":1}`,
+			want: nil,
+		},
+		{
+			name: "notifications null",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":null},"id":1}`,
+			want: nil,
+		},
+		{
+			name: "resourceSubscriptions null",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":null}},"id":1}`,
+			want: nil,
+		},
+		{
+			name: "params absent entirely",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","id":1}`,
+			want: nil,
+		},
+		{
+			name: "empty array",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":[]}},"id":1}`,
+			want: []string{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqs, err := ParseJSONRPCStrict([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if len(reqs[0].URIs) != len(tc.want) {
+				t.Fatalf("URIs = %v, want %v", reqs[0].URIs, tc.want)
+			}
+			for i := range tc.want {
+				if reqs[0].URIs[i] != tc.want[i] {
+					t.Errorf("URIs[%d] = %q, want %q", i, reqs[0].URIs[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// A present-but-wrong-typed subscription list fails closed rather than being
+// silently ignored: the field decides what the caller gets to watch, so
+// dropping it would grant a stream nobody gated.
+func TestParseJSONRPCStrict_SubscriptionsListen_FailsClosed(t *testing.T) {
+	oversized := make([]string, maxResourceSubscriptions+1)
+	for i := range oversized {
+		oversized[i] = `"repo://x"`
+	}
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"params not an object", `{"jsonrpc":"2.0","method":"subscriptions/listen","params":[1,2],"id":1}`},
+		{"notifications not an object", `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":"all"},"id":1}`},
+		{"subscriptions not an array", `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":"repo://a"}},"id":1}`},
+		{"subscription element not a string", `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":[{"uri":"repo://a"}]}},"id":1}`},
+		{"empty subscription URI", `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":["repo://a",""]}},"id":1}`},
+		{
+			// One request must not buy an unbounded amount of pattern
+			// matching against the resources family.
+			name: "too many subscriptions",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":[` +
+				strings.Join(oversized, ",") + `]}},"id":1}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseJSONRPCStrict([]byte(tc.body))
+			if err == nil {
+				t.Fatalf("expected a parse error, got none")
+			}
+			if err.Kind != ErrKindMalformedParams {
+				t.Errorf("Kind = %q, want %q", err.Kind, ErrKindMalformedParams)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Case-variant key smuggling
+// =============================================================================
+
+// Warden judges the body and then forwards it verbatim, and Go's
+// encoding/json matches object keys to struct fields case-insensitively — so
+// an upstream built on it honours "Arguments" and "Notifications" exactly as
+// it honours the canonical spelling. Reading only the exact spelling would
+// mean the gate never sees what the upstream acts on. For the OPTIONAL fields
+// that is a silent bypass rather than a denial, which is what makes it sharp.
+func TestParseJSONRPCStrict_CaseVariantKeysAreRead(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		check func(t *testing.T, req JSONRPCRequest)
+	}{
+		{
+			name: "tools/call Arguments",
+			body: `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"deploy","Arguments":{"env":"prod"}},"id":1}`,
+			check: func(t *testing.T, req JSONRPCRequest) {
+				if got := string(req.Arguments["env"]); got != `"prod"` {
+					t.Errorf("arguments.env = %s, want %q — a CEL condition would judge nothing", got, `"prod"`)
+				}
+			},
+		},
+		{
+			name: "tools/call NAME",
+			body: `{"jsonrpc":"2.0","method":"tools/call","params":{"NAME":"deploy"},"id":1}`,
+			check: func(t *testing.T, req JSONRPCRequest) {
+				if req.Name != "deploy" {
+					t.Errorf("Name = %q, want deploy", req.Name)
+				}
+			},
+		},
+		{
+			name: "listen Notifications",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"Notifications":{"resourceSubscriptions":["repo://secret"]}},"id":1}`,
+			check: func(t *testing.T, req JSONRPCRequest) {
+				if len(req.URIs) != 1 || req.URIs[0] != "repo://secret" {
+					t.Errorf("URIs = %v, want [repo://secret] — the subscription would go ungated", req.URIs)
+				}
+			},
+		},
+		{
+			name: "listen ResourceSubscriptions",
+			body: `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"ResourceSubscriptions":["repo://secret"]}},"id":1}`,
+			check: func(t *testing.T, req JSONRPCRequest) {
+				if len(req.URIs) != 1 {
+					t.Errorf("URIs = %v, want one URI", req.URIs)
+				}
+			},
+		},
+		{
+			name: "resources/read URI",
+			body: `{"jsonrpc":"2.0","method":"resources/read","params":{"URI":"repo://secret"},"id":1}`,
+			check: func(t *testing.T, req JSONRPCRequest) {
+				if req.Name != "repo://secret" {
+					t.Errorf("Name = %q, want repo://secret", req.Name)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqs, err := ParseJSONRPCStrict([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			tc.check(t, reqs[0])
+		})
+	}
+}
+
+// Two spellings at once is unresolvable — Go's decoder picks one by map
+// order — so it fails closed rather than gating whichever Warden happened to
+// read. The duplicate-key walk does not catch these: they are distinct keys.
+func TestParseJSONRPCStrict_AmbiguousCaseVariantsFailClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"two spellings of arguments", `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x","arguments":{"env":"dev"},"Arguments":{"env":"prod"}},"id":1}`},
+		{"two spellings of name", `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"safe","Name":"dangerous"},"id":1}`},
+		{"two spellings of notifications", `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"NOTIFICATIONS":{"resourceSubscriptions":["repo://secret"]}},"id":1}`},
+		{"two spellings of resourceSubscriptions", `{"jsonrpc":"2.0","method":"subscriptions/listen","params":{"notifications":{"resourceSubscriptions":[],"ResourceSubscriptions":["repo://secret"]}},"id":1}`},
+		{"two spellings of uri", `{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"repo://public","URI":"repo://secret"},"id":1}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseJSONRPCStrict([]byte(tc.body))
+			if err == nil {
+				t.Fatalf("expected a parse error, got none")
+			}
+			if err.Kind != ErrKindMalformedParams {
+				t.Errorf("Kind = %q, want %q", err.Kind, ErrKindMalformedParams)
+			}
+		})
+	}
+}
+
+// resources/subscribe is the legacy-era route to the same
+// notifications/resources/updated stream subscriptions/listen carries, so its
+// URI must reach the descriptor for the resources family to gate it.
+func TestParseJSONRPCStrict_ResourcesSubscribe(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","method":"resources/subscribe","params":{"uri":"repo://myorg/api"},"id":1}`)
+	reqs, err := ParseJSONRPCStrict(body)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if reqs[0].Name != "repo://myorg/api" {
+		t.Errorf("Name = %q, want repo://myorg/api", reqs[0].Name)
+	}
+
+	if _, err := ParseJSONRPCStrict([]byte(`{"jsonrpc":"2.0","method":"resources/subscribe","params":{},"id":1}`)); err == nil {
+		t.Errorf("a subscribe with no uri must fail closed")
+	}
+}

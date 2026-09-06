@@ -61,6 +61,7 @@ func synthesizeMCPDescriptorFromBody(body []byte) *logical.MCPRequestDescriptor 
 			Method:     r.Method,
 			Name:       r.Name,
 			MatchArgs:  classifyArgs(r.Arguments),
+			URIs:       r.URIs,
 			BatchIndex: i,
 		}
 	}
@@ -86,6 +87,22 @@ func mustCBPWithMCP(t testing.TB, cbpRules, mcpRules string) *CBP {
 	if mcpRules != "" {
 		mcp := testParseMCPPolicy(t, mcpRules)
 		mcp.Name = "mcp-contract"
+		policies = append(policies, mcp)
+	}
+	cbp, err := NewCBP(testContext(), policies)
+	require.NoError(t, err)
+	return cbp
+}
+
+// mustCBPWithMCPPolicies compiles one capability document and several named
+// MCP documents into a single CBP, which is how a token carrying more than
+// one contract on the same path evaluates: the rule-sets OR together.
+func mustCBPWithMCPPolicies(t testing.TB, cbpRules string, mcpRules map[string]string) *CBP {
+	t.Helper()
+	policies := []*Policy{testParsePolicy(t, cbpRules)}
+	for name, rules := range mcpRules {
+		mcp := testParseMCPPolicy(t, rules)
+		mcp.Name = name
 		policies = append(policies, mcp)
 	}
 	cbp, err := NewCBP(testContext(), policies)
@@ -1327,5 +1344,203 @@ path "mcp/gateway/*" {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// =============================================================================
+// subscriptions/listen resource-subscription gate
+// =============================================================================
+
+const listenContract = `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources { allowed = ["repo://myorg/*"] }
+}
+`
+
+func listenBody(uris ...string) string {
+	quoted := make([]string, len(uris))
+	for i, u := range uris {
+		quoted[i] = `"` + u + `"`
+	}
+	return `{"jsonrpc":"2.0","method":"subscriptions/listen","id":1,"params":{"notifications":{"resourceSubscriptions":[` +
+		strings.Join(quoted, ",") + `]}}}`
+}
+
+func TestMCPEval_ListenURI_AllowedByResourcesFamily(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, listenContract)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/api", "repo://myorg/web"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "allow", res.MCPDecision.Decision)
+}
+
+// The leak this closes: a caller denied resources/read on a URI could still
+// subscribe to its update stream. The content never arrives, but the
+// resource's existence and the timing of every change do.
+func TestMCPEval_ListenURI_OutsideAllowListDenies(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, listenContract)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/api", "repo://other/secret"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+	assert.Equal(t, "repo://other/secret", res.MCPDecision.Name, "audit must name the URI that refused")
+}
+
+func TestMCPEval_ListenURI_DeniedResourcesWins(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources {
+    allowed = ["repo://myorg/*"]
+    denied  = ["repo://myorg/secrets*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/secrets/db"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeDeniedResources, res.MCPDecision.RuleType)
+	assert.Equal(t, "repo://myorg/secrets*", res.MCPDecision.MatchedRule)
+}
+
+// A listen that names no resource subscribes only to list-changed events.
+// It carries no resource access, so it passes under a contract with no
+// resources{} block at all — the method gate is the whole of its governance.
+func TestMCPEval_ListenWithoutURIs_PassesWithNoResourcesBlock(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "subscriptions/listen",
+		"id":      1,
+		"params":  {"notifications": {"toolsListChanged": true}}
+	}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "allow", res.MCPDecision.Decision)
+}
+
+// The breaking half, stated as a test: methods { allowed = ["*"] } with no
+// resources{} block used to let a listen carry any URI. Deny-by-default in
+// the resources family now refuses it.
+func TestMCPEval_ListenWithURIs_DeniesWithNoResourcesBlock(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/api"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+}
+
+// The gate lives inside the per-set function, so cross-set OR survives: a
+// second contract granting the URIs allows the call even though the first
+// refuses it.
+func TestMCPEval_ListenURI_CrossSetOR(t *testing.T) {
+	cbp := mustCBPWithMCPPolicies(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, map[string]string{
+		"narrow": `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources { allowed = ["repo://myorg/*"] }
+}
+`,
+		"wide": `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources { allowed = ["repo://*"] }
+}
+`,
+	})
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://other/thing"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed, "a set that grants the URI must still allow the listen")
+}
+
+// Only subscriptions/listen carries subscription URIs. A descriptor that
+// somehow carries them on another method must not have them silently gated
+// under it — the resources family governs resources/read by its own name
+// gate, which is a different path.
+func TestMCPEval_ResourceSubscriptionGate_OnlyAppliesToListen(t *testing.T) {
+	set := &CBPMCPRules{AllowedResources: []string{"repo://myorg/*"}}
+	call := &logical.MCPCall{Method: "tools/call", URIs: []string{"repo://other/x"}}
+
+	assert.Nil(t, evaluateMCPResourceSubscriptions(set, mcpMethodToolsCall, call))
+	assert.NotNil(t, evaluateMCPResourceSubscriptions(set, mcpMethodSubscriptionsListen, call))
+}
+
+// The legacy-era route to the same update stream. Gating only the modern
+// spelling would leave the leak reachable one method name over, and Warden
+// fronts both eras by design.
+func TestMCPEval_ResourcesSubscribe_AnswersToResourcesFamily(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/subscribe"] }
+  resources { allowed = ["repo://myorg/*"] }
+}
+`)
+
+	allowed := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"resources/subscribe","params":{"uri":"repo://myorg/api"},"id":1}`)
+	res := cbp.AllowOperation(testContext(), allowed, nil, false)
+	assert.True(t, res.Allowed)
+
+	denied := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"resources/subscribe","params":{"uri":"repo://other/secret"},"id":1}`)
+	res = cbp.AllowOperation(testContext(), denied, nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+}
+
+// A resources/list response is pruned by what a read would allow, not by what
+// a subscribe would — adding subscribe to the list-method map would prune
+// listings by the wrong gate.
+func TestMCPEval_ResourcesSubscribe_DoesNotDriveListFiltering(t *testing.T) {
+	assert.Equal(t, mcpMethodResourcesRead, mcpListMethodToCall["resources/list"])
+	for _, call := range mcpListMethodToCall {
+		assert.NotEqual(t, mcpMethodResourcesSubscribe, call)
 	}
 }

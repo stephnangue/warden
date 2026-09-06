@@ -27,10 +27,18 @@ type MCPRequestDescriptor struct {
 // params.arguments) so the matcher's denied_params / allowed_params
 // can gate on individual argument values. For other methods MatchArgs
 // is nil.
+//
+// URIs is populated only for subscriptions/listen, from
+// params.notifications.resourceSubscriptions, and carries the resource
+// URIs whose update notifications the caller asked to receive. The
+// matcher gates each one against the resources family, so subscribing
+// to a resource's update stream requires the same grant as reading it.
+// nil for other methods, and for a listen that names no resource.
 type MCPCall struct {
 	Method     string
 	Name       string
 	MatchArgs  map[string]ParamValue
+	URIs       []string
 	BatchIndex int
 }
 
@@ -112,7 +120,9 @@ func (d *MCPRequestDescriptor) Clone() *MCPRequestDescriptor {
 
 // Clone returns a deep copy of the MCPCall. MatchArgs is a map of
 // value-typed ParamValue, so a length-preserving copy of the map
-// breaks aliasing.
+// breaks aliasing; URIs is a slice and needs the same treatment, or
+// the audit layer's copy would share backing array with the live
+// request.
 func (c MCPCall) Clone() MCPCall {
 	out := MCPCall{
 		Method:     c.Method,
@@ -124,6 +134,10 @@ func (c MCPCall) Clone() MCPCall {
 		for k, v := range c.MatchArgs {
 			out.MatchArgs[k] = v
 		}
+	}
+	if c.URIs != nil {
+		out.URIs = make([]string, len(c.URIs))
+		copy(out.URIs, c.URIs)
 	}
 	return out
 }
