@@ -376,3 +376,46 @@ func TestClassifyArgs_NilVsEmpty(t *testing.T) {
 		t.Errorf("classifyArgs(empty) len = %d, want 0", len(got))
 	}
 }
+
+// The extractor is mirrored by a test-local helper in policy_mcp_eval_test.go,
+// so a field the production mapping forgets can still look gated in every
+// evaluator test. This asserts the production path itself, and it matters most
+// for URIs: dropping them yields nil, which is the legitimate
+// list-changed-only shape and therefore ALLOWS — a silent fail-open, unlike
+// Name, whose loss denies at the name gate.
+func TestExtractMCPDescriptor_CarriesSubscriptionURIs(t *testing.T) {
+	c := &Core{}
+	req := newReq(t, `{"jsonrpc":"2.0","method":"subscriptions/listen","id":1,"params":{"notifications":{"resourceSubscriptions":["repo://a","repo://b"]}}}`)
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	desc := req.MCPDescriptor
+	if desc == nil || desc.ParseErr != nil {
+		t.Fatalf("descriptor = %+v, want populated with no ParseErr", desc)
+	}
+	if len(desc.Calls) != 1 {
+		t.Fatalf("Calls len = %d, want 1", len(desc.Calls))
+	}
+	got := desc.Calls[0].URIs
+	if len(got) != 2 || got[0] != "repo://a" || got[1] != "repo://b" {
+		t.Errorf("URIs = %v, want [repo://a repo://b]", got)
+	}
+}
+
+// A listen naming no resource must reach the evaluator as nil, not as an
+// empty-but-present slice — that is the shape the gate reads as
+// "list-changed only, method gate decides".
+func TestExtractMCPDescriptor_ListenWithoutSubscriptions(t *testing.T) {
+	c := &Core{}
+	req := newReq(t, `{"jsonrpc":"2.0","method":"subscriptions/listen","id":1,"params":{"notifications":{"toolsListChanged":true}}}`)
+	b := &mcpBackend{}
+	b.enforced = &fakeMCPHook{enforce: true, cap: 1 << 20}
+
+	c.extractMCPDescriptor(context.Background(), req, b)
+
+	if got := req.MCPDescriptor.Calls[0].URIs; got != nil {
+		t.Errorf("URIs = %v, want nil", got)
+	}
+}
