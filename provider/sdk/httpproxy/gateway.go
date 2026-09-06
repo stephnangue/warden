@@ -108,6 +108,24 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Clean headers and inject credentials
 	b.prepareHeaders(r, credHeaders, dispatch)
 
+	// Mark this mount's traffic so ModifyResponse can declare the response
+	// per-principal. Keyed on the spec opting into MCP enforcement, which is
+	// the only thing that means "responses here are judged per principal".
+	//
+	// Deliberately NOT req.MCPDescriptor != nil: proxyBackend implements
+	// MCPPolicyEnforced for every provider it backs, so core installs the
+	// empty sentinel on github, openai and git traffic too. Reading that as
+	// "governed" would mark the whole provider surface uncacheable by any
+	// shared cache — a cost nothing here is asking anyone to pay.
+	//
+	// Being per-mount rather than per-request is the point: it covers the
+	// listing where every item survived and no filter was attached, the
+	// resources/read gated request-side, and resources/templates/list, which
+	// is cacheable but is not a filterable family.
+	if b.spec.ShouldEnforceMCPPolicy != nil {
+		r = r.WithContext(withMCPGoverned(r.Context()))
+	}
+
 	// When the policy layer attached an MCP list filter, carry it into the
 	// proxy's ModifyResponse via the request context, and strip Accept-Encoding
 	// so the transport returns a decompressed body the filter can parse (a

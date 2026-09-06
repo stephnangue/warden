@@ -353,3 +353,129 @@ func TestFilterSSE_CRLFFraming(t *testing.T) {
 		t.Fatalf("denied tool leaked: %s", out)
 	}
 }
+
+// =============================================================================
+// cacheScope
+// =============================================================================
+
+func resultOf(t *testing.T, body []byte) map[string]json.RawMessage {
+	t.Helper()
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(env["result"], &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	return result
+}
+
+// A listing pruned for one principal is not the document another principal
+// would get, so an upstream "public" — which explicitly authorises a shared
+// intermediary to serve the same bytes to anyone — has to be narrowed.
+func TestFilterJSON_ForcesCacheScopePrivate(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"},{"name":"delete_x"}],"cacheScope":"public","ttlMs":60000}}`)
+
+	out, changed, err := FilterListResponse("tools/list", "application/json", body, denyPrefix("delete_"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+
+	result := resultOf(t, out)
+	if got := string(result["cacheScope"]); got != `"private"` {
+		t.Errorf("cacheScope = %s, want \"private\"", got)
+	}
+	if got := string(result["ttlMs"]); got != "60000" {
+		t.Errorf("ttlMs = %s, want 60000 — freshness is the upstream's call, not ours", got)
+	}
+}
+
+// The rewrite counts as a change on its own. "Nothing was dropped for THIS
+// principal" is not "this document is the same for everyone", and letting the
+// body pass through byte-identical would leave the public scope on the wire.
+func TestFilterJSON_CacheScopeRewriteAloneCountsAsChanged(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"}],"cacheScope":"public"}}`)
+
+	out, changed, err := FilterListResponse("tools/list", "application/json", body, func(string) bool { return true })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true — nothing dropped, but the scope was narrowed")
+	}
+	if got := string(resultOf(t, out)["cacheScope"]); got != `"private"` {
+		t.Errorf("cacheScope = %s, want \"private\"", got)
+	}
+}
+
+// Inventing a field the upstream never sent would put something on the wire
+// the server did not say, which strict clients may object to. An absent
+// cacheScope already means the conservative thing.
+func TestFilterJSON_DoesNotAddCacheScope(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"}]}}`)
+
+	out, changed, err := FilterListResponse("tools/list", "application/json", body, func(string) bool { return true })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if changed {
+		t.Error("changed = true, want false — nothing to drop and no scope to narrow")
+	}
+	if _, ok := resultOf(t, out)["cacheScope"]; ok {
+		t.Error("cacheScope was invented on a response that carried none")
+	}
+}
+
+func TestFilterJSON_AlreadyPrivateCacheScopeIsLeftAlone(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"}],"cacheScope":"private"}}`)
+
+	out, changed, err := FilterListResponse("tools/list", "application/json", body, func(string) bool { return true })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if changed {
+		t.Error("changed = true, want false — already private")
+	}
+	if string(out) != string(body) {
+		t.Error("body was rewritten despite nothing needing to change")
+	}
+}
+
+// A non-string cacheScope is a shape the spec does not define. Guessing at it
+// risks corrupting a field we do not understand; the Cache-Control header
+// still covers the response.
+func TestFilterJSON_NonStringCacheScopeLeftAlone(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"}],"cacheScope":{"scope":"public"}}}`)
+
+	_, changed, err := FilterListResponse("tools/list", "application/json", body, func(string) bool { return true })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if changed {
+		t.Error("changed = true, want false")
+	}
+}
+
+// The SSE shape goes through the same result rewrite, so it must narrow the
+// scope too — an event-stream listing is cacheable in exactly the same way.
+func TestFilterSSE_ForcesCacheScopePrivate(t *testing.T) {
+	body := []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"get_x\"}],\"cacheScope\":\"public\"}}\n\n")
+
+	out, changed, err := FilterListResponse("tools/list", "text/event-stream", body, func(string) bool { return true })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if !strings.Contains(string(out), `"cacheScope":"private"`) {
+		t.Errorf("SSE block did not carry the narrowed scope:\n%s", out)
+	}
+	if !strings.Contains(string(out), "event: message") {
+		t.Error("non-data lines must survive the rewrite")
+	}
+}

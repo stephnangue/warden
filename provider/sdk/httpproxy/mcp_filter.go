@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
@@ -29,6 +30,82 @@ func mcpListFilterFrom(ctx context.Context) *logical.MCPListFilter {
 	return f
 }
 
+// mcpGovernedCtxKey marks a request as one Warden judged per principal, which
+// is a wider set than "a filter was attached".
+type mcpGovernedCtxKeyT struct{}
+
+var mcpGovernedCtxKey = mcpGovernedCtxKeyT{}
+
+func withMCPGoverned(ctx context.Context) context.Context {
+	return context.WithValue(ctx, mcpGovernedCtxKey, true)
+}
+
+func mcpGovernedFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(mcpGovernedCtxKey).(bool)
+	return v
+}
+
+// MarkMCPResponsePrivate tells shared caches that this response is not a
+// document to hand to the next caller.
+//
+// Exported because the MCP providers that bypass this package's reverse
+// proxy — writing upstream headers onto the client's writer themselves —
+// need the identical rule, and two spellings of "which directives already
+// suffice" would drift.
+//
+// Warden creates the variance and so has to declare it. A listing is pruned
+// to one principal's callable items; a resources/read is gated per principal
+// before it is forwarded. An upstream describing its own unfiltered answer
+// has no way to know that, and under the modern revision it may explicitly
+// authorise sharing.
+//
+// This is the half that covers what the body rewrite cannot: the fast path
+// where every item survives and the filter is skipped entirely, and
+// resources/templates/list, which is cacheable but not a filterable family.
+//
+// It only ever strengthens. An upstream that said no-store, or already said
+// private, meant something at least this restrictive and keeps it — replacing
+// no-store with private would be Warden loosening a bound it does not own.
+func MarkMCPResponsePrivate(h http.Header) {
+	// Values, not Get: several Cache-Control field lines are legal, and Get
+	// reads only the first while Set replaces them all. Reading one line and
+	// writing one back would delete an upstream no-store sitting on another —
+	// the precise loosening this function exists to avoid.
+	values := h.Values("Cache-Control")
+	if len(values) == 0 {
+		h.Set("Cache-Control", "private")
+		return
+	}
+	existing := strings.Join(values, ", ")
+	if hasRestrictiveDirective(existing) {
+		h.Set("Cache-Control", existing)
+		return
+	}
+	h.Set("Cache-Control", existing+", private")
+}
+
+// hasRestrictiveDirective reports whether a Cache-Control value already
+// forbids a shared cache from serving this response to another principal.
+//
+// Directives are compared whole, and only in their unqualified form. The
+// qualified shapes — private="x-thing", no-cache="set-cookie" — restrict only
+// the header fields they name and leave the response body storable and
+// shareable, so they are exactly the case where the bare directive is still
+// needed. A substring test would read them as sufficient and skip it.
+func hasRestrictiveDirective(value string) bool {
+	for _, part := range strings.Split(value, ",") {
+		name := strings.TrimSpace(strings.ToLower(part))
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			continue // qualified form: restricts named fields only
+		}
+		switch name {
+		case "private", "no-store", "no-cache":
+			return true
+		}
+	}
+	return false
+}
+
 // installMCPListFilter wires the backend's ReverseProxy so an MCP list
 // response is pruned to the items the caller may use. The hook is a no-op for
 // any response whose request context carries no filter, so every non-MCP
@@ -38,7 +115,11 @@ func (b *proxyBackend) installMCPListFilter() {
 		return
 	}
 	b.Proxy.ModifyResponse = func(resp *http.Response) error {
-		filter := mcpListFilterFrom(resp.Request.Context())
+		ctx := resp.Request.Context()
+		if mcpGovernedFrom(ctx) {
+			MarkMCPResponsePrivate(resp.Header)
+		}
+		filter := mcpListFilterFrom(ctx)
 		if filter == nil {
 			return nil // not an MCP list request — stream verbatim
 		}
