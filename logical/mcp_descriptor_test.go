@@ -77,3 +77,21 @@ func TestMCPCall_Clone_NilRawIDStaysNil(t *testing.T) {
 	assert.Nil(t, clone.RawID, "a notification must not gain an empty id")
 	assert.False(t, clone.IDPresent)
 }
+
+// The audit layer treats the descriptor as a deep-copy field, so every field
+// added to it has to be carried. A value field silently dropped by Clone is
+// invisible until something reads the clone and finds a zero.
+func TestMCPRequestDescriptor_CloneCarriesEveryField(t *testing.T) {
+	orig := &MCPRequestDescriptor{
+		Calls:             []MCPCall{{Method: "tools/list"}},
+		IsBatch:           true,
+		ClientInfoName:    "claude-code",
+		ClientInfoVersion: "2.1.0",
+	}
+
+	clone := orig.Clone()
+
+	assert.True(t, clone.IsBatch, "the outer shape is not recoverable from Calls")
+	assert.Equal(t, "claude-code", clone.ClientInfoName)
+	assert.Equal(t, "2.1.0", clone.ClientInfoVersion)
+}

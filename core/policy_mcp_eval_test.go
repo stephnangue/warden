@@ -1031,6 +1031,12 @@ func TestBuildMCPDenyDescription_PerRuleType(t *testing.T) {
 		decision *logical.MCPDecision
 		want     string
 	}{
+		{mcpRuleTypeBatchUnsupported,
+			&logical.MCPDecision{RuleType: mcpRuleTypeBatchUnsupported},
+			"Batched requests are not supported at the requested protocol version."},
+		{mcpRuleTypeHeaderMismatch,
+			&logical.MCPDecision{RuleType: mcpRuleTypeHeaderMismatch, MatchedRule: headerMismatchMethod},
+			"MCP transport headers do not match the request body."},
 		{mcpRuleTypeDeniedMethods,
 			&logical.MCPDecision{Method: "tools/call", RuleType: mcpRuleTypeDeniedMethods},
 			"Method 'tools/call' not allowed."},
