@@ -352,6 +352,12 @@ type AuthorizeCredentialSpecInput struct {
 type AuthorizeCredentialSpecOutput struct {
 	Name         string `json:"name"`
 	AuthorizeURL string `json:"authorize_url"`
+
+	// Issuer is the identifier an RFC 9207 "iss" callback parameter must
+	// match, empty when the source records none. It rides the authorize
+	// response because the comparison happens at the callback, before the
+	// code is sent back to be redeemed.
+	Issuer string `json:"issuer,omitempty"`
 }
 
 // ConnectCredentialSpecInput is the input for completing the connect flow.
@@ -408,6 +414,9 @@ func (c *Sys) AuthorizeCredentialSpecWithContext(ctx context.Context, name strin
 	}
 	if v, ok := resource.Data["authorize_url"].(string); ok {
 		output.AuthorizeURL = v
+	}
+	if v, ok := resource.Data["issuer"].(string); ok {
+		output.Issuer = v
 	}
 	return output, nil
 }

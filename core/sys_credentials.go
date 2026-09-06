@@ -766,9 +766,13 @@ func (b *SystemBackend) handleCredentialSpecAuthorize(ctx context.Context, req *
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
 	}
 
+	// The issuer travels with the authorize URL because the check it enables
+	// belongs at the callback, in the CLI, before the code comes back here to
+	// be redeemed. Empty when the source records none.
 	return b.respondSuccess(map[string]any{
 		"name":          name,
 		"authorize_url": authorizeURL,
+		"issuer":        authorizer.AuthorizationIssuer(),
 	}), nil
 }
 
