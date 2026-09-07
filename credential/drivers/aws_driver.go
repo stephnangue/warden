@@ -75,6 +75,12 @@ type AWSDriver struct {
 	// ones used to validate the source at write time.
 	smBaseEndpoint string
 	stsEndpoint    string
+
+	// iamTestEndpoint redirects the IAM calls rotation makes. Set only by tests in
+	// this package: unlike the STS and Secrets Manager overrides there is
+	// deliberately no source-config key, because rotation acts on the real account
+	// whatever else a source is pointed at.
+	iamTestEndpoint string
 }
 
 // awsAuthMethodStatic and awsAuthMethodOIDCFederation select how the source
@@ -103,16 +109,11 @@ const awsRequestTimeout = 30 * time.Second
 var awsCreateProbeTimeout = 30 * time.Second
 
 // awsClients is one coherent generation of service clients, together with the
-// config and base credentials they were built from. It is built under authMu and
-// then used without it: a mint takes the whole snapshot up front, so every call it
-// makes signs with a single generation even if a rotation commit swaps the driver
+// base credentials they were built from. It is built under authMu and then used
+// without it: a mint takes the whole snapshot up front, so every call it makes
+// signs with a single generation even if a rotation commit swaps the driver
 // underneath it mid-request.
-//
-// cfg is safe to read unlocked because a source's config map is never written in
-// place — a rotation builds a fresh map and swaps the whole thing — so a snapshot
-// of the pointer is a snapshot of the contents.
 type awsClients struct {
-	cfg        map[string]string
 	baseCreds  aws.CredentialsProvider
 	sts        *sts.Client
 	sm         *secretsmanager.Client
@@ -176,6 +177,15 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("secretsmanager_endpoint").
 			Describe("Override where Secrets Manager calls are sent (default: the SDK's regional endpoint)").
 			Example("https://secretsmanager.us-east-1.amazonaws.com"),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example(""),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification (development only)").
+			Example("false"),
 	); err != nil {
 		return err
 	}
@@ -206,7 +216,7 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *AWSDriverFactory) SensitiveConfigFields() []string {
-	return []string{"secret_access_key"}
+	return []string{"secret_access_key", "ca_data"}
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
@@ -274,11 +284,8 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 
 	// AssumeRoleWithWebIdentity is unsigned: anonymous credentials skip SigV4.
 	// Built after the literal so it picks up the resolved endpoint override.
-	driver.anonSTSClient = sts.NewFromConfig(aws.Config{
-		Region:      region,
-		Credentials: aws.AnonymousCredentials{},
-		HTTPClient:  httpClient,
-	}, driver.stsOptions())
+	driver.anonSTSClient = sts.NewFromConfig(
+		driver.awsConfig(aws.AnonymousCredentials{}), driver.stsOptions())
 
 	// A federation source holds no IAM keys: skip the eager credential probe. All
 	// authentication happens per-request from the caller's identity assertion.
@@ -321,11 +328,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) (*awsClients, error)
 
 		// Verify base credentials are valid once with a lightweight API call
 		if !d.baseCredsVerified {
-			baseSTS := sts.NewFromConfig(aws.Config{
-				Region:      d.region,
-				Credentials: d.baseCreds,
-				HTTPClient:  d.httpClient,
-			}, d.stsOptions())
+			baseSTS := sts.NewFromConfig(d.awsConfig(d.baseCreds), d.stsOptions())
 			if _, err := baseSTS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
 				return nil, fmt.Errorf("invalid AWS credentials: %w", err)
 			}
@@ -345,11 +348,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) (*awsClients, error)
 	sessionDuration := credential.GetDuration(d.credSource.Config, "session_duration", 1*time.Hour)
 	externalID := credential.GetString(d.credSource.Config, "external_id", "")
 
-	baseSTS := sts.NewFromConfig(aws.Config{
-		Region:      d.region,
-		Credentials: d.baseCreds,
-		HTTPClient:  d.httpClient,
-	}, d.stsOptions())
+	baseSTS := sts.NewFromConfig(d.awsConfig(d.baseCreds), d.stsOptions())
 
 	input := &sts.AssumeRoleInput{
 		RoleArn:         &assumeRoleArn,
@@ -415,13 +414,8 @@ func (d *AWSDriver) smOptions() func(*secretsmanager.Options) {
 // The Redshift clients keep their resolved endpoints — the endpoint overrides
 // cover only the mint and source-validation paths.
 func (d *AWSDriver) buildClientsLocked(creds aws.CredentialsProvider) *awsClients {
-	cfg := aws.Config{
-		Region:      d.region,
-		Credentials: creds,
-		HTTPClient:  d.httpClient,
-	}
+	cfg := d.awsConfig(creds)
 	d.clients = &awsClients{
-		cfg:        d.credSource.Config,
 		baseCreds:  d.baseCreds,
 		sts:        sts.NewFromConfig(cfg, d.stsOptions()),
 		sm:         secretsmanager.NewFromConfig(cfg, d.smOptions()),
@@ -429,6 +423,34 @@ func (d *AWSDriver) buildClientsLocked(creds aws.CredentialsProvider) *awsClient
 		redshiftSL: redshiftserverless.NewFromConfig(cfg),
 	}
 	return d.clients
+}
+
+// awsConfig builds the SDK config every client in this driver is constructed
+// from. HTTPClient is set only when one was actually built: aws.Config takes an
+// interface, and a nil *http.Client stored in it reads as non-nil to the SDK,
+// which then panics on the first request instead of using its own default.
+func (d *AWSDriver) awsConfig(creds aws.CredentialsProvider) aws.Config {
+	cfg := aws.Config{
+		Region:      d.region,
+		Credentials: creds,
+	}
+	if d.httpClient != nil {
+		cfg.HTTPClient = d.httpClient
+	}
+	return cfg
+}
+
+// newIAMClient builds the IAM client rotation uses, from the base credentials —
+// an elevated session acts as the role principal and cannot manage the user's own
+// access keys.
+func (d *AWSDriver) newIAMClient(creds aws.CredentialsProvider) *iam.Client {
+	cfg := d.awsConfig(creds)
+	if d.iamTestEndpoint != "" {
+		return iam.NewFromConfig(cfg, func(o *iam.Options) {
+			o.BaseEndpoint = aws.String(d.iamTestEndpoint)
+		})
+	}
+	return iam.NewFromConfig(cfg)
 }
 
 // sourceConfig returns the current source config for callers that need it before
@@ -762,7 +784,7 @@ func (d *AWSDriver) credsFromWebIdentity(spec *credential.CredSpec, result *sts.
 // (e.g. freshly federated temporary credentials), honouring the source's endpoint
 // override when it set one.
 func (d *AWSDriver) newSecretsManagerClient(creds aws.CredentialsProvider) *secretsmanager.Client {
-	return secretsmanager.NewFromConfig(aws.Config{Region: d.region, Credentials: creds}, d.smOptions())
+	return secretsmanager.NewFromConfig(d.awsConfig(creds), d.smOptions())
 }
 
 // mintViaSecretsManager fetches a secret using the source's authenticated client (static
@@ -1036,11 +1058,7 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	oldAccessKeyID := credential.GetString(cfg, "access_key_id", "")
 
 	// Use base credentials (not elevated) for IAM operations on the user's own keys
-	iamClient := iam.NewFromConfig(aws.Config{
-		Region:      d.region,
-		Credentials: baseCreds,
-		HTTPClient:  d.httpClient,
-	})
+	iamClient := d.newIAMClient(baseCreds)
 
 	// IAM users can have max 2 keys. If there are already 2 (e.g., from a
 	// previously failed rotation), delete the orphaned key before creating a new one.
@@ -1075,9 +1093,11 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 
 	newKey := result.AccessKey
 
-	// Build new config (copy all, replace key fields)
+	// Build new config (copy all, replace key fields). Copied from the snapshot,
+	// not the live field: a commit landing mid-prepare would otherwise derive the
+	// new config from one generation while cleanup names another generation's key.
 	newConfig := make(map[string]string)
-	for k, v := range d.credSource.Config {
+	for k, v := range cfg {
 		newConfig[k] = v
 	}
 	newConfig["access_key_id"] = *newKey.AccessKeyId
@@ -1090,7 +1110,7 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 
 	// Return activateAfter to let the rotation manager schedule activation
 	// after AWS IAM eventual consistency has propagated the new key.
-	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultAWSActivationDelay)
+	activateAfter := credential.GetDuration(cfg, "activation_delay", DefaultAWSActivationDelay)
 
 	if d.logger != nil {
 		d.logger.Debug("prepared new IAM access key for rotation",
@@ -1151,14 +1171,8 @@ func (d *AWSDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 	baseCreds := d.baseCreds
 	d.authMu.Unlock()
 
-	// Use base credentials (not elevated) for IAM operations on the user's own keys,
-	// matching PrepareRotation. Elevated/assumed-role creds operate as the role
-	// principal and cannot delete the IAM user's access keys.
-	iamClient := iam.NewFromConfig(aws.Config{
-		Region:      d.region,
-		Credentials: baseCreds,
-		HTTPClient:  d.httpClient,
-	})
+	// Matches PrepareRotation: the user's own keys, from the base credentials.
+	iamClient := d.newIAMClient(baseCreds)
 
 	_, err := iamClient.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
 		AccessKeyId: &oldAccessKeyID,
