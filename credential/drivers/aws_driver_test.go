@@ -3,12 +3,17 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/types"
@@ -16,6 +21,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// primeClients gives a hand-built driver a usable client generation without the
+// network probe, standing in for the Create-time authenticate these tests skip.
+func primeClients(d *AWSDriver) {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	d.baseCredsVerified = true
+	d.buildClientsLocked(d.baseCreds)
+}
 
 func TestAWSDriverFactory_Type(t *testing.T) {
 	factory := &AWSDriverFactory{}
@@ -280,8 +294,7 @@ func TestAWSDriver_MintCredential_InvalidMethod(t *testing.T) {
 		region: "us-east-1",
 	}
 	// Build clients so authenticate doesn't fail (no assume_role_arn)
-	driver.buildClients(driver.baseCreds)
-	driver.baseCredsVerified = true
+	primeClients(driver)
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
@@ -308,8 +321,7 @@ func TestAWSDriver_MintCredential_TTLBelowMinimum(t *testing.T) {
 		},
 		region: "us-east-1",
 	}
-	driver.buildClients(driver.baseCreds)
-	driver.baseCredsVerified = true
+	primeClients(driver)
 
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
@@ -339,8 +351,7 @@ func TestAWSDriver_MintCredential_TTLExceedsMaximum(t *testing.T) {
 		},
 		region: "us-east-1",
 	}
-	driver.buildClients(driver.baseCreds)
-	driver.baseCredsVerified = true
+	primeClients(driver)
 
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
@@ -445,8 +456,7 @@ func newRedshiftTestDriver(t *testing.T) *AWSDriver {
 		},
 		region: "us-east-1",
 	}
-	driver.buildClients(driver.baseCreds)
-	driver.baseCredsVerified = true
+	primeClients(driver)
 	return driver
 }
 
@@ -1067,6 +1077,7 @@ func TestAWSDriver_EndpointOverride_SecretsManagerMint(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, target, "GetSecretValue")
+	assert.Contains(t, authScope, "AKIAIOSFODNN7EXAMPLE", "the static mint must sign with the source's own key")
 	assert.Equal(t, "stored-key", rawData["api_key"])
 }
 
@@ -1119,4 +1130,300 @@ func TestAWSDriver_EndpointOverride_AbsentLeavesResolverAlone(t *testing.T) {
 	awsDrv := drv.(*AWSDriver)
 	assert.Empty(t, awsDrv.stsEndpoint)
 	assert.Empty(t, awsDrv.smBaseEndpoint)
+
+	// The option funcs are what actually decide the endpoint, so assert on them
+	// rather than on the fields they read: with nothing configured they must leave
+	// BaseEndpoint untouched, so the SDK resolves the real regional endpoint.
+	stsOpts := sts.Options{}
+	awsDrv.stsOptions()(&stsOpts)
+	assert.Nil(t, stsOpts.BaseEndpoint)
+
+	smOpts := secretsmanager.Options{}
+	awsDrv.smOptions()(&smOpts)
+	assert.Nil(t, smOpts.BaseEndpoint)
+}
+
+// =============================================================================
+// Client generations: concurrency, timeouts, transport
+// =============================================================================
+
+// concurrentSTSStub is stsStub's thread-safe sibling. The concurrency tests drive
+// it from many goroutines at once, so it records under a mutex and reports the
+// SigV4 scope of every request it saw.
+type concurrentSTSStub struct {
+	mu     sync.Mutex
+	scopes []string
+	srv    *httptest.Server
+	// beforeRespond, when set, runs while the AssumeRole request is in flight —
+	// the seam a rotation needs to land in the middle of a mint.
+	beforeRespond func()
+	once          sync.Once
+}
+
+func newConcurrentSTSStub(t *testing.T) *concurrentSTSStub {
+	t.Helper()
+	s := &concurrentSTSStub{}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		action := r.Form.Get("Action")
+
+		s.mu.Lock()
+		s.scopes = append(s.scopes, r.Header.Get("Authorization"))
+		hook := s.beforeRespond
+		s.mu.Unlock()
+
+		if action == "AssumeRole" && hook != nil {
+			s.once.Do(hook)
+		}
+
+		w.Header().Set("Content-Type", "text/xml")
+		switch action {
+		case "GetCallerIdentity":
+			_, _ = w.Write([]byte(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/w</Arn><UserId>AIDA</UserId><Account>123456789012</Account></GetCallerIdentityResult>
+</GetCallerIdentityResponse>`))
+		default:
+			_, _ = w.Write([]byte(`<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult>
+    <Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SecretAccessKey>secretexample</SecretAccessKey>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>
+    <AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/App/w</Arn><AssumedRoleId>AROA:w</AssumedRoleId></AssumedRoleUser>
+  </AssumeRoleResult>
+</AssumeRoleResponse>`))
+		}
+	}))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+func (s *concurrentSTSStub) scopesSeen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.scopes...)
+}
+
+// TestAWSDriver_ConcurrentMintAndRotationCommit drives mints and rotation commits
+// against one driver instance, which is how the registry hands drivers out. The
+// assertion that matters is -race staying quiet: before the client generations
+// were snapshotted, every commit rebuilt fields that in-flight mints were reading
+// without the lock.
+func TestAWSDriver_ConcurrentMintAndRotationCommit(t *testing.T) {
+	sts := newConcurrentSTSStub(t)
+
+	var target, authScope string
+	var smMu sync.Mutex
+	smSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		smMu.Lock()
+		target, authScope = r.Header.Get("X-Amz-Target"), r.Header.Get("Authorization")
+		smMu.Unlock()
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"Name":"prod/app","SecretString":"{\"api_key\":\"k\"}"}`))
+	}))
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	baseConfig := map[string]string{
+		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key":       "secret0",
+		"region":                  "us-east-1",
+		"sts_endpoint":            sts.srv.URL,
+		"secretsmanager_endpoint": smSrv.URL,
+	}
+	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
+	require.NoError(t, err)
+	awsDrv := drv.(*AWSDriver)
+
+	roleSpec := &credential.CredSpec{Name: "role", Config: map[string]string{
+		"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::123456789012:role/App", "ttl": "1h",
+	}}
+	smSpec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+		"mint_method": "secrets_manager", "secret_id": "prod/app",
+	}}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			spec := roleSpec
+			if i%2 == 0 {
+				spec = smSpec
+			}
+			for n := 0; n < 15; n++ {
+				if _, _, _, _, err := drv.MintCredential(context.TODO(), spec); err != nil {
+					t.Errorf("mint failed: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; n < 15; n++ {
+			rotated := make(map[string]string, len(baseConfig))
+			for k, v := range baseConfig {
+				rotated[k] = v
+			}
+			rotated["secret_access_key"] = fmt.Sprintf("secret%d", n+1)
+			if err := awsDrv.CommitRotation(context.TODO(), rotated); err != nil {
+				t.Errorf("commit failed: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	smMu.Lock()
+	defer smMu.Unlock()
+	assert.Contains(t, target, "GetSecretValue")
+	assert.NotEmpty(t, authScope)
+}
+
+// TestAWSDriver_MintSignsWithOneGeneration pins the property the snapshot exists
+// for: a commit landing in the middle of a mint must not change which credentials
+// that mint's request is signed with. The stub gives the rotation a deterministic
+// seam rather than racing it with a sleep.
+func TestAWSDriver_MintSignsWithOneGeneration(t *testing.T) {
+	sts := newConcurrentSTSStub(t)
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	baseConfig := map[string]string{
+		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
+		"secret_access_key": "old-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      sts.srv.URL,
+	}
+	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
+	require.NoError(t, err)
+	awsDrv := drv.(*AWSDriver)
+
+	rotated := make(map[string]string, len(baseConfig))
+	for k, v := range baseConfig {
+		rotated[k] = v
+	}
+	rotated["access_key_id"] = "AKIANEWEXAMPLEKEY000"
+	rotated["secret_access_key"] = "new-secret"
+
+	// Commit the rotation while the mint's AssumeRole is in flight.
+	sts.mu.Lock()
+	sts.beforeRespond = func() {
+		if err := awsDrv.CommitRotation(context.TODO(), rotated); err != nil {
+			t.Errorf("commit failed: %v", err)
+		}
+	}
+	sts.mu.Unlock()
+
+	spec := &credential.CredSpec{Name: "role", Config: map[string]string{
+		"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::123456789012:role/App", "ttl": "1h",
+	}}
+	_, _, _, _, err = drv.MintCredential(context.TODO(), spec)
+	require.NoError(t, err)
+
+	var assumeRoleScope string
+	for _, s := range sts.scopesSeen() {
+		if strings.Contains(s, "AKIAOLDEXAMPLEKEY000") {
+			assumeRoleScope = s
+		}
+	}
+	assert.NotEmpty(t, assumeRoleScope,
+		"the in-flight mint must stay signed with the key its snapshot was built from, not the one committed mid-request")
+
+	// And the next mint picks up the new generation.
+	_, _, _, _, err = drv.MintCredential(context.TODO(), spec)
+	require.NoError(t, err)
+	last := sts.scopesSeen()
+	assert.Contains(t, last[len(last)-1], "AKIANEWEXAMPLEKEY000")
+}
+
+// TestAWSDriver_Create_ProbeTimesOut: an endpoint that accepts the connection and
+// never answers must fail the source write, not hold it open.
+func TestAWSDriver_Create_ProbeTimesOut(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	// Release the handler before closing: Close waits for it to return.
+	defer srv.Close()
+	defer close(block)
+
+	orig := awsCreateProbeTimeout
+	awsCreateProbeTimeout = 200 * time.Millisecond
+	defer func() { awsCreateProbeTimeout = orig }()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	start := time.Now()
+	_, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key": "secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      srv.URL,
+	}, log)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 10*time.Second, "Create must give up on the probe timeout")
+}
+
+// TestAWSDriver_HTTPClientReachesClients proves the configured transport is the one
+// the SDK uses: the stub speaks TLS with an untrusted certificate, so the probe can
+// only succeed if the driver's own client (built with tls_skip_verify) is in play.
+func TestAWSDriver_HTTPClientReachesClients(t *testing.T) {
+	var actions []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		actions = append(actions, r.Form.Get("Action"))
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/w</Arn><UserId>AIDA</UserId><Account>123456789012</Account></GetCallerIdentityResult>
+</GetCallerIdentityResponse>`))
+	}))
+	defer srv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	cfg := map[string]string{
+		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key": "secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      srv.URL,
+	}
+
+	_, err := (&AWSDriverFactory{}).Create(cfg, log)
+	require.Error(t, err, "without tls_skip_verify the untrusted certificate must be rejected")
+
+	cfg["tls_skip_verify"] = "true"
+	_, err = (&AWSDriverFactory{}).Create(cfg, log)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"GetCallerIdentity"}, actions)
+}
+
+// TestAWSDriver_MintViaRDSIAMToken_HappyPath covers the RDS path under the snapshot
+// signature. The token is signed locally, so no endpoint is involved.
+func TestAWSDriver_MintViaRDSIAMToken_HappyPath(t *testing.T) {
+	driver := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{
+			"access_key_id": "AKIAIOSFODNN7EXAMPLE", "secret_access_key": "secret", "region": "us-east-1",
+		}},
+		baseCreds: credentials.NewStaticCredentialsProvider("AKIAIOSFODNN7EXAMPLE", "secret", ""),
+		region:    "us-east-1",
+	}
+	primeClients(driver)
+
+	rawData, metadata, ttl, leaseID, err := driver.MintCredential(context.TODO(), &credential.CredSpec{
+		Name: "db",
+		Config: map[string]string{
+			"mint_method": "rds_iam_token",
+			"db_endpoint": "mydb.abc123.us-east-1.rds.amazonaws.com",
+			"db_user":     "app",
+		},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, rawData["auth_token"], "X-Amz-Signature=")
+	assert.Equal(t, "5432", rawData["db_port"])
+	assert.Equal(t, "rds_iam", rawData["token_type"])
+	assert.Nil(t, metadata)
+	assert.Equal(t, 15*time.Minute, ttl)
+	assert.Equal(t, "", leaseID)
 }
