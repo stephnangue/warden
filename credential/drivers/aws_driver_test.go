@@ -2130,3 +2130,216 @@ func TestAWSDriver_CleanupRotation_ToleratesAlreadyGone(t *testing.T) {
 		"access_key_id": "AKIAOLDEXAMPLEKEY000",
 	}))
 }
+
+// =============================================================================
+// Config validation
+// =============================================================================
+
+func TestAWSSessionSeconds(t *testing.T) {
+	tests := []struct {
+		name   string
+		dur    time.Duration
+		want   int32
+		errMsg string
+	}{
+		{name: "minimum", dur: 15 * time.Minute, want: 900},
+		{name: "typical", dur: time.Hour, want: 3600},
+		{name: "maximum", dur: 12 * time.Hour, want: 43200},
+		{name: "below minimum", dur: 899 * time.Second, errMsg: "at least 15m0s"},
+		{name: "far below minimum", dur: 5 * time.Minute, errMsg: "at least 15m0s"},
+		{name: "above maximum", dur: 12*time.Hour + time.Second, errMsg: "at most 12h0m0s"},
+		// Without the range check this wraps int32 into a negative number, which
+		// the service would read as something else entirely.
+		{name: "would overflow int32", dur: 100000 * time.Hour, errMsg: "at most 12h0m0s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := awsSessionSeconds(tt.dur, "ttl")
+			if tt.errMsg != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+				assert.Contains(t, err.Error(), "'ttl'", "the error must name the config key")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestAWSSessionName(t *testing.T) {
+	tests := []struct {
+		name     string
+		specName string
+		override string
+		want     string
+		wantErr  bool
+	}{
+		{name: "derived from spec name", specName: "prod-keys", want: "warden-prod-keys"},
+		{name: "explicit override", specName: "x", override: "my.session@1", want: "my.session@1"},
+		{name: "override at max length", specName: "x", override: strings.Repeat("a", 64), want: strings.Repeat("a", 64)},
+		{name: "override too long", specName: "x", override: strings.Repeat("a", 65), wantErr: true},
+		{name: "override too short", specName: "x", override: "a", wantErr: true},
+		{name: "illegal character", specName: "x", override: "has space", wantErr: true},
+		// A spec name AWS will not accept must be reported against the spec, not
+		// left to fail every mint with a service-side error.
+		{name: "spec name yields an invalid default", specName: "keys/for/prod", wantErr: true},
+		{name: "spec name too long for the default", specName: strings.Repeat("a", 60), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := map[string]string{}
+			if tt.override != "" {
+				cfg["session_name"] = tt.override
+			}
+			got, err := awsSessionName(&credential.CredSpec{Name: tt.specName, Config: cfg})
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "not accepted by AWS")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRedshiftLeaseTTL(t *testing.T) {
+	t.Run("no expiration falls back to the requested duration", func(t *testing.T) {
+		ttl, err := redshiftLeaseTTL(1800, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 30*time.Minute, ttl)
+	})
+
+	t.Run("future expiration wins", func(t *testing.T) {
+		exp := time.Now().Add(10 * time.Minute)
+		ttl, err := redshiftLeaseTTL(1800, &exp)
+		require.NoError(t, err)
+		assert.Less(t, ttl, 30*time.Minute)
+		assert.Greater(t, ttl, 9*time.Minute)
+	})
+
+	t.Run("past expiration is an error, not the full duration", func(t *testing.T) {
+		exp := time.Now().Add(-time.Minute)
+		_, err := redshiftLeaseTTL(1800, &exp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "expired")
+	})
+}
+
+// TestAWSDriver_MintViaSTSAssumeRole_TTLBelowSTSMinimum: a sub-15m ttl reaches the
+// operator as an error naming the key, instead of an opaque service rejection.
+func TestAWSDriver_MintViaSTSAssumeRole_TTLBelowSTSMinimum(t *testing.T) {
+	stub := newConcurrentSTSStub(t)
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key": "secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      stub.srv.URL,
+	}, log)
+	require.NoError(t, err)
+
+	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
+		Name: "role",
+		Config: map[string]string{
+			"mint_method": "sts_assume_role",
+			"role_arn":    "arn:aws:iam::123456789012:role/App",
+			"ttl":         "5m",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least 15m0s")
+
+	mu := &stub.mu
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range stub.requests {
+		assert.NotEqual(t, "AssumeRole", r.action, "an out-of-range ttl must not reach the service")
+	}
+}
+
+func TestAWSValidateConfig_EndpointAndActivationDelay(t *testing.T) {
+	factory := &AWSDriverFactory{}
+	base := func() map[string]string {
+		return map[string]string{
+			"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+			"secret_access_key": "secret",
+			"region":            "us-east-1",
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+		errMsg string
+	}{
+		{name: "valid activation delay", mutate: func(c map[string]string) { c["activation_delay"] = "10m" }},
+		{
+			name:   "malformed activation delay",
+			mutate: func(c map[string]string) { c["activation_delay"] = "5 minutes" },
+			errMsg: "activation_delay",
+		},
+		{name: "valid endpoints", mutate: func(c map[string]string) {
+			c["sts_endpoint"] = "https://sts.us-east-1.amazonaws.com"
+			c["secretsmanager_endpoint"] = "http://127.0.0.1:4566"
+		}},
+		{
+			name:   "endpoint without a scheme",
+			mutate: func(c map[string]string) { c["sts_endpoint"] = "sts.us-east-1.amazonaws.com" },
+			errMsg: "http or https",
+		},
+		{
+			name:   "endpoint with an unsupported scheme",
+			mutate: func(c map[string]string) { c["secretsmanager_endpoint"] = "ftp://example.com" },
+			errMsg: "http or https",
+		},
+		{
+			name:   "endpoint with no host",
+			mutate: func(c map[string]string) { c["sts_endpoint"] = "https://" },
+			errMsg: "no host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mutate(cfg)
+			err := factory.ValidateConfig(cfg)
+			if tt.errMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+// TestAWSValidateRotationConfig: rotation reaches the real account through IAM,
+// which has no override, so pairing it with a redirected source would loop.
+func TestAWSValidateRotationConfig(t *testing.T) {
+	factory := &AWSDriverFactory{}
+
+	require.NoError(t, factory.ValidateRotationConfig(map[string]string{
+		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key": "secret",
+		"region":            "us-east-1",
+	}))
+
+	for _, key := range []string{"sts_endpoint", "secretsmanager_endpoint"} {
+		t.Run(key, func(t *testing.T) {
+			err := factory.ValidateRotationConfig(map[string]string{
+				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+				"secret_access_key": "secret",
+				"region":            "us-east-1",
+				key:                 "http://127.0.0.1:4566",
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "rotation_period cannot be set")
+		})
+	}
+}
