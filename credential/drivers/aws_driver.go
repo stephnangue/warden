@@ -747,7 +747,10 @@ func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 			aws.ToString(creds.SecretAccessKey),
 			aws.ToString(creds.SessionToken),
 		)
-		return d.fetchSecret(ctx, d.newSecretsManagerClient(provider), spec)
+		// The claims carried on the exchange are what a templated secret_id
+		// resolves from, so the fetch is scoped to the principals on this request.
+		return d.fetchSecret(ctx, d.newSecretsManagerClient(provider), spec,
+			inputs.UserClaims, inputs.AgentClaims)
 	default:
 		return nil, nil, 0, "", fmt.Errorf("aws: mint_method %q is not supported over auth_method=oidc_federation (supported: sts_assume_role, secrets_manager)", mintMethod)
 	}
@@ -779,6 +782,12 @@ func awsAssertionAudience(sourceCfg map[string]string) (string, bool) {
 func awsAssertionResource(specCfg map[string]string) (string, bool) {
 	switch credential.GetString(specCfg, "mint_method", "") {
 	case "secrets_manager":
+		// A templated secret_id is carried unresolved, as every templated
+		// coordinate is here: this runs before the exchange that produces the
+		// claims it would resolve from. A downstream policy conditioning on this
+		// claim therefore pins the spec, not the individual secret — per-principal
+		// scoping is enforced where the resolved read happens, by the permissions
+		// on the assumed role.
 		if id := credential.GetString(specCfg, "secret_id", ""); id != "" {
 			return "aws-secretsmanager:" + id, true
 		}
@@ -908,14 +917,30 @@ func (d *AWSDriver) newSecretsManagerClient(creds aws.CredentialsProvider) *secr
 
 // mintViaSecretsManager fetches a secret using the source's authenticated client (static
 // auth). The keyless (federation) path fetches with a temp-credential client instead.
+//
+// Neither principal's claims are available here: this path runs when the spec sets no
+// subject_token_source, so nothing on the request was verified into claims. Passing
+// nil means a templated secret_id fails closed rather than being sent literally —
+// which matters, because a store will happily return a secret actually named
+// "prod/{{user.sub}}/keys" to whoever can create one.
 func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, c *awsClients, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	return d.fetchSecret(ctx, c.sm, spec)
+	return d.fetchSecret(ctx, c.sm, spec, nil, nil)
 }
 
 // fetchSecret reads and parses a Secrets Manager secret with the given client. The client
 // may be the source's own (static auth) or one bound to freshly federated credentials.
-func (d *AWSDriver) fetchSecret(ctx context.Context, sm *secretsmanager.Client, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+//
+// userClaims and agentClaims, when non-nil, supply the values for any {{user.<claim>}}
+// or {{agent.<claim>}} token in secret_id, so one spec can serve many callers and each
+// reads only its own secret.
+func (d *AWSDriver) fetchSecret(ctx context.Context, sm *secretsmanager.Client, spec *credential.CredSpec,
+	userClaims, agentClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+
 	secretID, err := credential.GetStringRequired(spec.Config, "secret_id")
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	secretID, err = resolveClaimTemplate(secretID, userClaims, agentClaims, "secret_id")
 	if err != nil {
 		return nil, nil, 0, "", err
 	}

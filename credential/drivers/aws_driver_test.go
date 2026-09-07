@@ -1176,23 +1176,27 @@ func newConcurrentSTSStub(t *testing.T) *concurrentSTSStub {
 		s.requests = append(s.requests, stsRequest{action: action, scope: r.Header.Get("Authorization")})
 		s.mu.Unlock()
 
+		const credsXML = `<Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SecretAccessKey>secretexample</SecretAccessKey>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>
+    <AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/App/w</Arn><AssumedRoleId>AROA:w</AssumedRoleId></AssumedRoleUser>`
+
 		w.Header().Set("Content-Type", "text/xml")
 		switch action {
 		case "GetCallerIdentity":
 			_, _ = w.Write([]byte(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/w</Arn><UserId>AIDA</UserId><Account>123456789012</Account></GetCallerIdentityResult>
 </GetCallerIdentityResponse>`))
+		case "AssumeRoleWithWebIdentity":
+			_, _ = w.Write([]byte(`<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>` + credsXML + `</AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`))
 		default:
 			_, _ = w.Write([]byte(`<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
-  <AssumeRoleResult>
-    <Credentials>
-      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
-      <SecretAccessKey>secretexample</SecretAccessKey>
-      <SessionToken>tokenexample</SessionToken>
-      <Expiration>2035-01-01T00:00:00Z</Expiration>
-    </Credentials>
-    <AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/App/w</Arn><AssumedRoleId>AROA:w</AssumedRoleId></AssumedRoleUser>
-  </AssumeRoleResult>
+  <AssumeRoleResult>` + credsXML + `</AssumeRoleResult>
 </AssumeRoleResponse>`))
 		}
 	}))
@@ -2342,4 +2346,180 @@ func TestAWSValidateRotationConfig(t *testing.T) {
 			assert.Contains(t, err.Error(), "rotation_period cannot be set")
 		})
 	}
+}
+
+// =============================================================================
+// Templated secret_id
+// =============================================================================
+
+// recordingSMStub records the SecretId of every GetSecretValue it is asked for, so
+// a test can tell which secret a templated spec actually reached for — and whether
+// it reached for one at all.
+func recordingSMStub(t *testing.T, secretIDs *[]string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SecretId string `json:"SecretId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		*secretIDs = append(*secretIDs, body.SecretId)
+
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"Name":"` + body.SecretId + `","SecretString":"{\"api_key\":\"k-for-` + body.SecretId + `\"}"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// federatedSecretsManagerDriver builds a keyless driver whose STS and Secrets
+// Manager calls both land on stubs.
+func federatedSecretsManagerDriver(t *testing.T, stsURL, smURL string) *AWSDriver {
+	t.Helper()
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"auth_method":             "oidc_federation",
+		"region":                  "us-east-1",
+		"sts_endpoint":            stsURL,
+		"secretsmanager_endpoint": smURL,
+	}, log)
+	require.NoError(t, err)
+	return drv.(*AWSDriver)
+}
+
+func TestAWSDriver_TemplatedSecretID(t *testing.T) {
+	tests := []struct {
+		name        string
+		secretID    string
+		userClaims  map[string]string
+		agentClaims map[string]string
+		wantFetched string
+		errMsg      string
+	}{
+		{
+			name:        "user claim selects the secret",
+			secretID:    "prod/users/{{user.sub}}/datadog",
+			userClaims:  map[string]string{"sub": "alice"},
+			agentClaims: map[string]string{"sub": "runner"},
+			wantFetched: "prod/users/alice/datadog",
+		},
+		{
+			name:        "agent claim selects the secret",
+			secretID:    "prod/agents/{{agent.sub}}/keys",
+			agentClaims: map[string]string{"sub": "build-runner"},
+			wantFetched: "prod/agents/build-runner/keys",
+		},
+		{
+			name:        "both namespaces compose",
+			secretID:    "{{agent.team}}/{{user.sub}}",
+			userClaims:  map[string]string{"sub": "alice"},
+			agentClaims: map[string]string{"team": "platform"},
+			wantFetched: "platform/alice",
+		},
+		{
+			name:        "untemplated id is unchanged",
+			secretID:    "prod/datadog/keys",
+			userClaims:  map[string]string{"sub": "alice"},
+			agentClaims: map[string]string{"sub": "runner"},
+			wantFetched: "prod/datadog/keys",
+		},
+		{
+			// An ARN carries ':' and '/', neither of which the template scanner
+			// touches, so it must pass through byte for byte.
+			name:        "arn form is unchanged",
+			secretID:    "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/datadog-AbCdEf",
+			agentClaims: map[string]string{"sub": "runner"},
+			wantFetched: "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/datadog-AbCdEf",
+		},
+		{
+			name:        "absent claim fails closed",
+			secretID:    "prod/users/{{user.sub}}/datadog",
+			agentClaims: map[string]string{"sub": "runner"},
+			errMsg:      "absent from the user's projected claims",
+		},
+		{
+			name:        "value that would escape the path fails closed",
+			secretID:    "prod/users/{{user.sub}}/datadog",
+			userClaims:  map[string]string{"sub": "../admin"},
+			agentClaims: map[string]string{"sub": "runner"},
+			errMsg:      "rejected by the allow-list",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stsSrv := newConcurrentSTSStub(t)
+			var fetched []string
+			smSrv := recordingSMStub(t, &fetched)
+
+			drv := federatedSecretsManagerDriver(t, stsSrv.srv.URL, smSrv.URL)
+			spec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+				"mint_method": "secrets_manager",
+				"secret_id":   tt.secretID,
+				"role_arn":    "arn:aws:iam::123456789012:role/App",
+			}}
+
+			rawData, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec,
+				&credential.ExchangeInputs{
+					SubjectToken:     "eyJ.warden.assertion",
+					SubjectTokenType: credential.TokenTypeJWT,
+					UserClaims:       tt.userClaims,
+					AgentClaims:      tt.agentClaims,
+				})
+
+			if tt.errMsg != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+				assert.Contains(t, err.Error(), "secret_id", "the error must name the config key")
+				assert.Empty(t, fetched, "a template that cannot be resolved must reach no store")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, []string{tt.wantFetched}, fetched)
+			assert.Equal(t, "k-for-"+tt.wantFetched, rawData["api_key"])
+		})
+	}
+}
+
+// TestAWSDriver_TemplatedSecretID_StaticPathFailsClosed: the non-exchange path has
+// no verified claims to resolve from, so a templated id must fail rather than be
+// sent as written. A store would return a secret literally named "{{user.sub}}" to
+// anyone able to create one.
+func TestAWSDriver_TemplatedSecretID_StaticPathFailsClosed(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+	var fetched []string
+	smSrv := recordingSMStub(t, &fetched)
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key":       "secret",
+		"region":                  "us-east-1",
+		"sts_endpoint":            stsSrv.srv.URL,
+		"secretsmanager_endpoint": smSrv.URL,
+	}, log)
+	require.NoError(t, err)
+
+	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
+		Name: "sm",
+		Config: map[string]string{
+			"mint_method": "secrets_manager",
+			"secret_id":   "prod/users/{{user.sub}}/datadog",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absent from the user's projected claims")
+	assert.Empty(t, fetched, "nothing may be fetched when the template cannot resolve")
+}
+
+// TestAWSAssertionResource_TemplatedSecretIDStaysRaw pins the deliberate choice:
+// the claim is minted before the exchange that would produce the claims, so it
+// carries the spec's coordinate rather than the resolved one — the same as every
+// other templated coordinate in the assertion layer.
+func TestAWSAssertionResource_TemplatedSecretIDStaysRaw(t *testing.T) {
+	got, ok := awsAssertionResource(map[string]string{
+		"mint_method": "secrets_manager",
+		"secret_id":   "prod/users/{{user.sub}}/datadog",
+	})
+	require.True(t, ok)
+	assert.Equal(t, "aws-secretsmanager:prod/users/{{user.sub}}/datadog", got)
 }
