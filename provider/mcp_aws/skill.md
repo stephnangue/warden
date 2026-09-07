@@ -87,7 +87,18 @@ convention. A `401` means the JWT expired (typical TTL 5–60 min) — refresh i
   back). Read the `error_description` to tell them apart. Structural problems
   (malformed JSON-RPC, duplicate keys, oversized body) also fail closed.
 - **Streamable HTTP / SSE flows through transparently.** The `Mcp-Session-Id`
-  response header round-trips so follow-up requests reach the same session.
+  response header round-trips so follow-up requests reach the same session. It
+  is legacy-era; an upstream speaking 2026-07-28 holds no session and ignores
+  it.
+- **Both protocol eras are served.** `server/discover` needs no allow-list
+  entry — it is exempt like `initialize`, `ping` and `notifications/*` — though
+  an operator can still block it by name. If you send the 2026-07-28 transport
+  headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`), they must match
+  the body: a contradiction is refused with HTTP 400 and a JSON-RPC `-32020`,
+  which means fix the headers, not the policy. Announce that revision and your
+  JSON-RPC batches are refused too. Subscribing to a resource — modern
+  `subscriptions/listen` or legacy `resources/subscribe` — answers to the
+  `resources` allow-list, the same grant that governs reading it.
 - **Two mount-wide deadlines, picked by method.** `timeout` caps a single call
   (default 60 seconds); `listen_timeout` caps a `subscriptions/listen` stream
   (default 10 minutes), and only that method. Ask the operator to raise

@@ -79,6 +79,22 @@ JWT expired (typical TTL 5–60 min) — refresh it in the client config.
 - **Streamable HTTP / SSE flows through transparently.** The server's framing
   comes back unchanged, and the `Mcp-Session-Id` response header round-trips
   automatically so follow-up requests reach the same upstream session.
+  `Mcp-Session-Id` is legacy-era; an upstream speaking 2026-07-28 holds no
+  session and ignores it.
+- **Both protocol eras are served.** `server/discover` needs no allow-list
+  entry — it is exempt like `initialize`, `ping` and `notifications/*` — so a
+  modern client's opening request works under any contract, though an operator
+  can still block it by name. If you send the 2026-07-28 transport headers
+  (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`), they must match the body
+  you send: a contradiction is refused with HTTP 400 and a JSON-RPC `-32020`,
+  which means fix the headers, not the policy. Announce that revision and your
+  JSON-RPC batches are refused too — batching left the spec in 2025-06-18.
+- **Subscribing to a resource needs the same grant as reading it.** A
+  `subscriptions/listen` naming resource URIs — and the legacy
+  `resources/subscribe` — answer to the `resources` allow-list, because a
+  subscription leaks a resource's existence and the timing of every change
+  even though its content never arrives. A listen that only asks for
+  list-changed events names no resource and needs no such grant.
 - **Two mount-wide deadlines, picked by method.** `timeout` caps a single call —
   a tool call, a listing, a resource read (default 60 seconds).
   `listen_timeout` caps a `subscriptions/listen` stream (default 10 minutes),

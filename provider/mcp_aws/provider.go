@@ -407,6 +407,18 @@ JSON-RPC bodies, the Accept header, and the Mcp-Session-Id header pass
 through unchanged. Streamable HTTP responses (JSON or SSE) stream
 without buffering.
 
+Mcp-Session-Id is legacy-era and is forwarded for the upstreams that still
+use it; a server speaking 2026-07-28 holds no session and ignores it.
+
+Deadlines are chosen by what the request is, not by how it responds.
+subscriptions/listen — and the legacy SSE GET it replaced — take
+listen_timeout, because a subscription is open-ended by design; everything
+else takes timeout. A long-running tool call that streams progress is still
+capped by timeout, and raising listen_timeout will not save it: the
+alternative, raising timeout far enough to hold a stream open, would hand
+every hung call on the mount the same ceiling. A severed stream is a
+reconnect trigger, losing only the notifications in the gap.
+
 Configuration:
 - mcp_aws_url:    MCP endpoint base URL (default: https://aws-mcp.us-east-1.api.aws/mcp)
 - region:         SigV4 signing region. Optional when the URL host yields one

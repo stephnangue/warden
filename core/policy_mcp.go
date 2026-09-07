@@ -351,13 +351,18 @@ func mcpDescriptorPopulated(req *logical.Request) bool {
 //
 //   - Non-nil, empty descriptor (Calls nil, ParseErr nil) — the
 //     backend is MCP-aware but ShouldEnforceMCPPolicy declined for
-//     this request (typically a non-POST verb, or a non-JSON
-//     Content-Type). A contract is body-authoritative; a verb with no
-//     body cannot be governed by method/tool allow-lists, so we
-//     return nil to skip evaluation and let the cap-level check
-//     decide. This is what makes MCP Streamable HTTP's GET
-//     (notification SSE stream) and DELETE (session terminate) work
-//     on the same URL that POST gates.
+//     this request (a non-POST verb, or a non-JSON Content-Type). A
+//     contract is body-authoritative; a verb with no body cannot be
+//     governed by method/tool allow-lists, so we return nil to skip
+//     evaluation and let the cap-level check decide. This is what
+//     makes Streamable HTTP's GET (notification stream) and DELETE
+//     (session terminate) work on the same URL that POST gates.
+//
+//     Both verbs are legacy-era. 2026-07-28 removed the GET endpoint
+//     in favour of subscriptions/listen, which is a POST and is
+//     therefore gated like any other call, and left no session for
+//     DELETE to terminate; a modern server answers both 405. The
+//     branch remains for the upstreams that still serve them.
 //
 //   - descriptor.ParseErr non-nil — strict JSON-RPC parse failed.
 //     Deny with the typed rule_type (malformed_jsonrpc, duplicate_key,
