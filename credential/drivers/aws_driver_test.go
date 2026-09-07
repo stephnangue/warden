@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1437,31 +1438,70 @@ func TestAWSDriver_MintViaRDSIAMToken_HappyPath(t *testing.T) {
 	assert.Equal(t, "", leaseID)
 }
 
-// iamStub answers the IAM calls rotation makes, recording each action. IAM speaks
-// the same query/XML protocol as STS.
-// onCreateKey, when set, runs while the CreateAccessKey call is in flight — the
-// seam a rotation commit needs to land inside a prepare, after it has snapshotted
-// the config and before it builds its result from it.
-func iamStub(t *testing.T, actions *[]string, mu *sync.Mutex, onCreateKey func()) *httptest.Server {
+// iamKey is one entry the IAM stub reports from ListAccessKeys.
+type iamKey struct {
+	id     string
+	status string // "Active" or "Inactive"
+}
+
+// iamCall is one request the stub saw: the action and the key it named, which is
+// how a test checks that rotation touched the key it meant to and no other.
+type iamCall struct {
+	action string
+	keyID  string
+	status string // the Status parameter, for UpdateAccessKey
+}
+
+// iamStubOpts configures the stub for one test.
+type iamStubOpts struct {
+	keys []iamKey
+	// onCreateKey, when set, runs while the CreateAccessKey call is in flight —
+	// the seam a rotation commit needs to land inside a prepare, after it has
+	// snapshotted the config and before it builds its result from it.
+	onCreateKey func()
+	// noSuchEntity makes every mutating call report the key as already gone.
+	noSuchEntity bool
+}
+
+// iamStub answers the IAM calls rotation makes, recording each one. IAM speaks the
+// same query/XML protocol as STS.
+func iamStub(t *testing.T, calls *[]iamCall, mu *sync.Mutex, opts iamStubOpts) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		action := r.Form.Get("Action")
 		mu.Lock()
-		*actions = append(*actions, action)
+		*calls = append(*calls, iamCall{
+			action: action,
+			keyID:  r.Form.Get("AccessKeyId"),
+			status: r.Form.Get("Status"),
+		})
 		mu.Unlock()
 
-		if action == "CreateAccessKey" && onCreateKey != nil {
-			onCreateKey()
+		if action == "CreateAccessKey" && opts.onCreateKey != nil {
+			opts.onCreateKey()
 		}
 
 		w.Header().Set("Content-Type", "text/xml")
+
+		if opts.noSuchEntity && (action == "DeleteAccessKey" || action == "UpdateAccessKey") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`<ErrorResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <Error><Type>Sender</Type><Code>NoSuchEntity</Code><Message>key not found</Message></Error>
+</ErrorResponse>`))
+			return
+		}
+
 		switch action {
 		case "ListAccessKeys":
+			members := ""
+			for _, k := range opts.keys {
+				members += `<member><UserName>w</UserName><AccessKeyId>` + k.id +
+					`</AccessKeyId><Status>` + k.status + `</Status></member>`
+			}
 			_, _ = w.Write([]byte(`<ListAccessKeysResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ListAccessKeysResult><IsTruncated>false</IsTruncated><AccessKeyMetadata>
-    <member><UserName>w</UserName><AccessKeyId>AKIAOLDEXAMPLEKEY000</AccessKeyId><Status>Active</Status></member>
-  </AccessKeyMetadata></ListAccessKeysResult>
+  <ListAccessKeysResult><IsTruncated>false</IsTruncated><AccessKeyMetadata>` + members +
+				`</AccessKeyMetadata></ListAccessKeysResult>
 </ListAccessKeysResponse>`))
 		case "CreateAccessKey":
 			_, _ = w.Write([]byte(`<CreateAccessKeyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
@@ -1495,21 +1535,24 @@ func TestAWSDriver_PrepareRotation_UsesOneConfigGeneration(t *testing.T) {
 	}
 
 	var awsDrv *AWSDriver
-	var iamActions []string
+	var iamCalls []iamCall
 	var iamMu sync.Mutex
 
 	// The interloping commit fires while prepare's CreateAccessKey is in flight:
 	// after prepare snapshotted the config, before it builds its result from it.
-	iamSrv := iamStub(t, &iamActions, &iamMu, func() {
-		if err := awsDrv.CommitRotation(context.TODO(), map[string]string{
-			"access_key_id":     "AKIAINTERLOPERKEY000",
-			"secret_access_key": "interloper-secret",
-			"region":            "us-east-1",
-			"sts_endpoint":      stsSrv.srv.URL,
-			"activation_delay":  "99m",
-		}); err != nil {
-			t.Errorf("interloping commit failed: %v", err)
-		}
+	iamSrv := iamStub(t, &iamCalls, &iamMu, iamStubOpts{
+		keys: []iamKey{{id: "AKIAOLDEXAMPLEKEY000", status: "Active"}},
+		onCreateKey: func() {
+			if err := awsDrv.CommitRotation(context.TODO(), map[string]string{
+				"access_key_id":     "AKIAINTERLOPERKEY000",
+				"secret_access_key": "interloper-secret",
+				"region":            "us-east-1",
+				"sts_endpoint":      stsSrv.srv.URL,
+				"activation_delay":  "99m",
+			}); err != nil {
+				t.Errorf("interloping commit failed: %v", err)
+			}
+		},
 	})
 
 	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
@@ -1825,4 +1868,265 @@ func TestAWSDriver_PrepareRotation_MalformedCreateKeyResponse(t *testing.T) {
 	_, _, _, err = awsDrv.PrepareRotation(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no SecretAccessKey")
+}
+
+// =============================================================================
+// Rotation safety
+// =============================================================================
+
+// rotationDriver builds a driver wired to an STS stub and the given IAM stub,
+// configured with a rotatable (AKIA-prefixed) key.
+func rotationDriver(t *testing.T, stsURL, iamURL, accessKeyID string) *AWSDriver {
+	t.Helper()
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     accessKeyID,
+		"secret_access_key": "old-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      stsURL,
+	}, log)
+	require.NoError(t, err)
+	awsDrv := drv.(*AWSDriver)
+	awsDrv.iamTestEndpoint = iamURL
+	return awsDrv
+}
+
+func iamActionsOf(calls []iamCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, c.action)
+	}
+	return out
+}
+
+// TestAWSDriver_PrepareRotation_RefusesUnownedKeyList: if the configured key is not
+// among the ones listed, the source's credentials belong to a different IAM user
+// than the one being listed. Every key there is someone else's, so touch none.
+func TestAWSDriver_PrepareRotation_RefusesUnownedKeyList(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+	var calls []iamCall
+	var mu sync.Mutex
+	iamSrv := iamStub(t, &calls, &mu, iamStubOpts{keys: []iamKey{
+		{id: "AKIASTRANGERONE00000", status: "Active"},
+		{id: "AKIASTRANGERTWO00000", status: "Active"},
+	}})
+
+	awsDrv := rotationDriver(t, stsSrv.srv.URL, iamSrv.URL, "AKIAOLDEXAMPLEKEY000")
+
+	_, _, _, err := awsDrv.PrepareRotation(context.TODO())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to remove a key this source does not own")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"ListAccessKeys"}, iamActionsOf(calls),
+		"a list it does not recognise must be read and nothing else")
+}
+
+// TestAWSDriver_PrepareRotation_DeactivatesActiveStranger: an active non-current
+// key is disabled rather than destroyed, and the attempt stops so the retry can
+// reclaim the slot once the key is safely inactive.
+func TestAWSDriver_PrepareRotation_DeactivatesActiveStranger(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+	var calls []iamCall
+	var mu sync.Mutex
+	iamSrv := iamStub(t, &calls, &mu, iamStubOpts{keys: []iamKey{
+		{id: "AKIAOLDEXAMPLEKEY000", status: "Active"},
+		{id: "AKIASTRANGERONE00000", status: "Active"},
+	}})
+
+	awsDrv := rotationDriver(t, stsSrv.srv.URL, iamSrv.URL, "AKIAOLDEXAMPLEKEY000")
+
+	_, _, _, err := awsDrv.PrepareRotation(context.TODO())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deactivated and will be removed on the next rotation attempt")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"ListAccessKeys", "UpdateAccessKey"}, iamActionsOf(calls),
+		"nothing may be deleted, and no key minted, on this attempt")
+	assert.Equal(t, "AKIASTRANGERONE00000", calls[1].keyID)
+	assert.Equal(t, "Inactive", calls[1].status)
+}
+
+// TestAWSDriver_PrepareRotation_ReclaimsInactiveOrphan: an inactive non-current key
+// is what an interrupted cleanup leaves behind, so it is attributable and can be
+// deleted to free the slot.
+func TestAWSDriver_PrepareRotation_ReclaimsInactiveOrphan(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+	var calls []iamCall
+	var mu sync.Mutex
+	iamSrv := iamStub(t, &calls, &mu, iamStubOpts{keys: []iamKey{
+		{id: "AKIAOLDEXAMPLEKEY000", status: "Active"},
+		{id: "AKIAORPHANKEY0000000", status: "Inactive"},
+	}})
+
+	awsDrv := rotationDriver(t, stsSrv.srv.URL, iamSrv.URL, "AKIAOLDEXAMPLEKEY000")
+
+	newConfig, cleanupConfig, _, err := awsDrv.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+	assert.Equal(t, "AKIAMINTEDEXAMPLE000", newConfig["access_key_id"])
+	assert.Equal(t, "AKIAOLDEXAMPLEKEY000", cleanupConfig["access_key_id"])
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"ListAccessKeys", "DeleteAccessKey", "CreateAccessKey"}, iamActionsOf(calls))
+	assert.Equal(t, "AKIAORPHANKEY0000000", calls[1].keyID, "only the orphan may be deleted")
+}
+
+// TestAWSDriver_CommitRotation_VerifyFailureKeepsInstanceOnOldKey: a commit whose
+// verification fails must leave this driver instance whole, so in-flight and
+// subsequent mints on it keep working with the credentials it already had.
+//
+// This is deliberately a claim about the instance, not about what the next request
+// sees: the manager persists the new config and closes the driver before calling
+// commit, so a later request is served by a fresh instance built from the persisted
+// key regardless.
+func TestAWSDriver_CommitRotation_VerifyFailureKeepsInstanceOnOldKey(t *testing.T) {
+	var mu sync.Mutex
+	var requests []stsRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		action, auth := r.Form.Get("Action"), r.Header.Get("Authorization")
+		mu.Lock()
+		requests = append(requests, stsRequest{action: action, scope: auth})
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/xml")
+		// The new key is rejected; the old one still works.
+		if strings.Contains(auth, "AKIANEWEXAMPLEKEY000") {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <Error><Type>Sender</Type><Code>InvalidClientTokenId</Code><Message>invalid key</Message></Error>
+</ErrorResponse>`))
+			return
+		}
+		switch action {
+		case "GetCallerIdentity":
+			_, _ = w.Write([]byte(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/w</Arn><UserId>AIDA</UserId><Account>123456789012</Account></GetCallerIdentityResult>
+</GetCallerIdentityResponse>`))
+		default:
+			_, _ = w.Write([]byte(`<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult><Credentials>
+    <AccessKeyId>ASIAEXAMPLE</AccessKeyId><SecretAccessKey>s</SecretAccessKey>
+    <SessionToken>t</SessionToken><Expiration>2035-01-01T00:00:00Z</Expiration>
+  </Credentials><AssumedRoleUser><Arn>arn:aws:sts::1:assumed-role/App/w</Arn><AssumedRoleId>AROA:w</AssumedRoleId></AssumedRoleUser></AssumeRoleResult>
+</AssumeRoleResponse>`))
+		}
+	}))
+	defer srv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
+		"secret_access_key": "old-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      srv.URL,
+	}, log)
+	require.NoError(t, err)
+	awsDrv := drv.(*AWSDriver)
+
+	err = awsDrv.CommitRotation(context.TODO(), map[string]string{
+		"access_key_id":     "AKIANEWEXAMPLEKEY000",
+		"secret_access_key": "new-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      srv.URL,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to authenticate with new IAM keys")
+
+	// The instance still mints, still on the old key.
+	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
+		Name: "role",
+		Config: map[string]string{
+			"mint_method": "sts_assume_role",
+			"role_arn":    "arn:aws:iam::123456789012:role/App",
+			"ttl":         "1h",
+		},
+	})
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var lastAssume string
+	for _, r := range requests {
+		if r.action == "AssumeRole" {
+			lastAssume = r.scope
+		}
+	}
+	assert.Contains(t, lastAssume, "AKIAOLDEXAMPLEKEY000",
+		"a failed commit must not leave the instance signing with the key it could not verify")
+}
+
+// TestAWSDriver_CommitRotation_SwapsAfterVerify: the happy path still swaps, and
+// the next mint signs with the new key.
+func TestAWSDriver_CommitRotation_SwapsAfterVerify(t *testing.T) {
+	stub := newConcurrentSTSStub(t)
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
+		"secret_access_key": "old-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      stub.srv.URL,
+	}, log)
+	require.NoError(t, err)
+	awsDrv := drv.(*AWSDriver)
+
+	require.NoError(t, awsDrv.CommitRotation(context.TODO(), map[string]string{
+		"access_key_id":     "AKIANEWEXAMPLEKEY000",
+		"secret_access_key": "new-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      stub.srv.URL,
+	}))
+
+	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
+		Name: "role",
+		Config: map[string]string{
+			"mint_method": "sts_assume_role",
+			"role_arn":    "arn:aws:iam::123456789012:role/App",
+			"ttl":         "1h",
+		},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, lastAssumeRoleScope(t, stub), "AKIANEWEXAMPLEKEY000")
+}
+
+// TestAWSDriver_CleanupRotation_DeactivatesThenDeletes: the order is what makes an
+// interrupted cleanup attributable to this source at the next prepare.
+func TestAWSDriver_CleanupRotation_DeactivatesThenDeletes(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+	var calls []iamCall
+	var mu sync.Mutex
+	iamSrv := iamStub(t, &calls, &mu, iamStubOpts{})
+
+	awsDrv := rotationDriver(t, stsSrv.srv.URL, iamSrv.URL, "AKIANEWEXAMPLEKEY000")
+
+	require.NoError(t, awsDrv.CleanupRotation(context.TODO(), map[string]string{
+		"access_key_id": "AKIAOLDEXAMPLEKEY000",
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"UpdateAccessKey", "DeleteAccessKey"}, iamActionsOf(calls))
+	assert.Equal(t, "Inactive", calls[0].status)
+	for _, c := range calls {
+		assert.Equal(t, "AKIAOLDEXAMPLEKEY000", c.keyID)
+	}
+}
+
+// TestAWSDriver_CleanupRotation_ToleratesAlreadyGone: cleanup is retried on a
+// schedule, so a key deleted out of band must not keep it retrying forever.
+func TestAWSDriver_CleanupRotation_ToleratesAlreadyGone(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+	var calls []iamCall
+	var mu sync.Mutex
+	iamSrv := iamStub(t, &calls, &mu, iamStubOpts{noSuchEntity: true})
+
+	awsDrv := rotationDriver(t, stsSrv.srv.URL, iamSrv.URL, "AKIANEWEXAMPLEKEY000")
+
+	require.NoError(t, awsDrv.CleanupRotation(context.TODO(), map[string]string{
+		"access_key_id": "AKIAOLDEXAMPLEKEY000",
+	}))
 }
