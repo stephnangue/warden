@@ -92,9 +92,9 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 		{
 			name:       "unsupported source type",
 			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci"},
-			sourceType: credential.SourceTypeAWS,
+			sourceType: credential.SourceTypeAzure,
 			wantErr:    true,
-			errMsg:     "require an hvault source",
+			errMsg:     "require an hvault or aws source",
 		},
 		{
 			name:       "wrong mint_method",
@@ -116,6 +116,121 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 			sourceType: credential.SourceTypeVault,
 			wantErr:    true,
 			errMsg:     "secret_path",
+		},
+
+		// An aws source reads a stored secret and vends it verbatim.
+		{
+			name:       "aws secret_read",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/datadog/keys"},
+			sourceType: credential.SourceTypeAWS,
+		},
+		{
+			name:       "aws secret_read with selection keys",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app", "version_stage": "AWSCURRENT", "json_key_map": "k=api_key"},
+			sourceType: credential.SourceTypeAWS,
+		},
+		{
+			name:       "aws secret_read without secret_id",
+			config:     map[string]string{"mint_method": "secret_read"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "'secret_id' is required when mint_method is secret_read",
+		},
+		{
+			name:       "keyless aws secret_read without role_arn",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app", "subject_token_source": "warden_identity"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "'role_arn' is required for keyless secret_read",
+		},
+		{
+			name:       "keyless aws secret_read with role_arn",
+			config: map[string]string{
+				"mint_method": "secret_read", "secret_id": "prod/app",
+				"subject_token_source": "warden_identity", "role_arn": "arn:aws:iam::1:role/R",
+			},
+			sourceType: credential.SourceTypeAWS,
+		},
+
+		// Neither source may claim the other's mint method.
+		{
+			name:       "vault mint method on an aws source",
+			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "must be 'secret_read' for a key_value credential on an aws source",
+		},
+		{
+			name:       "transit_signer on an aws source",
+			config:     map[string]string{"mint_method": "transit_signer", "transit_key": "k", "jwt_role": "r"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "must be 'secret_read' for a key_value credential on an aws source",
+		},
+		{
+			name:       "aws mint method on an hvault source",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "must be 'kv2_read' or 'transit_signer' for a key_value credential on an hvault source",
+		},
+
+		// A locator belonging to the other source would be accepted by the schema and
+		// then never read, leaving a spec that reads as configured for something it
+		// is not doing.
+		{
+			name:       "aws locator on an hvault spec",
+			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci", "secret_id": "prod/app"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "'secret_id' does not apply to mint_method=kv2_read",
+		},
+		{
+			name:       "aws role_arn on a transit_signer spec",
+			config:     map[string]string{"mint_method": "transit_signer", "transit_key": "k", "jwt_role": "r", "role_arn": "arn:aws:iam::1:role/R"},
+			sourceType: credential.SourceTypeVault,
+			wantErr:    true,
+			errMsg:     "'role_arn' does not apply to mint_method=transit_signer",
+		},
+		{
+			name:       "vault locator on an aws spec",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app", "kv2_mount": "secret"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "'kv2_mount' does not apply to mint_method=secret_read",
+		},
+		{
+			name:       "transit locator on an aws spec",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app", "signing_alg": "rsa-pss-sha256"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "'signing_alg' does not apply to mint_method=secret_read",
+		},
+		{
+			name:       "pinned transit key version on an aws spec",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app", "transit_key_version": "3"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "'transit_key_version' does not apply to mint_method=secret_read",
+		},
+		{
+			// The passthrough bag is named by the operator, so it is refused by
+			// prefix rather than by enumerating keys that cannot be enumerated.
+			name:       "transit payload passthrough on an aws spec",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app", "payload.client_id": "abc"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "'payload.client_id' does not apply to mint_method=secret_read",
+		},
+		{
+			// The driver only refuses credential_type when the operator omits
+			// `type` entirely, so an explicit key_value spec would otherwise carry
+			// a shape selector that selects nothing.
+			name:       "credential_type on an aws secret_read spec",
+			config:     map[string]string{"mint_method": "secret_read", "secret_id": "prod/app", "credential_type": "api_key"},
+			sourceType: credential.SourceTypeAWS,
+			wantErr:    true,
+			errMsg:     "'credential_type' does not apply to mint_method=secret_read",
 		},
 	}
 

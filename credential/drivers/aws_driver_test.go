@@ -2523,3 +2523,189 @@ func TestAWSAssertionResource_TemplatedSecretIDStaysRaw(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "aws-secretsmanager:prod/users/{{user.sub}}/datadog", got)
 }
+
+// =============================================================================
+// secret_read
+// =============================================================================
+
+// TestAWSDriver_SecretRead_Static_HappyPath pins the contract that makes this
+// method usable as a chaining source: the whole payload is vended under its own
+// key names, with no lease. A referenced credential carrying a lease is refused
+// outright by the chaining machinery, so the empty leaseID is load-bearing.
+func TestAWSDriver_SecretRead_Static_HappyPath(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+
+	var target, authScope string
+	smSrv := smStub(t, `{"api_key":"dd-key","application_key":"dd-app-key"}`, &target, &authScope)
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key":       "secret",
+		"region":                  "us-east-1",
+		"sts_endpoint":            stsSrv.srv.URL,
+		"secretsmanager_endpoint": smSrv.URL,
+	}, log)
+	require.NoError(t, err)
+
+	rawData, metadata, ttl, leaseID, err := drv.MintCredential(context.TODO(), &credential.CredSpec{
+		Name:   "datadog-keys",
+		Config: map[string]string{"mint_method": "secret_read", "secret_id": "prod/datadog/keys"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, target, "GetSecretValue")
+	assert.Equal(t, "dd-key", rawData["api_key"])
+	assert.Equal(t, "dd-app-key", rawData["application_key"])
+	assert.Nil(t, metadata)
+	assert.Equal(t, time.Duration(0), ttl)
+	assert.Equal(t, "", leaseID, "a chaining source must vend no lease")
+
+	// The payload has to survive parsing with every key intact, which is the whole
+	// point of the type this method infers.
+	cred, err := types.NewKeyValueCredType().Parse(rawData, metadata, ttl, leaseID)
+	require.NoError(t, err)
+	require.NoError(t, types.NewKeyValueCredType().Validate(cred))
+	assert.Equal(t, credential.TypeKeyValue, cred.Type)
+	assert.Equal(t, "dd-key", cred.Data["api_key"])
+	assert.Equal(t, "dd-app-key", cred.Data["application_key"])
+	assert.False(t, cred.Revocable)
+}
+
+func TestAWSDriver_SecretRead_WebIdentity_HappyPath(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+
+	var target, authScope string
+	smSrv := smStub(t, `{"api_key":"dd-key","application_key":"dd-app-key"}`, &target, &authScope)
+	defer smSrv.Close()
+
+	drv := federatedSecretsManagerDriver(t, stsSrv.srv.URL, smSrv.URL)
+
+	rawData, _, ttl, leaseID, err := drv.MintCredentialWithExchange(context.TODO(),
+		&credential.CredSpec{Name: "datadog-keys", Config: map[string]string{
+			"mint_method": "secret_read",
+			"secret_id":   "prod/datadog/keys",
+			"role_arn":    "arn:aws:iam::123456789012:role/App",
+		}},
+		&credential.ExchangeInputs{SubjectToken: "eyJ.warden.assertion", SubjectTokenType: credential.TokenTypeJWT})
+	require.NoError(t, err)
+	assert.Contains(t, target, "GetSecretValue")
+	assert.Contains(t, authScope, "ASIAEXAMPLE", "the fetch must be signed with the federated credentials")
+	assert.Equal(t, "dd-key", rawData["api_key"])
+	assert.Equal(t, time.Duration(0), ttl)
+	assert.Equal(t, "", leaseID)
+}
+
+// TestAWSDriver_SecretRead_SelectionKeys: secret_read reads the same store as
+// secrets_manager, so it honours the same projection and revision keys.
+func TestAWSDriver_SecretRead_SelectionKeys(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+
+	var gotBody map[string]string
+	smSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"Name":"prod/app","SecretString":"{\"k\":\"v\",\"drop\":\"me\"}"}`))
+	}))
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key":       "secret",
+		"region":                  "us-east-1",
+		"sts_endpoint":            stsSrv.srv.URL,
+		"secretsmanager_endpoint": smSrv.URL,
+	}, log)
+	require.NoError(t, err)
+
+	rawData, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{
+		Name: "sm",
+		Config: map[string]string{
+			"mint_method":   "secret_read",
+			"secret_id":     "prod/app",
+			"version_stage": "AWSPREVIOUS",
+			"version_id":    "abc-123",
+			"json_key_map":  "k=api_key",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "AWSPREVIOUS", gotBody["VersionStage"])
+	assert.Equal(t, "abc-123", gotBody["VersionId"])
+	assert.Equal(t, "v", rawData["api_key"])
+	assert.NotContains(t, rawData, "drop", "an unnamed key must not be vended")
+}
+
+func TestAWSDriverFactory_InferCredentialType_SecretRead(t *testing.T) {
+	factory := &AWSDriverFactory{}
+
+	got, err := factory.InferCredentialType(map[string]string{"mint_method": "secret_read"})
+	require.NoError(t, err)
+	assert.Equal(t, credential.TypeKeyValue, got)
+
+	// There is no shape to select when the payload is vended verbatim.
+	_, err = factory.InferCredentialType(map[string]string{"mint_method": "secret_read", "credential_type": "api_key"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential_type is only valid with mint_method=secrets_manager")
+}
+
+// TestAWSDriver_SecretRead_StaticSourceRefusesExchange: a chaining source must set
+// subject_token_source, which forces the exchange path, which a static source
+// cannot serve. The spec writes fine — the store skips test-minting an exchange
+// spec — so mint time is the only place this is enforced.
+//
+// The guard itself predates secret_read and fires before the mint-method switch;
+// this pins that secret_read inherits it rather than routing around it.
+func TestAWSDriver_SecretRead_StaticSourceRefusesExchange(t *testing.T) {
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{}},
+		logger:     log,
+	}
+
+	_, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(),
+		&credential.CredSpec{Name: "sm", Config: map[string]string{
+			"mint_method": "secret_read", "secret_id": "prod/app", "role_arn": "arn:aws:iam::1:role/R",
+		}},
+		&credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenType: credential.TokenTypeJWT})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires auth_method=oidc_federation on the source")
+}
+
+func TestAWSAssertionResource_SecretRead(t *testing.T) {
+	got, ok := awsAssertionResource(map[string]string{
+		"mint_method": "secret_read",
+		"secret_id":   "prod/datadog/keys",
+	})
+	require.True(t, ok)
+	assert.Equal(t, "aws-secretsmanager:prod/datadog/keys", got)
+}
+
+func TestAWSDriver_SecretRead_UnsupportedMethodMessages(t *testing.T) {
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+
+	static := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{
+			"access_key_id": "AKIAIOSFODNN7EXAMPLE", "secret_access_key": "secret", "region": "us-east-1",
+		}},
+		logger: log,
+		region: "us-east-1",
+	}
+	primeClients(static)
+
+	_, _, _, _, err := static.MintCredential(context.TODO(),
+		&credential.CredSpec{Name: "x", Config: map[string]string{"mint_method": "nope"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "'secret_read'")
+
+	federated := &AWSDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS,
+			Config: map[string]string{"auth_method": "oidc_federation"}},
+		logger: log,
+	}
+	_, _, _, _, err = federated.MintCredentialWithExchange(context.TODO(),
+		&credential.CredSpec{Name: "x", Config: map[string]string{"mint_method": "nope"}},
+		&credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenType: credential.TokenTypeJWT})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret_read")
+}

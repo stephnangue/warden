@@ -275,7 +275,7 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		if config["mint_method"] != "secrets_manager" {
 			return fmt.Errorf("'mint_method' must be 'secrets_manager' for an aws source, got: %s", config["mint_method"])
 		}
-		return validateAWSSecretsManagerSpecConfig(config)
+		return validateAWSSecretsManagerSpecConfig(config, "secrets_manager")
 	case credential.SourceTypeElastic:
 		// The key is created at the cluster on every mint, so the spec carries
 		// none. What it carries is the shape of the key to create.

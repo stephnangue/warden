@@ -3054,3 +3054,84 @@ func TestCredentialConfigStore_ValidateSpec_GrafanaChainedTokenExpiryIsCapped(t 
 		require.NoError(t, store.CreateSpec(ctx, spec("gf-short", "gf-chained", "1h")))
 	})
 }
+
+// An aws source can now be a chaining source, which means a key_value spec reading
+// a stored secret must survive the whole write-time chain — the type's own
+// validation, the stored-secret selection keys, and the reference check that runs
+// when a consumer names it. Each layer is unit-tested on its own; only here do they
+// run in the order and combination a real write uses.
+//
+// The driver registry is left nil so the create-time test mint is skipped: what is
+// under test is validation, which needs no account.
+func TestCredentialConfigStore_ValidateSpec_AWSKeyValueChainingSource(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	store.core.credentialDriverRegistry = nil
+
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: map[string]string{"auth_method": "oidc_federation", "region": "eu-west-1"},
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "datadog-src", Type: credential.SourceTypeAPIKey,
+		Config: map[string]string{"credential_fields": "application_key"},
+	}))
+
+	referenced := func(name string, extra map[string]string) *credential.CredSpec {
+		cfg := map[string]string{
+			"mint_method":          "secret_read",
+			"secret_id":            "prod/datadog/keys",
+			"role_arn":             "arn:aws:iam::123456789012:role/WardenSecretsReader",
+			"subject_token_source": "warden_identity",
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return &credential.CredSpec{
+			Name: name, Type: credential.TypeKeyValue, Source: "aws-fed",
+			MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: cfg,
+		}
+	}
+
+	t.Run("the referenced spec is writable", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, referenced("datadog-keys-in-aws", nil)))
+	})
+
+	t.Run("a consumer may chain off it", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "datadog-cred", Type: credential.TypeAPIKey, Source: "datadog-src",
+			MinTTL: 5 * time.Minute, MaxTTL: time.Hour,
+			Config: map[string]string{
+				credential.ConfigSecretSpec:  "datadog-keys-in-aws",
+				credential.ConfigSecretField: "api_key",
+			},
+		}))
+	})
+
+	t.Run("and cannot be deleted while it is consumed", func(t *testing.T) {
+		err := store.DeleteSpec(ctx, "datadog-keys-in-aws")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "referenced")
+	})
+
+	// The selection keys are owned by a validator outside the type, so a spec that
+	// reaches for the wrong one has to be refused here rather than by key_value.
+	t.Run("a numbered revision is refused, since this store does not spell one", func(t *testing.T) {
+		err := store.CreateSpec(ctx, referenced("pinned-by-number", map[string]string{"secret_version": "3"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "'secret_version' pins a revision")
+	})
+
+	t.Run("a field selection is accepted, since the payload is a document", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx,
+			referenced("projected", map[string]string{"json_key_map": "api_key=api_key"})))
+	})
+
+	t.Run("a locator belonging to the other store is refused", func(t *testing.T) {
+		err := store.CreateSpec(ctx, referenced("wrong-store", map[string]string{"kv2_mount": "secret"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "'kv2_mount' does not apply to mint_method=secret_read")
+	})
+}
