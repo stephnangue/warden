@@ -86,6 +86,9 @@ func TestMain(m *testing.M) {
 	if ibmIAMStub != nil {
 		ibmIAMStub.Close()
 	}
+	if awsStub != nil {
+		awsStub.Close()
+	}
 	if ovhS3 != nil {
 		ovhS3.Close()
 	}
