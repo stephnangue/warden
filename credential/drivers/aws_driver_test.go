@@ -12,8 +12,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/logger"
@@ -1568,4 +1570,259 @@ func TestAWSDriver_FederatedSecretsManagerUsesConfiguredTransport(t *testing.T) 
 	assert.Contains(t, target, "GetSecretValue")
 	assert.Contains(t, authScope, "ASIAEXAMPLE")
 	assert.Equal(t, "federated", rawData["api_key"])
+}
+
+// =============================================================================
+// Malformed responses
+// =============================================================================
+
+func TestValidSTSCredentials(t *testing.T) {
+	full := func() *ststypes.Credentials {
+		return &ststypes.Credentials{
+			AccessKeyId:     aws.String("ASIA"),
+			SecretAccessKey: aws.String("s"),
+			SessionToken:    aws.String("t"),
+			Expiration:      aws.Time(time.Now().Add(time.Hour)),
+		}
+	}
+
+	tests := []struct {
+		name   string
+		creds  func() *ststypes.Credentials
+		errMsg string
+	}{
+		{name: "complete", creds: full},
+		{
+			name:   "no block",
+			creds:  func() *ststypes.Credentials { return nil },
+			errMsg: "returned no credentials block",
+		},
+		{
+			name:   "no access key id",
+			creds:  func() *ststypes.Credentials { c := full(); c.AccessKeyId = nil; return c },
+			errMsg: "no AccessKeyId",
+		},
+		{
+			name:   "no secret access key",
+			creds:  func() *ststypes.Credentials { c := full(); c.SecretAccessKey = nil; return c },
+			errMsg: "no SecretAccessKey",
+		},
+		{
+			name:   "no session token",
+			creds:  func() *ststypes.Credentials { c := full(); c.SessionToken = nil; return c },
+			errMsg: "no SessionToken",
+		},
+		{
+			name:   "no expiration",
+			creds:  func() *ststypes.Credentials { c := full(); c.Expiration = nil; return c },
+			errMsg: "no Expiration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validSTSCredentials(tt.creds(), "STS AssumeRole for arn:x")
+			if tt.errMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+			assert.Contains(t, err.Error(), "arn:x", "the error must name the call it came from")
+		})
+	}
+}
+
+// malformedSTSStub answers the assume-role calls with the given credentials XML
+// fragment, so a test can omit the block entirely or leave one field out of it.
+// GetCallerIdentity always succeeds, so Create gets far enough to reach the call
+// under test.
+func malformedSTSStub(t *testing.T, credsXML string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml")
+		switch r.Form.Get("Action") {
+		case "GetCallerIdentity":
+			_, _ = w.Write([]byte(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/w</Arn><UserId>AIDA</UserId><Account>123456789012</Account></GetCallerIdentityResult>
+</GetCallerIdentityResponse>`))
+		case "AssumeRoleWithWebIdentity":
+			_, _ = w.Write([]byte(`<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>` + credsXML + `</AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`))
+		default:
+			_, _ = w.Write([]byte(`<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult>` + credsXML + `</AssumeRoleResult>
+</AssumeRoleResponse>`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+const (
+	// noCredentialsBlock is a 200 whose result carries no <Credentials> at all —
+	// the SDK leaves the struct nil.
+	noCredentialsBlock = `<AssumedRoleUser><Arn>arn:aws:sts::1:assumed-role/App/w</Arn><AssumedRoleId>AROA:w</AssumedRoleId></AssumedRoleUser>`
+
+	// partialCredentialsBlock has the struct but omits one field, which the SDK
+	// leaves as a nil pointer inside a non-nil struct.
+	partialCredentialsBlock = `<Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>`
+)
+
+// TestAWSDriver_MintViaSTSAssumeRole_MalformedResponse: a half-formed 200 must
+// surface as an error naming the missing field, not a panic in the broker.
+func TestAWSDriver_MintViaSTSAssumeRole_MalformedResponse(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		xml    string
+		errMsg string
+	}{
+		{"no credentials block", noCredentialsBlock, "returned no credentials block"},
+		{"missing secret access key", partialCredentialsBlock, "no SecretAccessKey"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := malformedSTSStub(t, tt.xml)
+
+			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+			drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+				"secret_access_key": "secret",
+				"region":            "us-east-1",
+				"sts_endpoint":      srv.URL,
+			}, log)
+			require.NoError(t, err)
+
+			_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
+				Name: "role",
+				Config: map[string]string{
+					"mint_method": "sts_assume_role",
+					"role_arn":    "arn:aws:iam::123456789012:role/App",
+					"ttl":         "1h",
+				},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+// TestAWSDriver_WebIdentity_MalformedResponse covers the same on the keyless path.
+// The guard there also protects the credential provider the federated secret fetch
+// is built from, whose fields are read through aws.ToString and would otherwise
+// become empty strings rather than panicking — a request signed with nothing.
+func TestAWSDriver_WebIdentity_MalformedResponse(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		xml    string
+		errMsg string
+	}{
+		{"no credentials block", noCredentialsBlock, "returned no credentials block"},
+		{"missing secret access key", partialCredentialsBlock, "no SecretAccessKey"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := malformedSTSStub(t, tt.xml)
+
+			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+			drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+				"auth_method":  "oidc_federation",
+				"region":       "us-east-1",
+				"sts_endpoint": srv.URL,
+			}, log)
+			require.NoError(t, err)
+
+			spec := &credential.CredSpec{Name: "wid", Config: map[string]string{
+				"mint_method": "sts_assume_role",
+				"role_arn":    "arn:aws:iam::123456789012:role/App",
+				"ttl":         "15m",
+			}}
+			_, _, _, _, err = drv.(*AWSDriver).MintCredentialWithExchange(context.TODO(), spec,
+				&credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenType: credential.TokenTypeJWT})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+// TestAWSDriver_Create_AssumeRoleSource_MalformedResponse: the same guard on the
+// source-creation path, where a nil dereference would take down a write rather
+// than a mint.
+func TestAWSDriver_Create_AssumeRoleSource_MalformedResponse(t *testing.T) {
+	srv := malformedSTSStub(t, noCredentialsBlock)
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	_, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key": "secret",
+		"region":            "us-east-1",
+		"assume_role_arn":   "arn:aws:iam::123456789012:role/WardenSourceRole",
+		"sts_endpoint":      srv.URL,
+	}, log)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "returned no credentials block")
+}
+
+func TestValidNewIAMAccessKey(t *testing.T) {
+	require.NoError(t, validNewIAMAccessKey(&iamtypes.AccessKey{
+		AccessKeyId: aws.String("AKIA"), SecretAccessKey: aws.String("s"),
+	}))
+
+	err := validNewIAMAccessKey(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no access key")
+
+	err = validNewIAMAccessKey(&iamtypes.AccessKey{SecretAccessKey: aws.String("s")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no AccessKeyId")
+
+	err = validNewIAMAccessKey(&iamtypes.AccessKey{AccessKeyId: aws.String("AKIA")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no SecretAccessKey")
+}
+
+// TestAWSDriver_PrepareRotation_MalformedCreateKeyResponse: rotation must refuse a
+// key it cannot fully read rather than persist a half-empty credential as the
+// source's only key.
+func TestAWSDriver_PrepareRotation_MalformedCreateKeyResponse(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+
+	iamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml")
+		if r.Form.Get("Action") == "ListAccessKeys" {
+			_, _ = w.Write([]byte(`<ListAccessKeysResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListAccessKeysResult><IsTruncated>false</IsTruncated><AccessKeyMetadata>
+    <member><UserName>w</UserName><AccessKeyId>AKIAOLDEXAMPLEKEY000</AccessKeyId><Status>Active</Status></member>
+  </AccessKeyMetadata></ListAccessKeysResult>
+</ListAccessKeysResponse>`))
+			return
+		}
+		// A CreateAccessKey whose key carries no secret.
+		_, _ = w.Write([]byte(`<CreateAccessKeyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <CreateAccessKeyResult><AccessKey>
+    <UserName>w</UserName><AccessKeyId>AKIAMINTEDEXAMPLE000</AccessKeyId><Status>Active</Status>
+  </AccessKey></CreateAccessKeyResult>
+</CreateAccessKeyResponse>`))
+	}))
+	defer iamSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
+		"secret_access_key": "old-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      stsSrv.srv.URL,
+	}, log)
+	require.NoError(t, err)
+	awsDrv := drv.(*AWSDriver)
+	awsDrv.iamTestEndpoint = iamSrv.URL
+
+	_, _, _, err = awsDrv.PrepareRotation(context.TODO())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no SecretAccessKey")
 }
