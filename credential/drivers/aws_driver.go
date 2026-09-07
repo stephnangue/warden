@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -174,12 +176,18 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 			Example("sts.amazonaws.com"),
 
 		credential.StringField("sts_endpoint").
+			Custom(validateAWSEndpoint).
 			Describe("Override where STS calls are sent, including the credential probe run when this source is written (default: the SDK's regional endpoint). Does not apply to the IAM, Redshift or RDS clients").
 			Example("https://sts.us-east-1.amazonaws.com"),
 
 		credential.StringField("secretsmanager_endpoint").
+			Custom(validateAWSEndpoint).
 			Describe("Override where Secrets Manager calls are sent (default: the SDK's regional endpoint)").
 			Example("https://secretsmanager.us-east-1.amazonaws.com"),
+
+		credential.DurationField("activation_delay").
+			Describe("Wait between creating a new IAM key and activating it, for propagation (default: 5m)").
+			Example("5m"),
 
 		credential.StringField("ca_data").
 			Custom(ValidateCAData).
@@ -215,6 +223,38 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// validateAWSEndpoint checks an endpoint override is a URL the SDK can actually
+// send to. A keyless source runs no probe when it is written, so without this a
+// typo surfaces only on the first request that needs it.
+func validateAWSEndpoint(v string) error {
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("endpoint is not a valid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("endpoint must use http or https scheme, got: %s", v)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("endpoint has no host: %s", v)
+	}
+	return nil
+}
+
+// ValidateRotationConfig refuses a rotation period on a source whose STS calls are
+// redirected. Rotation acts on the real account through IAM, which deliberately has
+// no override, so a source pointed at a stand-in would mint and verify against it
+// while trying to rotate keys that only exist somewhere else — failing on a loop
+// with no indication of why.
+func (f *AWSDriverFactory) ValidateRotationConfig(config map[string]string) error {
+	if credential.GetString(config, "sts_endpoint", "") == "" &&
+		credential.GetString(config, "secretsmanager_endpoint", "") == "" {
+		return nil
+	}
+	return fmt.Errorf("rotation_period cannot be set on a source that overrides sts_endpoint or " +
+		"secretsmanager_endpoint: rotation manages IAM keys in the real account, which those " +
+		"overrides do not redirect")
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
@@ -351,12 +391,17 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) (*awsClients, error)
 	sessionDuration := credential.GetDuration(d.credSource.Config, "session_duration", 1*time.Hour)
 	externalID := credential.GetString(d.credSource.Config, "external_id", "")
 
+	durationSeconds, err := awsSessionSeconds(sessionDuration, "session_duration")
+	if err != nil {
+		return nil, err
+	}
+
 	baseSTS := sts.NewFromConfig(d.awsConfig(d.baseCreds), d.stsOptions())
 
 	input := &sts.AssumeRoleInput{
 		RoleArn:         &assumeRoleArn,
 		RoleSessionName: &sessionName,
-		DurationSeconds: aws.Int32(int32(sessionDuration.Seconds())),
+		DurationSeconds: aws.Int32(durationSeconds),
 	}
 	if externalID != "" {
 		input.ExternalId = &externalID
@@ -555,7 +600,10 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, c *awsClients, spe
 		return nil, nil, 0, "", err
 	}
 
-	sessionName := credential.GetString(spec.Config, "session_name", fmt.Sprintf("warden-%s", spec.Name))
+	sessionName, err := awsSessionName(spec)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
 
 	ttlStr := credential.GetString(spec.Config, "ttl", "1h")
 	ttl, err := time.ParseDuration(ttlStr)
@@ -571,10 +619,15 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, c *awsClients, spe
 		return nil, nil, 0, "", fmt.Errorf("requested TTL %s exceeds maximum %s", ttl, spec.MaxTTL)
 	}
 
+	durationSeconds, err := awsSessionSeconds(ttl, "ttl")
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
 	input := &sts.AssumeRoleInput{
 		RoleArn:         &roleArn,
 		RoleSessionName: &sessionName,
-		DurationSeconds: aws.Int32(int32(ttl.Seconds())),
+		DurationSeconds: aws.Int32(durationSeconds),
 	}
 
 	if extID := credential.GetString(spec.Config, "external_id", ""); extID != "" {
@@ -763,13 +816,20 @@ func (d *AWSDriver) assumeRoleWithWebIdentity(ctx context.Context, spec *credent
 	if err != nil {
 		return nil, err
 	}
-	sessionName := credential.GetString(spec.Config, "session_name", fmt.Sprintf("warden-%s", spec.Name))
+	sessionName, err := awsSessionName(spec)
+	if err != nil {
+		return nil, err
+	}
+	durationSeconds, err := awsSessionSeconds(dur, "ttl")
+	if err != nil {
+		return nil, err
+	}
 
 	input := &sts.AssumeRoleWithWebIdentityInput{
 		RoleArn:          &roleArn,
 		RoleSessionName:  &sessionName,
 		WebIdentityToken: &webIdentityToken,
-		DurationSeconds:  aws.Int32(int32(dur.Seconds())),
+		DurationSeconds:  aws.Int32(durationSeconds),
 	}
 	if policy := credential.GetString(spec.Config, "policy", ""); policy != "" {
 		input.Policy = &policy
@@ -793,7 +853,11 @@ func (d *AWSDriver) assumeRoleWithWebIdentity(ctx context.Context, spec *credent
 // credential (mint_method=sts_assume_role over oidc_federation).
 func (d *AWSDriver) credsFromWebIdentity(spec *credential.CredSpec, result *sts.AssumeRoleWithWebIdentityOutput) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	roleArn := credential.GetString(spec.Config, "role_arn", "")
-	sessionName := credential.GetString(spec.Config, "session_name", fmt.Sprintf("warden-%s", spec.Name))
+	// Already validated by assumeRoleWithWebIdentity, which had to send it.
+	sessionName, err := awsSessionName(spec)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
 
 	creds := result.Credentials
 	leaseTTL := time.Until(*creds.Expiration)
@@ -1039,11 +1103,9 @@ func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, c *awsClients, 
 		deployment = "serverless"
 	}
 
-	leaseTTL := time.Duration(durationSeconds) * time.Second
-	if expiration != nil {
-		if remaining := time.Until(*expiration); remaining > 0 {
-			leaseTTL = remaining
-		}
+	leaseTTL, err := redshiftLeaseTTL(durationSeconds, expiration)
+	if err != nil {
+		return nil, nil, 0, "", err
 	}
 
 	rawData := map[string]interface{}{
@@ -1106,6 +1168,65 @@ func (d *AWSDriver) Cleanup(ctx context.Context) error {
 func (d *AWSDriver) SupportsRotation() bool {
 	accessKeyID := credential.GetString(d.sourceConfig(), "access_key_id", "")
 	return strings.HasPrefix(accessKeyID, "AKIA")
+}
+
+// STS accepts a session duration between 15 minutes and 12 hours. A role's own
+// maximum may be lower, which stays AWS's error to raise — this only rejects what
+// no role could accept.
+const (
+	minSTSSessionDuration = 15 * time.Minute
+	maxSTSSessionDuration = 12 * time.Hour
+)
+
+// awsSessionSeconds converts a session duration for an STS DurationSeconds field.
+// Rejecting out-of-range values here turns an opaque service-side ValidationError
+// into one naming the config key, and stops an absurd duration from wrapping the
+// int32 conversion into a negative number the service would read as something else
+// entirely.
+func awsSessionSeconds(dur time.Duration, field string) (int32, error) {
+	if dur < minSTSSessionDuration {
+		return 0, fmt.Errorf("'%s' must be at least %s (the AWS STS minimum), got %s", field, minSTSSessionDuration, dur)
+	}
+	if dur > maxSTSSessionDuration {
+		return 0, fmt.Errorf("'%s' must be at most %s (the AWS STS maximum), got %s", field, maxSTSSessionDuration, dur)
+	}
+	return int32(dur.Seconds()), nil
+}
+
+// awsSessionNamePattern is the character set and length AWS accepts for a
+// RoleSessionName.
+var awsSessionNamePattern = regexp.MustCompile(`^[\w+=,.@-]{2,64}$`)
+
+// awsSessionName resolves the session name for an assume-role and checks it
+// against what AWS will accept. The default is derived from the spec's name, so a
+// spec named in a way AWS rejects would otherwise fail every mint with a service
+// error that never mentions the spec. Validated rather than sanitised: a silently
+// rewritten session name is what shows up in the audit trail on the other side.
+func awsSessionName(spec *credential.CredSpec) (string, error) {
+	name := credential.GetString(spec.Config, "session_name", fmt.Sprintf("warden-%s", spec.Name))
+	if !awsSessionNamePattern.MatchString(name) {
+		return "", fmt.Errorf(
+			"session name %q is not accepted by AWS (2-64 characters of [A-Za-z0-9_+=,.@-]); "+
+				"set 'session_name' on the spec to override the default derived from its name", name)
+	}
+	return name, nil
+}
+
+// redshiftLeaseTTL derives the lease from what Redshift reported. An expiration
+// already in the past means the credentials are dead on arrival — clock skew, or a
+// cached response — and reporting the full requested duration for them would hand
+// out a lease that was never valid. Mirrors the assume-role path, which rejects a
+// non-positive TTL rather than substituting one.
+func redshiftLeaseTTL(durationSeconds int, expiration *time.Time) (time.Duration, error) {
+	if expiration == nil {
+		return time.Duration(durationSeconds) * time.Second, nil
+	}
+	remaining := time.Until(*expiration)
+	if remaining <= 0 {
+		return 0, fmt.Errorf("Redshift credentials expired at %s, before they could be issued",
+			expiration.UTC().Format(time.RFC3339))
+	}
+	return remaining, nil
 }
 
 // isIAMNoSuchEntity reports whether an error means the key is already gone, which
