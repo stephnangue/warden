@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1051,7 +1050,7 @@ func TestAWSDriver_EndpointOverride_AssumeRoleSource(t *testing.T) {
 }
 
 // TestAWSDriver_EndpointOverride_SecretsManagerMint proves the override reaches the
-// Secrets Manager client built by buildClients, i.e. the static mint path.
+// Secrets Manager client in the driver's client generation, i.e. the static mint path.
 func TestAWSDriver_EndpointOverride_SecretsManagerMint(t *testing.T) {
 	var actions []string
 	stsSrv := stsStub(t, &actions)
@@ -1151,13 +1150,16 @@ func TestAWSDriver_EndpointOverride_AbsentLeavesResolverAlone(t *testing.T) {
 // it from many goroutines at once, so it records under a mutex and reports the
 // SigV4 scope of every request it saw.
 type concurrentSTSStub struct {
-	mu     sync.Mutex
-	scopes []string
-	srv    *httptest.Server
-	// beforeRespond, when set, runs while the AssumeRole request is in flight —
-	// the seam a rotation needs to land in the middle of a mint.
-	beforeRespond func()
-	once          sync.Once
+	mu       sync.Mutex
+	requests []stsRequest
+	srv      *httptest.Server
+}
+
+// stsRequest is one call the stub saw: the action and the SigV4 scope it was
+// signed with, which is how a test tells one key generation from another.
+type stsRequest struct {
+	action string
+	scope  string
 }
 
 func newConcurrentSTSStub(t *testing.T) *concurrentSTSStub {
@@ -1168,13 +1170,8 @@ func newConcurrentSTSStub(t *testing.T) *concurrentSTSStub {
 		action := r.Form.Get("Action")
 
 		s.mu.Lock()
-		s.scopes = append(s.scopes, r.Header.Get("Authorization"))
-		hook := s.beforeRespond
+		s.requests = append(s.requests, stsRequest{action: action, scope: r.Header.Get("Authorization")})
 		s.mu.Unlock()
-
-		if action == "AssumeRole" && hook != nil {
-			s.once.Do(hook)
-		}
 
 		w.Header().Set("Content-Type", "text/xml")
 		switch action {
@@ -1200,11 +1197,6 @@ func newConcurrentSTSStub(t *testing.T) *concurrentSTSStub {
 	return s
 }
 
-func (s *concurrentSTSStub) scopesSeen() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.scopes...)
-}
 
 // TestAWSDriver_ConcurrentMintAndRotationCommit drives mints and rotation commits
 // against one driver instance, which is how the registry hands drivers out. The
@@ -1212,7 +1204,7 @@ func (s *concurrentSTSStub) scopesSeen() []string {
 // were snapshotted, every commit rebuilt fields that in-flight mints were reading
 // without the lock.
 func TestAWSDriver_ConcurrentMintAndRotationCommit(t *testing.T) {
-	sts := newConcurrentSTSStub(t)
+	stub := newConcurrentSTSStub(t)
 
 	var target, authScope string
 	var smMu sync.Mutex
@@ -1230,7 +1222,7 @@ func TestAWSDriver_ConcurrentMintAndRotationCommit(t *testing.T) {
 		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key":       "secret0",
 		"region":                  "us-east-1",
-		"sts_endpoint":            sts.srv.URL,
+		"sts_endpoint":            stub.srv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
 	}
 	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
@@ -1288,15 +1280,15 @@ func TestAWSDriver_ConcurrentMintAndRotationCommit(t *testing.T) {
 // for: a commit landing in the middle of a mint must not change which credentials
 // that mint's request is signed with. The stub gives the rotation a deterministic
 // seam rather than racing it with a sleep.
-func TestAWSDriver_MintSignsWithOneGeneration(t *testing.T) {
-	sts := newConcurrentSTSStub(t)
+func TestAWSDriver_SnapshotSurvivesRotationCommit(t *testing.T) {
+	stub := newConcurrentSTSStub(t)
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	baseConfig := map[string]string{
 		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
 		"secret_access_key": "old-secret",
 		"region":            "us-east-1",
-		"sts_endpoint":      sts.srv.URL,
+		"sts_endpoint":      stub.srv.URL,
 	}
 	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
 	require.NoError(t, err)
@@ -1309,35 +1301,50 @@ func TestAWSDriver_MintSignsWithOneGeneration(t *testing.T) {
 	rotated["access_key_id"] = "AKIANEWEXAMPLEKEY000"
 	rotated["secret_access_key"] = "new-secret"
 
-	// Commit the rotation while the mint's AssumeRole is in flight.
-	sts.mu.Lock()
-	sts.beforeRespond = func() {
-		if err := awsDrv.CommitRotation(context.TODO(), rotated); err != nil {
-			t.Errorf("commit failed: %v", err)
+	// Take a generation the way a mint does, then rotate underneath it.
+	held, err := awsDrv.authenticate(context.TODO())
+	require.NoError(t, err)
+	require.NoError(t, awsDrv.CommitRotation(context.TODO(), rotated))
+
+	// The held generation still signs with the key it was built from. This is the
+	// property the snapshot exists for: a mint that authenticated before a commit
+	// finishes its calls on one set of credentials rather than a mixture.
+	_, err = held.sts.AssumeRole(context.TODO(), &sts.AssumeRoleInput{
+		RoleArn:         aws.String("arn:aws:iam::123456789012:role/App"),
+		RoleSessionName: aws.String("held"),
+	})
+	require.NoError(t, err)
+	assert.Contains(t, lastAssumeRoleScope(t, stub),"AKIAOLDEXAMPLEKEY000",
+		"a generation taken before the commit must keep signing with its own key")
+
+	// A fresh generation picks up the rotated key, and is not the held one.
+	fresh, err := awsDrv.authenticate(context.TODO())
+	require.NoError(t, err)
+	assert.NotSame(t, held, fresh, "the commit must drop the stale generation")
+
+	_, err = fresh.sts.AssumeRole(context.TODO(), &sts.AssumeRoleInput{
+		RoleArn:         aws.String("arn:aws:iam::123456789012:role/App"),
+		RoleSessionName: aws.String("fresh"),
+	})
+	require.NoError(t, err)
+	assert.Contains(t, lastAssumeRoleScope(t, stub),"AKIANEWEXAMPLEKEY000")
+}
+
+// lastAssumeRoleScope returns the SigV4 scope of the most recent AssumeRole the
+// stub saw. Filtering by action matters: the Create-time probe signs a
+// GetCallerIdentity with the pre-rotation key, so scanning every request would
+// find the old key whatever the code under test did.
+func lastAssumeRoleScope(t *testing.T, s *concurrentSTSStub) string {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.requests) - 1; i >= 0; i-- {
+		if s.requests[i].action == "AssumeRole" {
+			return s.requests[i].scope
 		}
 	}
-	sts.mu.Unlock()
-
-	spec := &credential.CredSpec{Name: "role", Config: map[string]string{
-		"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::123456789012:role/App", "ttl": "1h",
-	}}
-	_, _, _, _, err = drv.MintCredential(context.TODO(), spec)
-	require.NoError(t, err)
-
-	var assumeRoleScope string
-	for _, s := range sts.scopesSeen() {
-		if strings.Contains(s, "AKIAOLDEXAMPLEKEY000") {
-			assumeRoleScope = s
-		}
-	}
-	assert.NotEmpty(t, assumeRoleScope,
-		"the in-flight mint must stay signed with the key its snapshot was built from, not the one committed mid-request")
-
-	// And the next mint picks up the new generation.
-	_, _, _, _, err = drv.MintCredential(context.TODO(), spec)
-	require.NoError(t, err)
-	last := sts.scopesSeen()
-	assert.Contains(t, last[len(last)-1], "AKIANEWEXAMPLEKEY000")
+	t.Fatal("stub saw no AssumeRole request")
+	return ""
 }
 
 // TestAWSDriver_Create_ProbeTimesOut: an endpoint that accepts the connection and
@@ -1426,4 +1433,139 @@ func TestAWSDriver_MintViaRDSIAMToken_HappyPath(t *testing.T) {
 	assert.Nil(t, metadata)
 	assert.Equal(t, 15*time.Minute, ttl)
 	assert.Equal(t, "", leaseID)
+}
+
+// iamStub answers the IAM calls rotation makes, recording each action. IAM speaks
+// the same query/XML protocol as STS.
+// onCreateKey, when set, runs while the CreateAccessKey call is in flight — the
+// seam a rotation commit needs to land inside a prepare, after it has snapshotted
+// the config and before it builds its result from it.
+func iamStub(t *testing.T, actions *[]string, mu *sync.Mutex, onCreateKey func()) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		action := r.Form.Get("Action")
+		mu.Lock()
+		*actions = append(*actions, action)
+		mu.Unlock()
+
+		if action == "CreateAccessKey" && onCreateKey != nil {
+			onCreateKey()
+		}
+
+		w.Header().Set("Content-Type", "text/xml")
+		switch action {
+		case "ListAccessKeys":
+			_, _ = w.Write([]byte(`<ListAccessKeysResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListAccessKeysResult><IsTruncated>false</IsTruncated><AccessKeyMetadata>
+    <member><UserName>w</UserName><AccessKeyId>AKIAOLDEXAMPLEKEY000</AccessKeyId><Status>Active</Status></member>
+  </AccessKeyMetadata></ListAccessKeysResult>
+</ListAccessKeysResponse>`))
+		case "CreateAccessKey":
+			_, _ = w.Write([]byte(`<CreateAccessKeyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <CreateAccessKeyResult><AccessKey>
+    <UserName>w</UserName><AccessKeyId>AKIAMINTEDEXAMPLE000</AccessKeyId>
+    <SecretAccessKey>minted-secret</SecretAccessKey><Status>Active</Status>
+  </AccessKey></CreateAccessKeyResult>
+</CreateAccessKeyResponse>`))
+		default:
+			_, _ = w.Write([]byte(`<Response xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></Response>`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestAWSDriver_PrepareRotation_UsesOneConfigGeneration pins that prepare builds
+// its result from the config it snapshotted, not from whatever is live when it
+// finishes. Reading the live field would let a commit landing mid-prepare produce
+// a new config derived from one generation while cleanup names another's key.
+func TestAWSDriver_PrepareRotation_UsesOneConfigGeneration(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	baseConfig := map[string]string{
+		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
+		"secret_access_key": "old-secret",
+		"region":            "us-east-1",
+		"sts_endpoint":      stsSrv.srv.URL,
+		"activation_delay":  "7m",
+	}
+
+	var awsDrv *AWSDriver
+	var iamActions []string
+	var iamMu sync.Mutex
+
+	// The interloping commit fires while prepare's CreateAccessKey is in flight:
+	// after prepare snapshotted the config, before it builds its result from it.
+	iamSrv := iamStub(t, &iamActions, &iamMu, func() {
+		if err := awsDrv.CommitRotation(context.TODO(), map[string]string{
+			"access_key_id":     "AKIAINTERLOPERKEY000",
+			"secret_access_key": "interloper-secret",
+			"region":            "us-east-1",
+			"sts_endpoint":      stsSrv.srv.URL,
+			"activation_delay":  "99m",
+		}); err != nil {
+			t.Errorf("interloping commit failed: %v", err)
+		}
+	})
+
+	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
+	require.NoError(t, err)
+	awsDrv = drv.(*AWSDriver)
+	awsDrv.iamTestEndpoint = iamSrv.URL
+
+	newConfig, cleanupConfig, activateAfter, err := awsDrv.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+
+	// Everything prepare returns must come from one generation: the key it minted,
+	// plus the config it snapshotted — never the one the commit installed midway.
+	assert.Equal(t, "AKIAMINTEDEXAMPLE000", newConfig["access_key_id"])
+	assert.Equal(t, "minted-secret", newConfig["secret_access_key"])
+	assert.Equal(t, "AKIAOLDEXAMPLEKEY000", cleanupConfig["access_key_id"],
+		"cleanup must name the key that was current when prepare snapshotted")
+	assert.Equal(t, "7m", newConfig["activation_delay"],
+		"the carried-over config must come from the same snapshot as the old key id")
+	assert.Equal(t, 7*time.Minute, activateAfter)
+}
+
+// TestAWSDriver_FederatedSecretsManagerUsesConfiguredTransport: the keyless fetch
+// builds its Secrets Manager client per request, so it has to pick up the source's
+// transport too — otherwise the STS leg honours a custom CA and the fetch does not.
+func TestAWSDriver_FederatedSecretsManagerUsesConfiguredTransport(t *testing.T) {
+	var stsActions []string
+	stsSrv := stsStub(t, &stsActions)
+	defer stsSrv.Close()
+
+	var target, authScope string
+	smSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target, authScope = r.Header.Get("X-Amz-Target"), r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"Name":"prod/app","SecretString":"{\"api_key\":\"federated\"}"}`))
+	}))
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"auth_method":             "oidc_federation",
+		"region":                  "us-east-1",
+		"sts_endpoint":            stsSrv.URL,
+		"secretsmanager_endpoint": smSrv.URL,
+		"tls_skip_verify":         "true",
+	}, log)
+	require.NoError(t, err)
+
+	spec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+		"mint_method": "secrets_manager",
+		"secret_id":   "prod/app",
+		"role_arn":    "arn:aws:iam::123456789012:role/App",
+	}}
+	rawData, _, _, _, err := drv.(*AWSDriver).MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{
+		SubjectToken:     "eyJ.warden.assertion",
+		SubjectTokenType: credential.TokenTypeJWT,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, target, "GetSecretValue")
+	assert.Contains(t, authScope, "ASIAEXAMPLE")
+	assert.Equal(t, "federated", rawData["api_key"])
 }
