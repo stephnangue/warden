@@ -273,6 +273,12 @@ func (f *AWSDriverFactory) InferCredentialType(specConfig map[string]string) (st
 	switch mintMethod {
 	case "rds_iam_token", "redshift_iam_token":
 		return credential.TypeDBAuthToken, nil
+	case "secret_read":
+		// The same fetch as secrets_manager, but vended verbatim: an arbitrary
+		// payload under its own key names, with no primary field to select. That is
+		// the shape a chained consumer reads by name, so there is nothing for
+		// credential_type to choose between.
+		return credential.TypeKeyValue, nil
 	case "secrets_manager":
 		// A stored secret can hold different credential shapes; the spec selects one
 		// via credential_type (default: AWS access keys). This mirrors how a Vault
@@ -582,14 +588,14 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	switch mintMethod {
 	case "sts_assume_role":
 		return d.mintViaSTSAssumeRole(ctx, c, spec)
-	case "secrets_manager":
+	case "secrets_manager", "secret_read":
 		return d.mintViaSecretsManager(ctx, c, spec)
 	case "rds_iam_token":
 		return d.mintViaRDSIAMToken(ctx, c, spec)
 	case "redshift_iam_token":
 		return d.mintViaRedshiftIAMToken(ctx, c, spec)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', 'rds_iam_token', or 'redshift_iam_token'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', 'secret_read', 'rds_iam_token', or 'redshift_iam_token'", mintMethod)
 	}
 }
 
@@ -733,7 +739,7 @@ func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 			return nil, nil, 0, "", err
 		}
 		return d.credsFromWebIdentity(spec, out)
-	case "secrets_manager":
+	case "secrets_manager", "secret_read":
 		// These credentials serve a single GetSecretValue and are then discarded, so
 		// request a short fixed session — the spec's TTL bounds govern the returned
 		// static secret, not this transient assume-role.
@@ -752,7 +758,7 @@ func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		return d.fetchSecret(ctx, d.newSecretsManagerClient(provider), spec,
 			inputs.UserClaims, inputs.AgentClaims)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("aws: mint_method %q is not supported over auth_method=oidc_federation (supported: sts_assume_role, secrets_manager)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("aws: mint_method %q is not supported over auth_method=oidc_federation (supported: sts_assume_role, secrets_manager, secret_read)", mintMethod)
 	}
 }
 
@@ -781,7 +787,7 @@ func awsAssertionAudience(sourceCfg map[string]string) (string, bool) {
 
 func awsAssertionResource(specCfg map[string]string) (string, bool) {
 	switch credential.GetString(specCfg, "mint_method", "") {
-	case "secrets_manager":
+	case "secrets_manager", "secret_read":
 		// A templated secret_id is carried unresolved, as every templated
 		// coordinate is here: this runs before the exchange that produces the
 		// claims it would resolve from. A downstream policy conditioning on this

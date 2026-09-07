@@ -174,7 +174,7 @@ var (
 	// returns a whole document to pick from.
 	mintMethodsHonoringKeyMap = map[string]map[string]struct{}{
 		SourceTypeVault: {"static_aws": {}, "static_apikey": {}, "kv2_read": {}},
-		SourceTypeAWS:   {"secrets_manager": {}},
+		SourceTypeAWS:   {"secrets_manager": {}, "secret_read": {}},
 	}
 
 	// secret_version pins a revision, which each store spells its own way: a
@@ -202,7 +202,7 @@ func ValidateSecretSelection(config map[string]string, sourceType string) error 
 
 	if keyMap := config["json_key_map"]; keyMap != "" {
 		if _, ok := mintMethodsHonoringKeyMap[sourceType][mintMethod]; !ok {
-			return fmt.Errorf("'json_key_map' selects fields of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, and secrets_manager on an aws source", mintMethod)
+			return fmt.Errorf("'json_key_map' selects fields of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, and secrets_manager and secret_read on an aws source", mintMethod)
 		}
 		if err := validateKeyMapSyntax(keyMap); err != nil {
 			return err

@@ -149,6 +149,19 @@ func TestValidateSecretSelection(t *testing.T) {
 			wantErr:    "'secret_version' pins a revision",
 		},
 		{
+			// secret_read reads the same store, so the same projection applies...
+			name:       "json_key_map on a stored-secret read",
+			config:     map[string]string{"mint_method": "secret_read", "json_key_map": "k=api_key"},
+			sourceType: SourceTypeAWS,
+		},
+		{
+			// ...and the same revision addressing, which is not a number.
+			name:       "secret_version on a stored-secret read",
+			config:     map[string]string{"mint_method": "secret_read", "secret_version": "3"},
+			sourceType: SourceTypeAWS,
+			wantErr:    "'secret_version' pins a revision",
+		},
+		{
 			name:       "secret_version on a dynamic mint",
 			config:     map[string]string{"mint_method": "dynamic_ibm", "secret_version": "3"},
 			sourceType: SourceTypeVault,
