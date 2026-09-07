@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -44,14 +45,22 @@ type AWSDriver struct {
 	elevatedExpiry time.Time
 	authMu         sync.Mutex
 
-	// AWS clients (rebuilt on auth changes)
-	stsClient                *sts.Client
-	secretsManagerClient     *secretsmanager.Client
-	iamClient                *iam.Client
-	redshiftClient           *redshift.Client
-	redshiftServerlessClient *redshiftserverless.Client
-	region                   string
-	baseCredsVerified        bool
+	// clients is the current generation of service clients, rebuilt on auth
+	// changes. Written and read only under authMu; a mint takes one reference and
+	// uses it without the lock. See awsClients.
+	clients *awsClients
+
+	region string
+
+	// baseCredsVerified records that the base key was proven usable by a live
+	// call. It says nothing about whether the current elevated session is fresh —
+	// only elevatedExpiry answers that, and conflating the two would let an
+	// assume-role source serve an expired session indefinitely.
+	baseCredsVerified bool
+
+	// httpClient bounds every request the SDK makes and carries any custom CA the
+	// source configured. Immutable after Create.
+	httpClient *http.Client
 
 	// anonSTSClient calls sts:AssumeRoleWithWebIdentity, which is unsigned — it
 	// takes no AWS credentials, only the web identity token. Built once in Create
@@ -81,6 +90,35 @@ const (
 // backing a single federated Secrets Manager read. They are used once and discarded, so
 // this is the AWS minimum for AssumeRoleWithWebIdentity (15m) rather than the secret's TTL.
 const federatedFetchSessionDuration = 15 * time.Minute
+
+// awsRequestTimeout bounds a single HTTP attempt to any AWS service. The SDK's
+// default retryer may make up to three, so the worst case is a small multiple of
+// this rather than the unbounded wait a missing timeout would allow.
+const awsRequestTimeout = 30 * time.Second
+
+// awsCreateProbeTimeout bounds the credential probe run when a source is written.
+// A var, not a const, so tests can shrink it — an endpoint that accepts the
+// connection and never answers would otherwise hold the write open for the full
+// request timeout.
+var awsCreateProbeTimeout = 30 * time.Second
+
+// awsClients is one coherent generation of service clients, together with the
+// config and base credentials they were built from. It is built under authMu and
+// then used without it: a mint takes the whole snapshot up front, so every call it
+// makes signs with a single generation even if a rotation commit swaps the driver
+// underneath it mid-request.
+//
+// cfg is safe to read unlocked because a source's config map is never written in
+// place — a rotation builds a fresh map and swaps the whole thing — so a snapshot
+// of the pointer is a snapshot of the contents.
+type awsClients struct {
+	cfg        map[string]string
+	baseCreds  aws.CredentialsProvider
+	sts        *sts.Client
+	sm         *secretsmanager.Client
+	redshift   *redshift.Client
+	redshiftSL *redshiftserverless.Client
+}
 
 // AWSDriverFactory creates AWSDriver instances
 type AWSDriverFactory struct{}
@@ -216,6 +254,11 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 
 	baseCreds := credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, "")
 
+	httpClient, err := BuildHTTPClient(config, awsRequestTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build HTTP client: %w", err)
+	}
+
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAWS,
@@ -226,6 +269,7 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		region:         region,
 		stsEndpoint:    credential.GetString(config, "sts_endpoint", ""),
 		smBaseEndpoint: credential.GetString(config, "secretsmanager_endpoint", ""),
+		httpClient:     httpClient,
 	}
 
 	// AssumeRoleWithWebIdentity is unsigned: anonymous credentials skip SigV4.
@@ -233,6 +277,7 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 	driver.anonSTSClient = sts.NewFromConfig(aws.Config{
 		Region:      region,
 		Credentials: aws.AnonymousCredentials{},
+		HTTPClient:  httpClient,
 	}, driver.stsOptions())
 
 	// A federation source holds no IAM keys: skip the eager credential probe. All
@@ -241,16 +286,22 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 		return driver, nil
 	}
 
-	// Perform initial authentication
-	if err := driver.authenticate(context.Background()); err != nil {
+	// Perform initial authentication. Bounded: a source write must not hang on an
+	// endpoint that accepts the connection and never answers.
+	probeCtx, cancel := context.WithTimeout(context.Background(), awsCreateProbeTimeout)
+	defer cancel()
+	if _, err := driver.authenticate(probeCtx); err != nil {
 		return nil, fmt.Errorf("AWS authentication failed: %w", err)
 	}
 
 	return driver, nil
 }
 
-// authenticate refreshes the elevated session if needed (thread-safe)
-func (d *AWSDriver) authenticate(ctx context.Context) error {
+// authenticate refreshes the session if needed and returns the client generation
+// to use. Thread-safe. The returned snapshot is the caller's for the rest of its
+// request: it must not re-read driver fields afterwards, or it risks mixing two
+// credential generations across a rotation.
+func (d *AWSDriver) authenticate(ctx context.Context) (*awsClients, error) {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 	return d.authenticateLocked(ctx)
@@ -258,30 +309,35 @@ func (d *AWSDriver) authenticate(ctx context.Context) error {
 
 // authenticateLocked performs authentication without acquiring authMu.
 // Caller must hold authMu.
-func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
+func (d *AWSDriver) authenticateLocked(ctx context.Context) (*awsClients, error) {
 	assumeRoleArn := credential.GetString(d.credSource.Config, "assume_role_arn", "")
 	if assumeRoleArn == "" {
-		// No role chaining; use base creds directly
-		d.buildClients(d.baseCreds)
+		// Base credentials do not expire, so a verified generation stays good until
+		// a rotation drops it. The assumeRoleArn guard is what keeps this branch
+		// from answering for an elevated session, whose expiry it cannot see.
+		if d.clients != nil && d.baseCredsVerified {
+			return d.clients, nil
+		}
 
 		// Verify base credentials are valid once with a lightweight API call
 		if !d.baseCredsVerified {
 			baseSTS := sts.NewFromConfig(aws.Config{
 				Region:      d.region,
 				Credentials: d.baseCreds,
+				HTTPClient:  d.httpClient,
 			}, d.stsOptions())
 			if _, err := baseSTS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
-				return fmt.Errorf("invalid AWS credentials: %w", err)
+				return nil, fmt.Errorf("invalid AWS credentials: %w", err)
 			}
 			d.baseCredsVerified = true
 		}
 
-		return nil
+		return d.buildClientsLocked(d.baseCreds), nil
 	}
 
 	// Check if elevated session is still valid (30-second buffer)
-	if d.elevatedCreds != nil && time.Now().Add(30*time.Second).Before(d.elevatedExpiry) {
-		return nil
+	if d.clients != nil && d.elevatedCreds != nil && time.Now().Add(30*time.Second).Before(d.elevatedExpiry) {
+		return d.clients, nil
 	}
 
 	// Call STS AssumeRole using base credentials
@@ -292,6 +348,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
 	baseSTS := sts.NewFromConfig(aws.Config{
 		Region:      d.region,
 		Credentials: d.baseCreds,
+		HTTPClient:  d.httpClient,
 	}, d.stsOptions())
 
 	input := &sts.AssumeRoleInput{
@@ -305,7 +362,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
 
 	result, err := baseSTS.AssumeRole(ctx, input)
 	if err != nil {
-		return fmt.Errorf("failed to assume role %s: %w", assumeRoleArn, err)
+		return nil, fmt.Errorf("failed to assume role %s: %w", assumeRoleArn, err)
 	}
 
 	d.elevatedCreds = &aws.Credentials{
@@ -320,7 +377,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
 		d.elevatedCreds.SecretAccessKey,
 		d.elevatedCreds.SessionToken,
 	)
-	d.buildClients(elevatedProvider)
+	clients := d.buildClientsLocked(elevatedProvider)
 
 	if d.logger != nil {
 		d.logger.Trace("authenticated to AWS via AssumeRole",
@@ -329,7 +386,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
 		)
 	}
 
-	return nil
+	return clients, nil
 }
 
 // stsOptions applies the source's STS endpoint override, if it set one. Every STS
@@ -352,25 +409,41 @@ func (d *AWSDriver) smOptions() func(*secretsmanager.Options) {
 	}
 }
 
-// buildClients creates AWS service clients from the given credentials provider.
-// The IAM, Redshift and Redshift Serverless clients keep their resolved endpoints —
-// the endpoint overrides cover only the mint and source-validation paths.
-func (d *AWSDriver) buildClients(creds aws.CredentialsProvider) {
+// buildClientsLocked creates a new client generation from the given credentials
+// and publishes it. Caller must hold authMu.
+//
+// The Redshift clients keep their resolved endpoints — the endpoint overrides
+// cover only the mint and source-validation paths.
+func (d *AWSDriver) buildClientsLocked(creds aws.CredentialsProvider) *awsClients {
 	cfg := aws.Config{
 		Region:      d.region,
 		Credentials: creds,
+		HTTPClient:  d.httpClient,
 	}
-	d.stsClient = sts.NewFromConfig(cfg, d.stsOptions())
-	d.secretsManagerClient = secretsmanager.NewFromConfig(cfg, d.smOptions())
-	d.iamClient = iam.NewFromConfig(cfg)
-	d.redshiftClient = redshift.NewFromConfig(cfg)
-	d.redshiftServerlessClient = redshiftserverless.NewFromConfig(cfg)
+	d.clients = &awsClients{
+		cfg:        d.credSource.Config,
+		baseCreds:  d.baseCreds,
+		sts:        sts.NewFromConfig(cfg, d.stsOptions()),
+		sm:         secretsmanager.NewFromConfig(cfg, d.smOptions()),
+		redshift:   redshift.NewFromConfig(cfg),
+		redshiftSL: redshiftserverless.NewFromConfig(cfg),
+	}
+	return d.clients
+}
+
+// sourceConfig returns the current source config for callers that need it before
+// (or without) authenticating. The map is never written in place, so the pointer
+// is a stable snapshot; a rotation swaps in a whole new map instead.
+func (d *AWSDriver) sourceConfig() map[string]string {
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	return d.credSource.Config
 }
 
 // MintCredential mints credentials using AWS based on credential spec
 func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")
-	authMethod := credential.GetString(d.credSource.Config, "auth_method", awsAuthMethodStatic)
+	authMethod := credential.GetString(d.sourceConfig(), "auth_method", awsAuthMethodStatic)
 
 	// A federation source holds no static credentials: it authenticates per-request
 	// by federating a caller assertion, which flows through MintCredentialWithExchange.
@@ -381,27 +454,29 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 		return nil, nil, 0, "", fmt.Errorf("auth_method=oidc_federation requires subject_token_source on the spec (warden_identity or agent_identity); federated minting runs through the token-exchange path")
 	}
 
-	// Re-authenticate if needed
-	if err := d.authenticate(ctx); err != nil {
+	// Re-authenticate if needed. The returned generation is this mint's for the
+	// rest of the call; a concurrent rotation swaps the driver's, not this one.
+	c, err := d.authenticate(ctx)
+	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("authentication failed: %w", err)
 	}
 
 	switch mintMethod {
 	case "sts_assume_role":
-		return d.mintViaSTSAssumeRole(ctx, spec)
+		return d.mintViaSTSAssumeRole(ctx, c, spec)
 	case "secrets_manager":
-		return d.mintViaSecretsManager(ctx, spec)
+		return d.mintViaSecretsManager(ctx, c, spec)
 	case "rds_iam_token":
-		return d.mintViaRDSIAMToken(ctx, spec)
+		return d.mintViaRDSIAMToken(ctx, c, spec)
 	case "redshift_iam_token":
-		return d.mintViaRedshiftIAMToken(ctx, spec)
+		return d.mintViaRedshiftIAMToken(ctx, c, spec)
 	default:
 		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for AWS driver; use 'sts_assume_role', 'secrets_manager', 'rds_iam_token', or 'redshift_iam_token'", mintMethod)
 	}
 }
 
 // mintViaSTSAssumeRole mints temporary credentials via STS AssumeRole
-func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, c *awsClients, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	roleArn, err := credential.GetStringRequired(spec.Config, "role_arn")
 	if err != nil {
 		return nil, nil, 0, "", err
@@ -436,7 +511,7 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 		input.Policy = &policy
 	}
 
-	result, err := d.stsClient.AssumeRole(ctx, input)
+	result, err := c.sts.AssumeRole(ctx, input)
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("STS AssumeRole failed for %s: %w", roleArn, err)
 	}
@@ -508,7 +583,7 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, spec *credential.C
 //   - sts_assume_role: the federated role credentials are themselves the issued credential.
 //   - secrets_manager: the federated credentials read one secret and are then discarded.
 func (d *AWSDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	if credential.GetString(d.credSource.Config, "auth_method", awsAuthMethodStatic) != awsAuthMethodOIDCFederation {
+	if credential.GetString(d.sourceConfig(), "auth_method", awsAuthMethodStatic) != awsAuthMethodOIDCFederation {
 		return nil, nil, 0, "", fmt.Errorf("aws: web-identity federation requires auth_method=oidc_federation on the source")
 	}
 	if inputs == nil || inputs.SubjectToken == "" {
@@ -692,8 +767,8 @@ func (d *AWSDriver) newSecretsManagerClient(creds aws.CredentialsProvider) *secr
 
 // mintViaSecretsManager fetches a secret using the source's authenticated client (static
 // auth). The keyless (federation) path fetches with a temp-credential client instead.
-func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	return d.fetchSecret(ctx, d.secretsManagerClient, spec)
+func (d *AWSDriver) mintViaSecretsManager(ctx context.Context, c *awsClients, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return d.fetchSecret(ctx, c.sm, spec)
 }
 
 // fetchSecret reads and parses a Secrets Manager secret with the given client. The client
@@ -755,7 +830,7 @@ func accountIDFromARN(arn string) string {
 // mintViaRDSIAMToken generates a short-lived IAM authentication token for RDS.
 // The token is a pre-signed STS GetCallerIdentity URL that RDS accepts as a password.
 // This is a local SigV4 signing operation — no network call to RDS.
-func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, c *awsClients, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	dbEndpoint, err := credential.GetStringRequired(spec.Config, "db_endpoint")
 	if err != nil {
 		return nil, nil, 0, "", err
@@ -771,7 +846,7 @@ func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.Cre
 
 	endpoint := fmt.Sprintf("%s:%s", dbEndpoint, dbPort)
 
-	token, err := rdsauth.BuildAuthToken(ctx, endpoint, region, dbUser, d.baseCreds)
+	token, err := rdsauth.BuildAuthToken(ctx, endpoint, region, dbUser, c.baseCreds)
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("failed to build RDS IAM auth token: %w", err)
 	}
@@ -807,7 +882,7 @@ func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, spec *credential.Cre
 //
 // Both APIs return a database user (mapped 1:1 to the source IAM identity for
 // provisioned, workgroup-scoped for serverless) and a temporary password.
-func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, c *awsClients, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	dbEndpoint, err := credential.GetStringRequired(spec.Config, "db_endpoint")
 	if err != nil {
 		return nil, nil, 0, "", err
@@ -846,7 +921,7 @@ func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credentia
 		if dbName != "" {
 			input.DbName = aws.String(dbName)
 		}
-		out, err := d.redshiftClient.GetClusterCredentialsWithIAM(ctx, input)
+		out, err := c.redshift.GetClusterCredentialsWithIAM(ctx, input)
 		if err != nil {
 			return nil, nil, 0, "", fmt.Errorf("Redshift GetClusterCredentialsWithIAM failed for cluster %s: %w", clusterID, err)
 		}
@@ -865,7 +940,7 @@ func (d *AWSDriver) mintViaRedshiftIAMToken(ctx context.Context, spec *credentia
 		if dbName != "" {
 			input.DbName = aws.String(dbName)
 		}
-		out, err := d.redshiftServerlessClient.GetCredentials(ctx, input)
+		out, err := c.redshiftSL.GetCredentials(ctx, input)
 		if err != nil {
 			return nil, nil, 0, "", fmt.Errorf("Redshift Serverless GetCredentials failed for workgroup %s: %w", workgroup, err)
 		}
@@ -943,7 +1018,7 @@ func (d *AWSDriver) Cleanup(ctx context.Context) error {
 // SupportsRotation returns true if this driver can rotate its own IAM keys.
 // Only permanent IAM keys (AKIA prefix) support rotation.
 func (d *AWSDriver) SupportsRotation() bool {
-	accessKeyID := credential.GetString(d.credSource.Config, "access_key_id", "")
+	accessKeyID := credential.GetString(d.sourceConfig(), "access_key_id", "")
 	return strings.HasPrefix(accessKeyID, "AKIA")
 }
 
@@ -951,17 +1026,21 @@ func (d *AWSDriver) SupportsRotation() bool {
 // Both old and new keys remain valid during the overlap period.
 // Returns activateAfter to allow time for AWS IAM eventual consistency propagation.
 func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
+	// Snapshot what the IAM calls need, then release: preparing must not modify
+	// driver state, and holding the lock across this call would block every mint
+	// on the source for as long as IAM takes to answer.
 	d.authMu.Lock()
-	defer d.authMu.Unlock()
+	cfg, baseCreds := d.credSource.Config, d.baseCreds
+	d.authMu.Unlock()
 
-	oldAccessKeyID := credential.GetString(d.credSource.Config, "access_key_id", "")
+	oldAccessKeyID := credential.GetString(cfg, "access_key_id", "")
 
 	// Use base credentials (not elevated) for IAM operations on the user's own keys
-	baseCfg := aws.Config{
+	iamClient := iam.NewFromConfig(aws.Config{
 		Region:      d.region,
-		Credentials: d.baseCreds,
-	}
-	iamClient := iam.NewFromConfig(baseCfg)
+		Credentials: baseCreds,
+		HTTPClient:  d.httpClient,
+	})
 
 	// IAM users can have max 2 keys. If there are already 2 (e.g., from a
 	// previously failed rotation), delete the orphaned key before creating a new one.
@@ -1042,8 +1121,10 @@ func (d *AWSDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	d.elevatedExpiry = time.Time{}
 	d.baseCredsVerified = false
 
-	// Re-authenticate (we already hold authMu, so use locked variant)
-	if err := d.authenticateLocked(ctx); err != nil {
+	// Drop the stale client generation, then re-authenticate to build a new one
+	// (we already hold authMu, so use the locked variant).
+	d.clients = nil
+	if _, err := d.authenticateLocked(ctx); err != nil {
 		return fmt.Errorf("failed to authenticate with new IAM keys: %w", err)
 	}
 
@@ -1064,17 +1145,20 @@ func (d *AWSDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 		return nil
 	}
 
+	// Snapshot and release, as PrepareRotation does — cleanup runs on a retry
+	// schedule and must not hold minting up while IAM answers.
 	d.authMu.Lock()
-	defer d.authMu.Unlock()
+	baseCreds := d.baseCreds
+	d.authMu.Unlock()
 
 	// Use base credentials (not elevated) for IAM operations on the user's own keys,
 	// matching PrepareRotation. Elevated/assumed-role creds operate as the role
 	// principal and cannot delete the IAM user's access keys.
-	baseCfg := aws.Config{
+	iamClient := iam.NewFromConfig(aws.Config{
 		Region:      d.region,
-		Credentials: d.baseCreds,
-	}
-	iamClient := iam.NewFromConfig(baseCfg)
+		Credentials: baseCreds,
+		HTTPClient:  d.httpClient,
+	})
 
 	_, err := iamClient.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
 		AccessKeyId: &oldAccessKeyID,
