@@ -13,10 +13,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	rdsauth "github.com/aws/aws-sdk-go-v2/feature/rds/auth"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/redshift"
 	"github.com/aws/aws-sdk-go-v2/service/redshiftserverless"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
 )
@@ -363,6 +365,9 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) (*awsClients, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to assume role %s: %w", assumeRoleArn, err)
 	}
+	if err := validSTSCredentials(result.Credentials, "STS AssumeRole for "+assumeRoleArn); err != nil {
+		return nil, err
+	}
 
 	d.elevatedCreds = &aws.Credentials{
 		AccessKeyID:     *result.Credentials.AccessKeyId,
@@ -423,6 +428,51 @@ func (d *AWSDriver) buildClientsLocked(creds aws.CredentialsProvider) *awsClient
 		redshiftSL: redshiftserverless.NewFromConfig(cfg),
 	}
 	return d.clients
+}
+
+// validSTSCredentials rejects a structurally incomplete credentials block. A
+// malformed 200 — an intercepting proxy, an endpoint override pointed at
+// something that only half speaks the protocol — yields a response whose missing
+// fields the SDK leaves nil, and every consumer here dereferences them. op names
+// the call for the error, which names the first field that is absent.
+//
+// The fields are checked in a fixed order rather than by map iteration so the
+// error a given response produces is always the same one.
+func validSTSCredentials(creds *ststypes.Credentials, op string) error {
+	if creds == nil {
+		return fmt.Errorf("%s returned no credentials block", op)
+	}
+	for _, f := range []struct {
+		name  string
+		value *string
+	}{
+		{"AccessKeyId", creds.AccessKeyId},
+		{"SecretAccessKey", creds.SecretAccessKey},
+		{"SessionToken", creds.SessionToken},
+	} {
+		if f.value == nil {
+			return fmt.Errorf("%s returned credentials with no %s", op, f.name)
+		}
+	}
+	if creds.Expiration == nil {
+		return fmt.Errorf("%s returned credentials with no Expiration", op)
+	}
+	return nil
+}
+
+// validNewIAMAccessKey rejects a CreateAccessKey response that does not carry the
+// key material a rotation is about to persist as the source's only credential.
+func validNewIAMAccessKey(key *iamtypes.AccessKey) error {
+	if key == nil {
+		return fmt.Errorf("IAM CreateAccessKey returned no access key")
+	}
+	if key.AccessKeyId == nil {
+		return fmt.Errorf("IAM CreateAccessKey returned a key with no AccessKeyId")
+	}
+	if key.SecretAccessKey == nil {
+		return fmt.Errorf("IAM CreateAccessKey returned a key with no SecretAccessKey")
+	}
+	return nil
 }
 
 // awsConfig builds the SDK config every client in this driver is constructed
@@ -536,6 +586,9 @@ func (d *AWSDriver) mintViaSTSAssumeRole(ctx context.Context, c *awsClients, spe
 	result, err := c.sts.AssumeRole(ctx, input)
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("STS AssumeRole failed for %s: %w", roleArn, err)
+	}
+	if err := validSTSCredentials(result.Credentials, "STS AssumeRole for "+roleArn); err != nil {
+		return nil, nil, 0, "", err
 	}
 
 	creds := result.Credentials
@@ -725,10 +778,11 @@ func (d *AWSDriver) assumeRoleWithWebIdentity(ctx context.Context, spec *credent
 	if err != nil {
 		return nil, fmt.Errorf("STS AssumeRoleWithWebIdentity failed for %s: %w", roleArn, err)
 	}
-	// A malformed 200 (e.g. an intercepting proxy) can omit the credentials block;
-	// guard here so both consumers dereference a non-nil struct.
-	if result.Credentials == nil {
-		return nil, fmt.Errorf("STS AssumeRoleWithWebIdentity for %s returned no credentials", roleArn)
+	// The single choke point for both consumers: the shaping in credsFromWebIdentity
+	// and the credential provider the federated secret fetch is built from. Checking
+	// the whole block here means neither has to.
+	if err := validSTSCredentials(result.Credentials, "STS AssumeRoleWithWebIdentity for "+roleArn); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -1068,10 +1122,14 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	}
 	if len(listResult.AccessKeyMetadata) >= 2 {
 		for _, key := range listResult.AccessKeyMetadata {
-			if *key.AccessKeyId != oldAccessKeyID {
+			keyID := aws.ToString(key.AccessKeyId)
+			if keyID == "" {
+				continue
+			}
+			if keyID != oldAccessKeyID {
 				if d.logger != nil {
 					d.logger.Warn("deleting orphaned IAM access key from previous failed rotation",
-						logger.String("orphaned_key_id", truncateID(*key.AccessKeyId, 8)),
+						logger.String("orphaned_key_id", truncateID(keyID, 8)),
 					)
 				}
 				_, err := iamClient.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
@@ -1091,6 +1149,9 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 		return nil, nil, 0, fmt.Errorf("failed to create new IAM access key: %w", err)
 	}
 
+	if err := validNewIAMAccessKey(result.AccessKey); err != nil {
+		return nil, nil, 0, err
+	}
 	newKey := result.AccessKey
 
 	// Build new config (copy all, replace key fields). Copied from the snapshot,
