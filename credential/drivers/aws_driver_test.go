@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -55,6 +56,27 @@ func TestAWSDriverFactory_ValidateConfig(t *testing.T) {
 				"external_id":       "ext-123",
 				"session_name":      "my-session",
 				"session_duration":  "2h",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid config with endpoint overrides",
+			config: map[string]string{
+				"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
+				"secret_access_key":       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+				"region":                  "us-east-1",
+				"sts_endpoint":            "https://sts.us-east-1.amazonaws.com",
+				"secretsmanager_endpoint": "https://secretsmanager.us-east-1.amazonaws.com",
+			},
+			wantErr: false,
+		},
+		{
+			name: "endpoint overrides on a federation source",
+			config: map[string]string{
+				"auth_method":             "oidc_federation",
+				"region":                  "us-east-1",
+				"sts_endpoint":            "https://sts.us-east-1.amazonaws.com",
+				"secretsmanager_endpoint": "https://secretsmanager.us-east-1.amazonaws.com",
 			},
 			wantErr: false,
 		},
@@ -908,4 +930,193 @@ func TestAWSValidateConfig_AudienceOnlyFederation(t *testing.T) {
 		})
 		require.NoError(t, err)
 	})
+}
+
+// =============================================================================
+// Endpoint overrides (sts_endpoint / secretsmanager_endpoint)
+// =============================================================================
+
+// stsStub answers the three STS actions the driver calls, recording each one. The
+// AssumeRole and AssumeRoleWithWebIdentity results share a credential shape, so one
+// handler covers every path that needs an STS endpoint.
+func stsStub(t *testing.T, actions *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		action := r.Form.Get("Action")
+		*actions = append(*actions, action)
+		w.Header().Set("Content-Type", "text/xml")
+
+		creds := `<Credentials>
+      <AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+      <SecretAccessKey>secretexample</SecretAccessKey>
+      <SessionToken>tokenexample</SessionToken>
+      <Expiration>2035-01-01T00:00:00Z</Expiration>
+    </Credentials>
+    <AssumedRoleUser>
+      <Arn>arn:aws:sts::123456789012:assumed-role/App/warden</Arn>
+      <AssumedRoleId>AROAEXAMPLE:warden</AssumedRoleId>
+    </AssumedRoleUser>`
+
+		switch action {
+		case "GetCallerIdentity":
+			_, _ = w.Write([]byte(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult>
+    <Arn>arn:aws:iam::123456789012:user/warden</Arn>
+    <UserId>AIDAEXAMPLE</UserId>
+    <Account>123456789012</Account>
+  </GetCallerIdentityResult>
+</GetCallerIdentityResponse>`))
+		case "AssumeRole":
+			_, _ = w.Write([]byte(`<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult>
+    ` + creds + `
+  </AssumeRoleResult>
+</AssumeRoleResponse>`))
+		case "AssumeRoleWithWebIdentity":
+			_, _ = w.Write([]byte(`<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    ` + creds + `
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+}
+
+// smStub answers GetSecretValue with the given JSON payload, recording the target
+// and the SigV4 scope of each call.
+func smStub(t *testing.T, payload string, target, authScope *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*target = r.Header.Get("X-Amz-Target")
+		*authScope = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		body, _ := json.Marshal(map[string]string{"Name": "prod/app", "SecretString": payload})
+		_, _ = w.Write(body)
+	}))
+}
+
+// TestAWSDriver_EndpointOverride_StaticSourceValidation pins the case a partial
+// application of the override would break: creating a static source runs a
+// GetCallerIdentity probe, which must reach the configured endpoint rather than the
+// real service. Without sts_endpoint on the authenticateLocked client, Create here
+// would call AWS and fail.
+func TestAWSDriver_EndpointOverride_StaticSourceValidation(t *testing.T) {
+	var actions []string
+	srv := stsStub(t, &actions)
+	defer srv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		"region":            "us-east-1",
+		"sts_endpoint":      srv.URL,
+	}, log)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"GetCallerIdentity"}, actions)
+	assert.Equal(t, srv.URL, drv.(*AWSDriver).stsEndpoint)
+}
+
+// TestAWSDriver_EndpointOverride_AssumeRoleSource covers the second STS client on the
+// source-creation path: a source with assume_role_arn calls AssumeRole instead of the
+// base-credential probe.
+func TestAWSDriver_EndpointOverride_AssumeRoleSource(t *testing.T) {
+	var actions []string
+	srv := stsStub(t, &actions)
+	defer srv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	_, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		"region":            "us-east-1",
+		"assume_role_arn":   "arn:aws:iam::123456789012:role/WardenSourceRole",
+		"sts_endpoint":      srv.URL,
+	}, log)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"AssumeRole"}, actions)
+}
+
+// TestAWSDriver_EndpointOverride_SecretsManagerMint proves the override reaches the
+// Secrets Manager client built by buildClients, i.e. the static mint path.
+func TestAWSDriver_EndpointOverride_SecretsManagerMint(t *testing.T) {
+	var actions []string
+	stsSrv := stsStub(t, &actions)
+	defer stsSrv.Close()
+
+	var target, authScope string
+	smSrv := smStub(t, `{"api_key":"stored-key"}`, &target, &authScope)
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
+		"secret_access_key":       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		"region":                  "us-east-1",
+		"sts_endpoint":            stsSrv.URL,
+		"secretsmanager_endpoint": smSrv.URL,
+	}, log)
+	require.NoError(t, err)
+
+	rawData, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{
+		Name:   "sm",
+		Config: map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/app"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, target, "GetSecretValue")
+	assert.Equal(t, "stored-key", rawData["api_key"])
+}
+
+// TestAWSDriver_EndpointOverride_WebIdentity proves both overrides reach a keyless
+// source built through the factory: the anonymous STS client and the client bound to
+// the freshly federated credentials.
+func TestAWSDriver_EndpointOverride_WebIdentity(t *testing.T) {
+	var actions []string
+	stsSrv := stsStub(t, &actions)
+	defer stsSrv.Close()
+
+	var target, authScope string
+	smSrv := smStub(t, `{"api_key":"federated-key"}`, &target, &authScope)
+	defer smSrv.Close()
+
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"auth_method":             "oidc_federation",
+		"region":                  "us-east-1",
+		"sts_endpoint":            stsSrv.URL,
+		"secretsmanager_endpoint": smSrv.URL,
+	}, log)
+	require.NoError(t, err)
+
+	spec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+		"mint_method": "secrets_manager",
+		"secret_id":   "prod/app",
+		"role_arn":    "arn:aws:iam::123456789012:role/App",
+	}}
+	rawData, _, _, _, err := drv.(*AWSDriver).MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{
+		SubjectToken:     "eyJ.warden.assertion",
+		SubjectTokenType: credential.TokenTypeJWT,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"AssumeRoleWithWebIdentity"}, actions)
+	assert.Contains(t, target, "GetSecretValue")
+	assert.Contains(t, authScope, "ASIAEXAMPLE", "the fetch must be signed with the federated credentials")
+	assert.Equal(t, "federated-key", rawData["api_key"])
+}
+
+// TestAWSDriver_EndpointOverride_AbsentLeavesResolverAlone: a source that sets neither
+// key must leave both empty, so the SDK resolves the real regional endpoints.
+func TestAWSDriver_EndpointOverride_AbsentLeavesResolverAlone(t *testing.T) {
+	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+		"auth_method": "oidc_federation",
+		"region":      "us-east-1",
+	}, log)
+	require.NoError(t, err)
+	awsDrv := drv.(*AWSDriver)
+	assert.Empty(t, awsDrv.stsEndpoint)
+	assert.Empty(t, awsDrv.smBaseEndpoint)
 }

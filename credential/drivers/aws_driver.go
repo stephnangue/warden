@@ -58,10 +58,14 @@ type AWSDriver struct {
 	// so a keyless federation (auth_method=oidc_federation) source needs no IAM keys.
 	anonSTSClient *sts.Client
 
-	// smBaseEndpoint, when non-empty, overrides the Secrets Manager endpoint for
-	// clients built from freshly federated credentials. Test-only: production leaves
-	// it empty so the SDK resolves the real regional endpoint.
+	// smBaseEndpoint and stsEndpoint, when non-empty, override where the Secrets
+	// Manager and STS calls are sent. Resolved once in Create from the source's
+	// secretsmanager_endpoint / sts_endpoint; empty leaves the SDK to resolve the
+	// real regional endpoint. Every client of either service is built through
+	// smOptions/stsOptions so an override applies to all of them, including the
+	// ones used to validate the source at write time.
 	smBaseEndpoint string
+	stsEndpoint    string
 }
 
 // awsAuthMethodStatic and awsAuthMethodOIDCFederation select how the source
@@ -126,6 +130,14 @@ func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.StringField("audience").
 			Describe("Audience minted into a warden_identity assertion for this source (oidc_federation only; default sts.amazonaws.com)").
 			Example("sts.amazonaws.com"),
+
+		credential.StringField("sts_endpoint").
+			Describe("Override where STS calls are sent, including the credential probe run when this source is written (default: the SDK's regional endpoint). Does not apply to the IAM, Redshift or RDS clients").
+			Example("https://sts.us-east-1.amazonaws.com"),
+
+		credential.StringField("secretsmanager_endpoint").
+			Describe("Override where Secrets Manager calls are sent (default: the SDK's regional endpoint)").
+			Example("https://secretsmanager.us-east-1.amazonaws.com"),
 	); err != nil {
 		return err
 	}
@@ -209,15 +221,19 @@ func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLog
 			Type:   credential.SourceTypeAWS,
 			Config: config,
 		},
-		logger:    log.WithSubsystem(credential.SourceTypeAWS),
-		baseCreds: baseCreds,
-		region:    region,
-		// AssumeRoleWithWebIdentity is unsigned: anonymous credentials skip SigV4.
-		anonSTSClient: sts.NewFromConfig(aws.Config{
-			Region:      region,
-			Credentials: aws.AnonymousCredentials{},
-		}),
+		logger:         log.WithSubsystem(credential.SourceTypeAWS),
+		baseCreds:      baseCreds,
+		region:         region,
+		stsEndpoint:    credential.GetString(config, "sts_endpoint", ""),
+		smBaseEndpoint: credential.GetString(config, "secretsmanager_endpoint", ""),
 	}
+
+	// AssumeRoleWithWebIdentity is unsigned: anonymous credentials skip SigV4.
+	// Built after the literal so it picks up the resolved endpoint override.
+	driver.anonSTSClient = sts.NewFromConfig(aws.Config{
+		Region:      region,
+		Credentials: aws.AnonymousCredentials{},
+	}, driver.stsOptions())
 
 	// A federation source holds no IAM keys: skip the eager credential probe. All
 	// authentication happens per-request from the caller's identity assertion.
@@ -253,7 +269,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
 			baseSTS := sts.NewFromConfig(aws.Config{
 				Region:      d.region,
 				Credentials: d.baseCreds,
-			})
+			}, d.stsOptions())
 			if _, err := baseSTS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
 				return fmt.Errorf("invalid AWS credentials: %w", err)
 			}
@@ -276,7 +292,7 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
 	baseSTS := sts.NewFromConfig(aws.Config{
 		Region:      d.region,
 		Credentials: d.baseCreds,
-	})
+	}, d.stsOptions())
 
 	input := &sts.AssumeRoleInput{
 		RoleArn:         &assumeRoleArn,
@@ -316,14 +332,36 @@ func (d *AWSDriver) authenticateLocked(ctx context.Context) error {
 	return nil
 }
 
-// buildClients creates AWS service clients from the given credentials provider
+// stsOptions applies the source's STS endpoint override, if it set one. Every STS
+// client goes through here: an override that reached only the minting clients would
+// leave the source validated against the real service and minted against another.
+func (d *AWSDriver) stsOptions() func(*sts.Options) {
+	return func(o *sts.Options) {
+		if d.stsEndpoint != "" {
+			o.BaseEndpoint = aws.String(d.stsEndpoint)
+		}
+	}
+}
+
+// smOptions applies the source's Secrets Manager endpoint override, if it set one.
+func (d *AWSDriver) smOptions() func(*secretsmanager.Options) {
+	return func(o *secretsmanager.Options) {
+		if d.smBaseEndpoint != "" {
+			o.BaseEndpoint = aws.String(d.smBaseEndpoint)
+		}
+	}
+}
+
+// buildClients creates AWS service clients from the given credentials provider.
+// The IAM, Redshift and Redshift Serverless clients keep their resolved endpoints —
+// the endpoint overrides cover only the mint and source-validation paths.
 func (d *AWSDriver) buildClients(creds aws.CredentialsProvider) {
 	cfg := aws.Config{
 		Region:      d.region,
 		Credentials: creds,
 	}
-	d.stsClient = sts.NewFromConfig(cfg)
-	d.secretsManagerClient = secretsmanager.NewFromConfig(cfg)
+	d.stsClient = sts.NewFromConfig(cfg, d.stsOptions())
+	d.secretsManagerClient = secretsmanager.NewFromConfig(cfg, d.smOptions())
 	d.iamClient = iam.NewFromConfig(cfg)
 	d.redshiftClient = redshift.NewFromConfig(cfg)
 	d.redshiftServerlessClient = redshiftserverless.NewFromConfig(cfg)
@@ -646,16 +684,10 @@ func (d *AWSDriver) credsFromWebIdentity(spec *credential.CredSpec, result *sts.
 }
 
 // newSecretsManagerClient builds a Secrets Manager client bound to the given credentials
-// (e.g. freshly federated temporary credentials). smBaseEndpoint, when set, overrides the
-// endpoint for tests.
+// (e.g. freshly federated temporary credentials), honouring the source's endpoint
+// override when it set one.
 func (d *AWSDriver) newSecretsManagerClient(creds aws.CredentialsProvider) *secretsmanager.Client {
-	cfg := aws.Config{Region: d.region, Credentials: creds}
-	if d.smBaseEndpoint != "" {
-		return secretsmanager.NewFromConfig(cfg, func(o *secretsmanager.Options) {
-			o.BaseEndpoint = aws.String(d.smBaseEndpoint)
-		})
-	}
-	return secretsmanager.NewFromConfig(cfg)
+	return secretsmanager.NewFromConfig(aws.Config{Region: d.region, Credentials: creds}, d.smOptions())
 }
 
 // mintViaSecretsManager fetches a secret using the source's authenticated client (static
