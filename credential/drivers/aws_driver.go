@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -906,6 +907,15 @@ func accountIDFromARN(arn string) string {
 // mintViaRDSIAMToken generates a short-lived IAM authentication token for RDS.
 // The token is a pre-signed STS GetCallerIdentity URL that RDS accepts as a password.
 // This is a local SigV4 signing operation — no network call to RDS.
+//
+// The token is a signature, not credential material, so its lifetime is bounded by
+// the signing key rather than by the fifteen minutes reported below: RDS validates
+// the signature at connection time, and cleanup deleting (or deactivating) the key
+// invalidates every token still signed by it. Cleanup runs right after a commit, so
+// a token minted moments earlier can be reported valid for fifteen minutes and be
+// unusable seconds later. Nothing here can see cleanup's schedule; closing the
+// window means delaying source-key cleanup by at least this lifetime, which is the
+// rotation manager's to arrange.
 func (d *AWSDriver) mintViaRDSIAMToken(ctx context.Context, c *awsClients, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	dbEndpoint, err := credential.GetStringRequired(spec.Config, "db_endpoint")
 	if err != nil {
@@ -1098,6 +1108,104 @@ func (d *AWSDriver) SupportsRotation() bool {
 	return strings.HasPrefix(accessKeyID, "AKIA")
 }
 
+// isIAMNoSuchEntity reports whether an error means the key is already gone, which
+// for cleanup is success rather than failure — it is retried on a schedule, and a
+// key deleted out of band should not keep it retrying forever.
+func isIAMNoSuchEntity(err error) bool {
+	var notFound *iamtypes.NoSuchEntityException
+	return errors.As(err, &notFound)
+}
+
+// maxIAMKeysPerUser is the hard cap IAM places on an user's access keys, which is
+// why a rotation has to free a slot before it can mint one.
+const maxIAMKeysPerUser = 2
+
+// makeRoomForNewKey frees a slot so CreateAccessKey can succeed, without
+// destroying a key it cannot attribute to this source's own rotation.
+//
+// It acts only at the cap, touches at most one key per attempt, and deletes only
+// a key that is already Inactive — the state an interrupted cleanup leaves
+// behind, since CleanupRotation now deactivates before it deletes. An Active key
+// that is not the current one is deactivated instead and the attempt stops with
+// an error; the retry finds it Inactive and reclaims the slot. A failed prepare
+// is retried on a backoff starting around twenty seconds, so that detour costs
+// one short retry rather than a rotation period.
+//
+// The alternative — refusing to touch an Active key at all — would wedge rotation
+// permanently, because two paths leave an Active key of this source's own behind:
+// a crash between CreateAccessKey and the staged persist, and a staged activation
+// exhausting its attempts, after which the manager resets to idle and prepares
+// afresh. Deactivating someone else's key is disruptive but reversible; deleting
+// it is not, and that is the trade being made.
+func (d *AWSDriver) makeRoomForNewKey(ctx context.Context, iamClient *iam.Client,
+	currentKeyID string, keys []iamtypes.AccessKeyMetadata) error {
+
+	if len(keys) < maxIAMKeysPerUser {
+		return nil
+	}
+
+	// The current key must be among the ones listed. If it is not, the source's
+	// credentials belong to a different IAM user than the one being listed, so
+	// every key here belongs to someone else — touch none of them and say why.
+	var candidate *iamtypes.AccessKeyMetadata
+	currentFound := false
+	for i := range keys {
+		keyID := aws.ToString(keys[i].AccessKeyId)
+		if keyID == "" {
+			continue
+		}
+		switch {
+		case keyID == currentKeyID:
+			currentFound = true
+		case candidate == nil:
+			candidate = &keys[i]
+		}
+	}
+	if !currentFound {
+		return fmt.Errorf(
+			"IAM user holds %d access keys, none of them the configured access_key_id %s: "+
+				"refusing to remove a key this source does not own",
+			len(keys), truncateID(currentKeyID, 8))
+	}
+	if candidate == nil {
+		return nil
+	}
+	candidateID := aws.ToString(candidate.AccessKeyId)
+
+	if candidate.Status == iamtypes.StatusTypeInactive {
+		if d.logger != nil {
+			d.logger.Warn("deleting inactive orphaned IAM access key from an interrupted rotation",
+				logger.String("orphaned_key_id", truncateID(candidateID, 8)),
+			)
+		}
+		if _, err := iamClient.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
+			AccessKeyId: candidate.AccessKeyId,
+		}); err != nil {
+			return fmt.Errorf("failed to delete orphaned IAM access key %s: %w", truncateID(candidateID, 8), err)
+		}
+		return nil
+	}
+
+	if d.logger != nil {
+		d.logger.Warn("deactivating an active non-current IAM access key to free a rotation slot; "+
+			"it will be deleted on the next rotation attempt",
+			logger.String("key_id", truncateID(candidateID, 8)),
+		)
+	}
+	if _, err := iamClient.UpdateAccessKey(ctx, &iam.UpdateAccessKeyInput{
+		AccessKeyId: candidate.AccessKeyId,
+		Status:      iamtypes.StatusTypeInactive,
+	}); err != nil {
+		return fmt.Errorf("failed to deactivate non-current IAM access key %s: %w", truncateID(candidateID, 8), err)
+	}
+
+	return fmt.Errorf(
+		"IAM user is at the %d-key limit and the non-current key %s was still active; "+
+			"it has been deactivated and will be removed on the next rotation attempt. "+
+			"If it is not this source's, reactivate it and give the source a dedicated IAM user",
+		maxIAMKeysPerUser, truncateID(candidateID, 8))
+}
+
 // PrepareRotation creates a new IAM access key without destroying the old one.
 // Both old and new keys remain valid during the overlap period.
 // Returns activateAfter to allow time for AWS IAM eventual consistency propagation.
@@ -1114,33 +1222,12 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	// Use base credentials (not elevated) for IAM operations on the user's own keys
 	iamClient := d.newIAMClient(baseCreds)
 
-	// IAM users can have max 2 keys. If there are already 2 (e.g., from a
-	// previously failed rotation), delete the orphaned key before creating a new one.
 	listResult, err := iamClient.ListAccessKeys(ctx, &iam.ListAccessKeysInput{})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to list IAM access keys: %w", err)
 	}
-	if len(listResult.AccessKeyMetadata) >= 2 {
-		for _, key := range listResult.AccessKeyMetadata {
-			keyID := aws.ToString(key.AccessKeyId)
-			if keyID == "" {
-				continue
-			}
-			if keyID != oldAccessKeyID {
-				if d.logger != nil {
-					d.logger.Warn("deleting orphaned IAM access key from previous failed rotation",
-						logger.String("orphaned_key_id", truncateID(keyID, 8)),
-					)
-				}
-				_, err := iamClient.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
-					AccessKeyId: key.AccessKeyId,
-				})
-				if err != nil {
-					return nil, nil, 0, fmt.Errorf("failed to delete orphaned IAM access key: %w", err)
-				}
-				break
-			}
-		}
+	if err := d.makeRoomForNewKey(ctx, iamClient, oldAccessKeyID, listResult.AccessKeyMetadata); err != nil {
+		return nil, nil, 0, err
 	}
 
 	// Create new access key
@@ -1186,28 +1273,38 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 // CommitRotation activates the new IAM keys in driver state.
 // Called after the new config has been persisted to storage.
 func (d *AWSDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
+	newAccessKeyID := credential.GetString(newConfig, "access_key_id", "")
+	newSecretAccessKey := credential.GetString(newConfig, "secret_access_key", "")
+	newCreds := credentials.NewStaticCredentialsProvider(newAccessKeyID, newSecretAccessKey, "")
+
+	// Verify before touching any driver state, and outside the lock so minting
+	// keeps flowing while IAM answers. On failure this instance is left whole:
+	// in-flight mints holding a generation finish on the credentials they started
+	// with, rather than on a driver switched half-way to a key that does not work.
+	//
+	// That is the whole of what this buys, and it is worth being exact about:
+	// the manager persists the new config before calling here and closes the
+	// driver when it does, so a later request is served by a fresh instance built
+	// from the persisted key whatever this call concludes. Durable state is the
+	// manager's ordering to fix, not this driver's.
+	probe := sts.NewFromConfig(d.awsConfig(newCreds), d.stsOptions())
+	if _, err := probe.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
+		return fmt.Errorf("failed to authenticate with new IAM keys: %w", err)
+	}
+
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	// Update internal config
 	d.credSource.Config = newConfig
+	d.baseCreds = newCreds
+	d.baseCredsVerified = true
 
-	// Rebuild base credentials provider
-	newAccessKeyID := credential.GetString(newConfig, "access_key_id", "")
-	newSecretAccessKey := credential.GetString(newConfig, "secret_access_key", "")
-	d.baseCreds = credentials.NewStaticCredentialsProvider(newAccessKeyID, newSecretAccessKey, "")
-
-	// Invalidate elevated session and base-creds flag to force full re-authentication
+	// Drop the elevated session and the client generation built from the old key.
+	// The next mint rebuilds both; for an assume-role source that re-establishes
+	// the session lazily, exactly as it does after an expiry.
 	d.elevatedCreds = nil
 	d.elevatedExpiry = time.Time{}
-	d.baseCredsVerified = false
-
-	// Drop the stale client generation, then re-authenticate to build a new one
-	// (we already hold authMu, so use the locked variant).
 	d.clients = nil
-	if _, err := d.authenticateLocked(ctx); err != nil {
-		return fmt.Errorf("failed to authenticate with new IAM keys: %w", err)
-	}
 
 	if d.logger != nil {
 		d.logger.Debug("committed rotated IAM access key",
@@ -1235,10 +1332,24 @@ func (d *AWSDriver) CleanupRotation(ctx context.Context, cleanupConfig map[strin
 	// Matches PrepareRotation: the user's own keys, from the base credentials.
 	iamClient := d.newIAMClient(baseCreds)
 
+	// Deactivate before deleting, so an interrupted cleanup leaves the key in a
+	// state the next prepare can attribute to this source. A key found Active is
+	// indistinguishable from a stranger's, and prepare will not delete it.
+	if _, err := iamClient.UpdateAccessKey(ctx, &iam.UpdateAccessKeyInput{
+		AccessKeyId: &oldAccessKeyID,
+		Status:      iamtypes.StatusTypeInactive,
+	}); err != nil && !isIAMNoSuchEntity(err) {
+		return fmt.Errorf("failed to deactivate old IAM access key %s: %w", truncateID(oldAccessKeyID, 8), err)
+	}
+
 	_, err := iamClient.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
 		AccessKeyId: &oldAccessKeyID,
 	})
 	if err != nil {
+		// Already gone is the outcome cleanup wanted.
+		if isIAMNoSuchEntity(err) {
+			return nil
+		}
 		if d.logger != nil {
 			d.logger.Warn("failed to delete old IAM access key during cleanup",
 				logger.Err(err),
