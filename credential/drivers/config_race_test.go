@@ -6,10 +6,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -234,4 +236,83 @@ func TestKubernetesDriver_HTTPClientSwapIsRaceFree(t *testing.T) {
 
 	close(stop)
 	readers.Wait()
+}
+
+// TestGitLabDriver_RequestUsesOneConfigGeneration asserts that a single request
+// reads the address and the token from one snapshot.
+//
+// doGitLabRequest used to call getGitLabAddress, getAuthMethod and getPAT
+// separately, taking three snapshots. Production rotation only ever replaces the
+// token, so the mismatch stayed invisible — but that is a property of what rotation
+// happens to touch today, not of the code. Both keys carry a generation here so the
+// pairing is observable at all: each server accepts only its own token, and a
+// request built from two generations arrives somewhere holding the wrong one.
+func TestGitLabDriver_RequestUsesOneConfigGeneration(t *testing.T) {
+	var mismatches int64
+
+	newServer := func(wantToken string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("PRIVATE-TOKEN") != wantToken {
+				atomic.AddInt64(&mismatches, 1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":1,"active":true}`))
+		}))
+	}
+
+	serverA := newServer("token-a")
+	defer serverA.Close()
+	serverB := newServer("token-b")
+	defer serverB.Close()
+
+	driver := newTestGitLabDriver("token-a")
+	driver.credSource.Config = credential.NewConfig(map[string]string{
+		"gitlab_address":        serverA.URL,
+		"auth_method":           "pat",
+		"personal_access_token": "token-a",
+	})
+	driver.tokenCache = NewTokenCache()
+
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		generations := []credential.Config{
+			credential.NewConfig(map[string]string{
+				"gitlab_address": serverA.URL, "auth_method": "pat", "personal_access_token": "token-a",
+			}),
+			credential.NewConfig(map[string]string{
+				"gitlab_address": serverB.URL, "auth_method": "pat", "personal_access_token": "token-b",
+			}),
+		}
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			driver.configMu.Lock()
+			driver.credSource.Config = generations[i%2]
+			driver.configMu.Unlock()
+		}
+	}()
+
+	var callers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			for j := 0; j < 300; j++ {
+				_, _, _ = driver.doGitLabRequest(t.Context(), http.MethodGet, "/api/v4/x", nil, nil)
+			}
+		}()
+	}
+	callers.Wait()
+	close(stop)
+	writer.Wait()
+
+	assert.Zero(t, atomic.LoadInt64(&mismatches),
+		"every request must send the token belonging to the address it was sent to")
 }

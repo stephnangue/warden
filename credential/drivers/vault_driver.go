@@ -268,6 +268,9 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig credential.Config) (
 
 // sourceConfig returns the current config map. Rotation swaps in a whole new map
 // rather than writing into the live one, so the result is a stable snapshot.
+// An operation that reads more than one key must take one snapshot and read every
+// value from it. Calling this per key is correct for a single value and wrong for
+// a set: a rotation between two calls yields values from two generations.
 func (d *VaultDriver) sourceConfig() credential.Config {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
@@ -316,9 +319,18 @@ func (d *VaultDriver) isTokenValid(ctx context.Context) bool {
 
 // loginViaApprole authenticates to Vault using AppRole
 func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
-	roleID := credential.GetString(d.sourceConfig(), "role_id", "")
-	secretID := credential.GetString(d.sourceConfig(), "secret_id", "")
-	approleMount := credential.GetString(d.sourceConfig(), "approle_mount", "")
+	// One snapshot: secret_id is what rotation replaces, so reading it separately
+	// from role_id would let a login pair a role with a secret issued for a
+	// different generation of it.
+	//
+	// That cannot happen today — every caller holds authMu, and the only writer
+	// holds it too — but that is an argument spanning three functions, and it stops
+	// holding the moment someone adds a caller that does not take authMu. The
+	// snapshot makes the guarantee local.
+	config := d.sourceConfig()
+	roleID := credential.GetString(config, "role_id", "")
+	secretID := credential.GetString(config, "secret_id", "")
+	approleMount := credential.GetString(config, "approle_mount", "")
 
 	data := map[string]interface{}{
 		"role_id":   roleID,
@@ -1152,14 +1164,13 @@ func (d *VaultDriver) Cleanup(ctx context.Context) error {
 // SupportsRotation returns true if this driver instance can rotate its credentials.
 // Currently only AppRole authentication supports rotation.
 func (d *VaultDriver) SupportsRotation() bool {
-	authMethod := credential.GetString(d.sourceConfig(), "auth_method", "")
-	if authMethod != "approle" {
+	config := d.sourceConfig()
+	if credential.GetString(config, "auth_method", "") != "approle" {
 		return false
 	}
 
 	// AppRole rotation requires role_name to generate new secret_id
-	roleName := credential.GetString(d.sourceConfig(), "role_name", "")
-	return roleName != ""
+	return credential.GetString(config, "role_name", "") != ""
 }
 
 // PrepareRotation generates a new AppRole secret_id WITHOUT destroying the old one.
@@ -1169,14 +1180,19 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	authMethod := credential.GetString(d.sourceConfig(), "auth_method", "")
+	// One snapshot for everything this rotation derives from the current config, so
+	// the role it generates against and the accessor it retires describe the same
+	// generation.
+	config := d.sourceConfig()
+
+	authMethod := credential.GetString(config, "auth_method", "")
 	if authMethod != "approle" {
 		return nil, nil, 0, fmt.Errorf("rotation only supported for approle auth method, got: %s", authMethod)
 	}
 
-	approleMount := credential.GetString(d.sourceConfig(), "approle_mount", "")
-	roleName := credential.GetString(d.sourceConfig(), "role_name", "")
-	oldAccessor := credential.GetString(d.sourceConfig(), "secret_id_accessor", "")
+	approleMount := credential.GetString(config, "approle_mount", "")
+	roleName := credential.GetString(config, "role_name", "")
+	oldAccessor := credential.GetString(config, "secret_id_accessor", "")
 
 	if roleName == "" {
 		return nil, nil, 0, fmt.Errorf("role_name is required for AppRole rotation")
@@ -1203,9 +1219,10 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 		return nil, nil, 0, fmt.Errorf("secret_id_accessor not found in response")
 	}
 
-	// Build new config (both old and new are valid at this point)
-	newConfig := make(map[string]string)
-	for k, v := range d.sourceConfig().All() {
+	// Build new config (both old and new are valid at this point), from the same
+	// snapshot the checks above used rather than re-reading the live field.
+	newConfig := make(map[string]string, config.Len())
+	for k, v := range config.All() {
 		newConfig[k] = v
 	}
 	newConfig["secret_id"] = newSecretID
