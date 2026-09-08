@@ -1,8 +1,6 @@
 package credential
 
 import (
-	"errors"
-	"sync"
 	"time"
 )
 
@@ -136,91 +134,4 @@ type CredSource struct {
 	Type           string // local, hvault, aws, azure_key_vault, gcp_secret_manager
 	Config         Config
 	RotationPeriod time.Duration // 0 means no rotation
-}
-
-type CredSourceRegistry struct {
-	sources map[string]*CredSource
-	mu      sync.RWMutex
-}
-
-func NewCredSourceRegistry() *CredSourceRegistry {
-	return &CredSourceRegistry{
-		sources: make(map[string]*CredSource),
-	}
-}
-
-// Register adds a credential source to the registry
-// Returns an error if the source is invalid or if a source with the same name already exists
-func (r *CredSourceRegistry) Register(source CredSource) error {
-	if source.Name == "" {
-		return errors.New("source name cannot be empty")
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, exists := r.sources[source.Name]; exists {
-		return ErrSourceAlreadyExists
-	}
-
-	r.sources[source.Name] = &source
-	return nil
-}
-
-// Get retrieves a credential source by name (alias for GetSource for consistency)
-func (r *CredSourceRegistry) Get(name string) (*CredSource, bool) {
-	return r.GetSource(name)
-}
-
-// GetSource retrieves a credential source by name
-func (r *CredSourceRegistry) GetSource(name string) (*CredSource, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	source := r.sources[name]
-	if source == nil {
-		return nil, false
-	}
-	return source, true
-}
-
-// List returns all registered sources
-func (r *CredSourceRegistry) List() []*CredSource {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	sources := make([]*CredSource, 0, len(r.sources))
-	for _, source := range r.sources {
-		sources = append(sources, source)
-	}
-	return sources
-}
-
-// Delete removes a source from the registry
-func (r *CredSourceRegistry) Delete(name string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, exists := r.sources[name]; !exists {
-		return false
-	}
-
-	delete(r.sources, name)
-	return true
-}
-
-// Exists checks if a source with the given name exists
-func (r *CredSourceRegistry) Exists(name string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	_, exists := r.sources[name]
-	return exists
-}
-
-// Count returns the number of registered sources
-func (r *CredSourceRegistry) Count() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return len(r.sources)
 }
