@@ -976,3 +976,49 @@ func TestNamespaceStore_ClearNamespaceResources_NilManagers(t *testing.T) {
 	err := core.namespaceStore.clearNamespaceResources(nsCtx, childNs)
 	require.NoError(t, err)
 }
+
+// TestNamespaceStore_ClearNamespaceResourcesClosesDrivers asserts that deleting a
+// namespace releases the credential drivers its sources left behind.
+//
+// Nothing closed them before: CloseAllDriversForNamespace existed across three
+// layers with no production caller, so every driver in a deleted namespace kept its
+// HTTP clients, pooled connections and cached upstream tokens for the life of the
+// process.
+func TestNamespaceStore_ClearNamespaceResourcesClosesDrivers(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	driver := &mockRotatableDriver{supportsRotation: true}
+	require.NoError(t, core.credentialDriverRegistry.RegisterFactory(&mockDriverFactory{driver: driver}))
+
+	// Rebuild the manager so it resolves through the registry the mock is in.
+	credManager, err := credential.NewManager(
+		core.credentialTypeRegistry, core.credentialDriverRegistry, core.credConfigStore, core.logger)
+	require.NoError(t, err)
+	core.credentialManager = credManager
+
+	childNs := &namespace.Namespace{
+		ID:   "driver-cleanup-ns",
+		UUID: "driver-cleanup-ns-uuid",
+		Path: "driver-cleanup/",
+	}
+	nsCtx := namespace.ContextWithNamespace(context.Background(), childNs)
+
+	require.NoError(t, core.credConfigStore.CreateSource(nsCtx, &credential.CredSource{
+		Name: "mock-src",
+		Type: "mock",
+	}))
+
+	// Instantiate the driver, the way a mint would.
+	_, err = core.credentialManager.GetOrCreateDriver(nsCtx, "mock-src")
+	require.NoError(t, err)
+
+	// The factory hands back one shared instance, so the connection probe that
+	// source validation runs has already torn it down once. Measure the delta.
+	before := driver.GetDriverCleanupCount()
+
+	require.NoError(t, core.namespaceStore.clearNamespaceResources(nsCtx, childNs))
+
+	assert.Equal(t, before+1, driver.GetDriverCleanupCount(),
+		"deleting the namespace must close the drivers its sources created")
+}
