@@ -634,16 +634,12 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	// Create source and spec
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
-	_, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
-	require.NoError(t, err)
+	// A vault_token spec needs an hvault source; a local one is rejected. This used
+	// to be a "local" source, and the spec creation below failed 400 without the
+	// test noticing — the handler reports that in the response, not as a Go error.
+	// The delete then succeeded against a spec that had never been created, because
+	// deleting something absent returned 200.
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
@@ -657,8 +653,11 @@ func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	}
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
-	_, err = backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
+	createResp, err := backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
 	require.NoError(t, err)
+	require.NotNil(t, createResp)
+	require.Equal(t, http.StatusCreated, createResp.StatusCode,
+		"spec creation must succeed before the delete is meaningful: %+v", createResp.Data)
 
 	// Delete spec
 	resp, err := backend.handleCredentialSpecDelete(ctx, specReq, specFieldData)
@@ -666,6 +665,12 @@ func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Data["message"], "Successfully deleted")
+
+	// Deleting it again must now report not-found rather than success.
+	resp, err = backend.handleCredentialSpecDelete(ctx, specReq, specFieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestSystemBackend_HandleCredentialSpecList(t *testing.T) {

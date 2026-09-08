@@ -197,15 +197,126 @@ func (s *CredentialConfigStore) isBuiltinSource(name string) bool {
 }
 
 // ============================================================================
+// Lock discipline
+// ============================================================================
+//
+// Every mutator runs in three phases:
+//
+//  1. Validate, holding no store lock. Validation reaches back into the store's
+//     own getters, and it talks to the provider — a spec write mints and revokes a
+//     real credential, and a source write builds a driver, which for some types
+//     authenticates. Running that under the write lock would block every read on
+//     the issuance path for as long as the provider takes to answer, and a hung
+//     provider would stall all credential issuance. Doing it before the lock is
+//     also what removes the re-entrancy: the validators call the public getters
+//     while the caller holds nothing.
+//
+//  2. Commit, under s.mu.Lock. Existence checks, the cheap invariant re-checks
+//     that close the gap opened by validating outside the lock, the storage write
+//     and the cache update. No I/O beyond the storage write.
+//
+//  3. Everything else, after the unlock: rotation reconciliation and driver
+//     teardown. CloseDriver takes the driver registry's lock and runs the driver's
+//     Cleanup, which can do network I/O, so it must not run inside the critical
+//     section.
+//
+// The lock stays an RWMutex: readers are the hot path, and the critical section is
+// short once validation and driver teardown sit outside it.
+//
+// Helpers named *Locked take no lock and fill no cache. They exist so phase 2 can
+// re-run a check that phase 1 already performed.
+
+// isClosed reports whether the store has been torn down.
+func (s *CredentialConfigStore) isClosed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.closed
+}
+
+// specExists reports whether a spec is present, distinguishing "absent" from
+// "could not tell". A storage read that fails for any reason other than a genuine
+// not-found is returned as an error: treating it as absent lets a create overwrite
+// a spec that exists but is momentarily unreadable.
+func (s *CredentialConfigStore) specExists(namespaceID, name string) (bool, error) {
+	if _, found := s.specsByID.Get(s.buildSpecCacheKey(namespaceID, name)); found {
+		return true, nil
+	}
+	if _, err := s.loadSpec(namespaceID, name); err != nil {
+		if errors.Is(err, ErrSpecNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to determine whether spec %q exists: %w", name, err)
+	}
+	return true, nil
+}
+
+// sourceExists is specExists for sources.
+func (s *CredentialConfigStore) sourceExists(namespaceID, name string) (bool, error) {
+	if _, found := s.sourcesByID.Get(s.buildSourceCacheKey(namespaceID, name)); found {
+		return true, nil
+	}
+	if _, err := s.loadSource(namespaceID, name); err != nil {
+		if errors.Is(err, ErrSourceNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to determine whether source %q exists: %w", name, err)
+	}
+	return true, nil
+}
+
+// checkSourceReferencesLocked returns the specs bound to a source, reading storage
+// directly rather than through the caching list helpers.
+func (s *CredentialConfigStore) checkSourceReferencesLocked(namespaceID, sourceName string) ([]*credential.CredSpec, error) {
+	specs, err := s.loadAllSpecs(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []*credential.CredSpec
+	for _, spec := range specs {
+		if spec.Source == sourceName {
+			refs = append(refs, spec)
+		}
+	}
+	return refs, nil
+}
+
+// checkSpecReferencesLocked returns the sources and specs that name this spec as
+// their credential-chaining secret source.
+func (s *CredentialConfigStore) checkSpecReferencesLocked(namespaceID, specName string) ([]string, error) {
+	sources, err := s.loadAllSources(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+	specs, err := s.loadAllSpecs(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []string
+	for _, src := range sources {
+		if src.Config[credential.ConfigSecretSpec] == specName {
+			refs = append(refs, "source/"+src.Name)
+		}
+	}
+	for _, spec := range specs {
+		if spec.Name == specName {
+			continue // a spec never references itself
+		}
+		if spec.Config[credential.ConfigSecretSpec] == specName {
+			refs = append(refs, "spec/"+spec.Name)
+		}
+	}
+	return refs, nil
+}
+
+// ============================================================================
 // CredSpec Operations
 // ============================================================================
 
 // CreateSpec creates a new credential spec in the namespace from context
 func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential.CredSpec) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -214,29 +325,64 @@ func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential
 		return err
 	}
 
-	// Validate spec
+	// Phase 1: validate, holding no lock.
+
+	// The duplicate check comes first because validation mints and revokes a real
+	// credential at the provider. Running it before this meant every duplicate
+	// create paid for an upstream mint to then be rejected on a name clash.
+	exists, err := s.specExists(ns.UUID, spec.Name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrSpecAlreadyExists
+	}
+
 	if err := s.ValidateSpec(ctx, spec); err != nil {
 		return err
 	}
 
-	// Check if spec already exists (check both cache and storage)
-	cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
-	if _, found := s.specsByID.Get(cacheKey); found {
-		return ErrSpecAlreadyExists
-	}
-	// Also check storage in case cache was evicted or server restarted
-	if _, err := s.loadSpec(ns.UUID, spec.Name); err == nil {
-		return ErrSpecAlreadyExists
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
 	}
 
-	// Persist to storage
+	// Re-check what validation established, now that nothing can move underneath
+	// us. Another create of this name, or a delete of the source this spec binds
+	// to, may have landed while validation was talking to the provider.
+	exists, err = s.specExists(ns.UUID, spec.Name)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if exists {
+		s.mu.Unlock()
+		return ErrSpecAlreadyExists
+	}
+	if !s.isBuiltinSource(spec.Source) {
+		sourceExists, err := s.sourceExists(ns.UUID, spec.Source)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if !sourceExists {
+			s.mu.Unlock()
+			return logical.ErrBadRequestf("source '%s' not found in namespace", spec.Source)
+		}
+	}
+
 	if err := s.persistSpec(ns.UUID, spec); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to persist spec: %w", err)
 	}
 
-	// Cache the spec
-	s.specsByID.Set(cacheKey, spec, 1)
+	s.specsByID.Set(s.buildSpecCacheKey(ns.UUID, spec.Name), spec, 1)
 	s.specsByID.Wait()
+	s.mu.Unlock()
+
+	// Phase 3: rotation registration, outside the lock.
 
 	// Register with rotation manager if RotationPeriod is configured. A chained
 	// spec never gets this far: the check above rejects that combination, and
@@ -331,10 +477,7 @@ func (s *CredentialConfigStore) ReloadSpec(ctx context.Context, name string) (*c
 
 // UpdateSpec updates an existing spec
 func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential.CredSpec, opts ...UpdateSpecOptions) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -343,7 +486,7 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 		return err
 	}
 
-	// Validate spec
+	// Phase 1: validate, holding no lock.
 	var skipVerification bool
 	if len(opts) > 0 {
 		skipVerification = opts[0].SkipVerification
@@ -352,21 +495,34 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 		return err
 	}
 
-	// Check if spec exists
-	cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
-	existing, err := s.loadSpec(ns.UUID, spec.Name)
-	if err != nil {
-		return ErrSpecNotFound
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
 	}
 
-	// Persist to storage
+	// A read that fails for any reason other than a genuine not-found is reported
+	// as such, rather than told to the operator as "spec not found".
+	existing, err := s.loadSpec(ns.UUID, spec.Name)
+	if err != nil {
+		s.mu.Unlock()
+		if errors.Is(err, ErrSpecNotFound) {
+			return ErrSpecNotFound
+		}
+		return fmt.Errorf("failed to read spec %q: %w", spec.Name, err)
+	}
+
 	if err := s.persistSpec(ns.UUID, spec); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to persist spec: %w", err)
 	}
 
-	// Update cache
-	s.specsByID.Set(cacheKey, spec, 1)
+	s.specsByID.Set(s.buildSpecCacheKey(ns.UUID, spec.Name), spec, 1)
 	s.specsByID.Wait()
+	s.mu.Unlock()
+
+	// Phase 3: rotation reconciliation, outside the lock.
 
 	// Same reconciliation the source path does, for the same reason: the spec
 	// update API has always carried rotation_period, so a period could be changed
@@ -417,10 +573,7 @@ func (s *CredentialConfigStore) reconcileSpecRotation(ctx context.Context, spec 
 
 // DeleteSpec removes a spec by name
 func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -429,17 +582,48 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 		return err
 	}
 
-	// Prevent deleting a spec still referenced as a chaining secret source
-	// (secret_spec) by another source or spec.
-	refs, err := s.CheckSpecReferences(ctx, name)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
+	}
+
+	// Deleting something that is not there used to report success: storage Delete
+	// is idempotent and nothing checked first, so the handler's not-found branch
+	// was unreachable and DELETE of a missing spec answered 200.
+	exists, err := s.specExists(ns.UUID, name)
 	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if !exists {
+		s.mu.Unlock()
+		return ErrSpecNotFound
+	}
+
+	// Prevent deleting a spec still referenced as a chaining secret source
+	// (secret_spec) by another source or spec. Checked inside the critical section
+	// so a consumer created concurrently cannot be left pointing at nothing.
+	refs, err := s.checkSpecReferencesLocked(ns.UUID, name)
+	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if len(refs) > 0 {
+		s.mu.Unlock()
 		return ErrSpecInUse
 	}
 
-	// Unregister from rotation manager first (if registered)
+	if err := s.deleteSpec(ns.UUID, name); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
+	s.specsByID.Del(s.buildSpecCacheKey(ns.UUID, name))
+	s.mu.Unlock()
+
+	// Unregister from rotation after the delete is durable: an unregister followed
+	// by a failed delete would leave a spec that no longer rotates.
 	if s.rotationManager != nil {
 		if err := s.rotationManager.UnregisterSpec(ctx, name); err != nil {
 			s.logger.Debug("spec was not registered for rotation (or already unregistered)",
@@ -447,15 +631,6 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 			)
 		}
 	}
-
-	// Delete from storage
-	if err := s.deleteSpec(ns.UUID, name); err != nil {
-		return err
-	}
-
-	// Remove from cache
-	cacheKey := s.buildSpecCacheKey(ns.UUID, name)
-	s.specsByID.Del(cacheKey)
 
 	s.logger.Info("deleted credential spec",
 		logger.String("namespace", ns.UUID),
@@ -501,10 +676,7 @@ func (s *CredentialConfigStore) ListSpecs(ctx context.Context) ([]*credential.Cr
 
 // CreateSource creates a new credential source in the namespace from context
 func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *credential.CredSource) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -518,29 +690,49 @@ func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *creden
 		return err
 	}
 
-	// Validate source
+	// Phase 1: validate, holding no lock. Validation builds a driver, which for
+	// several source types authenticates against the provider.
+
+	// Cheap check first, so a duplicate create does not pay for that round trip.
+	exists, err := s.sourceExists(ns.UUID, source.Name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrSourceAlreadyExists
+	}
+
 	if err := s.ValidateSource(ctx, source); err != nil {
 		return err
 	}
 
-	// Check if source already exists (check both cache and storage)
-	cacheKey := s.buildSourceCacheKey(ns.UUID, source.Name)
-	if _, found := s.sourcesByID.Get(cacheKey); found {
-		return ErrSourceAlreadyExists
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
 	}
-	// Also check storage in case cache was evicted or server restarted
-	if _, err := s.loadSource(ns.UUID, source.Name); err == nil {
+
+	exists, err = s.sourceExists(ns.UUID, source.Name)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if exists {
+		s.mu.Unlock()
 		return ErrSourceAlreadyExists
 	}
 
-	// Persist to storage
 	if err := s.persistSource(ns.UUID, source); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to persist source: %w", err)
 	}
 
-	// Cache the source
-	s.sourcesByID.Set(cacheKey, source, 1)
+	s.sourcesByID.Set(s.buildSourceCacheKey(ns.UUID, source.Name), source, 1)
 	s.sourcesByID.Wait()
+	s.mu.Unlock()
+
+	// Phase 3: rotation registration, outside the lock.
 
 	// Register with rotation manager if RotationPeriod is configured. A federated
 	// source is never enrolled: CreateSource rejects the combination outright, so
@@ -620,10 +812,7 @@ type UpdateSourceOptions struct {
 
 // UpdateSource updates an existing source
 func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *credential.CredSource, opts ...UpdateSourceOptions) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -637,7 +826,8 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 		return err
 	}
 
-	// Validate source
+	// Phase 1: validate, holding no lock. Unless the caller skips it, this opens a
+	// connection to the provider.
 	var skipConnectionTest bool
 	if len(opts) > 0 {
 		skipConnectionTest = opts[0].SkipConnectionTest
@@ -652,12 +842,24 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// so letting Type change in place would silently invalidate those guards for
 	// already-bound specs. The API handler already forces the type; this defends the
 	// invariant at the store layer for any other caller.
-	cacheKey := s.buildSourceCacheKey(ns.UUID, source.Name)
+	//
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
+	}
+
 	existing, err := s.loadSource(ns.UUID, source.Name)
 	if err != nil {
-		return ErrSourceNotFound
+		s.mu.Unlock()
+		if errors.Is(err, ErrSourceNotFound) {
+			return ErrSourceNotFound
+		}
+		return fmt.Errorf("failed to read source %q: %w", source.Name, err)
 	}
 	if source.Type != existing.Type {
+		s.mu.Unlock()
 		return logical.ErrBadRequestf("cannot change the type of source %q (%s → %s); source type is immutable", source.Name, existing.Type, source.Type)
 	}
 
@@ -666,12 +868,13 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// the specs are untouched — they simply start minting without a field, and the
 	// provider takes its fallback branch. Reject rather than let a source edit
 	// silently narrow credentials bound to it.
-	if err := s.checkBoundSpecsStillCarried(ctx, source); err != nil {
+	if err := s.checkBoundSpecsStillCarriedLocked(ns.UUID, source); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 
-	// Close the old driver instance only when the config it was built from actually
-	// changed, so it is rebuilt from the new one on next use.
+	// Whether the driver has to be rebuilt is decided here, while the previous
+	// config is still known, but acted on after the unlock.
 	//
 	// Config is the only field a driver reads: Name keys it, Type is immutable
 	// (refused above), and RotationPeriod is the manager's state, not the driver's.
@@ -680,7 +883,25 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// tokens, discovered identity, pooled connections — to rebuild something byte
 	// for byte the same. That case stopped being hypothetical when the update path
 	// began accepting a rotation period on its own.
-	if !maps.Equal(existing.Config, source.Config) {
+	driverInputsChanged := !maps.Equal(existing.Config, source.Config)
+
+	if err := s.persistSource(ns.UUID, source); err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to persist source: %w", err)
+	}
+
+	s.sourcesByID.Set(s.buildSourceCacheKey(ns.UUID, source.Name), source, 1)
+	s.sourcesByID.Wait()
+	s.mu.Unlock()
+
+	// Phase 3: outside the lock.
+
+	// Close the old driver instance so it is rebuilt from the new config on next
+	// use. This runs after the cache carries the new config, so a mint racing the
+	// teardown rebuilds from the new config rather than the old — and after the
+	// unlock, because CloseDriver takes the registry's lock and runs the driver's
+	// Cleanup, which can do network I/O.
+	if driverInputsChanged && s.core != nil && s.core.credentialManager != nil {
 		if err := s.core.credentialManager.CloseDriver(ctx, source.Name); err != nil {
 			s.logger.Warn("failed to close driver during source update",
 				logger.String("source_name", source.Name),
@@ -688,15 +909,6 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 			// Continue with update even if driver cleanup fails
 		}
 	}
-
-	// Persist to storage
-	if err := s.persistSource(ns.UUID, source); err != nil {
-		return fmt.Errorf("failed to persist source: %w", err)
-	}
-
-	// Update cache
-	s.sourcesByID.Set(cacheKey, source, 1)
-	s.sourcesByID.Wait()
 
 	// Reconcile the rotation schedule with what was just persisted. Until this
 	// existed the manager was told about a source only at create and delete, so a
@@ -760,10 +972,7 @@ func (s *CredentialConfigStore) reconcileSourceRotation(ctx context.Context, sou
 
 // DeleteSource removes a source by name
 func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -777,16 +986,46 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 		return err
 	}
 
-	// Check if source is in use
-	refs, err := s.CheckSourceReferences(ctx, name)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
+	}
+
+	// Deleting something absent used to report success — see DeleteSpec.
+	exists, err := s.sourceExists(ns.UUID, name)
 	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if !exists {
+		s.mu.Unlock()
+		return ErrSourceNotFound
+	}
+
+	// Check if source is in use, inside the critical section so a spec created
+	// concurrently cannot be left bound to a source that is being removed.
+	refs, err := s.checkSourceReferencesLocked(ns.UUID, name)
+	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if len(refs) > 0 {
+		s.mu.Unlock()
 		return ErrSourceInUse
 	}
 
-	// Unregister from rotation manager first (if registered)
+	if err := s.deleteSource(ns.UUID, name); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
+	s.sourcesByID.Del(s.buildSourceCacheKey(ns.UUID, name))
+	s.mu.Unlock()
+
+	// Outside the lock: unregister rotation and release the driver's resources.
+	// Both run after the delete is durable, so a failure here cannot leave a
+	// deleted source still rotating or a live source without its driver.
 	if s.rotationManager != nil {
 		if err := s.rotationManager.UnregisterSource(ctx, name); err != nil {
 			s.logger.Debug("source was not registered for rotation (or already unregistered)",
@@ -795,9 +1034,7 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 		}
 	}
 
-	// Close driver instance to prevent resource leaks
-	// This releases any connections, HTTP clients, or other resources held by the driver
-	if s.core.credentialManager != nil {
+	if s.core != nil && s.core.credentialManager != nil {
 		if err := s.core.credentialManager.CloseDriver(ctx, name); err != nil {
 			s.logger.Warn("failed to close driver during source deletion",
 				logger.String("source_name", name),
@@ -805,15 +1042,6 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 			// Continue with deletion even if driver cleanup fails
 		}
 	}
-
-	// Delete from storage
-	if err := s.deleteSource(ns.UUID, name); err != nil {
-		return err
-	}
-
-	// Remove from cache
-	cacheKey := s.buildSourceCacheKey(ns.UUID, name)
-	s.sourcesByID.Del(cacheKey)
 
 	s.logger.Info("deleted credential source",
 		logger.String("namespace", ns.UUID),
@@ -865,16 +1093,22 @@ func (s *CredentialConfigStore) ListSources(ctx context.Context) ([]*credential.
 // Rotation unregistration is handled for each entry.
 // This is called during namespace deletion.
 func (s *CredentialConfigStore) ClearNamespace(ctx context.Context) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
 	ns, err := s.getNamespaceFromContext(ctx)
 	if err != nil {
 		return err
+	}
+
+	// One critical section for the whole sweep: a create landing part-way through
+	// would otherwise survive a namespace deletion.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrConfigStoreClosed
 	}
 
 	// Delete all specs first (removes references to sources)
@@ -1559,12 +1793,15 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 // working mount. The operator is told which specs to fix.
 //
 // Widening is always fine; only a name that disappears can strand anything.
-func (s *CredentialConfigStore) checkBoundSpecsStillCarried(ctx context.Context, source *credential.CredSource) error {
+//
+// Takes no lock and fills no cache: it runs inside UpdateSource's critical
+// section, where the referenced specs must not be able to change underneath it.
+func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(namespaceID string, source *credential.CredSource) error {
 	if s.core == nil || s.core.credentialTypeRegistry == nil {
 		return nil
 	}
 
-	refs, err := s.CheckSourceReferences(ctx, source.Name)
+	refs, err := s.checkSourceReferencesLocked(namespaceID, source.Name)
 	if err != nil {
 		// A listing failure must not block an unrelated source edit; the
 		// spec-level guard still covers every future write.
