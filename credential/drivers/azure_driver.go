@@ -192,6 +192,17 @@ type AzureDriver struct {
 	credGeneration uint64
 	tokenMu        sync.Mutex
 
+	// configMu guards credSource.Config, which rotation replaces while mints are
+	// in flight. It is deliberately separate from tokenMu: token acquisition
+	// releases tokenMu for the duration of the HTTP call and reads the source
+	// credentials on the way, so tokenMu does not cover the config field at all.
+	//
+	// It is never held across acquiring another lock — sourceConfig takes it,
+	// reads one map header and releases — so the two locks cannot deadlock in
+	// either order, and a caller already holding tokenMu may read config freely.
+	// RWMutex because the readers are on the mint path.
+	configMu sync.RWMutex
+
 	// Object ID cache: appID -> objectID (immutable mapping in Azure AD)
 	objectIDCache map[string]string
 	objectIDMu    sync.Mutex
@@ -216,16 +227,39 @@ type AzureDriver struct {
 // Config accessors — single source of truth is credSource.Config.
 // These are cheap map lookups, not cached copies.
 
+// sourceConfig returns the current config map. Rotation swaps in a whole new map
+// rather than writing into the live one, so the result is a stable snapshot and
+// callers need not hold the lock while reading it.
+func (d *AzureDriver) sourceConfig() map[string]string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.credSource.Config
+}
+
 func (d *AzureDriver) getTenantID() string {
-	return credential.GetString(d.credSource.Config, "tenant_id", "")
+	return credential.GetString(d.sourceConfig(), "tenant_id", "")
 }
 
 func (d *AzureDriver) getClientID() string {
-	return credential.GetString(d.credSource.Config, "client_id", "")
+	return credential.GetString(d.sourceConfig(), "client_id", "")
 }
 
 func (d *AzureDriver) getClientSecret() string {
-	return credential.GetString(d.credSource.Config, "client_secret", "")
+	return credential.GetString(d.sourceConfig(), "client_secret", "")
+}
+
+// sourceCreds returns the service principal's tenant, client id and secret from a
+// single snapshot.
+//
+// These three must never be read separately. A rotation landing between two of the
+// reads would pair a client id with a secret belonging to a different generation —
+// a credential that never existed — and the resulting failure looks like a bad
+// stored secret rather than a torn read.
+func (d *AzureDriver) sourceCreds() (tenantID, clientID, clientSecret string) {
+	config := d.sourceConfig()
+	return credential.GetString(config, "tenant_id", ""),
+		credential.GetString(config, "client_id", ""),
+		credential.GetString(config, "client_secret", "")
 }
 
 // cachedAzureToken holds an Azure AD access token with expiry and generation
@@ -368,7 +402,7 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	// A keyless source mints only through the exchange path, which carries the
 	// caller-scoped assertion. Fail closed here to avoid silently minting with
 	// no credential material.
-	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+	if credential.GetString(d.sourceConfig(), "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
 		return nil, nil, 0, "", fmt.Errorf("azure: source uses auth_method=oidc_federation; the spec must set subject_token_source (warden_identity or agent_identity)")
 	}
 
@@ -393,7 +427,7 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 // the app's federated credential must trust the origin IdP directly). There is no
 // caller-supplied, unverified subject token.
 func (d *AzureDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) != azureAuthMethodOIDCFederation {
+	if credential.GetString(d.sourceConfig(), "auth_method", azureAuthMethodStatic) != azureAuthMethodOIDCFederation {
 		return nil, nil, 0, "", fmt.Errorf("azure: workload identity federation requires auth_method=oidc_federation on the source")
 	}
 	if inputs == nil || inputs.SubjectToken == "" {
@@ -605,7 +639,11 @@ func (d *AzureDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	d.tokenMu.Lock()
 	defer d.tokenMu.Unlock()
 
-	oldSecretID := credential.GetString(d.credSource.Config, "secret_id", "")
+	// One snapshot for everything this rotation derives from the current config, so
+	// the secret it retires, the map it copies and the delay it returns all describe
+	// the same generation.
+	current := d.sourceConfig()
+	oldSecretID := credential.GetString(current, "secret_id", "")
 
 	// Get Graph API token
 	graphToken, err := d.getGraphTokenLocked(ctx)
@@ -625,8 +663,8 @@ func (d *AzureDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	d.removeOrphanedPasswordCredentials(ctx, graphToken, d.getClientID(), oldSecretID, newSecretID)
 
 	// Build new config
-	newConfig := make(map[string]string)
-	for k, v := range d.credSource.Config {
+	newConfig := make(map[string]string, len(current))
+	for k, v := range current {
 		newConfig[k] = v
 	}
 	newConfig["client_secret"] = newSecret
@@ -638,7 +676,7 @@ func (d *AzureDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 
 	// Return activateAfter to let the rotation manager schedule activation
 	// after Azure AD eventual consistency has propagated the new credential.
-	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultAzureActivationDelay)
+	activateAfter := credential.GetDuration(current, "activation_delay", DefaultAzureActivationDelay)
 
 	if d.logger != nil {
 		d.logger.Debug("prepared source credential rotation",
@@ -655,8 +693,11 @@ func (d *AzureDriver) CommitRotation(ctx context.Context, newConfig map[string]s
 	d.tokenMu.Lock()
 	defer d.tokenMu.Unlock()
 
-	// Update config (single source of truth for credentials)
+	// Update config (single source of truth for credentials). Under configMu, not
+	// tokenMu: the readers are mints that never take tokenMu at all.
+	d.configMu.Lock()
 	d.credSource.Config = newConfig
+	d.configMu.Unlock()
 
 	// Bump generation to invalidate all cached tokens; old-generation entries
 	// are ignored on lookup without needing to clear the map.
@@ -760,7 +801,7 @@ func (d *AzureDriver) PrepareSpecRotation(ctx context.Context, spec *credential.
 
 	// Return activateAfter to let the rotation manager schedule activation
 	// after Azure AD eventual consistency has propagated the new credential.
-	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultAzureActivationDelay)
+	activateAfter := credential.GetDuration(d.sourceConfig(), "activation_delay", DefaultAzureActivationDelay)
 
 	if d.logger != nil {
 		d.logger.Debug("prepared spec credential rotation",
@@ -898,7 +939,8 @@ func (d *AzureDriver) getSourceToken(ctx context.Context, resourceURI string) (s
 	d.tokenMu.Unlock()
 
 	// Slow path: acquire token WITHOUT holding lock
-	token, expiresIn, err := d.acquireToken(ctx, d.getTenantID(), d.getClientID(), d.getClientSecret(), resourceURI)
+	tenantID, clientID, clientSecret := d.sourceCreds()
+	token, expiresIn, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
 	if err != nil {
 		return "", err
 	}
@@ -931,7 +973,8 @@ func (d *AzureDriver) getSourceTokenLocked(ctx context.Context, resourceURI stri
 		return cached.accessToken, nil
 	}
 
-	token, expiresIn, err := d.acquireToken(ctx, d.getTenantID(), d.getClientID(), d.getClientSecret(), resourceURI)
+	tenantID, clientID, clientSecret := d.sourceCreds()
+	token, expiresIn, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
 	if err != nil {
 		return "", err
 	}
@@ -961,7 +1004,7 @@ func (d *AzureDriver) getGraphTokenLocked(ctx context.Context) (string, error) {
 func (d *AzureDriver) hasGraphPermissions() bool {
 	// A keyless federation source has no client_secret, so the source-token probe
 	// below would be a doomed round-trip. It also has nothing to rotate.
-	if credential.GetString(d.credSource.Config, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+	if credential.GetString(d.sourceConfig(), "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
 		return false
 	}
 

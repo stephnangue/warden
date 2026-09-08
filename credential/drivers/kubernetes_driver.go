@@ -55,10 +55,19 @@ var _ credential.ExchangeMinter = (*KubernetesDriver)(nil)
 type KubernetesDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
+
+	// httpClient is replaced wholesale when a rotation changes the TLS settings,
+	// so it is guarded rather than read directly — see httpClientSnapshot.
 	httpClient *http.Client
 
 	// authMu protects credSource.Config writes during rotation.
 	authMu sync.Mutex
+
+	// clientMu guards the httpClient field alone, and is deliberately not authMu:
+	// doK8sRequestWith is called by rotation paths that already hold authMu, so
+	// reading the client under authMu would deadlock. clientMu is only ever held
+	// long enough to read or replace one pointer, never across another lock.
+	clientMu sync.RWMutex
 }
 
 // KubernetesDriverFactory creates KubernetesDriver instances
@@ -407,9 +416,18 @@ func (d *KubernetesDriver) Type() string {
 	return credential.SourceTypeKubernetes
 }
 
+// httpClientSnapshot returns the current HTTP client. A rotation that changes the
+// TLS settings replaces the whole client, so a caller takes one reference and uses
+// it for the rest of the call rather than reading the field again.
+func (d *KubernetesDriver) httpClientSnapshot() *http.Client {
+	d.clientMu.RLock()
+	defer d.clientMu.RUnlock()
+	return d.httpClient
+}
+
 // Cleanup releases resources
 func (d *KubernetesDriver) Cleanup(_ context.Context) error {
-	d.httpClient.CloseIdleConnections()
+	d.httpClientSnapshot().CloseIdleConnections()
 	return nil
 }
 
@@ -573,7 +591,9 @@ func (d *KubernetesDriver) CommitRotation(ctx context.Context, newConfig map[str
 			d.authMu.Unlock()
 			return fmt.Errorf("failed to rebuild HTTP client after rotation: %w", err)
 		}
+		d.clientMu.Lock()
 		d.httpClient = httpClient
+		d.clientMu.Unlock()
 	}
 
 	if d.logger != nil {
@@ -660,7 +680,7 @@ func (d *KubernetesDriver) probeTLS(ctx context.Context) error {
 	// Transport is nil when neither is set (BuildHTTPClient returns a bare client
 	// then), which leaves a nil config and the system roots — the right default.
 	var tlsConfig *tls.Config
-	if transport, ok := d.httpClient.Transport.(*http.Transport); ok && transport != nil {
+	if transport, ok := d.httpClientSnapshot().Transport.(*http.Transport); ok && transport != nil {
 		tlsConfig = transport.TLSClientConfig
 	}
 
@@ -717,7 +737,7 @@ func (d *KubernetesDriver) doK8sRequestWith(ctx context.Context, k8sURL, token, 
 		headers["Content-Type"] = "application/json"
 	}
 
-	return httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
+	return httputil.ExecuteWithRetry(ctx, d.httpClientSnapshot(), httputil.HTTPRequest{
 		Method:  method,
 		URL:     k8sURL + path,
 		Body:    body,

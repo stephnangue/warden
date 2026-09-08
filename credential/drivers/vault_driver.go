@@ -43,6 +43,13 @@ type VaultDriver struct {
 	httpClient    *http.Client // HTTP client for external API calls (e.g., IBM IAM token exchange)
 	tokenExpireAt time.Time    // Tracks when the current token expires
 	authMu        sync.Mutex   // Protects tokenExpireAt and authentication
+
+	// configMu guards the credSource.Config field, which rotation replaces. It is
+	// separate from authMu because loginViaApprole reads config while authMu is
+	// already held, so reading under authMu would deadlock. configMu is only ever
+	// held long enough to read or replace one map header, never across another
+	// lock, so the two cannot deadlock in either order.
+	configMu sync.RWMutex
 }
 
 // VaultDriverFactory creates VaultDriver instances
@@ -259,9 +266,17 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (
 	}
 }
 
+// sourceConfig returns the current config map. Rotation swaps in a whole new map
+// rather than writing into the live one, so the result is a stable snapshot.
+func (d *VaultDriver) sourceConfig() map[string]string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.credSource.Config
+}
+
 // getAuthMethod returns the source's configured auth_method ("" for a pre-set token).
 func (d *VaultDriver) getAuthMethod() string {
-	return credential.GetString(d.credSource.Config, "auth_method", "")
+	return credential.GetString(d.sourceConfig(), "auth_method", "")
 }
 
 // authenticate performs Vault authentication only if needed (thread-safe)
@@ -301,9 +316,9 @@ func (d *VaultDriver) isTokenValid(ctx context.Context) bool {
 
 // loginViaApprole authenticates to Vault using AppRole
 func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
-	roleID := credential.GetString(d.credSource.Config, "role_id", "")
-	secretID := credential.GetString(d.credSource.Config, "secret_id", "")
-	approleMount := credential.GetString(d.credSource.Config, "approle_mount", "")
+	roleID := credential.GetString(d.sourceConfig(), "role_id", "")
+	secretID := credential.GetString(d.sourceConfig(), "secret_id", "")
+	approleMount := credential.GetString(d.sourceConfig(), "approle_mount", "")
 
 	data := map[string]interface{}{
 		"role_id":   roleID,
@@ -513,7 +528,7 @@ func (d *VaultDriver) effectiveJWTRole(spec *credential.CredSpec) string {
 	if r := credential.GetString(spec.Config, "jwt_role", ""); r != "" {
 		return r
 	}
-	return credential.GetString(d.credSource.Config, "jwt_role", "")
+	return credential.GetString(d.sourceConfig(), "jwt_role", "")
 }
 
 // loginViaJWT builds a per-request, token-isolated Vault client and logs in at the
@@ -534,7 +549,7 @@ func (d *VaultDriver) loginViaJWT(ctx context.Context, spec *credential.CredSpec
 	if jwtRole == "" {
 		return nil, nil, fmt.Errorf("vault: jwt_role is required for auth_method=%s", vaultAuthMethodOIDCFederation)
 	}
-	jwtMount := credential.GetString(d.credSource.Config, "jwt_mount", defaultVaultJWTMount)
+	jwtMount := credential.GetString(d.sourceConfig(), "jwt_mount", defaultVaultJWTMount)
 
 	path := fmt.Sprintf("auth/%s/login", jwtMount)
 	secret, err := client.Logical().WriteWithContext(ctx, path, map[string]interface{}{
@@ -1137,13 +1152,13 @@ func (d *VaultDriver) Cleanup(ctx context.Context) error {
 // SupportsRotation returns true if this driver instance can rotate its credentials.
 // Currently only AppRole authentication supports rotation.
 func (d *VaultDriver) SupportsRotation() bool {
-	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
+	authMethod := credential.GetString(d.sourceConfig(), "auth_method", "")
 	if authMethod != "approle" {
 		return false
 	}
 
 	// AppRole rotation requires role_name to generate new secret_id
-	roleName := credential.GetString(d.credSource.Config, "role_name", "")
+	roleName := credential.GetString(d.sourceConfig(), "role_name", "")
 	return roleName != ""
 }
 
@@ -1154,14 +1169,14 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
+	authMethod := credential.GetString(d.sourceConfig(), "auth_method", "")
 	if authMethod != "approle" {
 		return nil, nil, 0, fmt.Errorf("rotation only supported for approle auth method, got: %s", authMethod)
 	}
 
-	approleMount := credential.GetString(d.credSource.Config, "approle_mount", "")
-	roleName := credential.GetString(d.credSource.Config, "role_name", "")
-	oldAccessor := credential.GetString(d.credSource.Config, "secret_id_accessor", "")
+	approleMount := credential.GetString(d.sourceConfig(), "approle_mount", "")
+	roleName := credential.GetString(d.sourceConfig(), "role_name", "")
+	oldAccessor := credential.GetString(d.sourceConfig(), "secret_id_accessor", "")
 
 	if roleName == "" {
 		return nil, nil, 0, fmt.Errorf("role_name is required for AppRole rotation")
@@ -1190,7 +1205,7 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 
 	// Build new config (both old and new are valid at this point)
 	newConfig := make(map[string]string)
-	for k, v := range d.credSource.Config {
+	for k, v := range d.sourceConfig() {
 		newConfig[k] = v
 	}
 	newConfig["secret_id"] = newSecretID
@@ -1216,16 +1231,19 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 
 // CommitRotation activates the new credentials in driver state.
 //
-// Thread-safety: authMu protects credSource.Config writes and loginViaApprole reads.
-// The rotated fields (secret_id, secret_id_accessor) are ONLY read inside loginViaApprole
-// which always runs under authMu. Other config fields (vault_address, database_mount, etc.)
-// are never modified by rotation, so concurrent reads by MintCredential are safe.
+// Thread-safety: authMu serializes this against authentication, and configMu guards
+// the config field itself. Both are needed. The rotated fields (secret_id,
+// secret_id_accessor) are only read inside loginViaApprole, which runs under authMu,
+// and the other fields hold the same value before and after a rotation — but equal
+// values do not make an unsynchronized field write safe. Readers elsewhere take
+// configMu, so the swap must too.
 func (d *VaultDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	// Update internal state (safe: rotated fields only read under authMu)
+	d.configMu.Lock()
 	d.credSource.Config = newConfig
+	d.configMu.Unlock()
 
 	// Re-authenticate with new credentials
 	if err := d.loginViaApprole(ctx); err != nil {
