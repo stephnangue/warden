@@ -42,14 +42,33 @@ type mockConfigStore struct {
 	// getSourceHook, when set, runs after GetSource has read a source and before
 	// it returns. See GetSource.
 	getSourceHook func()
+
+	// sourceReads counts GetSource calls per name, so a test can assert an issuance
+	// resolves each source exactly once.
+	sourceReads map[string]int
 }
 
 func newMockConfigStore() *mockConfigStore {
 	return &mockConfigStore{
-		cache:   make(map[string]*CredSpec),
-		storage: make(map[string]*CredSpec),
-		sources: make(map[string]*CredSource),
+		cache:       make(map[string]*CredSpec),
+		storage:     make(map[string]*CredSpec),
+		sources:     make(map[string]*CredSource),
+		sourceReads: make(map[string]int),
 	}
+}
+
+// sourceReadCount reports how many times a source name was resolved.
+func (m *mockConfigStore) sourceReadCount(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sourceReads[name]
+}
+
+// resetSourceReads zeroes the counters so a test can measure one issuance.
+func (m *mockConfigStore) resetSourceReads() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sourceReads = make(map[string]int)
 }
 
 func (m *mockConfigStore) GetSpec(ctx context.Context, name string) (*CredSpec, error) {
@@ -77,6 +96,10 @@ func (m *mockConfigStore) GetSource(ctx context.Context, name string) (*CredSour
 	m.mu.Lock()
 	source, ok := m.sources[name]
 	hook := m.getSourceHook
+	if m.sourceReads == nil {
+		m.sourceReads = make(map[string]int)
+	}
+	m.sourceReads[name]++
 	m.mu.Unlock()
 
 	if !ok {
@@ -1600,4 +1623,42 @@ func TestClaimsFingerprint_NoConcatenationCollisions(t *testing.T) {
 		claimsFingerprint(map[string]string{"a": "b", "c": "d"}),
 		claimsFingerprint(map[string]string{"a": "bcd"}))
 	assert.NotContains(t, claimsFingerprint(map[string]string{"sub": "SECRETVALUE"}), "SECRETVALUE")
+}
+
+// TestManager_IssuanceResolvesEachSourceOnce pins the read count of a plain
+// issuance.
+//
+// Unlike the chained case — see TestChaining_ResolvesEachSourceOnce, which is where
+// the repeated reads actually were — a plain issuance always resolved its source
+// once, so this test does not reproduce a past defect. It guards against a future
+// one: the helpers that want a source-level value now take the pair they are given,
+// and the count must not start growing again as more of them appear.
+func TestManager_IssuanceResolvesEachSourceOnce(t *testing.T) {
+	manager, configStore, _ := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "spec", Type: TypeVaultToken, Source: "src", Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	configStore.resetSourceReads()
+
+	_, err := manager.IssueCredential(ctx, Caller{TokenID: "tok", TokenTTL: time.Hour}, "spec", nil)
+	require.NoError(t, err)
+
+	// Two, and both are load-bearing: the request's own snapshot, and the read the
+	// driver coordinator pairs with a generation so it can refuse to install a driver
+	// built from config that went stale mid-build. Handing the coordinator the
+	// request's already-read source would collapse this to one and undo that check.
+	// What this asserts is that the number does not grow with the number of helpers
+	// that want a source-level value.
+	assert.Equal(t, 2, configStore.sourceReadCount("src"),
+		"a plain issuance resolves its source once for the request and once to build the driver")
+
+	// The driver is cached now, so a second issuance takes only the request snapshot.
+	configStore.resetSourceReads()
+	_, err = manager.IssueCredential(ctx, Caller{TokenID: "tok2", TokenTTL: time.Hour}, "spec", nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, configStore.sourceReadCount("src"),
+		"with the driver already built, an issuance resolves its source exactly once")
 }
