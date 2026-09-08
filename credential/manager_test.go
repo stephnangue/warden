@@ -38,6 +38,10 @@ type mockConfigStore struct {
 	sources   map[string]*CredSource
 	persisted []*CredSpec // specs captured by PersistRotatedSpec, in order
 	persistFn func(spec *CredSpec) error
+
+	// getSourceHook, when set, runs after GetSource has read a source and before
+	// it returns. See GetSource.
+	getSourceHook func()
 }
 
 func newMockConfigStore() *mockConfigStore {
@@ -71,10 +75,18 @@ func (m *mockConfigStore) ReloadSpec(ctx context.Context, name string) (*CredSpe
 
 func (m *mockConfigStore) GetSource(ctx context.Context, name string) (*CredSource, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	source, ok := m.sources[name]
+	hook := m.getSourceHook
+	m.mu.Unlock()
+
 	if !ok {
 		return nil, errors.New("source not found")
+	}
+	// Runs after the source has been read and before it reaches the caller, so a
+	// test can land a config update in exactly the window a caller sits in between
+	// reading a source and installing the driver built from it.
+	if hook != nil {
+		hook()
 	}
 	return source, nil
 }
