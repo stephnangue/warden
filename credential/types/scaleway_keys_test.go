@@ -62,7 +62,7 @@ func TestScalewayKeysCredType_ValidateConfig_LocalSource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeLocal)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeLocal)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -78,11 +78,11 @@ func TestScalewayKeysCredType_ValidateConfig_LocalSource(t *testing.T) {
 // mint. It is refused at create now.
 func TestScalewayKeysCredType_ValidateConfig_VaultSourceRejected(t *testing.T) {
 	ct := &ScalewayKeysCredType{}
-	err := ct.ValidateConfig(map[string]string{
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 		"mint_method": "static_scaleway",
 		"kv2_mount":   "secret",
 		"secret_path": "scaleway/prod/keys",
-	}, credential.SourceTypeVault)
+	}), credential.SourceTypeVault)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "local or scaleway")
 }
@@ -227,7 +227,7 @@ func TestScalewayKeysCredType_ValidateConfig_ScalewaySource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeScaleway)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeScaleway)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -240,10 +240,10 @@ func TestScalewayKeysCredType_ValidateConfig_ScalewaySource(t *testing.T) {
 
 func TestScalewayKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 	ct := &ScalewayKeysCredType{}
-	err := ct.ValidateConfig(map[string]string{
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 		"access_key": "SCWXXXXXXXXXXXXXXXXX",
 		"secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-	}, credential.SourceTypeAWS)
+	}), credential.SourceTypeAWS)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "local or scaleway")
 }

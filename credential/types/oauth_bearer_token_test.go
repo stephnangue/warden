@@ -93,7 +93,7 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, tt.sourceType)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), tt.sourceType)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -289,17 +289,17 @@ func TestOAuthBearerTokenCredType_ConnectGating(t *testing.T) {
 	ct := NewOAuthBearerTokenCredType()
 
 	// client_credentials (default) is not connect-gated.
-	assert.False(t, ct.RequiresConnect(map[string]string{}))
-	assert.False(t, ct.RequiresConnect(map[string]string{"auth_method": "client_credentials"}))
+	assert.False(t, ct.RequiresConnect(credential.NewConfig(map[string]string{})))
+	assert.False(t, ct.RequiresConnect(credential.NewConfig(map[string]string{"auth_method": "client_credentials"})))
 
 	// authorization_code is connect-gated.
 	ac := map[string]string{"auth_method": "authorization_code"}
-	assert.True(t, ct.RequiresConnect(ac))
-	assert.False(t, ct.IsConnected(ac)) // no token sealed yet
+	assert.True(t, ct.RequiresConnect(credential.NewConfig(ac)))
+	assert.False(t, ct.IsConnected(credential.NewConfig(ac))) // no token sealed yet
 
 	// Connected once a refresh token or static access token is sealed.
-	assert.True(t, ct.IsConnected(map[string]string{"auth_method": "authorization_code", "refresh_token": "rt"}))
-	assert.True(t, ct.IsConnected(map[string]string{"auth_method": "authorization_code", "access_token": "at"}))
+	assert.True(t, ct.IsConnected(credential.NewConfig(map[string]string{"auth_method": "authorization_code", "refresh_token": "rt"})))
+	assert.True(t, ct.IsConnected(credential.NewConfig(map[string]string{"auth_method": "authorization_code", "access_token": "at"})))
 }
 
 func TestOAuthBearerTokenCredType_FieldSchemas(t *testing.T) {

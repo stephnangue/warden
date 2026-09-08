@@ -17,7 +17,7 @@ import (
 //
 // Example:
 //
-//	func (f *MyDriverFactory) ValidateConfig(config map[string]string) error {
+//	func (f *MyDriverFactory) ValidateConfig(config Config) error {
 //	    // Validate required fields exist
 //	    if err := credential.ValidateRequired(config, "address", "token"); err != nil {
 //	        return err
@@ -34,11 +34,11 @@ type SourceDriverFactory interface {
 
 	// Create instantiates a new driver with the given configuration
 	// Config values are strings - use credential.Get* helpers to parse to expected types
-	Create(config map[string]string, logger *logger.GatedLogger) (SourceDriver, error)
+	Create(config Config, logger *logger.GatedLogger) (SourceDriver, error)
 
 	// ValidateConfig validates driver-specific configuration
 	// Config values are strings - use credential.Get* helpers to validate types
-	ValidateConfig(config map[string]string) error
+	ValidateConfig(config Config) error
 
 	// SensitiveConfigFields returns the list of config keys that should be masked in output
 	SensitiveConfigFields() []string
@@ -47,7 +47,7 @@ type SourceDriverFactory interface {
 	// Simple sources return a fixed type (ignoring specConfig).
 	// Multi-type sources inspect specConfig (e.g., mint_method) to disambiguate.
 	// Returns error if the type cannot be inferred and must be provided explicitly.
-	InferCredentialType(specConfig map[string]string) (string, error)
+	InferCredentialType(specConfig Config) (string, error)
 }
 
 // SourceDriver defines the interface for credential source drivers.
@@ -123,7 +123,7 @@ type SpecVerifier interface {
 type RotationConfigValidator interface {
 	// ValidateRotationConfig returns an error if a rotation_period on this config
 	// could never be honoured. It is called only when a rotation_period is set.
-	ValidateRotationConfig(config map[string]string) error
+	ValidateRotationConfig(config Config) error
 }
 
 // Rotatable is an optional interface for drivers that support credential rotation.

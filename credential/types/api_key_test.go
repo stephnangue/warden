@@ -63,7 +63,7 @@ func TestAPIKeyCredType_ValidateConfig_AWSSource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeAWS)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeAWS)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -419,7 +419,7 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, tt.sourceType)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), tt.sourceType)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -625,14 +625,14 @@ func TestAPIKeyCredType_SensitiveConfigFields(t *testing.T) {
 func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 	ct := NewAPIKeyCredType()
 
-	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
 		"api_key":         "sk-xxxx",
 		"application_key": "app-xxxx",
 		"organization_id": "org-1",
 		"mint_method":     "static_apikey",
 		"secret_path":     "apikeys/thing",
 		"totally_unknown": "could be anything",
-	})
+	}))
 
 	// Known secrets.
 	assert.Contains(t, fields, "api_key")
@@ -659,11 +659,11 @@ func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 // unknown key that reads back in the clear.
 func TestAPIKeyCredType_SensitiveConfigFieldsFor_UnderscorePrefixIsNotTrusted(t *testing.T) {
 	ct := NewAPIKeyCredType()
-	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
 		"api_key":          "sk-xxxx",
 		"__adjunct_fields": "organization_id",
 		"__anything":       "could be a secret",
-	})
+	}))
 	assert.Contains(t, fields, "__adjunct_fields")
 	assert.Contains(t, fields, "__anything")
 }
@@ -704,11 +704,11 @@ func TestAPIKeyCredType_KnownAdjunctFieldsAreDeclared(t *testing.T) {
 func TestAPIKeyCredType_SensitiveConfigFieldsFor_GrafanaMintParams(t *testing.T) {
 	ct := NewAPIKeyCredType()
 
-	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
 		"service_account_id": "42",
 		"name_prefix":        "warden-team-a-",
 		"token_expiry":       "1h",
-	})
+	}))
 
 	for _, key := range []string{"service_account_id", "name_prefix", "token_expiry"} {
 		assert.NotContains(t, fields, key, "%s shapes the mint and is not a secret", key)

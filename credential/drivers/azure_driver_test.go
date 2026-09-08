@@ -18,11 +18,11 @@ func newTestAzureDriver() *AzureDriver {
 	return &AzureDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAzure,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"tenant_id":     "test-tenant",
 				"client_id":     "test-client",
 				"client_secret": "test-secret",
-			},
+			}),
 		},
 		objectIDCache: make(map[string]string),
 		httpClient:    &http.Client{Timeout: 30 * time.Second},
@@ -47,85 +47,85 @@ func TestAzureDriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name: "valid minimal config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"tenant_id":     "00000000-0000-0000-0000-000000000001",
 				"client_id":     "00000000-0000-0000-0000-000000000002",
 				"client_secret": "test-secret",
 				"secret_id":     "00000000-0000-0000-0000-000000000099",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid config with subscription_id",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"tenant_id":       "00000000-0000-0000-0000-000000000001",
 				"client_id":       "00000000-0000-0000-0000-000000000002",
 				"client_secret":   "test-secret",
 				"secret_id":       "00000000-0000-0000-0000-000000000099",
 				"subscription_id": "00000000-0000-0000-0000-000000000003",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "missing tenant_id",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":     "00000000-0000-0000-0000-000000000002",
 				"client_secret": "test-secret",
 				"secret_id":     "00000000-0000-0000-0000-000000000099",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "tenant_id",
 		},
 		{
 			name: "missing client_id",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"tenant_id":     "00000000-0000-0000-0000-000000000001",
 				"client_secret": "test-secret",
 				"secret_id":     "00000000-0000-0000-0000-000000000099",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "client_id",
 		},
 		{
 			name: "missing client_secret",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"tenant_id": "00000000-0000-0000-0000-000000000001",
 				"client_id": "00000000-0000-0000-0000-000000000002",
 				"secret_id": "00000000-0000-0000-0000-000000000099",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "client_secret",
 		},
 		{
 			name: "missing secret_id",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"tenant_id":     "00000000-0000-0000-0000-000000000001",
 				"client_id":     "00000000-0000-0000-0000-000000000002",
 				"client_secret": "test-secret",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "secret_id",
 		},
 		{
 			name:    "empty config",
-			config:  map[string]string{},
+			config:  credential.NewConfig(map[string]string{}),
 			wantErr: true,
 			errMsg:  "tenant_id",
 		},
 		{
 			name: "invalid tenant_id format",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"tenant_id":     "not-a-uuid",
 				"client_id":     "00000000-0000-0000-0000-000000000002",
 				"client_secret": "test-secret",
 				"secret_id":     "00000000-0000-0000-0000-000000000099",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "invalid tenant_id",
 		},
@@ -148,7 +148,7 @@ func TestAzureDriver_Type(t *testing.T) {
 	driver := &AzureDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAzure,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeAzure, driver.Type())
@@ -158,7 +158,7 @@ func TestAzureDriver_Cleanup(t *testing.T) {
 	driver := &AzureDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAzure,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	err := driver.Cleanup(context.TODO())
@@ -169,7 +169,7 @@ func TestAzureDriver_Revoke_NoOp(t *testing.T) {
 	driver := &AzureDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAzure,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	// Azure tokens can't be revoked - should be no-op
@@ -187,9 +187,9 @@ func TestAzureDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeAzureBearerToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid_method",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -203,10 +203,10 @@ func TestAzureDriver_MintCredential_BearerToken_MissingCredentials(t *testing.T)
 	spec := &credential.CredSpec{
 		Name: "test-bearer",
 		Type: credential.TypeAzureBearerToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":   "bearer_token",
 			"client_secret": "test-secret",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -216,10 +216,10 @@ func TestAzureDriver_MintCredential_BearerToken_MissingCredentials(t *testing.T)
 	spec2 := &credential.CredSpec{
 		Name: "test-bearer",
 		Type: credential.TypeAzureBearerToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "bearer_token",
 			"client_id":   "test-client",
-		},
+		}),
 	}
 	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
@@ -233,12 +233,12 @@ func TestAzureDriver_MintCredential_KeyVaultSecret_MissingConfig(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-kv",
 		Type: credential.TypeAzureBearerToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":   "key_vault_secret",
 			"client_id":     "test-client",
 			"client_secret": "test-secret",
 			"secret_name":   "test-secret",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -248,12 +248,12 @@ func TestAzureDriver_MintCredential_KeyVaultSecret_MissingConfig(t *testing.T) {
 	spec2 := &credential.CredSpec{
 		Name: "test-kv",
 		Type: credential.TypeAzureBearerToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":   "key_vault_secret",
 			"client_id":     "test-client",
 			"client_secret": "test-secret",
 			"vault_name":    "test-vault",
-		},
+		}),
 	}
 	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
@@ -283,9 +283,9 @@ func TestAzureDriver_PrepareSpecRotation_MissingClientID(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
 		Type:   credential.TypeAzureBearerToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			// Missing client_id
-		},
+		}),
 	}
 
 	_, _, _, err := driver.PrepareSpecRotation(context.TODO(), spec)
@@ -297,11 +297,11 @@ func TestAzureDriver_CommitSpecRotation(t *testing.T) {
 	driver := &AzureDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAzure,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"tenant_id":     "test-tenant",
 				"client_id":     "test-client",
 				"client_secret": "test-secret",
-			},
+			}),
 		},
 	}
 
@@ -321,11 +321,11 @@ func TestAzureDriver_CleanupSpecRotation_EmptyConfig(t *testing.T) {
 	driver := &AzureDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAzure,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"tenant_id":     "test-tenant",
 				"client_id":     "test-client",
 				"client_secret": "test-secret",
-			},
+			}),
 		},
 	}
 
@@ -448,7 +448,7 @@ func TestAzureDriver_Cleanup_Nil(t *testing.T) {
 	driver := &AzureDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAzure,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		httpClient: &http.Client{},
 	}
@@ -511,35 +511,35 @@ func TestAzureDriverFactory_ValidateConfig_Federation(t *testing.T) {
 	factory := &AzureDriverFactory{}
 
 	// A keyless source needs no client_secret/secret_id.
-	require.NoError(t, factory.ValidateConfig(map[string]string{
+	require.NoError(t, factory.ValidateConfig(credential.NewConfig(map[string]string{
 		"auth_method": "oidc_federation",
 		"tenant_id":   "00000000-0000-0000-0000-000000000001",
 		"client_id":   "00000000-0000-0000-0000-000000000002",
-	}))
+	})))
 
 	// A keyless source with no identity at all is still valid (tenant/client_id
 	// come from the spec at mint time).
-	require.NoError(t, factory.ValidateConfig(map[string]string{
+	require.NoError(t, factory.ValidateConfig(credential.NewConfig(map[string]string{
 		"auth_method": "oidc_federation",
-	}))
+	})))
 
 	// A stray static secret must be rejected so modes cannot silently mix.
-	err := factory.ValidateConfig(map[string]string{
+	err := factory.ValidateConfig(credential.NewConfig(map[string]string{
 		"auth_method":   "oidc_federation",
 		"client_secret": "leftover",
-	})
+	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must not be set for auth_method=oidc_federation")
 
-	err = factory.ValidateConfig(map[string]string{
+	err = factory.ValidateConfig(credential.NewConfig(map[string]string{
 		"auth_method": "oidc_federation",
 		"secret_id":   "leftover",
-	})
+	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must not be set for auth_method=oidc_federation")
 
 	// An unknown auth_method is rejected by the schema.
-	err = factory.ValidateConfig(map[string]string{"auth_method": "bogus"})
+	err = factory.ValidateConfig(credential.NewConfig(map[string]string{"auth_method": "bogus"}))
 	require.Error(t, err)
 }
 
@@ -548,11 +548,11 @@ func TestAzureDriverFactory_ValidateConfig_Federation(t *testing.T) {
 func TestAzureDriver_Create_Federation_Keyless(t *testing.T) {
 	factory := &AzureDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := factory.Create(map[string]string{
+	drv, err := factory.Create(credential.NewConfig(map[string]string{
 		"auth_method": "oidc_federation",
 		"tenant_id":   "00000000-0000-0000-0000-000000000001",
 		"client_id":   "00000000-0000-0000-0000-000000000002",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	require.NotNil(t, drv)
 
@@ -567,9 +567,9 @@ func TestAzureDriver_Create_Federation_Keyless(t *testing.T) {
 // path refuses to mint for a keyless source (which carries no credential material).
 func TestAzureDriver_MintCredential_Federation_FailsClosed(t *testing.T) {
 	drv := &AzureDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "oidc_federation"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})},
 	}
-	_, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "bearer_token"}})
+	_, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "bearer_token"})})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "subject_token_source (warden_identity or agent_identity)")
 }
@@ -578,14 +578,14 @@ func TestAzureDriver_MintCredential_Federation_FailsClosed(t *testing.T) {
 // before any network call.
 func TestAzureDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	fedDrv := &AzureDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "oidc_federation"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})},
 	}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "bearer_token", "tenant_id": "00000000-0000-0000-0000-000000000001", "client_id": "app"}}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "bearer_token", "tenant_id": "00000000-0000-0000-0000-000000000001", "client_id": "app"})}
 	verified := &credential.ExchangeInputs{SubjectToken: "eyJ"}
 
 	// A static source must not reach the federation path.
 	staticDrv := &AzureDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "static"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: credential.NewConfig(map[string]string{"auth_method": "static"})},
 	}
 	_, _, _, _, err := staticDrv.MintCredentialWithExchange(context.TODO(), spec, verified)
 	require.Error(t, err)
@@ -597,14 +597,14 @@ func TestAzureDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	assert.Contains(t, err.Error(), "no subject token")
 
 	// An unsupported mint_method is rejected before any network call.
-	kvSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "key_vault_secret", "tenant_id": "00000000-0000-0000-0000-000000000001", "client_id": "app"}}
+	kvSpec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "key_vault_secret", "tenant_id": "00000000-0000-0000-0000-000000000001", "client_id": "app"})}
 	_, _, _, _, err = fedDrv.MintCredentialWithExchange(context.TODO(), kvSpec, verified)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported over auth_method=oidc_federation")
 
 	// A federated bearer_token spec missing tenant_id fails with a clear message
 	// (defense in depth — spec validation also requires it at create time).
-	noTenant := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "bearer_token", "client_id": "app"}}
+	noTenant := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "bearer_token", "client_id": "app"})}
 	_, _, _, _, err = fedDrv.MintCredentialWithExchange(context.TODO(), noTenant, verified)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'client_id' and 'tenant_id'")
@@ -630,16 +630,16 @@ func TestAzureDriver_MintCredentialWithExchange_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	drv := &AzureDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "oidc_federation"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		loginHost:  srv.URL,
 	}
-	spec := &credential.CredSpec{Name: "azure-mgmt", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "azure-mgmt", Config: credential.NewConfig(map[string]string{
 		"mint_method":  "bearer_token",
 		"tenant_id":    "00000000-0000-0000-0000-000000000001",
 		"client_id":    "11111111-1111-1111-1111-111111111111",
 		"resource_uri": "https://management.azure.com/",
-	}}
+	})}
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:     "eyJ.warden.assertion",
 		SubjectTokenType: credential.TokenTypeJWT,
@@ -683,15 +683,15 @@ func TestAzureDriver_MintCredentialWithExchange_ForwardedSubject_HappyPath(t *te
 	defer srv.Close()
 
 	drv := &AzureDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "oidc_federation"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		loginHost:  srv.URL,
 	}
-	spec := &credential.CredSpec{Name: "azure-mgmt", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "azure-mgmt", Config: credential.NewConfig(map[string]string{
 		"mint_method": "bearer_token",
 		"tenant_id":   "00000000-0000-0000-0000-000000000001",
 		"client_id":   "11111111-1111-1111-1111-111111111111",
-	}}
+	})}
 	// A forwarded inbound JWT: eager, no ResolveSubjectToken, no SubjectCacheIdentity.
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:     "eyJ.inbound.idp.jwt",
@@ -722,16 +722,16 @@ func TestAzureDriver_MintBearerToken_Static_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	drv := &AzureDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: map[string]string{"auth_method": "static"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAzure, Config: credential.NewConfig(map[string]string{"auth_method": "static"})},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		loginHost:  srv.URL,
 	}
-	spec := &credential.CredSpec{Name: "azure-static", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "azure-static", Config: credential.NewConfig(map[string]string{
 		"mint_method":   "bearer_token",
 		"tenant_id":     "00000000-0000-0000-0000-000000000001",
 		"client_id":     "11111111-1111-1111-1111-111111111111",
 		"client_secret": "the-secret",
-	}}
+	})}
 
 	rawData, _, _, _, err := drv.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
@@ -743,24 +743,24 @@ func TestAzureDriver_MintBearerToken_Static_HappyPath(t *testing.T) {
 
 func TestAzureAssertionAudience(t *testing.T) {
 	t.Run("federation default", func(t *testing.T) {
-		aud, ok := azureAssertionAudience(map[string]string{"auth_method": "oidc_federation"})
+		aud, ok := azureAssertionAudience(credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}))
 		require.True(t, ok)
 		assert.Equal(t, "api://AzureADTokenExchange", aud)
 	})
 
 	t.Run("federation explicit override", func(t *testing.T) {
-		aud, ok := azureAssertionAudience(map[string]string{"auth_method": "oidc_federation", "audience": "api://custom"})
+		aud, ok := azureAssertionAudience(credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "audience": "api://custom"}))
 		require.True(t, ok)
 		assert.Equal(t, "api://custom", aud)
 	})
 
 	t.Run("static source derives nothing", func(t *testing.T) {
-		_, ok := azureAssertionAudience(map[string]string{"auth_method": "static"})
+		_, ok := azureAssertionAudience(credential.NewConfig(map[string]string{"auth_method": "static"}))
 		assert.False(t, ok)
 	})
 
 	t.Run("routed via DeriveAssertionAudience", func(t *testing.T) {
-		aud, ok := DeriveAssertionAudience(credential.SourceTypeAzure, map[string]string{"auth_method": "oidc_federation"}, map[string]string{})
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeAzure, credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}), credential.NewConfig(map[string]string{}))
 		require.True(t, ok)
 		assert.Equal(t, "api://AzureADTokenExchange", aud)
 	})
@@ -770,25 +770,25 @@ func TestAzureValidateConfig_AudienceOnlyFederation(t *testing.T) {
 	f := &AzureDriverFactory{}
 
 	t.Run("audience rejected on static", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method":   "static",
 			"tenant_id":     "00000000-0000-0000-0000-000000000000",
 			"client_id":     "cid",
 			"client_secret": "sec",
 			"secret_id":     "sid",
 			"audience":      "api://AzureADTokenExchange",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "only valid for auth_method=oidc_federation")
 	})
 
 	t.Run("audience allowed on federation", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method": "oidc_federation",
 			"tenant_id":   "00000000-0000-0000-0000-000000000000",
 			"client_id":   "cid",
 			"audience":    "api://custom",
-		})
+		}))
 		require.NoError(t, err)
 	})
 }

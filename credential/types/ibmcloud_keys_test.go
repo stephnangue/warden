@@ -79,7 +79,7 @@ func TestIBMCloudKeysCredType_ValidateConfig_VaultSource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeVault)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeVault)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -170,7 +170,7 @@ func TestIBMCloudKeysCredType_ValidateConfig_IBMSource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeIBM)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeIBM)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -186,9 +186,9 @@ func TestIBMCloudKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 
 	for _, source := range []string{credential.SourceTypeLocal, credential.SourceTypeAWS, credential.SourceTypeGCP} {
 		t.Run(source, func(t *testing.T) {
-			err := ct.ValidateConfig(map[string]string{
+			err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 				"access_token": "test-token",
-			}, source)
+			}), source)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "vault or ibm")
 		})

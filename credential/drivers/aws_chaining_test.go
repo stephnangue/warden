@@ -94,32 +94,32 @@ func TestChaining_AWSSecretReadBacksAnAPIKeyConsumer(t *testing.T) {
 	store := newChainStore()
 	store.sources["aws-fed"] = &credential.CredSource{
 		Name: "aws-fed", Type: credential.SourceTypeAWS,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"auth_method":             "oidc_federation",
 			"region":                  "us-east-1",
 			"sts_endpoint":            stsSrv.srv.URL,
 			"secretsmanager_endpoint": smSrv.URL,
-		},
+		}),
 	}
 	store.specs["datadog-keys-in-aws"] = &credential.CredSpec{
 		Name: "datadog-keys-in-aws", Type: credential.TypeKeyValue, Source: "aws-fed",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":          "secret_read",
 			"secret_id":            "prod/datadog/keys",
 			"role_arn":             "arn:aws:iam::123456789012:role/WardenSecretsReader",
 			"subject_token_source": "warden_identity",
-		},
+		}),
 	}
 	store.sources["datadog-src"] = &credential.CredSource{
 		Name: "datadog-src", Type: credential.SourceTypeAPIKey,
-		Config: map[string]string{"credential_fields": "application_key"},
+		Config: credential.NewConfig(map[string]string{"credential_fields": "application_key"}),
 	}
 	store.specs["datadog-cred"] = &credential.CredSpec{
 		Name: "datadog-cred", Type: credential.TypeAPIKey, Source: "datadog-src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSecretSpec:  "datadog-keys-in-aws",
 			credential.ConfigSecretField: "api_key",
-		},
+		}),
 	}
 
 	manager, err := credential.NewManager(typeRegistry, driverRegistry, store, log)

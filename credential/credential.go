@@ -134,7 +134,7 @@ func (c *Credential) ShouldRotate(threshold float64) bool {
 type CredSource struct {
 	Name           string
 	Type           string // local, hvault, aws, azure_key_vault, gcp_secret_manager
-	Config         map[string]string
+	Config         Config
 	RotationPeriod time.Duration // 0 means no rotation
 }
 

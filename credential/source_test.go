@@ -12,9 +12,9 @@ func TestCredSourceRegistry_Register(t *testing.T) {
 	source := CredSource{
 		Name: "test-source",
 		Type: "local",
-		Config: map[string]string{
+		Config: NewConfig(map[string]string{
 			"path": "/secrets",
-		},
+		}),
 	}
 
 	// Test successful registration

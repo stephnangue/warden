@@ -15,30 +15,30 @@ import (
 // recordingDriver reports the config it was built from, so a test can tell which
 // generation of a source an installed driver came from.
 type recordingDriver struct {
-	config map[string]string
+	config Config
 }
 
 func (d *recordingDriver) MintCredential(context.Context, *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	return nil, nil, 0, "", nil
 }
 func (d *recordingDriver) Revoke(context.Context, string) error { return nil }
-func (d *recordingDriver) Type() string                        { return "recording" }
-func (d *recordingDriver) Cleanup(context.Context) error       { return nil }
+func (d *recordingDriver) Type() string                         { return "recording" }
+func (d *recordingDriver) Cleanup(context.Context) error        { return nil }
 
 type recordingFactory struct {
 	mu    sync.Mutex
 	built []string // the "version" config value each Create saw, in order
 }
 
-func (f *recordingFactory) Type() string                           { return "recording" }
-func (f *recordingFactory) ValidateConfig(map[string]string) error { return nil }
-func (f *recordingFactory) SensitiveConfigFields() []string        { return nil }
-func (f *recordingFactory) InferCredentialType(map[string]string) (string, error) {
+func (f *recordingFactory) Type() string                    { return "recording" }
+func (f *recordingFactory) ValidateConfig(Config) error     { return nil }
+func (f *recordingFactory) SensitiveConfigFields() []string { return nil }
+func (f *recordingFactory) InferCredentialType(Config) (string, error) {
 	return "", nil
 }
-func (f *recordingFactory) Create(config map[string]string, _ *logger.GatedLogger) (SourceDriver, error) {
+func (f *recordingFactory) Create(config Config, _ *logger.GatedLogger) (SourceDriver, error) {
 	f.mu.Lock()
-	f.built = append(f.built, config["version"])
+	f.built = append(f.built, config.Get("version"))
 	f.mu.Unlock()
 	return &recordingDriver{config: config}, nil
 }
@@ -64,7 +64,7 @@ func TestGetOrCreateDriver_RefusesToInstallDriverBuiltFromStaleConfig(t *testing
 	store.sources["src"] = &CredSource{
 		Name:   "src",
 		Type:   "recording",
-		Config: map[string]string{"version": "v1"},
+		Config: NewConfig(map[string]string{"version": "v1"}),
 	}
 
 	coordinator := NewDriverCoordinator(registry, store, log)
@@ -79,7 +79,7 @@ func TestGetOrCreateDriver_RefusesToInstallDriverBuiltFromStaleConfig(t *testing
 			store.sources["src"] = &CredSource{
 				Name:   "src",
 				Type:   "recording",
-				Config: map[string]string{"version": "v2"},
+				Config: NewConfig(map[string]string{"version": "v2"}),
 			}
 			store.mu.Unlock()
 
@@ -92,7 +92,7 @@ func TestGetOrCreateDriver_RefusesToInstallDriverBuiltFromStaleConfig(t *testing
 
 	installed, ok := driver.(*recordingDriver)
 	require.True(t, ok)
-	assert.Equal(t, "v2", installed.config["version"],
+	assert.Equal(t, "v2", installed.config.Get("version"),
 		"the installed driver must come from the config that is current, not the one read before the update")
 
 	// And the instance the registry serves from here on is that same one.
@@ -120,7 +120,7 @@ func TestGetOrCreateDriver_ReturnsCachedInstanceWithoutRebuilding(t *testing.T) 
 	store.sources["src"] = &CredSource{
 		Name:   "src",
 		Type:   "recording",
-		Config: map[string]string{"version": "v1"},
+		Config: NewConfig(map[string]string{"version": "v1"}),
 	}
 
 	coordinator := NewDriverCoordinator(registry, store, log)
@@ -155,7 +155,7 @@ func TestGetOrCreateDriver_ConcurrentCallersShareOneInstance(t *testing.T) {
 	store.sources["src"] = &CredSource{
 		Name:   "src",
 		Type:   "recording",
-		Config: map[string]string{"version": "v1"},
+		Config: NewConfig(map[string]string{"version": "v1"}),
 	}
 
 	coordinator := NewDriverCoordinator(registry, store, log)

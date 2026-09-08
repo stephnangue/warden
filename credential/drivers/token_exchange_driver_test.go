@@ -31,7 +31,7 @@ func makeUnsignedJWT(claims map[string]interface{}) string {
 
 func newExchangeDriver(config map[string]string, client *http.Client) *TokenExchangeDriver {
 	return &TokenExchangeDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeTokenExchange, Config: config},
+		credSource: &credential.CredSource{Type: credential.SourceTypeTokenExchange, Config: credential.NewConfig(config)},
 		httpClient: client,
 	}
 }
@@ -71,10 +71,10 @@ func TestTokenExchangeDriver_RFC8693(t *testing.T) {
 		"client_id":     "warden-gateway",
 		"client_secret": "s3cret",
 	}, server.Client())
-	spec := &credential.CredSpec{Name: "internal-api", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "internal-api", Config: credential.NewConfig(map[string]string{
 		"audience": "https://api.internal.example.com",
 		"scope":    "read:orders",
-	}}
+	})}
 
 	rawData, meta, ttl, leaseID, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
 	require.NoError(t, err)
@@ -107,7 +107,7 @@ func TestTokenExchangeDriver_JWTBearer_Entra(t *testing.T) {
 		"client_secret":                   "cs",
 		"token_param.requested_token_use": "on_behalf_of",
 	}, server.Client())
-	spec := &credential.CredSpec{Config: map[string]string{"scope": "https://graph.microsoft.com/.default"}}
+	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"scope": "https://graph.microsoft.com/.default"})}
 
 	rawData, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
 	require.NoError(t, err)
@@ -123,7 +123,7 @@ func TestTokenExchangeDriver_JWTBearer_RejectsAudience(t *testing.T) {
 	d := newExchangeDriver(map[string]string{
 		"token_url": sts.URL, "grant": tokenExchangeGrantJWTBearer, "client_id": "c", "client_secret": "s",
 	}, sts.Client())
-	spec := &credential.CredSpec{Config: map[string]string{"audience": "https://target.example.com"}}
+	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://target.example.com"})}
 	_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "audience")
@@ -152,9 +152,9 @@ func TestTokenExchangeDriver_Resources_MultiValue(t *testing.T) {
 			d := newExchangeDriver(map[string]string{
 				"token_url": sts.URL, "grant": grant, "client_id": "c", "client_secret": "s",
 			}, sts.Client())
-			spec := &credential.CredSpec{Config: map[string]string{
+			spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{
 				"resources": "https://api.example.com https://api2.example.com",
-			}}
+			})}
 			_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u"})))
 			require.NoError(t, err)
 			assertResources(t, got, "https://api.example.com", "https://api2.example.com")
@@ -265,43 +265,43 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, f.ValidateConfig(base()))
+	require.NoError(t, f.ValidateConfig(credential.NewConfig(base())))
 
 	t.Run("missing token_url", func(t *testing.T) {
 		c := base()
 		delete(c, "token_url")
-		assert.Error(t, f.ValidateConfig(c))
+		assert.Error(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 	t.Run("missing client credentials", func(t *testing.T) {
 		c := base()
 		delete(c, "client_secret")
-		assert.Error(t, f.ValidateConfig(c))
+		assert.Error(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 	t.Run("bad grant", func(t *testing.T) {
 		c := base()
 		c["grant"] = "nope"
-		assert.Error(t, f.ValidateConfig(c))
+		assert.Error(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 	t.Run("token_param overriding a core field", func(t *testing.T) {
 		c := base()
 		c["token_param.subject_token"] = "x"
-		assert.Error(t, f.ValidateConfig(c))
+		assert.Error(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 	t.Run("id_jag without resource_token_url", func(t *testing.T) {
 		c := base()
 		c["grant"] = tokenExchangeGrantIDJAG
-		assert.Error(t, f.ValidateConfig(c))
+		assert.Error(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 	t.Run("id_jag with resource_token_url", func(t *testing.T) {
 		c := base()
 		c["grant"] = tokenExchangeGrantIDJAG
 		c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
-		assert.NoError(t, f.ValidateConfig(c))
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 	t.Run("non-https token_url", func(t *testing.T) {
 		c := base()
 		c["token_url"] = "http://idp.example.com/token"
-		assert.Error(t, f.ValidateConfig(c))
+		assert.Error(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 }
 
@@ -313,72 +313,72 @@ func TestTokenExchangeDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr string
 	}{
 		{
 			name: "secret-based, neither half inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthSecretPost,
 				"secret_spec": "idp-client-secret", "secret_field": "client_secret",
-			},
+			}),
 		},
 		{
 			name: "secret-based, client_secret still inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthSecretPost,
 				"secret_spec": "idp-client-secret", "client_secret": "s",
-			},
+			}),
 			wantErr: "client_secret must be omitted when secret_spec is set",
 		},
 		{
 			name: "secret-based, client_id still inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthSecretBasic,
 				"secret_spec": "idp-client-secret", "client_id": "c",
-			},
+			}),
 			wantErr: "client_id must be omitted when secret_spec is set",
 		},
 		{
 			name: "private_key_jwt, neither half inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthPrivateKeyJWT,
 				"secret_spec": "idp-key", "secret_field": "private_key",
-			},
+			}),
 		},
 		{
 			name: "private_key_jwt, private_key still inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthPrivateKeyJWT,
 				"secret_spec": "idp-key", "private_key": testRSAPrivateKeyPEM(t),
-			},
+			}),
 			wantErr: "private_key must be omitted when secret_spec is set",
 		},
 		{
 			name: "private_key_jwt, client_id still inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthPrivateKeyJWT,
 				"secret_spec": "idp-key", "client_id": "c",
-			},
+			}),
 			wantErr: "client_id must be omitted when secret_spec is set",
 		},
 		{
 			// A kid names one key among several; kept on the source it would be stamped
 			// on assertions signed by every agent's key.
 			name: "private_key_jwt, client_assertion_kid still inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthPrivateKeyJWT,
 				"secret_spec": "idp-key", "client_assertion_kid": "key-1",
-			},
+			}),
 			wantErr: "client_assertion_kid must be omitted when secret_spec is set",
 		},
 		{
 			// kid is meaningless to the secret methods, so it is not policed there.
 			name: "secret-based, an inert kid is left alone",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthSecretPost,
 				"secret_spec": "idp-client-secret", "client_assertion_kid": "key-1",
-			},
+			}),
 		},
 		{
 			// The chained branch must not short-circuit the rest of validation. This
@@ -386,18 +386,18 @@ func TestTokenExchangeDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			// client_id, so an unprotected token_param.client_id would be the only
 			// one on the wire.
 			name: "chained, token_param overriding a core field",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthSecretPost,
 				"secret_spec": "idp-client-secret", "token_param.client_id": "sneaky",
-			},
+			}),
 			wantErr: "cannot override a core token-exchange field",
 		},
 		{
 			name: "chained id_jag without resource_token_url",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://idp.example.com/token", "client_auth": clientAuthSecretPost,
 				"grant": tokenExchangeGrantIDJAG, "secret_spec": "idp-client-secret",
-			},
+			}),
 			wantErr: "resource_token_url is required",
 		},
 	}
@@ -687,7 +687,7 @@ func TestTokenExchangeDriver_ChainedPayloadWithoutAnIDFailsBeforeAnyRequest(t *t
 	tests := []struct {
 		name     string
 		material credential.SecretMaterial
-		config   map[string]string
+		config   credential.Config
 		wantErr  string // defaults to the missing-id message
 	}{
 		{
@@ -715,10 +715,10 @@ func TestTokenExchangeDriver_ChainedPayloadWithoutAnIDFailsBeforeAnyRequest(t *t
 			// rather than between the two.
 			name:     "id_jag, id absent",
 			material: credential.SecretMaterial{Data: map[string]string{"value": "s"}, Field: "value"},
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grant":              tokenExchangeGrantIDJAG,
 				"resource_token_url": "https://resource.example/token",
-			},
+			}),
 		},
 	}
 
@@ -731,10 +731,10 @@ func TestTokenExchangeDriver_ChainedPayloadWithoutAnIDFailsBeforeAnyRequest(t *t
 			cfg := map[string]string{
 				"token_url": sts.URL, "client_auth": clientAuthSecretPost, "secret_spec": "s",
 			}
-			for k, v := range tc.config {
+			for k, v := range tc.config.All() {
 				cfg[k] = v
 			}
-			spec := &credential.CredSpec{Config: map[string]string{"audience": "https://resource.example"}}
+			spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource.example"})}
 
 			d := newExchangeDriver(cfg, sts.Client())
 			_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(
@@ -880,7 +880,7 @@ func TestTokenExchangeDriver_ChainedIDJAG_PairOnBothLegs(t *testing.T) {
 		"secret_spec":        "idp-client-secret",
 	}, &http.Client{})
 
-	spec := &credential.CredSpec{Config: map[string]string{"audience": "https://resource-as.example.com"}}
+	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource-as.example.com"})}
 	rawData, _, _, _, err := d.MintCredentialWithExchangeFromSecret(
 		context.Background(), spec, subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u"})),
 		chainedMaterial("jag-client", "jag-secret"))
@@ -956,11 +956,11 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 		"client_id":          "c",
 		"client_secret":      "s",
 	}, &http.Client{})
-	spec := &credential.CredSpec{Config: map[string]string{
+	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{
 		"audience":  "https://resource-as.example.com",
 		"scope":     "files:read",
 		"resources": "https://api.example.com",
-	}}
+	})}
 
 	rawData, _, ttl, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
 	require.NoError(t, err)
@@ -971,7 +971,7 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 func TestTokenExchangeDriverFactory_Basics(t *testing.T) {
 	f := &TokenExchangeDriverFactory{}
 	assert.Equal(t, credential.SourceTypeTokenExchange, f.Type())
-	ct, err := f.InferCredentialType(nil)
+	ct, err := f.InferCredentialType(credential.NewConfig(nil))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeOAuthBearerToken, ct)
 	assert.ElementsMatch(t, []string{"client_secret", "private_key", "ca_data"}, f.SensitiveConfigFields())

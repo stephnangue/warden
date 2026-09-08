@@ -29,7 +29,7 @@ func TestStaticAPIKeyDriverFactory_SensitiveConfigFields(t *testing.T) {
 
 func TestStaticAPIKeyDriverFactory_InferCredentialType(t *testing.T) {
 	f := &StaticAPIKeyDriverFactory{}
-	ct, err := f.InferCredentialType(map[string]string{})
+	ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeAPIKey, ct)
 }
@@ -39,23 +39,23 @@ func TestStaticAPIKeyDriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name:    "valid empty config",
-			config:  map[string]string{},
+			config:  credential.NewConfig(map[string]string{}),
 			wantErr: false,
 		},
 		{
 			name:    "valid with api_url",
-			config:  map[string]string{"api_url": "https://api.openai.com"},
+			config:  credential.NewConfig(map[string]string{"api_url": "https://api.openai.com"}),
 			wantErr: false,
 		},
 		{
 			name: "valid with all optional fields",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"api_url":           "https://api.anthropic.com",
 				"verify_endpoint":   "/v1/models",
 				"verify_method":     "GET",
@@ -64,56 +64,56 @@ func TestStaticAPIKeyDriverFactory_ValidateConfig(t *testing.T) {
 				"extra_headers":     "anthropic-version:2023-06-01",
 				"credential_fields": "organization_id",
 				"display_name":      "Anthropic",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name:    "invalid api_url - http scheme",
-			config:  map[string]string{"api_url": "http://example.com"},
+			config:  credential.NewConfig(map[string]string{"api_url": "http://example.com"}),
 			wantErr: true,
 			errMsg:  "must use https://",
 		},
 		{
 			name:    "invalid api_url - no host",
-			config:  map[string]string{"api_url": "https://"},
+			config:  credential.NewConfig(map[string]string{"api_url": "https://"}),
 			wantErr: true,
 			errMsg:  "must include a host",
 		},
 		{
 			name:    "invalid verify_method",
-			config:  map[string]string{"verify_method": "DELETE"},
+			config:  credential.NewConfig(map[string]string{"verify_method": "DELETE"}),
 			wantErr: true,
 			errMsg:  "verify_method must be GET or POST",
 		},
 		{
 			name:    "invalid auth_header_type",
-			config:  map[string]string{"auth_header_type": "basic"},
+			config:  credential.NewConfig(map[string]string{"auth_header_type": "basic"}),
 			wantErr: true,
 			errMsg:  "auth_header_type must be one of",
 		},
 		{
 			name:    "custom_header without auth_header_name",
-			config:  map[string]string{"auth_header_type": "custom_header"},
+			config:  credential.NewConfig(map[string]string{"auth_header_type": "custom_header"}),
 			wantErr: true,
 			errMsg:  "auth_header_name is required",
 		},
 		{
 			name: "custom_header with auth_header_name",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_header_type": "custom_header",
 				"auth_header_name": "x-api-key",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name:    "invalid extra_headers format",
-			config:  map[string]string{"extra_headers": "no-colon"},
+			config:  credential.NewConfig(map[string]string{"extra_headers": "no-colon"}),
 			wantErr: true,
 			errMsg:  "expected key:value format",
 		},
 		{
 			name:    "valid extra_headers",
-			config:  map[string]string{"extra_headers": "anthropic-version:2023-06-01,x-custom:value"},
+			config:  credential.NewConfig(map[string]string{"extra_headers": "anthropic-version:2023-06-01,x-custom:value"}),
 			wantErr: false,
 		},
 	}
@@ -136,7 +136,7 @@ func TestStaticAPIKeyDriverFactory_ValidateConfig(t *testing.T) {
 func TestStaticAPIKeyDriverFactory_Create(t *testing.T) {
 	f := &StaticAPIKeyDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	driver, err := f.Create(map[string]string{"api_url": "https://api.openai.com"}, log)
+	driver, err := f.Create(credential.NewConfig(map[string]string{"api_url": "https://api.openai.com"}), log)
 	require.NoError(t, err)
 	require.NotNil(t, driver)
 	assert.Equal(t, credential.SourceTypeAPIKey, driver.Type())
@@ -150,7 +150,7 @@ func createTestAPIKeyDriver(t *testing.T, config map[string]string) *StaticAPIKe
 	t.Helper()
 	f := &StaticAPIKeyDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	driver, err := f.Create(config, log)
+	driver, err := f.Create(credential.NewConfig(config), log)
 	require.NoError(t, err)
 	return driver.(*StaticAPIKeyDriver)
 }
@@ -183,7 +183,7 @@ func TestStaticAPIKeyDriver_MintCredential(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Type:   credential.TypeAPIKey,
-		Config: map[string]string{"api_key": "sk-test-key-123"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-test-key-123"}),
 	}
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -197,7 +197,7 @@ func TestStaticAPIKeyDriver_MintCredential_EmptyKey(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Type:   credential.TypeAPIKey,
-		Config: map[string]string{"api_key": ""},
+		Config: credential.NewConfig(map[string]string{"api_key": ""}),
 	}
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -208,7 +208,7 @@ func TestStaticAPIKeyDriver_MintCredential_DisplayName(t *testing.T) {
 	d := createTestAPIKeyDriver(t, map[string]string{})
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	}
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -241,11 +241,11 @@ func TestStaticAPIKeyDriver_MintCredential_CredentialFields(t *testing.T) {
 		})
 		spec := &credential.CredSpec{
 			Name: "test",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_key":         "sk-test",
 				"organization_id": "org-456",
 				"project_id":      "proj-789",
-			},
+			}),
 		}
 		rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
@@ -259,7 +259,7 @@ func TestStaticAPIKeyDriver_MintCredential_CredentialFields(t *testing.T) {
 		})
 		spec := &credential.CredSpec{
 			Name:   "test",
-			Config: map[string]string{"api_key": "sk-test"},
+			Config: credential.NewConfig(map[string]string{"api_key": "sk-test"}),
 		}
 		rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
@@ -270,10 +270,10 @@ func TestStaticAPIKeyDriver_MintCredential_CredentialFields(t *testing.T) {
 		d := createTestAPIKeyDriver(t, map[string]string{})
 		spec := &credential.CredSpec{
 			Name: "test",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_key":         "sk-test",
 				"organization_id": "org-123",
-			},
+			}),
 		}
 		rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestStaticAPIKeyDriver_MintFromSecret(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Type:   credential.TypeAPIKey,
-		Config: map[string]string{"secret_spec": "openai-key-in-vault", "secret_field": "api_key"},
+		Config: credential.NewConfig(map[string]string{"secret_spec": "openai-key-in-vault", "secret_field": "api_key"}),
 	}
 	material := credential.SecretMaterial{
 		Data:  map[string]string{"api_key": "sk-chained-key"},
@@ -313,7 +313,7 @@ func TestStaticAPIKeyDriver_MintFromSecret(t *testing.T) {
 func TestStaticAPIKeyDriver_MintFromSecret_AutoDetectSingleKey(t *testing.T) {
 	// No secret_field resolved (Field == ""): fall back to the conventional "api_key" key.
 	d := createTestAPIKeyDriver(t, map[string]string{})
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref"}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{"secret_spec": "ref"})}
 	material := credential.SecretMaterial{Data: map[string]string{"api_key": "sk-fallback"}, Field: ""}
 	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
 	require.NoError(t, err)
@@ -324,11 +324,11 @@ func TestStaticAPIKeyDriver_MintFromSecret_CredentialFields(t *testing.T) {
 	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "organization_id"})
 	spec := &credential.CredSpec{
 		Name: "test",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"secret_spec":     "ref",
 			"secret_field":    "api_key",
 			"organization_id": "org-999",
-		},
+		}),
 	}
 	material := credential.SecretMaterial{Data: map[string]string{"api_key": "sk-x"}, Field: "api_key"}
 	rawData, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
@@ -347,7 +347,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFromMaterial(t *testing.T) {
 	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "application_key"})
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"secret_spec": "ref"},
+		Config: credential.NewConfig(map[string]string{"secret_spec": "ref"}),
 	}
 	material := credential.SecretMaterial{Data: map[string]string{
 		"api_key":         "sk-from-vault",
@@ -369,10 +369,10 @@ func TestStaticAPIKeyDriver_MintFromSecret_MaterialBeatsSpecConfig(t *testing.T)
 	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "application_key"})
 	spec := &credential.CredSpec{
 		Name: "test",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"secret_spec":     "ref",
 			"application_key": "app-from-spec",
-		},
+		}),
 	}
 	material := credential.SecretMaterial{Data: map[string]string{
 		"api_key":         "sk-from-vault",
@@ -390,10 +390,10 @@ func TestStaticAPIKeyDriver_MintFromSecret_AdjunctFallsBackToSpecConfig(t *testi
 	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "email"})
 	spec := &credential.CredSpec{
 		Name: "test",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"secret_spec": "ref",
 			"email":       "svc@corp.com",
-		},
+		}),
 	}
 	material := credential.SecretMaterial{Data: map[string]string{"api_key": "sk-from-vault"}}
 
@@ -414,7 +414,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_DeclaredAPIKeyCannotClobberSelection(
 	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "api_key"})
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"secret_spec": "ref", "secret_field": "prod_key"},
+		Config: credential.NewConfig(map[string]string{"secret_spec": "ref", "secret_field": "prod_key"}),
 	}
 	material := credential.SecretMaterial{
 		Data:  map[string]string{"prod_key": "sk-selected", "api_key": "sk-other"},
@@ -439,29 +439,29 @@ func TestStaticAPIKeyDriver_MintFromSecret_DeclaredAPIKeyCannotClobberSelection(
 func TestStaticAPIKeyDriverFactory_RejectsFormerKeyName(t *testing.T) {
 	f := &StaticAPIKeyDriverFactory{}
 
-	err := f.ValidateConfig(map[string]string{"optional_metadata": "organization_id"})
+	err := f.ValidateConfig(credential.NewConfig(map[string]string{"optional_metadata": "organization_id"}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential_fields", "the error must name the key to use instead")
 
-	assert.NoError(t, f.ValidateConfig(map[string]string{"credential_fields": "organization_id"}))
+	assert.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{"credential_fields": "organization_id"})))
 }
 
 func TestStaticAPIKeyDriver_ValidateConfig_RejectsReservedCredentialFields(t *testing.T) {
 	f := &StaticAPIKeyDriverFactory{}
 
 	for _, name := range []string{"secret_path", "mint_method", "secret_spec", "json_key_map", "__adjunct_fields"} {
-		err := f.ValidateConfig(map[string]string{"credential_fields": name})
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{"credential_fields": name}))
 		assert.ErrorContains(t, err, "credential_fields cannot name", "name %q", name)
 	}
 
-	assert.NoError(t, f.ValidateConfig(map[string]string{"credential_fields": "organization_id,email"}))
+	assert.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{"credential_fields": "organization_id,email"})))
 }
 
 func TestStaticAPIKeyDriver_MintCredential_SkipsReservedCredentialFields(t *testing.T) {
 	d := createTestAPIKeyDriver(t, map[string]string{"credential_fields": "secret_path"})
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"api_key": "sk-x", "secret_path": "apikeys/prod"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-x", "secret_path": "apikeys/prod"}),
 	}
 
 	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
@@ -473,7 +473,7 @@ func TestStaticAPIKeyDriver_MintCredential_SkipsReservedCredentialFields(t *test
 func TestStaticAPIKeyDriver_MintFromSecret_EmptyField(t *testing.T) {
 	// secret_field resolved but empty/absent → fail loudly, do NOT fall back.
 	d := createTestAPIKeyDriver(t, map[string]string{"display_name": "OpenAI"})
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref", "secret_field": "api_key"}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{"secret_spec": "ref", "secret_field": "api_key"})}
 	material := credential.SecretMaterial{Data: map[string]string{"other": "x"}, Field: "api_key"}
 	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
 	require.Error(t, err)
@@ -483,7 +483,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_EmptyField(t *testing.T) {
 func TestStaticAPIKeyDriver_MintFromSecret_NoKey(t *testing.T) {
 	// No field resolved and no conventional "api_key" key present.
 	d := createTestAPIKeyDriver(t, map[string]string{"display_name": "OpenAI"})
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref"}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{"secret_spec": "ref"})}
 	material := credential.SecretMaterial{Data: map[string]string{"token": "x"}, Field: ""}
 	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, material)
 	require.Error(t, err)
@@ -493,7 +493,7 @@ func TestStaticAPIKeyDriver_MintFromSecret_NoKey(t *testing.T) {
 func TestStaticAPIKeyDriver_MintCredential_ChainedFailsClosed(t *testing.T) {
 	t.Run("spec-level secret_spec", func(t *testing.T) {
 		d := createTestAPIKeyDriver(t, map[string]string{})
-		spec := &credential.CredSpec{Name: "test", Config: map[string]string{"secret_spec": "ref"}}
+		spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{"secret_spec": "ref"})}
 		_, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "credential chaining")
@@ -501,7 +501,7 @@ func TestStaticAPIKeyDriver_MintCredential_ChainedFailsClosed(t *testing.T) {
 
 	t.Run("source-level secret_spec", func(t *testing.T) {
 		d := createTestAPIKeyDriver(t, map[string]string{"secret_spec": "ref"})
-		spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+		spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 		_, _, _, _, err := d.MintCredential(context.Background(), spec)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "credential chaining")
@@ -525,17 +525,17 @@ func TestStaticAPIKeyDriver_VerifySpec_Bearer(t *testing.T) {
 	d := &StaticAPIKeyDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAPIKey,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_url":         server.URL,
 				"verify_endpoint": "/v1/models",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"api_key": "sk-valid-key"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-valid-key"}),
 	}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err)
@@ -555,20 +555,20 @@ func TestStaticAPIKeyDriver_VerifySpec_CustomHeader(t *testing.T) {
 	d := &StaticAPIKeyDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAPIKey,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_url":          server.URL,
 				"verify_endpoint":  "/v1/models",
 				"auth_header_type": "custom_header",
 				"auth_header_name": "x-api-key",
 				"extra_headers":    "anthropic-version:2023-06-01",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"api_key": "sk-valid-key"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-valid-key"}),
 	}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err)
@@ -586,18 +586,18 @@ func TestStaticAPIKeyDriver_VerifySpec_PostMethod(t *testing.T) {
 	d := &StaticAPIKeyDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAPIKey,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_url":         server.URL,
 				"verify_endpoint": "/auth.test",
 				"verify_method":   "POST",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"api_key": "sk-valid-key"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-valid-key"}),
 	}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err)
@@ -607,7 +607,7 @@ func TestStaticAPIKeyDriver_VerifySpec_NoVerifyEndpoint(t *testing.T) {
 	d := createTestAPIKeyDriver(t, map[string]string{})
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"api_key": "sk-test"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-test"}),
 	}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err) // skips verification
@@ -623,17 +623,17 @@ func TestStaticAPIKeyDriver_VerifySpec_InvalidKey(t *testing.T) {
 	d := &StaticAPIKeyDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAPIKey,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_url":         server.URL,
 				"verify_endpoint": "/v1/models",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"api_key": "sk-invalid"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-invalid"}),
 	}
 	err := d.VerifySpec(context.Background(), spec)
 	require.Error(t, err)
@@ -644,7 +644,7 @@ func TestStaticAPIKeyDriver_VerifySpec_EmptyKey(t *testing.T) {
 	d := createTestAPIKeyDriver(t, map[string]string{"display_name": "OpenAI"})
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{"api_key": ""},
+		Config: credential.NewConfig(map[string]string{"api_key": ""}),
 	}
 	err := d.VerifySpec(context.Background(), spec)
 	require.Error(t, err)
@@ -658,7 +658,7 @@ func TestStaticAPIKeyDriver_VerifySpec_EmptyKey(t *testing.T) {
 func TestBuildAPIKeyAuthHeaders(t *testing.T) {
 	tests := []struct {
 		name          string
-		config        map[string]string
+		config        credential.Config
 		apiKey        string
 		expectHeader  string
 		expectValue   string
@@ -666,28 +666,28 @@ func TestBuildAPIKeyAuthHeaders(t *testing.T) {
 	}{
 		{
 			name:         "default bearer",
-			config:       map[string]string{},
+			config:       credential.NewConfig(map[string]string{}),
 			apiKey:       "sk-123",
 			expectHeader: "Authorization",
 			expectValue:  "Bearer sk-123",
 		},
 		{
 			name:         "explicit bearer",
-			config:       map[string]string{"auth_header_type": "bearer"},
+			config:       credential.NewConfig(map[string]string{"auth_header_type": "bearer"}),
 			apiKey:       "sk-123",
 			expectHeader: "Authorization",
 			expectValue:  "Bearer sk-123",
 		},
 		{
 			name:         "token type",
-			config:       map[string]string{"auth_header_type": "token"},
+			config:       credential.NewConfig(map[string]string{"auth_header_type": "token"}),
 			apiKey:       "sk-123",
 			expectHeader: "Authorization",
 			expectValue:  "Token sk-123",
 		},
 		{
 			name:          "custom header",
-			config:        map[string]string{"auth_header_type": "custom_header", "auth_header_name": "x-api-key"},
+			config:        credential.NewConfig(map[string]string{"auth_header_type": "custom_header", "auth_header_name": "x-api-key"}),
 			apiKey:        "sk-123",
 			expectHeader:  "x-api-key",
 			expectValue:   "sk-123",
@@ -714,7 +714,7 @@ func TestBuildAPIKeyAuthHeaders_ExtraHeaders(t *testing.T) {
 		"auth_header_name": "x-api-key",
 		"extra_headers":    "anthropic-version:2023-06-01,x-custom:value",
 	}
-	headers := buildAPIKeyAuthHeaders(config, "sk-test")
+	headers := buildAPIKeyAuthHeaders(credential.NewConfig(config), "sk-test")
 	assert.Equal(t, "sk-test", headers["x-api-key"])
 	assert.Equal(t, "2023-06-01", headers["anthropic-version"])
 	assert.Equal(t, "value", headers["x-custom"])

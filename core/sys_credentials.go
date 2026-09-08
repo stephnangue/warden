@@ -287,7 +287,7 @@ func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string
 	if b.core.credentialTypeRegistry != nil {
 		if credType, err := b.core.credentialTypeRegistry.GetByName(specType); err == nil {
 			if dynamic, ok := credType.(credential.ConfigSensitivity); ok {
-				sensitiveFields = dynamic.SensitiveConfigFieldsFor(config)
+				sensitiveFields = dynamic.SensitiveConfigFieldsFor(credential.NewConfig(config))
 			} else {
 				sensitiveFields = credType.SensitiveConfigFields()
 			}
@@ -325,7 +325,7 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 	source := &credential.CredSource{
 		Name:           name,
 		Type:           sourceType,
-		Config:         convertToStringMap(configAny),
+		Config:         credential.NewConfig(convertToStringMap(configAny)),
 		RotationPeriod: time.Duration(rotationPeriodSec) * time.Second,
 	}
 
@@ -365,7 +365,7 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 	}
 
 	// Mask sensitive config fields
-	maskedConfig := b.maskSourceConfig(source.Type, source.Config)
+	maskedConfig := b.maskSourceConfig(source.Type, source.Config.Map())
 
 	data := map[string]any{
 		"name":            source.Name,
@@ -409,8 +409,8 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 	}
 
 	// Create a new source with merged config (don't modify the cached object)
-	mergedConfig := make(map[string]string, len(existingSource.Config))
-	for k, v := range existingSource.Config {
+	mergedConfig := make(map[string]string, existingSource.Config.Len())
+	for k, v := range existingSource.Config.All() {
 		mergedConfig[k] = v
 	}
 
@@ -448,7 +448,7 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 	updatedSource := &credential.CredSource{
 		Name:           existingSource.Name,
 		Type:           existingSource.Type,
-		Config:         mergedConfig,
+		Config:         credential.NewConfig(mergedConfig),
 		RotationPeriod: rotationPeriod,
 	}
 
@@ -511,7 +511,7 @@ func (b *SystemBackend) handleCredentialSourceList(ctx context.Context, req *log
 	// Convert to output format with masked sensitive fields
 	sourceInfos := make([]map[string]any, 0, len(sources))
 	for _, source := range sources {
-		maskedConfig := b.maskSourceConfig(source.Type, source.Config)
+		maskedConfig := b.maskSourceConfig(source.Type, source.Config.Map())
 		sourceInfos = append(sourceInfos, map[string]any{
 			"name":            source.Name,
 			"type":            source.Type,
@@ -552,7 +552,7 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		if err != nil {
 			return logical.ErrorResponse(logical.ErrBadRequestf("unknown source type: %s", src.Type)), nil
 		}
-		specType, err = factory.InferCredentialType(specConfig)
+		specType, err = factory.InferCredentialType(credential.NewConfig(specConfig))
 		if err != nil {
 			return logical.ErrorResponse(logical.ErrBadRequestf(
 				"cannot infer credential type for source type '%s': %s — please specify 'type' explicitly",
@@ -584,7 +584,7 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		Name:           name,
 		Type:           specType,
 		Source:         source,
-		Config:         specConfig,
+		Config:         credential.NewConfig(specConfig),
 		MinTTL:         time.Duration(minTTL) * time.Second,
 		MaxTTL:         time.Duration(maxTTL) * time.Second,
 		RotationPeriod: time.Duration(rotationPeriod) * time.Second,
@@ -625,7 +625,7 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 	}
 
 	// Mask sensitive config fields
-	maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
+	maskedConfig := b.maskSpecConfig(spec.Type, spec.Config.Map())
 
 	return b.respondSuccess(map[string]any{
 		"name":            spec.Name,
@@ -664,8 +664,8 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 	}
 
 	// Create a new spec with merged config (don't modify the cached object)
-	mergedConfig := make(map[string]string, len(spec.Config))
-	for k, v := range spec.Config {
+	mergedConfig := make(map[string]string, spec.Config.Len())
+	for k, v := range spec.Config.All() {
 		mergedConfig[k] = v
 	}
 
@@ -679,7 +679,7 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		newConfig := convertToStringMap(configAny.(map[string]any))
 		// Refuse operator-set values for keys the server seals, before merging —
 		// afterwards the caller's input and the stored value are indistinguishable.
-		if err := b.checkSystemManagedSpecConfig(spec.Type, newConfig, spec.Config); err != nil {
+		if err := b.checkSystemManagedSpecConfig(spec.Type, newConfig, spec.Config.Map()); err != nil {
 			return logical.ErrorResponse(err), nil
 		}
 		for k, v := range newConfig {
@@ -695,7 +695,7 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		Name:           spec.Name,
 		Type:           spec.Type,
 		Source:         spec.Source,
-		Config:         mergedConfig,
+		Config:         credential.NewConfig(mergedConfig),
 		MinTTL:         spec.MinTTL,
 		MaxTTL:         spec.MaxTTL,
 		RotationPeriod: spec.RotationPeriod,
@@ -821,13 +821,7 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 		MinTTL:         spec.MinTTL,
 		MaxTTL:         spec.MaxTTL,
 		RotationPeriod: spec.RotationPeriod,
-		Config:         make(map[string]string, len(spec.Config)+len(sealed)),
-	}
-	for k, v := range spec.Config {
-		updated.Config[k] = v
-	}
-	for k, v := range sealed {
-		updated.Config[k] = v
+		Config:         spec.Config.WithAll(sealed),
 	}
 
 	// Skip verification: the exchange is itself the verification, and re-minting
@@ -927,7 +921,7 @@ func validateConnectRedirectURI(spec *credential.CredSpec, redirectURI string) e
 	if redirectURI == "" {
 		return fmt.Errorf("redirect_uri is required")
 	}
-	if pinned := spec.Config["redirect_uri"]; pinned != "" {
+	if pinned := spec.Config.Get("redirect_uri"); pinned != "" {
 		if redirectURI != pinned {
 			return fmt.Errorf("redirect_uri %q does not match the spec's pinned redirect_uri", redirectURI)
 		}
@@ -978,7 +972,7 @@ func (b *SystemBackend) handleCredentialSpecList(ctx context.Context, req *logic
 	// Convert to output format with masked sensitive fields
 	specInfos := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
-		maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
+		maskedConfig := b.maskSpecConfig(spec.Type, spec.Config.Map())
 		specInfos = append(specInfos, map[string]any{
 			"name":            spec.Name,
 			"type":            spec.Type,

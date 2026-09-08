@@ -31,7 +31,7 @@ func grafanaTestDriver(server *httptest.Server, config map[string]string) *Grafa
 	return &GrafanaDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGrafana,
-			Config: full,
+			Config: credential.NewConfig(full),
 		},
 		httpClient: server.Client(),
 	}
@@ -41,7 +41,7 @@ func grafanaSpec(name string, config map[string]string) *credential.CredSpec {
 	if config == nil {
 		config = map[string]string{}
 	}
-	return &credential.CredSpec{Name: name, Type: credential.TypeAPIKey, Config: config}
+	return &credential.CredSpec{Name: name, Type: credential.TypeAPIKey, Config: credential.NewConfig(config)}
 }
 
 func TestGrafanaDriverFactory_Type(t *testing.T) {
@@ -58,7 +58,7 @@ func TestGrafanaDriverFactory_SensitiveConfigFields(t *testing.T) {
 
 func TestGrafanaDriverFactory_InferCredentialType(t *testing.T) {
 	factory := &GrafanaDriverFactory{}
-	credType, err := factory.InferCredentialType(nil)
+	credType, err := factory.InferCredentialType(credential.NewConfig(nil))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeAPIKey, credType)
 }
@@ -68,63 +68,63 @@ func TestGrafanaDriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name: "valid config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url": "https://mystack.grafana.net",
 				"admin_token": "glsa_test_token",
-			},
+			}),
 		},
 		{
 			name: "with a default service account",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url":        "https://mystack.grafana.net",
 				"admin_token":        "glsa_test_token",
 				"service_account_id": "42",
-			},
+			}),
 		},
 		{
 			name: "non-numeric default service account",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url":        "https://mystack.grafana.net",
 				"admin_token":        "glsa_test_token",
 				"service_account_id": "my-account",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "positive integer",
 		},
 		{
 			name:    "missing grafana_url",
-			config:  map[string]string{"admin_token": "glsa_test_token"},
+			config:  credential.NewConfig(map[string]string{"admin_token": "glsa_test_token"}),
 			wantErr: true,
 			errMsg:  "grafana_url",
 		},
 		{
 			name:    "missing admin_token",
-			config:  map[string]string{"grafana_url": "https://mystack.grafana.net"},
+			config:  credential.NewConfig(map[string]string{"grafana_url": "https://mystack.grafana.net"}),
 			wantErr: true,
 			errMsg:  "admin_token",
 		},
 		{
 			name: "invalid grafana_url scheme",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url": "http://mystack.grafana.net",
 				"admin_token": "glsa_test_token",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must use https://",
 		},
 		{
 			name: "http allowed with tls_skip_verify",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url":     "http://grafana.local",
 				"admin_token":     "glsa_test_token",
 				"tls_skip_verify": "true",
-			},
+			}),
 		},
 	}
 
@@ -145,10 +145,10 @@ func TestGrafanaDriverFactory_ValidateConfig(t *testing.T) {
 // forever, visible only in server logs — so the factory refuses it outright.
 func TestGrafanaDriverFactory_ValidateRotationConfig(t *testing.T) {
 	factory := &GrafanaDriverFactory{}
-	err := factory.ValidateRotationConfig(map[string]string{
+	err := factory.ValidateRotationConfig(credential.NewConfig(map[string]string{
 		"grafana_url": "https://mystack.grafana.net",
 		"admin_token": "glsa_admin",
-	})
+	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rotation does not apply")
 }
@@ -156,10 +156,10 @@ func TestGrafanaDriverFactory_ValidateRotationConfig(t *testing.T) {
 func TestGrafanaDriverFactory_Create(t *testing.T) {
 	factory := &GrafanaDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	driver, err := factory.Create(map[string]string{
+	driver, err := factory.Create(credential.NewConfig(map[string]string{
 		"grafana_url": "https://mystack.grafana.net",
 		"admin_token": "glsa_test_token",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	assert.NotNil(t, driver)
 	assert.Equal(t, credential.SourceTypeGrafana, driver.Type())
@@ -192,7 +192,7 @@ func TestGrafanaDriver_NotRotatable(t *testing.T) {
 func TestGrafanaDriver_GetGrafanaURL(t *testing.T) {
 	driver := &GrafanaDriver{
 		credSource: &credential.CredSource{
-			Config: map[string]string{"grafana_url": "https://mystack.grafana.net/"},
+			Config: credential.NewConfig(map[string]string{"grafana_url": "https://mystack.grafana.net/"}),
 		},
 	}
 	assert.Equal(t, "https://mystack.grafana.net", driver.getGrafanaURL())
@@ -593,7 +593,7 @@ func TestGrafanaDriver_Revoke(t *testing.T) {
 }
 
 func TestGrafanaDriver_Revoke_EmptyLeaseID(t *testing.T) {
-	driver := &GrafanaDriver{credSource: &credential.CredSource{Config: map[string]string{}}}
+	driver := &GrafanaDriver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{})}}
 	assert.NoError(t, driver.Revoke(context.Background(), ""))
 }
 
@@ -845,42 +845,42 @@ func TestGrafanaDriverFactory_ValidateConfig_Chained(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name: "secret_spec without admin_token",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url":               "https://mystack.grafana.net",
 				credential.ConfigSecretSpec: "grafana-admin-token",
-			},
+			}),
 		},
 		{
 			name: "secret_spec with the modifiers",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url":                   "https://mystack.grafana.net",
 				"service_account_id":            "42",
 				credential.ConfigSecretSpec:     "grafana-admin-token",
 				credential.ConfigSecretField:    "admin_token",
 				credential.ConfigSecretCacheTTL: "30m",
-			},
+			}),
 		},
 		{
 			// Keeping the token would leave a source that reads as keyless while
 			// storing the very secret chaining removes.
 			name: "admin_token alongside secret_spec is refused",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"grafana_url":               "https://mystack.grafana.net",
 				"admin_token":               "glsa_still_here",
 				credential.ConfigSecretSpec: "grafana-admin-token",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "admin_token must be omitted",
 		},
 		{
 			name:    "neither admin_token nor secret_spec is refused",
-			config:  map[string]string{"grafana_url": "https://mystack.grafana.net"},
+			config:  credential.NewConfig(map[string]string{"grafana_url": "https://mystack.grafana.net"}),
 			wantErr: true,
 			errMsg:  "admin_token is required unless",
 		},

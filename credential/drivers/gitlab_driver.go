@@ -88,7 +88,7 @@ func (f *GitLabDriverFactory) Type() string {
 }
 
 // ValidateConfig validates GitLab driver configuration using declarative schema
-func (f *GitLabDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *GitLabDriverFactory) ValidateConfig(config credential.Config) error {
 	// Validate gitlab_address with custom URL validation
 	if err := credential.ValidateSchema(config,
 		credential.StringField("gitlab_address").
@@ -217,12 +217,12 @@ func (f *GitLabDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType always returns gitlab_access_token for GitLab sources.
-func (f *GitLabDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *GitLabDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeGitLabAccessToken, nil
 }
 
 // Create instantiates a new GitLabDriver
-func (f *GitLabDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *GitLabDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitLab,
@@ -262,7 +262,7 @@ func (f *GitLabDriverFactory) Create(config map[string]string, log *logger.Gated
 // rather than writing into the live one, so the returned map is a stable snapshot
 // and callers need not hold the lock while reading it. Callers that need several
 // keys to agree must take one snapshot and read all of them from it.
-func (d *GitLabDriver) sourceConfig() map[string]string {
+func (d *GitLabDriver) sourceConfig() credential.Config {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
 	return d.credSource.Config
@@ -411,7 +411,7 @@ func (d *GitLabDriver) MintCredential(ctx context.Context, spec *credential.Cred
 	// A chained spec must mint through MintFromSecret, which the manager routes it
 	// to; arriving here means that routing was bypassed. Fail rather than fall
 	// through to an inline token that a chained source does not have.
-	if spec.Config[credential.ConfigSecretSpec] != "" || d.isChained() {
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" || d.isChained() {
 		return nil, nil, 0, "", fmt.Errorf("gitlab: source uses secret_spec (credential chaining); it must mint from fetched secret material, not directly")
 	}
 	return d.mint(ctx, spec, nil)
@@ -757,8 +757,8 @@ func (d *GitLabDriver) preparePATRotation(ctx context.Context) (map[string]strin
 	// Build new config with the new token, from one snapshot rather than the live
 	// field, so the copy cannot straddle a concurrent swap.
 	current := d.sourceConfig()
-	newConfig := make(map[string]string, len(current))
-	for k, v := range current {
+	newConfig := make(map[string]string, current.Len())
+	for k, v := range current.All() {
 		newConfig[k] = v
 	}
 	newConfig["personal_access_token"] = rotateResult.Token
@@ -767,7 +767,7 @@ func (d *GitLabDriver) preparePATRotation(ctx context.Context) (map[string]strin
 	// calls immediately use the new token. The old token is already revoked by
 	// GitLab's rotate endpoint, so any call using it would fail.
 	d.configMu.Lock()
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.configMu.Unlock()
 
 	cleanupConfig := map[string]string{
@@ -810,8 +810,8 @@ func (d *GitLabDriver) prepareOAuth2Rotation(ctx context.Context) (map[string]st
 
 	// Build new config, from one snapshot — see preparePATRotation.
 	current := d.sourceConfig()
-	newConfig := make(map[string]string, len(current))
-	for k, v := range current {
+	newConfig := make(map[string]string, current.Len())
+	for k, v := range current.All() {
 		newConfig[k] = v
 	}
 	newConfig["application_secret"] = rotateResult.Secret
@@ -820,7 +820,7 @@ func (d *GitLabDriver) prepareOAuth2Rotation(ctx context.Context) (map[string]st
 	// concurrent calls immediately re-authenticate with the new secret.
 	// The old secret is already invalidated by GitLab's rotate endpoint.
 	d.configMu.Lock()
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.configMu.Unlock()
 	d.tokenCache.InvalidateGeneration()
 
@@ -842,7 +842,7 @@ func (d *GitLabDriver) CommitRotation(ctx context.Context, newConfig map[string]
 	// Update the config. Under configMu like the two swaps in PrepareRotation:
 	// mints still holding this instance read the map concurrently.
 	d.configMu.Lock()
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.configMu.Unlock()
 
 	// Invalidate OAuth2 token cache to force re-authentication

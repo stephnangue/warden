@@ -179,7 +179,7 @@ func (d *VaultDriver) mintTransitSigner(
 // latest at mint time"; either way the resolved number is what travels, never "latest",
 // so a held capability keeps signing with the version it was checked against instead of
 // whatever happens to be newest when it eventually signs.
-func transitSignerVersion(config map[string]string) (int, error) {
+func transitSignerVersion(config credential.Config) (int, error) {
 	raw := strings.TrimSpace(credential.GetString(config, "transit_key_version", ""))
 	if raw == "" {
 		return 0, nil
@@ -228,7 +228,7 @@ var transitSignerCoordinates = map[string]struct{}{
 //
 // A name the driver writes itself is refused rather than dropped: silently ignoring it
 // would leave an operator with a spec that reads as though it set something.
-func transitSignerPayloadFields(config map[string]string, userClaims, agentClaims map[string]string) (map[string]string, error) {
+func transitSignerPayloadFields(config credential.Config, userClaims, agentClaims map[string]string) (map[string]string, error) {
 	out := map[string]string{}
 	for k, v := range credential.GetPrefixed(config, transitSignerPayloadPrefix) {
 		if _, reserved := transitSignerCoordinates[k]; reserved {

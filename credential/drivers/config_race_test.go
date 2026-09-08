@@ -30,11 +30,11 @@ func TestAzureDriver_SourceCredsNeverMixesGenerations(t *testing.T) {
 	driver := newTestAzureDriver()
 	// Seed generation 0 so every value the readers see carries a generation; the
 	// helper's defaults do not, and would read as a mixed triple.
-	driver.credSource.Config = map[string]string{
+	driver.credSource.Config = credential.NewConfig(map[string]string{
 		"tenant_id":     "tenant-0",
 		"client_id":     "client-0",
 		"client_secret": "secret-0",
-	}
+	})
 
 	writerDone := make(chan struct{})
 	stop := make(chan struct{})
@@ -53,7 +53,7 @@ func TestAzureDriver_SourceCredsNeverMixesGenerations(t *testing.T) {
 			}
 			// The swap CommitRotation performs, without its network round trip.
 			driver.configMu.Lock()
-			driver.credSource.Config = cfg
+			driver.credSource.Config = credential.NewConfig(cfg)
 			driver.configMu.Unlock()
 		}
 	}()
@@ -94,7 +94,7 @@ func TestGitLabDriver_CommitRotationIsRaceFreeWithMints(t *testing.T) {
 	defer server.Close()
 
 	driver := newTestGitLabDriver("initial-token")
-	driver.credSource.Config["gitlab_address"] = server.URL
+	driver.credSource.Config = driver.credSource.Config.With("gitlab_address", server.URL)
 	driver.tokenCache = NewTokenCache()
 
 	stop := make(chan struct{})
@@ -145,14 +145,14 @@ func TestVaultDriver_ConfigReadsAreRaceFreeWithRotation(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"auth_method":   "approle",
 				"vault_address": "https://vault.example.com",
 				"role_id":       "role-0",
 				"secret_id":     "secret-0",
 				"approle_mount": "approle",
 				"jwt_role":      "warden",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -186,7 +186,7 @@ func TestVaultDriver_ConfigReadsAreRaceFreeWithRotation(t *testing.T) {
 			"jwt_role":      "warden",
 		}
 		driver.configMu.Lock()
-		driver.credSource.Config = newConfig
+		driver.credSource.Config = credential.NewConfig(newConfig)
 		driver.configMu.Unlock()
 	}
 
@@ -200,10 +200,10 @@ func TestKubernetesDriver_HTTPClientSwapIsRaceFree(t *testing.T) {
 	driver := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeKubernetes,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kubernetes_url": "https://k8s.example.com",
 				"token":          "initial",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}

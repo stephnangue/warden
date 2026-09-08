@@ -68,7 +68,7 @@ func (t *VaultTokenCredType) ConfigSchema() []*credential.FieldValidator {
 // ValidateConfig validates the Config for a Vault token credential spec
 // sourceType determines the validation rules:
 // - "hvault": requires auth configuration to generate tokens
-func (t *VaultTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *VaultTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	if sourceType != credential.SourceTypeVault {
 		return fmt.Errorf("vault_token credentials require a vault source, got: %s", sourceType)
@@ -88,10 +88,10 @@ func (t *VaultTokenCredType) ValidateConfig(config map[string]string, sourceType
 	// intent (which would vend a token with the wrong policy set). The credential type
 	// sees the spec config, so it distinguishes the two without the source config.
 	if credential.SpecRequestsExchange(config) {
-		if config["token_role"] != "" {
+		if config.Get("token_role") != "" {
 			return fmt.Errorf("field 'token_role' is not used when '%s' is set: an exchange-minted vault_token vends the exchanged token directly", credential.ConfigSubjectTokenSource)
 		}
-	} else if config["token_role"] == "" {
+	} else if config.Get("token_role") == "" {
 		return fmt.Errorf("field 'token_role' is required for mint_method=vault_token")
 	}
 

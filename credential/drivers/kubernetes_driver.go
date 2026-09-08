@@ -79,7 +79,7 @@ func (f *KubernetesDriverFactory) Type() string {
 }
 
 // ValidateConfig validates Kubernetes driver configuration using declarative schema
-func (f *KubernetesDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *KubernetesDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("kubernetes_url").
 			Required().
@@ -174,7 +174,7 @@ func (f *KubernetesDriverFactory) ValidateConfig(config map[string]string) error
 		// A federation source holds no token of its own, so it has nothing to rotate
 		// and no service account to rotate as.
 		for _, k := range []string{"token", "source_service_account", "source_namespace", "source_token_ttl"} {
-			if config[k] != "" {
+			if config.Get(k) != "" {
 				return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, kubernetesAuthMethodOIDCFederation)
 			}
 		}
@@ -188,12 +188,12 @@ func (f *KubernetesDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType returns the credential type for Kubernetes sources.
-func (f *KubernetesDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *KubernetesDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeKubernetesToken, nil
 }
 
 // Create instantiates a new KubernetesDriver
-func (f *KubernetesDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *KubernetesDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeKubernetes,
@@ -507,8 +507,8 @@ func (d *KubernetesDriver) PrepareRotation(ctx context.Context) (map[string]stri
 	token := credential.GetString(d.credSource.Config, "token", "")
 
 	// Copy config for building newConfig later
-	configCopy := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	configCopy := make(map[string]string, d.credSource.Config.Len())
+	for k, v := range d.credSource.Config.All() {
 		configCopy[k] = v
 	}
 	d.authMu.Unlock()
@@ -561,8 +561,8 @@ func (d *KubernetesDriver) PrepareRotation(ctx context.Context) (map[string]stri
 // CommitRotation activates the new source token.
 func (d *KubernetesDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
 	// Snapshot new config values for verification without holding the lock during HTTP calls.
-	newK8sURL := credential.GetString(newConfig, "kubernetes_url", "")
-	newToken := credential.GetString(newConfig, "token", "")
+	newK8sURL := newConfig["kubernetes_url"]
+	newToken := newConfig["token"]
 
 	// Verify new token works before committing
 	if err := d.verifyConnectionWith(ctx, newK8sURL, newToken); err != nil {
@@ -572,18 +572,18 @@ func (d *KubernetesDriver) CommitRotation(ctx context.Context, newConfig map[str
 	// Swap config under lock
 	d.authMu.Lock()
 	oldConfig := d.credSource.Config
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 
 	// Rebuild HTTP client if TLS config changed
 	oldCA := credential.GetString(oldConfig, "ca_data", "")
 	oldSkip := credential.GetString(oldConfig, "tls_skip_verify", "")
-	newCA := credential.GetString(newConfig, "ca_data", "")
-	newSkip := credential.GetString(newConfig, "tls_skip_verify", "")
+	newCA := newConfig["ca_data"]
+	newSkip := newConfig["tls_skip_verify"]
 	tlsChanged := oldCA != newCA || oldSkip != newSkip
 	d.authMu.Unlock()
 
 	if tlsChanged {
-		httpClient, err := BuildHTTPClient(newConfig, 30*time.Second)
+		httpClient, err := BuildHTTPClient(credential.NewConfig(newConfig), 30*time.Second)
 		if err != nil {
 			// Rollback config on TLS rebuild failure
 			d.authMu.Lock()

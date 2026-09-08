@@ -279,13 +279,13 @@ func TestExchangeInputs_Fingerprint_ActorCacheIdentity(t *testing.T) {
 func TestSpecRequestsExchange(t *testing.T) {
 	tests := []struct {
 		name   string
-		config map[string]string
+		config Config
 		want   bool
 	}{
-		{"absent", map[string]string{}, false},
-		{"none", map[string]string{ConfigSubjectTokenSource: SourceNone}, false},
-		{"agent_identity", map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity}, true},
-		{"user_identity", map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}, true},
+		{"absent", NewConfig(map[string]string{}), false},
+		{"none", NewConfig(map[string]string{ConfigSubjectTokenSource: SourceNone}), false},
+		{"agent_identity", NewConfig(map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity}), true},
+		{"user_identity", NewConfig(map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -299,49 +299,49 @@ func TestSpecRequestsExchange(t *testing.T) {
 func TestValidateExchangeSpecConfig(t *testing.T) {
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  Config
 		wantErr bool
 	}{
-		{"empty is valid", map[string]string{}, false},
-		{"subject agent_identity", map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity}, false},
-		{"subject user_identity", map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}, false},
+		{"empty is valid", NewConfig(map[string]string{}), false},
+		{"subject agent_identity", NewConfig(map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity}), false},
+		{"subject user_identity", NewConfig(map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}), false},
 		{
 			// The retired "header" source is no longer accepted by the OneOf.
 			name:    "subject header rejected",
-			config:  map[string]string{ConfigSubjectTokenSource: "header"},
+			config:  NewConfig(map[string]string{ConfigSubjectTokenSource: "header"}),
 			wantErr: true,
 		},
 		{
 			// The retired "auth_token" literal is no longer accepted by the OneOf.
 			name:    "subject auth_token literal rejected",
-			config:  map[string]string{ConfigSubjectTokenSource: "auth_token"},
+			config:  NewConfig(map[string]string{ConfigSubjectTokenSource: "auth_token"}),
 			wantErr: true,
 		},
 		{
 			name:    "invalid subject source",
-			config:  map[string]string{ConfigSubjectTokenSource: "bogus"},
+			config:  NewConfig(map[string]string{ConfigSubjectTokenSource: "bogus"}),
 			wantErr: true,
 		},
 		{
 			name:    "invalid actor source",
-			config:  map[string]string{ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: "bogus"},
+			config:  NewConfig(map[string]string{ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: "bogus"}),
 			wantErr: true,
 		},
 		{
 			name:    "actor without subject",
-			config:  map[string]string{ConfigActorTokenSource: SourceAgentIdentity},
+			config:  NewConfig(map[string]string{ConfigActorTokenSource: SourceAgentIdentity}),
 			wantErr: true,
 		},
 		{
 			// The valid delegation shape: a user subject with the agent as actor.
 			name:   "subject user_identity + actor agent_identity",
-			config: map[string]string{ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: SourceAgentIdentity},
+			config: NewConfig(map[string]string{ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: SourceAgentIdentity}),
 		},
 		{
 			// An actor is only meaningful in the delegation shape (subject=user_identity),
 			// so agent_identity subject + any actor is rejected.
 			name:    "subject agent_identity + actor agent_identity rejected",
-			config:  map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity, ConfigActorTokenSource: SourceAgentIdentity},
+			config:  NewConfig(map[string]string{ConfigSubjectTokenSource: SourceAgentIdentity, ConfigActorTokenSource: SourceAgentIdentity}),
 			wantErr: true,
 		},
 		{
@@ -350,127 +350,127 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			// audience from their own config. This structural validator no longer
 			// rejects a missing audience on its own.
 			name:    "warden_identity without assertion_audience (structural: allowed)",
-			config:  map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity},
+			config:  NewConfig(map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity}),
 			wantErr: false,
 		},
 		{
 			name:   "warden_identity with assertion_audience",
-			config: map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity, ConfigAssertionAudience: "https://sts.example/aud"},
+			config: NewConfig(map[string]string{ConfigSubjectTokenSource: SourceWardenIdentity, ConfigAssertionAudience: "https://sts.example/aud"}),
 		},
 		{
 			name: "assertion_metadata_claims with warden_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource:      SourceWardenIdentity,
 				ConfigAssertionAudience:       "https://sts.example/aud",
 				ConfigAssertionMetadataClaims: "team,env",
-			},
+			}),
 		},
 		{
 			// agent_identity mints no assertion, so nothing is projected into one —
 			// but the same list names what {{agent.<claim>}} may template, and that
 			// works on a forwarded agent token too.
 			name: "assertion_metadata_claims with agent_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource:      SourceAgentIdentity,
 				ConfigAssertionMetadataClaims: "team",
-			},
+			}),
 		},
 		{
 			// user_identity carries neither job: no assertion is minted, and the
 			// agent's claims are not what a user-subject spec templates on.
 			name: "assertion_metadata_claims with user_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource:      SourceUserIdentity,
 				ConfigAssertionMetadataClaims: "team",
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "assertion_algorithm ES256 with warden_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 				ConfigAssertionAlgorithm: AssertionAlgES256,
-			},
+			}),
 		},
 		{
 			name: "assertion_algorithm unknown value",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 				ConfigAssertionAlgorithm: "EdDSA",
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "assertion_algorithm without warden_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceAgentIdentity,
 				ConfigAssertionAlgorithm: AssertionAlgES256,
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "assertion_resource with warden_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 				ConfigAssertionResource:  "aws-secretsmanager:prod/db",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "assertion_resource=none with warden_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 				ConfigAssertionResource:  AssertionResourceNone,
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "assertion_resource without warden_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceAgentIdentity,
 				ConfigAssertionResource:  "aws-secretsmanager:prod/db",
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			// The valid delegation shape with a Warden-minted actor assertion.
 			name: "actor warden_identity with user_identity subject",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceUserIdentity,
 				ConfigActorTokenSource:   SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
-			},
+			}),
 		},
 		{
 			name: "actor warden_identity rejects agent_identity subject",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceAgentIdentity,
 				ConfigActorTokenSource:   SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "actor warden_identity rejects warden_identity subject",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceWardenIdentity,
 				ConfigActorTokenSource:   SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "assertion_algorithm valid when actor is warden_identity",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				ConfigSubjectTokenSource: SourceUserIdentity,
 				ConfigActorTokenSource:   SourceWardenIdentity,
 				ConfigAssertionAudience:  "https://sts.example/aud",
 				ConfigAssertionAlgorithm: AssertionAlgES256,
-			},
+			}),
 		},
 	}
 	for _, tt := range tests {
@@ -500,7 +500,7 @@ func TestAssertionMetadataKeys(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := AssertionMetadataKeys(map[string]string{ConfigAssertionMetadataClaims: tt.raw})
+			got := AssertionMetadataKeys(NewConfig(map[string]string{ConfigAssertionMetadataClaims: tt.raw}))
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}
@@ -514,11 +514,11 @@ func TestAssertionMetadataKeys(t *testing.T) {
 }
 
 func TestAssertionUserClaimKeys(t *testing.T) {
-	if got := AssertionUserClaimKeys(map[string]string{}); got != nil {
+	if got := AssertionUserClaimKeys(NewConfig(map[string]string{})); got != nil {
 		t.Errorf("empty config: got %v, want nil", got)
 	}
 	// Trimmed, de-duplicated, order-preserving.
-	got := AssertionUserClaimKeys(map[string]string{ConfigAssertionUserClaims: " username , email , username "})
+	got := AssertionUserClaimKeys(NewConfig(map[string]string{ConfigAssertionUserClaims: " username , email , username "}))
 	want := []string{"username", "email"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("got %v, want %v", got, want)
@@ -527,31 +527,31 @@ func TestAssertionUserClaimKeys(t *testing.T) {
 
 func TestValidateExchangeSpecConfig_AssertionUserClaimsGate(t *testing.T) {
 	// Valid: a warden_identity subject mints the assertion the claims ride in.
-	if err := ValidateExchangeSpecConfig(map[string]string{
+	if err := ValidateExchangeSpecConfig(NewConfig(map[string]string{
 		ConfigSubjectTokenSource:  SourceWardenIdentity,
 		ConfigAssertionUserClaims: "username",
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("warden_identity + assertion_user_claims should be valid: %v", err)
 	}
 	// "sub" alone is valid — the identity-only opt-in.
-	if err := ValidateExchangeSpecConfig(map[string]string{
+	if err := ValidateExchangeSpecConfig(NewConfig(map[string]string{
 		ConfigSubjectTokenSource:  SourceWardenIdentity,
 		ConfigAssertionUserClaims: "sub",
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("assertion_user_claims=sub should be valid: %v", err)
 	}
 	// A set-but-empty value (parses to zero keys) is rejected.
-	if err := ValidateExchangeSpecConfig(map[string]string{
+	if err := ValidateExchangeSpecConfig(NewConfig(map[string]string{
 		ConfigSubjectTokenSource:  SourceWardenIdentity,
 		ConfigAssertionUserClaims: " , ",
-	}); err == nil {
+	})); err == nil {
 		t.Fatal("whitespace-only assertion_user_claims must be rejected")
 	}
 	// Rejected: a non-minting subject cannot carry warden_user.
-	err := ValidateExchangeSpecConfig(map[string]string{
+	err := ValidateExchangeSpecConfig(NewConfig(map[string]string{
 		ConfigSubjectTokenSource:  SourceAgentIdentity,
 		ConfigAssertionUserClaims: "username",
-	})
+	}))
 	if err == nil {
 		t.Fatal("assertion_user_claims without a warden_identity subject/actor must be rejected")
 	}

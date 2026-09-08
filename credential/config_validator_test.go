@@ -209,18 +209,18 @@ func TestFieldValidators(t *testing.T) {
 func TestValidateSchema(t *testing.T) {
 	tests := []struct {
 		name       string
-		config     map[string]string
+		config     Config
 		validators []*FieldValidator
 		wantErr    bool
 		errMsg     string
 	}{
 		{
 			name: "all required fields present and valid",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				"name":    "test",
 				"timeout": "30s",
 				"retries": "3",
-			},
+			}),
 			validators: []*FieldValidator{
 				StringField("name").Required(),
 				DurationField("timeout").Required(),
@@ -230,9 +230,9 @@ func TestValidateSchema(t *testing.T) {
 		},
 		{
 			name: "missing required field",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				"timeout": "30s",
-			},
+			}),
 			validators: []*FieldValidator{
 				StringField("name").Required(),
 				DurationField("timeout").Required(),
@@ -242,10 +242,10 @@ func TestValidateSchema(t *testing.T) {
 		},
 		{
 			name: "empty required field",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				"name":    "",
 				"timeout": "30s",
-			},
+			}),
 			validators: []*FieldValidator{
 				StringField("name").Required(),
 				DurationField("timeout").Required(),
@@ -255,9 +255,9 @@ func TestValidateSchema(t *testing.T) {
 		},
 		{
 			name: "optional field missing",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				"name": "test",
-			},
+			}),
 			validators: []*FieldValidator{
 				StringField("name").Required(),
 				DurationField("timeout"), // Optional
@@ -266,10 +266,10 @@ func TestValidateSchema(t *testing.T) {
 		},
 		{
 			name: "invalid field value",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				"name":    "test",
 				"retries": "not-a-number",
-			},
+			}),
 			validators: []*FieldValidator{
 				StringField("name").Required(),
 				IntField("retries").Range(0, 10),
@@ -279,10 +279,10 @@ func TestValidateSchema(t *testing.T) {
 		},
 		{
 			name: "field out of range",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				"name":    "test",
 				"retries": "15",
-			},
+			}),
 			validators: []*FieldValidator{
 				StringField("name").Required(),
 				IntField("retries").Range(0, 10),
@@ -292,13 +292,13 @@ func TestValidateSchema(t *testing.T) {
 		},
 		{
 			name: "complex schema - all valid",
-			config: map[string]string{
+			config: NewConfig(map[string]string{
 				"address":     "https://vault.example.com",
 				"namespace":   "admin",
 				"max_retries": "3",
 				"timeout":     "30s",
 				"tls_skip":    "false",
-			},
+			}),
 			validators: []*FieldValidator{
 				StringField("address").Required().Describe("Vault server address"),
 				StringField("namespace").Describe("Vault namespace"),

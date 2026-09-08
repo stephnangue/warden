@@ -120,21 +120,21 @@ func testPubPEM(t *testing.T, keyType string) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 }
 
-func transitSignerSpec(cfg map[string]string) *credential.CredSpec {
+func transitSignerSpec(cfg credential.Config) *credential.CredSpec {
 	base := map[string]string{
 		"mint_method":       "transit_signer",
 		"jwt_role":          "warden-transit-signer",
 		"transit_key":       "client-assertion",
 		"payload.client_id": "warden-gateway",
 	}
-	for k, v := range cfg {
+	for k, v := range cfg.All() {
 		if v == "" {
 			delete(base, k)
 			continue
 		}
 		base[k] = v
 	}
-	return &credential.CredSpec{Name: "signer", Config: base}
+	return &credential.CredSpec{Name: "signer", Config: credential.NewConfig(base)}
 }
 
 func TestTransitSigner_MintsScopedCapability(t *testing.T) {
@@ -144,7 +144,7 @@ func TestTransitSigner_MintsScopedCapability(t *testing.T) {
 	driver := federationDriver(t, url)
 
 	rawData, metadata, ttl, leaseID, err := driver.MintCredentialWithExchange(
-		context.TODO(), transitSignerSpec(nil), verifiedInputs())
+		context.TODO(), transitSignerSpec(credential.Config{}), verifiedInputs())
 	require.NoError(t, err)
 
 	// The capability is minted under the SPEC's narrow role, not the source's broad
@@ -189,7 +189,7 @@ func TestTransitSigner_RequiresSpecLevelRole(t *testing.T) {
 	driver := federationDriver(t, url)
 
 	_, _, _, _, err := driver.MintCredentialWithExchange(
-		context.TODO(), transitSignerSpec(map[string]string{"jwt_role": ""}), verifiedInputs())
+		context.TODO(), transitSignerSpec(credential.NewConfig(map[string]string{"jwt_role": ""})), verifiedInputs())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "spec-level jwt_role")
 	assert.Contains(t, err.Error(), "broader capability")
@@ -202,7 +202,7 @@ func TestTransitSigner_PinnedVersionAndExplicitKid(t *testing.T) {
 	driver := federationDriver(t, url)
 
 	rawData, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(),
-		transitSignerSpec(map[string]string{"transit_key_version": "2", "payload.kid": "operator-chosen"}),
+		transitSignerSpec(credential.NewConfig(map[string]string{"transit_key_version": "2", "payload.kid": "operator-chosen"})),
 		verifiedInputs())
 	require.NoError(t, err)
 	assert.Equal(t, "2", rawData["transit_key_version"])
@@ -219,16 +219,16 @@ func TestTransitSigner_RejectsUnusableKeys(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		cfg    map[string]string
+		cfg    credential.Config
 		errMsg string
 	}{
-		{"unknown key", map[string]string{"transit_key": "nope"}, "unusable"},
-		{"exportable key", map[string]string{"transit_key": "exportable-key"}, "exportable"},
-		{"curve does not match alg", map[string]string{"transit_key": "ec-key", "signing_alg": "ES256"}, "expected"},
-		{"version beyond latest", map[string]string{"transit_key_version": "9"}, "unusable"},
-		{"non-numeric version", map[string]string{"transit_key_version": "latest"}, "positive integer"},
-		{"missing client id", map[string]string{"payload.client_id": ""}, "payload.client_id"},
-		{"missing key name", map[string]string{"transit_key": ""}, "transit_key is required"},
+		{"unknown key", credential.NewConfig(map[string]string{"transit_key": "nope"}), "unusable"},
+		{"exportable key", credential.NewConfig(map[string]string{"transit_key": "exportable-key"}), "exportable"},
+		{"curve does not match alg", credential.NewConfig(map[string]string{"transit_key": "ec-key", "signing_alg": "ES256"}), "expected"},
+		{"version beyond latest", credential.NewConfig(map[string]string{"transit_key_version": "9"}), "unusable"},
+		{"non-numeric version", credential.NewConfig(map[string]string{"transit_key_version": "latest"}), "positive integer"},
+		{"missing client id", credential.NewConfig(map[string]string{"payload.client_id": ""}), "payload.client_id"},
+		{"missing key name", credential.NewConfig(map[string]string{"transit_key": ""}), "transit_key is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,10 +252,10 @@ func TestTransitSigner_TemplatedPerCaller(t *testing.T) {
 	inputs.AgentClaims = map[string]string{"sub": "agent-7"}
 
 	rawData, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(),
-		transitSignerSpec(map[string]string{
+		transitSignerSpec(credential.NewConfig(map[string]string{
 			"transit_key":       "tx-{{agent.sub}}",
 			"payload.client_id": "client-{{agent.sub}}",
-		}), inputs)
+		})), inputs)
 	require.NoError(t, err)
 	assert.Equal(t, "tx-agent-7", rawData["transit_key"])
 	assert.Equal(t, "client-agent-7", rawData["client_id"])
@@ -271,14 +271,14 @@ func TestTransitSigner_RefusedOffTheExchangePath(t *testing.T) {
 	})
 	driver := federationDriver(t, url)
 
-	_, _, _, _, err := driver.MintCredential(context.TODO(), transitSignerSpec(nil))
+	_, _, _, _, err := driver.MintCredential(context.TODO(), transitSignerSpec(credential.Config{}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "oidc_federation")
 }
 
 func TestTransitSigner_InfersKeyValueType(t *testing.T) {
 	f := &VaultDriverFactory{}
-	typ, err := f.InferCredentialType(map[string]string{"mint_method": "transit_signer"})
+	typ, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "transit_signer"}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeKeyValue, typ)
 }
@@ -296,7 +296,7 @@ func TestTransitSigner_RecordsWhetherTheTokenIsTracked(t *testing.T) {
 		driver := federationDriver(t, url)
 
 		_, metadata, _, _, err := driver.MintCredentialWithExchange(
-			context.TODO(), transitSignerSpec(nil), verifiedInputs())
+			context.TODO(), transitSignerSpec(credential.Config{}), verifiedInputs())
 		require.NoError(t, err)
 		assert.Equal(t, "false", metadata["tracked_token"])
 		assert.NotContains(t, metadata, "accessor", "an untracked token has none to record")
@@ -307,7 +307,7 @@ func TestTransitSigner_RecordsWhetherTheTokenIsTracked(t *testing.T) {
 		driver := federationDriver(t, url)
 
 		_, metadata, _, _, err := driver.MintCredentialWithExchange(
-			context.TODO(), transitSignerSpec(nil), verifiedInputs())
+			context.TODO(), transitSignerSpec(credential.Config{}), verifiedInputs())
 		require.NoError(t, err, "a tracked token is an operational cost, not an error")
 		assert.Equal(t, "true", metadata["tracked_token"])
 		assert.Equal(t, "acc-9", metadata["accessor"])
@@ -327,7 +327,7 @@ func TestTransitSigner_RejectsReservedPayloadNames(t *testing.T) {
 	for _, key := range []string{"vault_token", "vault_address", "kms_backend", "transit_key", "transit_key_version", "signing_alg", "token_expires_at"} {
 		t.Run(key, func(t *testing.T) {
 			_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(),
-				transitSignerSpec(map[string]string{"payload." + key: "attacker-supplied"}), verifiedInputs())
+				transitSignerSpec(credential.NewConfig(map[string]string{"payload." + key: "attacker-supplied"})), verifiedInputs())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "payload."+key)
 			assert.Contains(t, err.Error(), "would replace it")
@@ -345,7 +345,7 @@ func TestTransitSigner_RoleCheckedBeforeLogin(t *testing.T) {
 	driver := federationDriver(t, url)
 
 	_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(),
-		transitSignerSpec(map[string]string{"jwt_role": ""}), verifiedInputs())
+		transitSignerSpec(credential.NewConfig(map[string]string{"jwt_role": ""})), verifiedInputs())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "spec-level jwt_role")
 	assert.Nil(t, srv.loginBody, "no login was attempted, so no token was minted under the source's broad role")

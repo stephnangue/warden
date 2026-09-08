@@ -40,30 +40,30 @@ func TestIBMDriverFactory_ValidateConfig(t *testing.T) {
 	// never performs the grant, and a chained source is refused one outright. An
 	// iam_token spec still needs it, which VerifySpec and the mint path enforce.
 	t.Run("api_key is not required at source level", func(t *testing.T) {
-		require.NoError(t, f.ValidateConfig(map[string]string{}))
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{})))
 	})
 
 	t.Run("valid minimal config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"api_key": "test-api-key",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("valid full config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"api_key":      "test-api-key",
 			"account_id":   "abc123",
 			"iam_endpoint": "https://iam.test.cloud.ibm.com",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("iam_endpoint rejects http scheme", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"api_key":      "test-api-key",
 			"iam_endpoint": "http://iam.cloud.ibm.com",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "https")
 	})
@@ -73,30 +73,30 @@ func TestIBMDriverFactory_InferCredentialType(t *testing.T) {
 	f := &IBMDriverFactory{}
 
 	t.Run("iam_token", func(t *testing.T) {
-		ct, err := f.InferCredentialType(map[string]string{"mint_method": "iam_token"})
+		ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "iam_token"}))
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeOAuthBearerToken, ct)
 	})
 
 	t.Run("empty defaults to oauth bearer token", func(t *testing.T) {
-		ct, err := f.InferCredentialType(map[string]string{})
+		ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeOAuthBearerToken, ct)
 	})
 
 	t.Run("access_keys", func(t *testing.T) {
-		ct, err := f.InferCredentialType(map[string]string{"mint_method": "access_keys"})
+		ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "access_keys"}))
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeIBMCloudKeys, ct)
 	})
 
 	t.Run("iam_with_cos is gone", func(t *testing.T) {
-		_, err := f.InferCredentialType(map[string]string{"mint_method": "iam_with_cos"})
+		_, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "iam_with_cos"}))
 		require.Error(t, err)
 	})
 
 	t.Run("unsupported mint method", func(t *testing.T) {
-		_, err := f.InferCredentialType(map[string]string{"mint_method": "invalid"})
+		_, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "invalid"}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot infer credential type")
 	})
@@ -110,7 +110,7 @@ func TestIBMDriver_Type(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeIBM, d.Type())
@@ -120,7 +120,7 @@ func TestIBMDriver_Cleanup(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Cleanup(context.TODO()))
@@ -130,7 +130,7 @@ func TestIBMDriver_Revoke_NoOp(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Revoke(context.TODO(), "some-lease-id"))
@@ -143,7 +143,7 @@ func TestIBMDriver_SupportsRotation(t *testing.T) {
 	// driver rather than a bare struct.
 	withConfig := func(cfg map[string]string, iamID string) *IBMDriver {
 		return &IBMDriver{
-			credSource: &credential.CredSource{Type: credential.SourceTypeIBM, Config: cfg},
+			credSource: &credential.CredSource{Type: credential.SourceTypeIBM, Config: credential.NewConfig(cfg)},
 			iamID:      iamID,
 		}
 	}
@@ -169,7 +169,7 @@ func TestIBMDriver_SupportsRotation(t *testing.T) {
 		d := &IBMDriver{
 			credSource: &credential.CredSource{
 				Type:   credential.SourceTypeIBM,
-				Config: map[string]string{credential.ConfigSecretSpec: "ibm-api-key"},
+				Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "ibm-api-key"}),
 			},
 			iamID: "iam-1234",
 		}
@@ -185,15 +185,15 @@ func TestIBMDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid_method",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -321,10 +321,10 @@ func newTestIBMDriver(t *testing.T, serverURL string) *IBMDriver {
 	return &IBMDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeIBM,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_key":      "test-key",
 				"iam_endpoint": serverURL,
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -341,9 +341,9 @@ func TestIBMDriver_MintIAMToken(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "iam_token",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
@@ -362,7 +362,7 @@ func TestIBMDriver_MintIAMToken_DefaultMintMethod(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
-		Config: map[string]string{}, // no mint_method = defaults to iam_token
+		Config: credential.NewConfig(map[string]string{}), // no mint_method = defaults to iam_token
 	}
 
 	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -375,14 +375,14 @@ func TestIBMDriver_MintIAMToken_InvalidKey(t *testing.T) {
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
-	d.credSource.Config["api_key"] = "invalid-key"
+	d.credSource.Config = d.credSource.Config.With("api_key", "invalid-key")
 	d.tokenCache.Clear()
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "iam_token",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -428,10 +428,10 @@ func TestIBMDriver_DiscoverAPIKeyDetails(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeIBM,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_key":      "test-key",
 				"iam_endpoint": srv.URL,
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -445,10 +445,13 @@ func TestIBMDriver_DiscoverAPIKeyDetails(t *testing.T) {
 	assert.Equal(t, "acc-123456", d.discoveredAccountID)
 
 	// The discovered account is held on the driver, never written back into the
-	// config map. That map belongs to the config store, which hands the same
+	// config. That config belongs to the config store, which hands the same
 	// instance to readers taking no driver lock, so a write here raced them.
-	assert.NotContains(t, d.credSource.Config, "account_id",
-		"discovery must not mutate the source config map")
+	//
+	// The Config type now makes such a write a compile error rather than something
+	// a test has to catch; this stays as a guard on the discovery behaviour itself.
+	_, present := d.credSource.Config.Lookup("account_id")
+	assert.False(t, present, "discovery must not write back into the source config")
 }
 
 // An operator-configured account wins over whatever discovery reports, which is
@@ -460,11 +463,11 @@ func TestIBMDriver_AccountID_ConfiguredWinsOverDiscovered(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeIBM,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_key":      "test-key",
 				"iam_endpoint": srv.URL,
 				"account_id":   "acc-operator",
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -484,7 +487,7 @@ func TestIBMDriver_PrepareRotation(t *testing.T) {
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
-	d.credSource.Config["account_id"] = "acc-123456"
+	d.credSource.Config = d.credSource.Config.With("account_id", "acc-123456")
 
 	newConfig, cleanupConfig, activateAfter, err := d.PrepareRotation(context.TODO())
 	require.NoError(t, err)
@@ -554,10 +557,10 @@ func TestIBMDriverFactory_Create(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	f := &IBMDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"api_key":      "test-key",
 		"iam_endpoint": srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	ibmDriver, ok := driver.(*IBMDriver)
@@ -573,10 +576,10 @@ func TestIBMDriverFactory_Create_InvalidKey(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	f := &IBMDriverFactory{}
-	_, err := f.Create(map[string]string{
+	_, err := f.Create(credential.NewConfig(map[string]string{
 		"api_key":      "invalid-key",
 		"iam_endpoint": srv.URL,
-	}, log)
+	}), log)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "IBM Cloud authentication failed")
 }
@@ -594,9 +597,9 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 	t.Run("valid spec", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "iam_token",
-			},
+			}),
 		}
 		err := d.VerifySpec(context.TODO(), spec)
 		require.NoError(t, err)
@@ -605,7 +608,7 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 	t.Run("default mint method", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name:   "test-spec",
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		}
 		err := d.VerifySpec(context.TODO(), spec)
 		require.NoError(t, err)
@@ -613,14 +616,14 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 
 	t.Run("invalid api key fails verification", func(t *testing.T) {
 		d2 := newTestIBMDriver(t, srv.URL)
-		d2.credSource.Config["api_key"] = "invalid-key"
+		d2.credSource.Config = d2.credSource.Config.With("api_key", "invalid-key")
 		d2.tokenCache.Clear()
 
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "iam_token",
-			},
+			}),
 		}
 		err := d2.VerifySpec(context.TODO(), spec)
 		require.Error(t, err)
@@ -637,7 +640,7 @@ func accessKeysSpec(secretSpec string) *credential.CredSpec {
 	if secretSpec != "" {
 		cfg[credential.ConfigSecretSpec] = secretSpec
 	}
-	return &credential.CredSpec{Name: "test-spec", Config: cfg}
+	return &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(cfg)}
 }
 
 func TestIBMDriver_MintFromSecret_ServesThePair(t *testing.T) {
@@ -669,7 +672,7 @@ func TestIBMDriver_MintFromSecret_HonoursSecretCacheTTL(t *testing.T) {
 	d := newTestIBMDriver(t, srv.URL)
 
 	spec := accessKeysSpec("cos-pair")
-	spec.Config[credential.ConfigSecretCacheTTL] = "5m"
+	spec.Config = spec.Config.With(credential.ConfigSecretCacheTTL, "5m")
 
 	material := credential.SecretMaterial{Data: map[string]string{
 		"access_key_id":     "ak",
@@ -732,7 +735,7 @@ func TestIBMDriver_MintFromSecret_RefusesUnknownMintMethod(t *testing.T) {
 
 	d := newTestIBMDriver(t, srv.URL)
 
-	spec := &credential.CredSpec{Name: "test-spec", Config: map[string]string{"mint_method": "iam_with_cos"}}
+	spec := &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{"mint_method": "iam_with_cos"})}
 	_, _, _, _, err := d.MintFromSecret(context.TODO(), spec, credential.SecretMaterial{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "iam_with_cos")
@@ -757,7 +760,7 @@ func TestIBMDriver_MintCredential_IAMWithCOSNowUnsupported(t *testing.T) {
 
 	d := newTestIBMDriver(t, srv.URL)
 
-	spec := &credential.CredSpec{Name: "test-spec", Config: map[string]string{"mint_method": "iam_with_cos"}}
+	spec := &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{"mint_method": "iam_with_cos"})}
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported mint_method")
@@ -943,10 +946,10 @@ func newChainedIBMDriver(t *testing.T, serverURL string) *IBMDriver {
 	return &IBMDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeIBM,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"iam_endpoint":              serverURL,
 				credential.ConfigSecretSpec: "ibm-api-key",
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -954,7 +957,7 @@ func newChainedIBMDriver(t *testing.T, serverURL string) *IBMDriver {
 }
 
 func bearerSpec() *credential.CredSpec {
-	return &credential.CredSpec{Name: "test-spec", Config: map[string]string{"mint_method": "iam_token"}}
+	return &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{"mint_method": "iam_token"})}
 }
 
 // A chained source keeps none of the config that describes a key it does not hold,
@@ -963,17 +966,17 @@ func TestIBMDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 	f := &IBMDriverFactory{}
 
 	t.Run("a reference alone is valid", func(t *testing.T) {
-		require.NoError(t, f.ValidateConfig(map[string]string{
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
 			credential.ConfigSecretSpec: "ibm-api-key",
-		}))
+		})))
 	})
 
 	for _, key := range []string{"api_key", "account_id", "activation_delay"} {
 		t.Run(key+" is refused beside a reference", func(t *testing.T) {
-			err := f.ValidateConfig(map[string]string{
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{
 				credential.ConfigSecretSpec: "ibm-api-key",
 				key:                         "some-value",
-			})
+			}))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), key)
 			assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
@@ -1067,7 +1070,7 @@ func TestIBMDriver_MintCredential_InlineRejectionIsNotRetryable(t *testing.T) {
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
-	d.credSource.Config["api_key"] = "invalid-key"
+	d.credSource.Config = d.credSource.Config.With("api_key", "invalid-key")
 	d.tokenCache.Clear()
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), bearerSpec())
@@ -1139,7 +1142,7 @@ func TestIBMDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
 	t.Run("spec-level reference", func(t *testing.T) {
 		d := newTestIBMDriver(t, srv.URL)
 		spec := bearerSpec()
-		spec.Config[credential.ConfigSecretSpec] = "ibm-api-key"
+		spec.Config = spec.Config.With(credential.ConfigSecretSpec, "ibm-api-key")
 		_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
@@ -1174,7 +1177,7 @@ func TestIBMDriverFactory_Create_SkipsProbeWithoutKey(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			atomic.StoreInt32(&hits, 0)
 			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-			d, err := f.Create(config, log)
+			d, err := f.Create(credential.NewConfig(config), log)
 			require.NoError(t, err)
 			require.NotNil(t, d)
 			assert.Zero(t, atomic.LoadInt32(&hits), "Create must make no upstream call without a stored key")
@@ -1202,7 +1205,7 @@ func TestIBMDriver_VerifySpec_ChainedSourceNeedsNoAPIKey(t *testing.T) {
 		d := &IBMDriver{
 			credSource: &credential.CredSource{
 				Type:   credential.SourceTypeIBM,
-				Config: map[string]string{"iam_endpoint": srv.URL},
+				Config: credential.NewConfig(map[string]string{"iam_endpoint": srv.URL}),
 			},
 			tokenCache: NewTokenCache(),
 			httpClient: &http.Client{Timeout: 5 * time.Second},

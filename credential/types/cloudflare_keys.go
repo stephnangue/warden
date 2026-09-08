@@ -47,7 +47,7 @@ func (t *CloudflareKeysCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for a Cloudflare credential spec
-func (t *CloudflareKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *CloudflareKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// A vault source is not supported: it would need a static_cloudflare mint
 	// method, which the Vault driver has never implemented. It used to be accepted
 	// here and then failed at the first mint.
@@ -60,16 +60,16 @@ func (t *CloudflareKeysCredType) ValidateConfig(config map[string]string, source
 		return err
 	}
 
-	hasAPI := config["api_token"] != ""
-	hasR2 := config["access_key_id"] != "" || config["secret_access_key"] != ""
+	hasAPI := config.Get("api_token") != ""
+	hasR2 := config.Get("access_key_id") != "" || config.Get("secret_access_key") != ""
 	if !hasAPI && !hasR2 {
 		return fmt.Errorf("at least one of 'api_token' (for API) or 'access_key_id'+'secret_access_key' (for R2) is required")
 	}
 	// If R2 fields are partially set, both must be present
-	if config["access_key_id"] != "" && config["secret_access_key"] == "" {
+	if config.Get("access_key_id") != "" && config.Get("secret_access_key") == "" {
 		return fmt.Errorf("'secret_access_key' is required when 'access_key_id' is set")
 	}
-	if config["secret_access_key"] != "" && config["access_key_id"] == "" {
+	if config.Get("secret_access_key") != "" && config.Get("access_key_id") == "" {
 		return fmt.Errorf("'access_key_id' is required when 'secret_access_key' is set")
 	}
 

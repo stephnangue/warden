@@ -1527,8 +1527,8 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 	}
 
 	inputs := &credential.ExchangeInputs{
-		SubjectTokenType: spec.Config[credential.ConfigSubjectTokenType],
-		ActorTokenType:   spec.Config[credential.ConfigActorTokenType],
+		SubjectTokenType: spec.Config.Get(credential.ConfigSubjectTokenType),
+		ActorTokenType:   spec.Config.Get(credential.ConfigActorTokenType),
 	}
 	if inputs.SubjectTokenType == "" {
 		inputs.SubjectTokenType = credential.TokenTypeJWT
@@ -1559,7 +1559,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		userTE = req.User.TokenEntry
 	}
 
-	switch spec.Config[credential.ConfigSubjectTokenSource] {
+	switch spec.Config.Get(credential.ConfigSubjectTokenSource) {
 	case credential.SourceAgentIdentity:
 		// Reuse the JWT Warden verified during inbound authentication. It lives
 		// in ClientToken only for transparent JWT auth; an opaque session token
@@ -1607,10 +1607,10 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 	default:
 		// SpecRequestsExchange already excluded "none"/absent; any other value
 		// (including a persisted, now-retired "header") fails closed at mint.
-		return nil, fmt.Errorf("spec %q has an unsupported %s %q", specName, credential.ConfigSubjectTokenSource, spec.Config[credential.ConfigSubjectTokenSource])
+		return nil, fmt.Errorf("spec %q has an unsupported %s %q", specName, credential.ConfigSubjectTokenSource, spec.Config.Get(credential.ConfigSubjectTokenSource))
 	}
 
-	switch spec.Config[credential.ConfigActorTokenSource] {
+	switch spec.Config.Get(credential.ConfigActorTokenSource) {
 	case credential.SourceAgentIdentity:
 		// The agent's verified inbound JWT acts as the actor (agent-acting-for-user).
 		// Requires JWT auth; spec validation forbids subject_token_source=agent_identity
@@ -1642,7 +1642,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 	default:
 		// A persisted spec with a retired actor source (e.g. "header") reaches here
 		// at mint time — fail closed rather than silently minting without delegation.
-		return nil, fmt.Errorf("spec %q has an unsupported %s %q", specName, credential.ConfigActorTokenSource, spec.Config[credential.ConfigActorTokenSource])
+		return nil, fmt.Errorf("spec %q has an unsupported %s %q", specName, credential.ConfigActorTokenSource, spec.Config.Get(credential.ConfigActorTokenSource))
 	}
 
 	if err := inputs.Validate(); err != nil {
@@ -1696,7 +1696,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// The assertion audience: an explicit spec value wins; otherwise derive it
 	// from the source (e.g. a GCP federation source derives it from its
 	// workload_identity_provider). Fails closed if neither yields one.
-	audience := spec.Config[credential.ConfigAssertionAudience]
+	audience := spec.Config.Get(credential.ConfigAssertionAudience)
 	if audience == "" {
 		src, err := loadSource()
 		if err != nil {
@@ -1714,7 +1714,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// any other value is emitted verbatim. Best-effort: a spec with no single
 	// static resource simply carries no warden_resource claim.
 	var resource string
-	switch r := spec.Config[credential.ConfigAssertionResource]; r {
+	switch r := spec.Config.Get(credential.ConfigAssertionResource); r {
 	case credential.AssertionResourceNone:
 		// opt-out: emit no warden_resource claim
 	case "":

@@ -77,7 +77,7 @@ func TestCloudflareKeysCredType_ValidateConfig_LocalSource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeLocal)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeLocal)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -93,22 +93,22 @@ func TestCloudflareKeysCredType_ValidateConfig_LocalSource(t *testing.T) {
 // first mint. It is refused at create now.
 func TestCloudflareKeysCredType_ValidateConfig_VaultSourceRejected(t *testing.T) {
 	ct := &CloudflareKeysCredType{}
-	err := ct.ValidateConfig(map[string]string{
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 		"mint_method": "static_cloudflare",
 		"kv2_mount":   "secret",
 		"secret_path": "cloudflare/prod/keys",
-	}, credential.SourceTypeVault)
+	}), credential.SourceTypeVault)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "local source")
 }
 
 func TestCloudflareKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 	ct := &CloudflareKeysCredType{}
-	err := ct.ValidateConfig(map[string]string{
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 		"access_key_id":     "test-access-key-id",
 		"secret_access_key": "test-secret-access-key",
 		"api_token":         "test-api-token",
-	}, credential.SourceTypeAWS)
+	}), credential.SourceTypeAWS)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "local source")
 }

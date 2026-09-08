@@ -110,7 +110,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := credType.ValidateConfig(tt.config, tt.sourceType)
+			err := credType.ValidateConfig(credential.NewConfig(tt.config), tt.sourceType)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -199,7 +199,7 @@ func TestAzureBearerTokenCredType_ValidateConfig_Federation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := credType.ValidateConfig(tt.config, credential.SourceTypeAzure)
+			err := credType.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeAzure)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)

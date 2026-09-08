@@ -98,7 +98,7 @@ func (f *ElasticDriverFactory) Type() string {
 }
 
 // ValidateConfig validates Elasticsearch driver configuration using declarative schema
-func (f *ElasticDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *ElasticDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := validateElasticChainedConfig(config); err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (f *ElasticDriverFactory) ValidateConfig(config map[string]string) error {
 // which is derived from the key and, kept beside a fetched one, would name one
 // key while presenting another's. There is nothing here for it to be used by
 // either: the id serves rotation cleanup, and a chained source does not rotate.
-func validateElasticChainedConfig(config map[string]string) error {
+func validateElasticChainedConfig(config credential.Config) error {
 	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
 		// The schema cannot express "required unless another key is set", so the
 		// non-chained requirement lands here alongside its opposite.
@@ -205,12 +205,12 @@ func (f *ElasticDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType returns the credential type for Elasticsearch sources.
-func (f *ElasticDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *ElasticDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil
 }
 
 // Create instantiates a new ElasticDriver
-func (f *ElasticDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *ElasticDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &ElasticDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeElastic,
@@ -297,7 +297,7 @@ func (d *ElasticDriver) MintCredential(ctx context.Context, spec *credential.Cre
 	// A chained spec mints through MintFromSecret, which the minting layer routes
 	// it to. Arriving here means that routing was bypassed, so fail rather than
 	// fall through to an inline key this source does not have.
-	if chained || spec.Config[credential.ConfigSecretSpec] != "" {
+	if chained || spec.Config.Get(credential.ConfigSecretSpec) != "" {
 		return nil, nil, 0, "", fmt.Errorf("elastic: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
 			credential.ConfigSecretSpec)
 	}
@@ -351,7 +351,7 @@ func (d *ElasticDriver) mintAPIKey(ctx context.Context, auth elasticAuth, spec *
 	// A key created without an expiration never expires, so an empty value is
 	// refused rather than passed through as absent. Spec validation rejects it at
 	// write time; this holds for a spec that predates that check.
-	expiration, present := spec.Config["expiration"]
+	expiration, present := spec.Config.Lookup("expiration")
 	if present && expiration == "" {
 		return nil, nil, 0, "", fmt.Errorf("spec sets an empty expiration; omit it to take the 1h default, or give a lifetime such as 24h")
 	}
@@ -577,7 +577,7 @@ func (d *ElasticDriver) PrepareRotation(ctx context.Context) (map[string]string,
 
 	// Build new config
 	newConfig := make(map[string]string)
-	for k, v := range d.credSource.Config {
+	for k, v := range d.credSource.Config.All() {
 		newConfig[k] = v
 	}
 	newConfig["api_key"] = createResp.Encoded
@@ -612,8 +612,8 @@ func (d *ElasticDriver) CommitRotation(ctx context.Context, newConfig map[string
 	d.configMu.Lock()
 	defer d.configMu.Unlock()
 
-	d.credSource.Config = newConfig
-	d.sourceAPIKeyID = credential.GetString(newConfig, "api_key_id", "")
+	d.credSource.Config = credential.NewConfig(newConfig)
+	d.sourceAPIKeyID = newConfig["api_key_id"]
 
 	identity, err := d.verifyAuthenticationWith(ctx, d.authSnapshotLocked())
 	if err != nil {

@@ -40,7 +40,7 @@ func TestScalewayDriverFactory_Type(t *testing.T) {
 
 func TestScalewayDriverFactory_InferCredentialType(t *testing.T) {
 	f := &ScalewayDriverFactory{}
-	ct, err := f.InferCredentialType(map[string]string{})
+	ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeScalewayKeys, ct)
 }
@@ -49,22 +49,22 @@ func TestScalewayDriverFactory_ValidateConfig(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 
 	t.Run("empty config is valid", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{})
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{}))
 		assert.NoError(t, err)
 	})
 
 	t.Run("valid config with all fields", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"scaleway_url":          "https://api.scaleway.com",
 			"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-		})
+		}))
 		assert.NoError(t, err)
 	})
 
 	t.Run("invalid URL", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"scaleway_url": "http://api.scaleway.com",
-		})
+		}))
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "https")
 	})
@@ -81,10 +81,10 @@ func TestScalewayDriverFactory_Create(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          "https://api.scaleway.com",
 		"management_secret_key": "test-key",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	require.NotNil(t, driver)
 	assert.Equal(t, credential.SourceTypeScaleway, driver.Type())
@@ -96,17 +96,17 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{}, log)
+	driver, err := f.Create(credential.NewConfig(map[string]string{}), log)
 	require.NoError(t, err)
 
 	t.Run("valid static keys", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "static_keys",
 				"access_key":  "SCWXXXXXXXXXXXXXXXXX",
 				"secret_key":  "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-			},
+			}),
 		}
 
 		rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
@@ -123,10 +123,10 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 		// would guess at what the operator meant.
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"access_key": "SCWXXXXXXXXXXXXXXXXX",
 				"secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-			},
+			}),
 		}
 
 		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -137,10 +137,10 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 	t.Run("missing access_key", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "static_keys",
 				"secret_key":  "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-			},
+			}),
 		}
 
 		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -151,10 +151,10 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 	t.Run("missing secret_key", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "static_keys",
 				"access_key":  "SCWXXXXXXXXXXXXXXXXX",
-			},
+			}),
 		}
 
 		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -165,9 +165,9 @@ func TestScalewayDriver_MintStaticCredential(t *testing.T) {
 	t.Run("unsupported mint_method", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "unknown",
-			},
+			}),
 		}
 
 		_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -214,21 +214,21 @@ func TestScalewayDriver_MintDynamicCredential(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "mgmt-secret-key",
 		"tls_skip_verify":       "true",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "dynamic-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":    "dynamic_keys",
 			"application_id": "app-123",
 			"ttl":            "2h",
 			"description":    "test-key",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
@@ -258,20 +258,20 @@ func TestScalewayDriver_MintDynamicCredential_LeaseFollowsServerExpiry(t *testin
 	defer server.Close()
 
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "mgmt-secret-key",
 		"tls_skip_verify":       "true",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "clamped-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":    "dynamic_keys",
 			"application_id": "app-123",
 			"ttl":            "24h",
-		},
+		}),
 	}
 
 	_, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
@@ -293,20 +293,20 @@ func TestScalewayDriver_MintDynamicCredential_UnparseableExpiryFallsBack(t *test
 	defer server.Close()
 
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "mgmt-secret-key",
 		"tls_skip_verify":       "true",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 
 	_, _, ttl, _, err := driver.MintCredential(context.Background(), &credential.CredSpec{
 		Name: "weird-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":    "dynamic_keys",
 			"application_id": "app-123",
 			"ttl":            "30m",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 30*time.Minute, ttl)
@@ -324,20 +324,20 @@ func TestScalewayDriver_MintDynamicCredential_AlreadyExpiredIsAnError(t *testing
 	defer server.Close()
 
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "mgmt-secret-key",
 		"tls_skip_verify":       "true",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 
 	_, _, _, _, err = driver.MintCredential(context.Background(), &credential.CredSpec{
 		Name: "dead-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":    "dynamic_keys",
 			"application_id": "app-123",
 			"ttl":            "1h",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already expired")
@@ -347,15 +347,15 @@ func TestScalewayDriver_MintDynamicCredential_MissingManagementKey(t *testing.T)
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{}, log)
+	driver, err := f.Create(credential.NewConfig(map[string]string{}), log)
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "dynamic-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":    "dynamic_keys",
 			"application_id": "app-123",
-		},
+		}),
 	}
 
 	_, _, _, _, err = driver.MintCredential(context.Background(), spec)
@@ -367,16 +367,16 @@ func TestScalewayDriver_MintDynamicCredential_MissingApplicationID(t *testing.T)
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"management_secret_key": "mgmt-key",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "dynamic-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_keys",
-		},
+		}),
 	}
 
 	_, _, _, _, err = driver.MintCredential(context.Background(), spec)
@@ -402,11 +402,11 @@ func TestScalewayDriver_Revoke(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "mgmt-secret-key",
 		"tls_skip_verify":       "true",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	err = driver.Revoke(context.Background(), "SCWNEWKEYXXXXXXXXXX")
@@ -418,7 +418,7 @@ func TestScalewayDriver_Revoke_EmptyLeaseID(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{}, log)
+	driver, err := f.Create(credential.NewConfig(map[string]string{}), log)
 	require.NoError(t, err)
 
 	// Empty leaseID should be a no-op
@@ -430,7 +430,7 @@ func TestScalewayDriver_Revoke_MissingManagementKey(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{}, log)
+	driver, err := f.Create(credential.NewConfig(map[string]string{}), log)
 	require.NoError(t, err)
 
 	err = driver.Revoke(context.Background(), "SCWKEY123")
@@ -456,19 +456,19 @@ func TestScalewayDriver_VerifySpec_StaticKeys(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":    server.URL,
 		"tls_skip_verify": "true",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_keys",
 			"access_key":  "SCWXXXXXXXXXXXXXXXXX",
 			"secret_key":  "test-secret",
-		},
+		}),
 	}
 
 	scwDriver := driver.(*ScalewayDriver)
@@ -480,17 +480,17 @@ func TestScalewayDriver_VerifySpec_DynamicKeys(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"management_secret_key": "mgmt-key",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "dynamic-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":    "dynamic_keys",
 			"application_id": "app-123",
-		},
+		}),
 	}
 
 	scwDriver := driver.(*ScalewayDriver)
@@ -502,16 +502,16 @@ func TestScalewayDriver_VerifySpec_DynamicKeys_MissingFields(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{}, log)
+	driver, err := f.Create(credential.NewConfig(map[string]string{}), log)
 	require.NoError(t, err)
 
 	t.Run("missing management_secret_key", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name: "dynamic-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method":    "dynamic_keys",
 				"application_id": "app-123",
-			},
+			}),
 		}
 		scwDriver := driver.(*ScalewayDriver)
 		err := scwDriver.VerifySpec(context.Background(), spec)
@@ -521,14 +521,14 @@ func TestScalewayDriver_VerifySpec_DynamicKeys_MissingFields(t *testing.T) {
 
 	t.Run("missing application_id", func(t *testing.T) {
 		f2 := &ScalewayDriverFactory{}
-		driver2, _ := f2.Create(map[string]string{
+		driver2, _ := f2.Create(credential.NewConfig(map[string]string{
 			"management_secret_key": "mgmt-key",
-		}, log)
+		}), log)
 		spec := &credential.CredSpec{
 			Name: "dynamic-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "dynamic_keys",
-			},
+			}),
 		}
 		scwDriver := driver2.(*ScalewayDriver)
 		err := scwDriver.VerifySpec(context.Background(), spec)
@@ -543,7 +543,7 @@ func TestScalewayDriver_Cleanup(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{}, log)
+	driver, err := f.Create(credential.NewConfig(map[string]string{}), log)
 	require.NoError(t, err)
 
 	// Should not panic
@@ -556,35 +556,35 @@ func TestScalewayDriver_Cleanup(t *testing.T) {
 func TestScalewayDriver_SupportsRotation(t *testing.T) {
 	t.Run("supports when both keys present", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 				"management_secret_key": "secret",
 				"management_access_key": "SCWMGMTKEY",
-			}},
+			})},
 		}
 		assert.True(t, d.SupportsRotation())
 	})
 
 	t.Run("does not support without access key", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 				"management_secret_key": "secret",
-			}},
+			})},
 		}
 		assert.False(t, d.SupportsRotation())
 	})
 
 	t.Run("does not support without secret key", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 				"management_access_key": "SCWMGMTKEY",
-			}},
+			})},
 		}
 		assert.False(t, d.SupportsRotation())
 	})
 
 	t.Run("does not support with empty config", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{}},
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{})},
 		}
 		assert.False(t, d.SupportsRotation())
 	})
@@ -635,12 +635,12 @@ func TestScalewayDriver_PrepareRotation(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "old-mgmt-secret",
 		"management_access_key": "SCWOLDMGMTKEY",
 		"tls_skip_verify":       "true",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	scwDriver := driver.(*ScalewayDriver)
@@ -666,9 +666,9 @@ func TestScalewayDriver_PrepareRotation_MissingFields(t *testing.T) {
 
 	t.Run("missing management_secret_key", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 				"management_access_key": "SCWKEY",
-			}},
+			})},
 			logger: log,
 		}
 		_, _, _, err := d.PrepareRotation(context.Background())
@@ -678,9 +678,9 @@ func TestScalewayDriver_PrepareRotation_MissingFields(t *testing.T) {
 
 	t.Run("missing management_access_key", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 				"management_secret_key": "secret",
-			}},
+			})},
 			logger: log,
 		}
 		_, _, _, err := d.PrepareRotation(context.Background())
@@ -693,11 +693,11 @@ func TestScalewayDriver_CommitRotation(t *testing.T) {
 	log := createScalewayTestLogger()
 
 	d := &ScalewayDriver{
-		credSource: &credential.CredSource{Config: map[string]string{
+		credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 			"management_secret_key": "old-secret",
 			"management_access_key": "SCWOLDKEY",
 			"scaleway_url":          "https://api.scaleway.com",
-		}},
+		})},
 		logger: log,
 	}
 
@@ -733,12 +733,12 @@ func TestScalewayDriver_CleanupRotation(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "new-mgmt-secret",
 		"management_access_key": "SCWNEWMGMTKEY",
 		"tls_skip_verify":       "true",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	scwDriver := driver.(*ScalewayDriver)
@@ -753,7 +753,7 @@ func TestScalewayDriver_CleanupRotation_EmptyAccessKey(t *testing.T) {
 	log := createScalewayTestLogger()
 
 	d := &ScalewayDriver{
-		credSource: &credential.CredSource{Config: map[string]string{}},
+		credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{})},
 		logger:     log,
 	}
 
@@ -783,13 +783,13 @@ func TestScalewayDriver_PrepareRotation_CustomActivationDelay(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 	log := createScalewayTestLogger()
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "secret",
 		"management_access_key": "SCWKEY",
 		"activation_delay":      "2m",
 		"tls_skip_verify":       "true",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	scwDriver := driver.(*ScalewayDriver)
@@ -803,16 +803,16 @@ func TestScalewayDriver_PrepareRotation_CustomActivationDelay(t *testing.T) {
 func TestScalewayDriver_GetScalewayURL(t *testing.T) {
 	t.Run("default URL", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{}},
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{})},
 		}
 		assert.Equal(t, "https://api.scaleway.com", d.getScalewayURLLocked())
 	})
 
 	t.Run("custom URL", func(t *testing.T) {
 		d := &ScalewayDriver{
-			credSource: &credential.CredSource{Config: map[string]string{
+			credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 				"scaleway_url": "https://api.fr-par.scaleway.com/",
-			}},
+			})},
 		}
 		assert.Equal(t, "https://api.fr-par.scaleway.com", d.getScalewayURLLocked())
 	})
@@ -823,12 +823,12 @@ func TestScalewayDriver_GetScalewayURL(t *testing.T) {
 func newChainedScalewayDriver(t *testing.T, serverURL string) *ScalewayDriver {
 	t.Helper()
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":    serverURL,
 		"secret_spec":     "scw-mgmt-key",
 		"secret_field":    "management_secret_key",
 		"tls_skip_verify": "true",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 	return driver.(*ScalewayDriver)
 }
@@ -836,18 +836,18 @@ func newChainedScalewayDriver(t *testing.T, serverURL string) *ScalewayDriver {
 func chainedDynamicKeysSpec() *credential.CredSpec {
 	return &credential.CredSpec{
 		Name: "chained-dynamic",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":    "dynamic_keys",
 			"application_id": "app-123",
 			"ttl":            "1h",
-		},
+		}),
 	}
 }
 
 func chainedStaticKeysSpec() *credential.CredSpec {
 	return &credential.CredSpec{
 		Name:   "chained-static",
-		Config: map[string]string{"mint_method": "static_keys", "secret_spec": "scw-pair"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "static_keys", "secret_spec": "scw-pair"}),
 	}
 }
 
@@ -855,11 +855,11 @@ func TestScalewayDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 
 	t.Run("minimal chained config", func(t *testing.T) {
-		require.NoError(t, f.ValidateConfig(map[string]string{
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
 			"secret_spec":      "scw-mgmt-key",
 			"secret_field":     "management_secret_key",
 			"secret_cache_ttl": "30m",
-		}))
+		})))
 	})
 
 	// A source that keeps its key while claiming to fetch one reads as keyless but
@@ -876,18 +876,18 @@ func TestScalewayDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			default:
 				cfg[key] = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 			}
-			err := f.ValidateConfig(cfg)
+			err := f.ValidateConfig(credential.NewConfig(cfg))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), key)
 		})
 	}
 
 	t.Run("non-chained config still accepts management keys", func(t *testing.T) {
-		require.NoError(t, f.ValidateConfig(map[string]string{
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
 			"management_access_key": "SCWXXXXXXXXXXXXXXXXX",
 			"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
 			"activation_delay":      "2m",
-		}))
+		})))
 	})
 }
 
@@ -901,7 +901,7 @@ func TestScalewayDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
 
 	t.Run("spec-level", func(t *testing.T) {
 		f := &ScalewayDriverFactory{}
-		driver, err := f.Create(map[string]string{}, createScalewayTestLogger())
+		driver, err := f.Create(credential.NewConfig(map[string]string{}), createScalewayTestLogger())
 		require.NoError(t, err)
 		_, _, _, _, err = driver.MintCredential(context.Background(), chainedStaticKeysSpec())
 		require.Error(t, err)
@@ -985,11 +985,11 @@ func TestScalewayDriver_MintFromSecret_StaticKeys_RefusesSourceLevelRouting(t *t
 
 	inlineSpec := &credential.CredSpec{
 		Name: "pre-conversion",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_keys",
 			"access_key":  "SCWSPECOWNKEYXXXXXX",
 			"secret_key":  "spec-own-secret",
-		},
+		}),
 	}
 	managementPayload := credential.SecretMaterial{
 		Data: map[string]string{"access_key": "SCWMANAGEMENTKEYXXX", "secret_key": "management-secret"},
@@ -1003,7 +1003,7 @@ func TestScalewayDriver_MintFromSecret_StaticKeys_RefusesSourceLevelRouting(t *t
 func TestScalewayDriver_MintFromSecret_StaticKeys_TTLFollowsCacheTTL(t *testing.T) {
 	d := newChainedScalewayDriver(t, "https://api.scaleway.com")
 	spec := chainedStaticKeysSpec()
-	spec.Config["secret_cache_ttl"] = "5m"
+	spec.Config = spec.Config.With("secret_cache_ttl", "5m")
 
 	_, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
 		Data: map[string]string{"access_key": "SCWPAIRXXXXXXXXXXXX", "secret_key": "s"},
@@ -1013,7 +1013,7 @@ func TestScalewayDriver_MintFromSecret_StaticKeys_TTLFollowsCacheTTL(t *testing.
 
 	// "0" opts out of caching, not out of a staleness bound: taking it literally
 	// would restore the session-long pin this TTL exists to prevent.
-	spec.Config["secret_cache_ttl"] = "0"
+	spec.Config = spec.Config.With("secret_cache_ttl", "0")
 	_, _, ttl, _, err = d.MintFromSecret(context.Background(), spec, credential.SecretMaterial{
 		Data: map[string]string{"access_key": "SCWPAIRXXXXXXXXXXXX", "secret_key": "s"},
 	})
@@ -1061,7 +1061,7 @@ func TestScalewayDriver_MintFromSecret_IncompleteMaterial(t *testing.T) {
 
 	t.Run("unknown mint_method", func(t *testing.T) {
 		_, _, _, _, err := d.MintFromSecret(context.Background(),
-			&credential.CredSpec{Name: "drifted", Config: map[string]string{"mint_method": "wat"}},
+			&credential.CredSpec{Name: "drifted", Config: credential.NewConfig(map[string]string{"mint_method": "wat"})},
 			credential.SecretMaterial{Data: map[string]string{"secret_key": "s"}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "dynamic_keys or static_keys")
@@ -1114,10 +1114,10 @@ func TestScalewayDriver_NonChainedSourceStillRotates(t *testing.T) {
 	// A plain source that merely hosts a spec-chained static spec keeps its own
 	// management key, and keeps rotating it.
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
 		"management_access_key": "SCWXXXXXXXXXXXXXXXXX",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 	assert.True(t, driver.(*ScalewayDriver).SupportsRotation())
 }
@@ -1131,7 +1131,7 @@ func TestScalewayDriverFactory_ValidateConfig_DoesNotEchoSwappedSecret(t *testin
 	f := &ScalewayDriverFactory{}
 	secret := "11111111-2222-3333-4444-555555555555"
 
-	err := f.ValidateConfig(map[string]string{"management_access_key": secret})
+	err := f.ValidateConfig(credential.NewConfig(map[string]string{"management_access_key": secret}))
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), secret)
 	assert.Contains(t, err.Error(), "did you swap")
@@ -1140,11 +1140,11 @@ func TestScalewayDriverFactory_ValidateConfig_DoesNotEchoSwappedSecret(t *testin
 func TestScalewayDriverFactory_ValidateConfig_ActivationDelay(t *testing.T) {
 	f := &ScalewayDriverFactory{}
 
-	require.NoError(t, f.ValidateConfig(map[string]string{"activation_delay": "2m"}))
+	require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{"activation_delay": "2m"})))
 
 	// Previously undeclared, so a typo passed validation and was then silently
 	// swallowed by GetDuration, leaving the operator with the 30s default.
-	err := f.ValidateConfig(map[string]string{"activation_delay": "30sec"})
+	err := f.ValidateConfig(credential.NewConfig(map[string]string{"activation_delay": "30sec"}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "activation_delay")
 }
@@ -1159,11 +1159,11 @@ func TestScalewayDriver_Revoke_NotFoundBodyIsSuccessBareIsNot(t *testing.T) {
 		defer server.Close()
 
 		f := &ScalewayDriverFactory{}
-		driver, err := f.Create(map[string]string{
+		driver, err := f.Create(credential.NewConfig(map[string]string{
 			"scaleway_url":          server.URL,
 			"management_secret_key": "mgmt-secret-key",
 			"tls_skip_verify":       "true",
-		}, createScalewayTestLogger())
+		}), createScalewayTestLogger())
 		require.NoError(t, err)
 
 		require.NoError(t, driver.Revoke(context.Background(), "SCWGONEKEYXXXXXXXXX"))
@@ -1179,11 +1179,11 @@ func TestScalewayDriver_Revoke_NotFoundBodyIsSuccessBareIsNot(t *testing.T) {
 		defer server.Close()
 
 		f := &ScalewayDriverFactory{}
-		driver, err := f.Create(map[string]string{
+		driver, err := f.Create(credential.NewConfig(map[string]string{
 			"scaleway_url":          server.URL,
 			"management_secret_key": "mgmt-secret-key",
 			"tls_skip_verify":       "true",
-		}, createScalewayTestLogger())
+		}), createScalewayTestLogger())
 		require.NoError(t, err)
 
 		require.NoError(t, driver.Revoke(context.Background(), "SCWLIVEKEYXXXXXXXXX"))
@@ -1199,11 +1199,11 @@ func TestScalewayDriver_CleanupRotation_BareNotFoundIsAnError(t *testing.T) {
 	defer server.Close()
 
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "mgmt-secret-key",
 		"tls_skip_verify":       "true",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 
 	err = driver.(*ScalewayDriver).CleanupRotation(context.Background(),
@@ -1256,12 +1256,12 @@ func TestScalewayDriver_PrepareRotation_SweepsOnlyItsOwnLineage(t *testing.T) {
 	defer server.Close()
 
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "old-mgmt-secret",
 		"management_access_key": "SCWOLDMGMTKEY",
 		"tls_skip_verify":       "true",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 
 	_, _, _, err = driver.(*ScalewayDriver).PrepareRotation(context.Background())
@@ -1286,18 +1286,18 @@ func TestScalewayDriver_MintConcurrentWithCommitRotation(t *testing.T) {
 	defer server.Close()
 
 	f := &ScalewayDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"scaleway_url":          server.URL,
 		"management_secret_key": "mgmt-secret-key",
 		"management_access_key": "SCWMGMTKEY",
 		"tls_skip_verify":       "true",
-	}, createScalewayTestLogger())
+	}), createScalewayTestLogger())
 	require.NoError(t, err)
 	scw := driver.(*ScalewayDriver)
 
 	spec := &credential.CredSpec{
 		Name:   "race-spec",
-		Config: map[string]string{"mint_method": "dynamic_keys", "application_id": "app-123", "ttl": "1h"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "dynamic_keys", "application_id": "app-123", "ttl": "1h"}),
 	}
 
 	var wg sync.WaitGroup

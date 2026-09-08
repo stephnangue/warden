@@ -144,40 +144,40 @@ func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 
 // ValidateConfig validates the config for a database auth token credential spec.
 // Cross-validates mint_method against source type and required fields.
-func (t *DBAuthTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *DBAuthTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	schema := t.ConfigSchema()
 	if err := credential.ValidateSchema(config, schema...); err != nil {
 		return err
 	}
 
-	mintMethod := config["mint_method"]
+	mintMethod := config.Get("mint_method")
 	switch mintMethod {
 	case "rds_iam_token":
 		if sourceType != credential.SourceTypeAWS {
 			return fmt.Errorf("rds_iam_token requires an aws source, got: %s", sourceType)
 		}
-		if config["db_endpoint"] == "" {
+		if config.Get("db_endpoint") == "" {
 			return fmt.Errorf("rds_iam_token requires db_endpoint")
 		}
-		if config["db_user"] == "" {
+		if config.Get("db_user") == "" {
 			return fmt.Errorf("rds_iam_token requires db_user")
 		}
 	case "redshift_iam_token":
 		if sourceType != credential.SourceTypeAWS {
 			return fmt.Errorf("redshift_iam_token requires an aws source, got: %s", sourceType)
 		}
-		if config["db_endpoint"] == "" {
+		if config.Get("db_endpoint") == "" {
 			return fmt.Errorf("redshift_iam_token requires db_endpoint")
 		}
-		hasCluster := config["cluster_identifier"] != ""
-		hasWorkgroup := config["workgroup_name"] != ""
+		hasCluster := config.Get("cluster_identifier") != ""
+		hasWorkgroup := config.Get("workgroup_name") != ""
 		if !hasCluster && !hasWorkgroup {
 			return fmt.Errorf("redshift_iam_token requires either cluster_identifier (provisioned) or workgroup_name (serverless)")
 		}
 		if hasCluster && hasWorkgroup {
 			return fmt.Errorf("redshift_iam_token requires exactly one of cluster_identifier or workgroup_name, not both")
 		}
-		if d := config["duration_seconds"]; d != "" {
+		if d := config.Get("duration_seconds"); d != "" {
 			n, err := strconv.Atoi(d)
 			if err != nil {
 				return fmt.Errorf("duration_seconds must be an integer: %w", err)
@@ -190,20 +190,20 @@ func (t *DBAuthTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 		if sourceType != credential.SourceTypeGCP {
 			return fmt.Errorf("cloud_sql_iam_token requires a gcp source, got: %s", sourceType)
 		}
-		if config["target_service_account"] == "" {
+		if config.Get("target_service_account") == "" {
 			return fmt.Errorf("cloud_sql_iam_token requires target_service_account")
 		}
-		if config["db_user"] == "" {
+		if config.Get("db_user") == "" {
 			return fmt.Errorf("cloud_sql_iam_token requires db_user")
 		}
 	case "azure_db_iam_token":
 		if sourceType != credential.SourceTypeAzure {
 			return fmt.Errorf("azure_db_iam_token requires an azure source, got: %s", sourceType)
 		}
-		if config["db_host"] == "" {
+		if config.Get("db_host") == "" {
 			return fmt.Errorf("azure_db_iam_token requires db_host")
 		}
-		if config["db_user"] == "" {
+		if config.Get("db_user") == "" {
 			return fmt.Errorf("azure_db_iam_token requires db_user")
 		}
 	default:

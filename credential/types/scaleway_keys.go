@@ -86,7 +86,7 @@ func (t *ScalewayKeysCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for a Scaleway credential spec
-func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *ScalewayKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// A vault source is not supported: it would need a static_scaleway mint method,
 	// which the Vault driver has never implemented. It used to be accepted here and
 	// then failed at the first mint.
@@ -104,8 +104,8 @@ func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceTy
 
 	switch sourceType {
 	case credential.SourceTypeScaleway:
-		chained := config[credential.ConfigSecretSpec] != ""
-		mintMethod := config["mint_method"]
+		chained := config.Get(credential.ConfigSecretSpec) != ""
+		mintMethod := config.Get("mint_method")
 		switch mintMethod {
 		case "static_keys":
 			// The pair either lives here or is fetched from a referenced spec — never
@@ -113,14 +113,14 @@ func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceTy
 			// fetched from the chain.
 			if chained {
 				for _, key := range []string{"access_key", "secret_key"} {
-					if config[key] != "" {
+					if config.Get(key) != "" {
 						return fmt.Errorf("'%s' must be omitted when '%s' is set; the referenced spec supplies the whole pair",
 							key, credential.ConfigSecretSpec)
 					}
 				}
 				// secret_field names one secret, and a pair is not one: both halves are
 				// read by name. Anything set here was set deliberately and does nothing.
-				if config[credential.ConfigSecretField] != "" {
+				if config.Get(credential.ConfigSecretField) != "" {
 					return fmt.Errorf("'%s' does not apply to static_keys: the credential is a pair, read from the referenced payload's 'access_key' and 'secret_key' by name",
 						credential.ConfigSecretField)
 				}
@@ -129,7 +129,7 @@ func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceTy
 			// Naming both remedies matters: on a chained source the missing-pair error
 			// would otherwise send an operator to add inline keys that the rule above
 			// then rejects.
-			if config["access_key"] == "" || config["secret_key"] == "" {
+			if config.Get("access_key") == "" || config.Get("secret_key") == "" {
 				return fmt.Errorf("static_keys needs 'access_key' and 'secret_key', or a '%s' naming a spec that yields them",
 					credential.ConfigSecretSpec)
 			}
@@ -141,17 +141,17 @@ func (t *ScalewayKeysCredType) ValidateConfig(config map[string]string, sourceTy
 				return fmt.Errorf("for dynamic_keys, set '%s' on the source: the chained management key authenticates the source, not this spec",
 					credential.ConfigSecretSpec)
 			}
-			if config["application_id"] == "" {
+			if config.Get("application_id") == "" {
 				return fmt.Errorf("'application_id' is required for dynamic_keys")
 			}
 		default:
 			return fmt.Errorf("'mint_method' must be 'static_keys' or 'dynamic_keys' for scaleway source, got: %s", mintMethod)
 		}
 	default:
-		if config["access_key"] == "" {
+		if config.Get("access_key") == "" {
 			return fmt.Errorf("'access_key' is required")
 		}
-		if config["secret_key"] == "" {
+		if config.Get("secret_key") == "" {
 			return fmt.Errorf("'secret_key' is required")
 		}
 	}

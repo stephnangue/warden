@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/stephnangue/warden/credential"
 )
 
 // generateTestCA creates a self-signed CA certificate and returns the
@@ -46,7 +48,7 @@ func generateTestCA(t *testing.T) string {
 
 func TestBuildHTTPClient_NoTLSConfig(t *testing.T) {
 	config := map[string]string{}
-	client, err := BuildHTTPClient(config, 30*time.Second)
+	client, err := BuildHTTPClient(credential.NewConfig(config), 30*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,7 +62,7 @@ func TestBuildHTTPClient_NoTLSConfig(t *testing.T) {
 
 func TestBuildHTTPClient_TLSSkipVerify(t *testing.T) {
 	config := map[string]string{"tls_skip_verify": "true"}
-	client, err := BuildHTTPClient(config, 15*time.Second)
+	client, err := BuildHTTPClient(credential.NewConfig(config), 15*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,7 +78,7 @@ func TestBuildHTTPClient_TLSSkipVerify(t *testing.T) {
 func TestBuildHTTPClient_ValidCAData(t *testing.T) {
 	caData := generateTestCA(t)
 	config := map[string]string{"ca_data": caData}
-	client, err := BuildHTTPClient(config, 30*time.Second)
+	client, err := BuildHTTPClient(credential.NewConfig(config), 30*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -94,7 +96,7 @@ func TestBuildHTTPClient_ValidCAData(t *testing.T) {
 
 func TestBuildHTTPClient_InvalidBase64(t *testing.T) {
 	config := map[string]string{"ca_data": "not-valid-base64!!!"}
-	_, err := BuildHTTPClient(config, 30*time.Second)
+	_, err := BuildHTTPClient(credential.NewConfig(config), 30*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid base64")
 	}
@@ -104,7 +106,7 @@ func TestBuildHTTPClient_InvalidPEM(t *testing.T) {
 	config := map[string]string{
 		"ca_data": base64.StdEncoding.EncodeToString([]byte("not a PEM certificate")),
 	}
-	_, err := BuildHTTPClient(config, 30*time.Second)
+	_, err := BuildHTTPClient(credential.NewConfig(config), 30*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid PEM")
 	}
@@ -116,7 +118,7 @@ func TestBuildHTTPClient_BothOptions(t *testing.T) {
 		"ca_data":         caData,
 		"tls_skip_verify": "true",
 	}
-	client, err := BuildHTTPClient(config, 30*time.Second)
+	client, err := BuildHTTPClient(credential.NewConfig(config), 30*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,7 +136,7 @@ func TestBuildHTTPClient_BothOptions(t *testing.T) {
 
 func TestBuildHTTPClient_MinTLSVersion(t *testing.T) {
 	config := map[string]string{"tls_skip_verify": "true"}
-	client, err := BuildHTTPClient(config, 30*time.Second)
+	client, err := BuildHTTPClient(credential.NewConfig(config), 30*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

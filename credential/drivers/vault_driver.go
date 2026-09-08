@@ -61,7 +61,7 @@ func (f *VaultDriverFactory) Type() string {
 }
 
 // Create instantiates a new VaultDriver
-func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *VaultDriverFactory) Create(config credential.Config, logger *logger.GatedLogger) (credential.SourceDriver, error) {
 	// Parse config values
 	vaultAddress := credential.GetString(config, "vault_address", "")
 	vaultNamespace := credential.GetString(config, "vault_namespace", "")
@@ -127,7 +127,7 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 }
 
 // ValidateConfig validates Vault driver configuration using declarative schema
-func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *VaultDriverFactory) ValidateConfig(config credential.Config) error {
 	// Validate vault_address with custom URL validation
 	if err := credential.ValidateSchema(config,
 		credential.StringField("vault_address").
@@ -180,7 +180,7 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 			// Reject keyless-federation config on an approle source so a
 			// misconfiguration cannot silently mix modes.
 			for _, k := range []string{"jwt_role", "jwt_mount", "audience"} {
-				if config[k] != "" {
+				if config.Get(k) != "" {
 					return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, vaultAuthMethodOIDCFederation)
 				}
 			}
@@ -206,7 +206,7 @@ func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
 			}
 			// Reject approle/token secrets on a keyless source (symmetric guard).
 			for _, k := range []string{"role_id", "secret_id", "secret_id_accessor", "approle_mount", "role_name", "token"} {
-				if config[k] != "" {
+				if config.Get(k) != "" {
 					return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, vaultAuthMethodOIDCFederation)
 				}
 			}
@@ -240,8 +240,8 @@ func (f *VaultDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
-func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
-	mintMethod := specConfig["mint_method"]
+func (f *VaultDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
+	mintMethod := specConfig.Get("mint_method")
 	switch mintMethod {
 	case "static_aws", "dynamic_aws":
 		return credential.TypeAWSAccessKeys, nil
@@ -268,7 +268,7 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (
 
 // sourceConfig returns the current config map. Rotation swaps in a whole new map
 // rather than writing into the live one, so the result is a stable snapshot.
-func (d *VaultDriver) sourceConfig() map[string]string {
+func (d *VaultDriver) sourceConfig() credential.Config {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
 	return d.credSource.Config
@@ -1205,7 +1205,7 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 
 	// Build new config (both old and new are valid at this point)
 	newConfig := make(map[string]string)
-	for k, v := range d.sourceConfig() {
+	for k, v := range d.sourceConfig().All() {
 		newConfig[k] = v
 	}
 	newConfig["secret_id"] = newSecretID
@@ -1242,7 +1242,7 @@ func (d *VaultDriver) CommitRotation(ctx context.Context, newConfig map[string]s
 	defer d.authMu.Unlock()
 
 	d.configMu.Lock()
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.configMu.Unlock()
 
 	// Re-authenticate with new credentials
@@ -1250,8 +1250,8 @@ func (d *VaultDriver) CommitRotation(ctx context.Context, newConfig map[string]s
 		return fmt.Errorf("failed to authenticate with new secret_id: %w", err)
 	}
 
-	roleName := credential.GetString(newConfig, "role_name", "")
-	newAccessor := credential.GetString(newConfig, "secret_id_accessor", "")
+	roleName := newConfig["role_name"]
+	newAccessor := newConfig["secret_id_accessor"]
 
 	if d.logger != nil {
 		d.logger.Debug("committed rotated AppRole secret_id",

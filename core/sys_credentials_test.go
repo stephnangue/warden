@@ -580,8 +580,8 @@ func TestSystemBackend_HandleCredentialSpecUpdate_MaskedValueIsNotPersisted(t *t
 	// The stored secret must survive; the edited field must land.
 	stored, err := backend.core.credConfigStore.GetSpec(ctx, "masked-spec")
 	require.NoError(t, err)
-	assert.Equal(t, "sk-real-secret", stored.Config["api_key"], "resending the mask destroyed the stored secret")
-	assert.Equal(t, "org-2", stored.Config["organization_id"])
+	assert.Equal(t, "sk-real-secret", stored.Config.Get("api_key"), "resending the mask destroyed the stored secret")
+	assert.Equal(t, "org-2", stored.Config.Get("organization_id"))
 }
 
 // TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted is the
@@ -627,8 +627,8 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 
 	stored, err := backend.core.credConfigStore.GetSource(ctx, "vault-src")
 	require.NoError(t, err)
-	assert.Equal(t, "real-secret-id", stored.Config["secret_id"], "resending the mask destroyed the stored secret")
-	assert.Equal(t, "http://localhost:8300", stored.Config["vault_address"])
+	assert.Equal(t, "real-secret-id", stored.Config.Get("secret_id"), "resending the mask destroyed the stored secret")
+	assert.Equal(t, "http://localhost:8300", stored.Config.Get("vault_address"))
 }
 
 func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
@@ -837,7 +837,7 @@ func TestSystemBackend_HandleCredentialSpecConnect(t *testing.T) {
 	// The refresh token is sealed into the spec.
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"])
+	assert.Equal(t, "rt-sealed", spec.Config.Get("refresh_token"))
 
 	// Re-running reports reconnected=true.
 	resp2, err := backend.handleCredentialSpecConnect(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/connect", raw), createFieldData(schema, raw))
@@ -880,7 +880,7 @@ func TestSystemBackend_HandleCredentialSpecConnect_ExchangeError(t *testing.T) {
 	// The spec must NOT be marked connected after a failed exchange.
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Empty(t, spec.Config["refresh_token"])
+	assert.Empty(t, spec.Config.Get("refresh_token"))
 }
 
 func TestSystemBackend_HandleCredentialSpecAuthorize_PinnedRedirectURI(t *testing.T) {
@@ -991,7 +991,7 @@ func TestSystemBackend_HandleCredentialSpecUpdate_RejectsSealedKeys(t *testing.T
 	// The sealed value is untouched.
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"])
+	assert.Equal(t, "rt-sealed", spec.Config.Get("refresh_token"))
 }
 
 // TestSystemBackend_HandleCredentialSpecUpdate_SealedKeysSurviveResend is the
@@ -1027,8 +1027,8 @@ func TestSystemBackend_HandleCredentialSpecUpdate_SealedKeysSurviveResend(t *tes
 
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"], "the secret must survive the round trip")
-	assert.Equal(t, "read:everything", spec.Config["scope"])
+	assert.Equal(t, "rt-sealed", spec.Config.Get("refresh_token"), "the secret must survive the round trip")
+	assert.Equal(t, "read:everything", spec.Config.Get("scope"))
 }
 
 // TestSystemBackend_HandleCredentialSpecUpdate_SealedKeyCanBeCleared keeps the
@@ -1051,5 +1051,5 @@ func TestSystemBackend_HandleCredentialSpecUpdate_SealedKeyCanBeCleared(t *testi
 
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Empty(t, spec.Config["refresh_token"])
+	assert.Empty(t, spec.Config.Get("refresh_token"))
 }

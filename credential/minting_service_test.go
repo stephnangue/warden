@@ -21,9 +21,12 @@ func (d *plainMintDriver) MintCredential(ctx context.Context, spec *CredSpec) (m
 	d.mintCalled = true
 	return map[string]interface{}{"k": "v"}, nil, time.Hour, d.leaseID, nil
 }
-func (d *plainMintDriver) Revoke(ctx context.Context, leaseID string) error { d.revokeCalled = true; return nil }
-func (d *plainMintDriver) Type() string                                     { return "plain" }
-func (d *plainMintDriver) Cleanup(ctx context.Context) error                { return nil }
+func (d *plainMintDriver) Revoke(ctx context.Context, leaseID string) error {
+	d.revokeCalled = true
+	return nil
+}
+func (d *plainMintDriver) Type() string                      { return "plain" }
+func (d *plainMintDriver) Cleanup(ctx context.Context) error { return nil }
 
 // exchangeDriver implements SourceDriver and ExchangeMinter.
 type exchangeDriver struct {

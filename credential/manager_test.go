@@ -125,11 +125,12 @@ func (m *mockConfigStore) rotateOnOtherNode(name, refreshToken string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur := m.storage[name]
-	updated := &CredSpec{Name: cur.Name, Type: cur.Type, Source: cur.Source, Config: map[string]string{}}
-	for k, v := range cur.Config {
-		updated.Config[k] = v
+	updated := &CredSpec{
+		Name:   cur.Name,
+		Type:   cur.Type,
+		Source: cur.Source,
+		Config: cur.Config.With("refresh_token", refreshToken),
 	}
-	updated.Config["refresh_token"] = refreshToken
 	m.storage[name] = updated // cache intentionally left stale
 }
 
@@ -197,11 +198,11 @@ func (f *mockSourceDriverFactory) Type() string {
 	return f.driverType
 }
 
-func (f *mockSourceDriverFactory) Create(config map[string]string, logger *logger.GatedLogger) (SourceDriver, error) {
+func (f *mockSourceDriverFactory) Create(config Config, logger *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
 
-func (f *mockSourceDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *mockSourceDriverFactory) ValidateConfig(config Config) error {
 	return nil
 }
 
@@ -209,7 +210,7 @@ func (f *mockSourceDriverFactory) SensitiveConfigFields() []string {
 	return []string{"password", "secret"}
 }
 
-func (f *mockSourceDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *mockSourceDriverFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("mock driver cannot infer type")
 }
 
@@ -236,7 +237,7 @@ func (t *mockCredentialType) ConfigSchema() []*FieldValidator {
 	return nil // No schema required for mock
 }
 
-func (t *mockCredentialType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *mockCredentialType) ValidateConfig(config Config, sourceType string) error {
 	return nil
 }
 
@@ -349,13 +350,13 @@ func TestManager_IssueCredential_Success(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -382,13 +383,13 @@ func TestManager_IssueCredential_CacheHit(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -422,8 +423,8 @@ func TestManager_IssueCredential_ExpiredNotServed(t *testing.T) {
 		return map[string]interface{}{"username": "u", "password": "p"}, nil, 40 * time.Millisecond, "", nil
 	}
 
-	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
 
 	ctx := createNamespaceContext()
 	tokenID := "token-expiry"
@@ -465,7 +466,7 @@ func TestManager_IssueCredential_SourceNotFound(t *testing.T) {
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "nonexistent-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -483,13 +484,13 @@ func TestManager_IssueCredential_NoNamespace(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	// Context without namespace
@@ -507,13 +508,13 @@ func TestManager_RevokeByExpiration_Success(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -569,7 +570,7 @@ func TestManager_RevokeByExpiration_CreatesDriverIfNeeded(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -589,7 +590,7 @@ func TestManager_RevokeByExpiration_RevokeFails(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	// Configure driver to fail revocation
@@ -612,13 +613,13 @@ func TestManager_IssueCredential_Concurrent(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -675,13 +676,13 @@ func TestManager_IssueCredential_Timeout(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	// Configure driver to block longer than timeout
@@ -711,13 +712,13 @@ func TestManager_IssueCredential_ErrorNotCached(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -785,7 +786,7 @@ func TestManager_SpecExists(t *testing.T) {
 			Name:   "existing-spec",
 			Type:   TypeVaultToken,
 			Source: "test-source",
-			Config: map[string]string{},
+			Config: NewConfig(map[string]string{}),
 		})
 
 		exists := manager.SpecExists(ctx, "existing-spec")
@@ -818,10 +819,10 @@ func TestManager_SpecExists(t *testing.T) {
 // ============================================================================
 
 func addRefreshSpecAndSource(configStore *mockConfigStore, refreshToken string) {
-	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: map[string]string{
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: NewConfig(map[string]string{
 		"auth_method": "authorization_code", "refresh_token": refreshToken,
-	}})
+	})})
 }
 
 func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
@@ -849,17 +850,17 @@ func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
 
 	// The rotated token and its refreshed expiry are persisted into a fresh spec copy.
 	require.Len(t, configStore.persisted, 1)
-	assert.Equal(t, "rt-new", configStore.persisted[0].Config["refresh_token"])
-	assert.Equal(t, "2030-01-01T00:00:00Z", configStore.persisted[0].Config["refresh_token_expires_at"])
+	assert.Equal(t, "rt-new", configStore.persisted[0].Config.Get("refresh_token"))
+	assert.Equal(t, "2030-01-01T00:00:00Z", configStore.persisted[0].Config.Get("refresh_token_expires_at"))
 }
 
 func TestManager_WriteBack_RotatingWithoutExpiry_KeepsPriorExpiry(t *testing.T) {
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()
-	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: map[string]string{
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: NewConfig(map[string]string{
 		"auth_method": "authorization_code", "refresh_token": "rt-old", "refresh_token_expires_at": "2027-01-01T00:00:00Z",
-	}})
+	})})
 
 	// Rotates the token but surfaces no new expiry.
 	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
@@ -870,9 +871,9 @@ func TestManager_WriteBack_RotatingWithoutExpiry_KeepsPriorExpiry(t *testing.T) 
 	require.NoError(t, err)
 
 	require.Len(t, configStore.persisted, 1)
-	assert.Equal(t, "rt-new", configStore.persisted[0].Config["refresh_token"])
+	assert.Equal(t, "rt-new", configStore.persisted[0].Config.Get("refresh_token"))
 	// The prior expiry is left untouched rather than dropped or overwritten.
-	assert.Equal(t, "2027-01-01T00:00:00Z", configStore.persisted[0].Config["refresh_token_expires_at"])
+	assert.Equal(t, "2027-01-01T00:00:00Z", configStore.persisted[0].Config.Get("refresh_token_expires_at"))
 }
 
 func TestManager_WriteBack_NonRotating_NoPersist(t *testing.T) {
@@ -903,11 +904,11 @@ func TestManager_InvalidGrant_RetriesOnceWithReloadedSpec(t *testing.T) {
 	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		n := atomic.AddInt32(&attempts, 1)
 		if n == 1 {
-			assert.Equal(t, "rt-stale", spec.Config["refresh_token"])
+			assert.Equal(t, "rt-stale", spec.Config.Get("refresh_token"))
 			configStore.rotateOnOtherNode("gh", "rt-fresh") // storage advances; cache stays stale
 			return nil, nil, 0, "", ErrRefreshTokenRejected
 		}
-		assert.Equal(t, "rt-fresh", spec.Config["refresh_token"], "retry must reload from storage, bypassing the stale cache")
+		assert.Equal(t, "rt-fresh", spec.Config.Get("refresh_token"), "retry must reload from storage, bypassing the stale cache")
 		return map[string]interface{}{"api_key": "at-ok"}, nil, time.Hour, "", nil
 	}
 
@@ -1012,12 +1013,12 @@ type exchangeDriverFactory struct {
 }
 
 func (f *exchangeDriverFactory) Type() string { return "exchange_src" }
-func (f *exchangeDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (SourceDriver, error) {
+func (f *exchangeDriverFactory) Create(config Config, log *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
-func (f *exchangeDriverFactory) ValidateConfig(config map[string]string) error { return nil }
-func (f *exchangeDriverFactory) SensitiveConfigFields() []string               { return nil }
-func (f *exchangeDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *exchangeDriverFactory) ValidateConfig(config Config) error { return nil }
+func (f *exchangeDriverFactory) SensitiveConfigFields() []string    { return nil }
+func (f *exchangeDriverFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("mock exchange driver cannot infer type")
 }
 
@@ -1035,12 +1036,12 @@ func createExchangeTestManager(t *testing.T) (*Manager, *exchangeDriverFactory) 
 	require.NoError(t, driverRegistry.RegisterFactory(factory))
 
 	configStore := newMockConfigStore()
-	configStore.AddSource(&CredSource{Name: "ex-source", Type: "exchange_src", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "ex-source", Type: "exchange_src", Config: NewConfig(map[string]string{})})
 	configStore.AddSpec(&CredSpec{
 		Name:   "ex-spec",
 		Type:   TypeVaultToken,
 		Source: "ex-source",
-		Config: map[string]string{ConfigSubjectTokenSource: SourceUserIdentity},
+		Config: NewConfig(map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}),
 	})
 
 	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log)
@@ -1088,8 +1089,8 @@ func TestManager_IssueCredential_ExchangeInputs_NonExchangeDriver(t *testing.T) 
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()
 
-	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
 
 	ctx := createNamespaceContext()
 	_, err := issueForTest(manager, ctx, "tok", "test-spec", time.Hour, exchangeInputsFor("s"))
@@ -1288,8 +1289,8 @@ func TestManager_IssueCredential_PerUserCacheDimension(t *testing.T) {
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()
 
-	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
 
 	ctx := createNamespaceContext()
 	const agentTok = "shared-agent-token"
@@ -1447,10 +1448,10 @@ const testRefFP = "0000000000000000000000000000000000000000000000000000000000000
 // resolved to when the entry was filled, so an edit cannot inherit the old answer.
 func TestChainedSpecFingerprint(t *testing.T) {
 	spec := func(cfg map[string]string) *CredSpec {
-		return &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-main", Config: cfg}
+		return &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-main", Config: NewConfig(cfg)}
 	}
 	src := func(cfg map[string]string) *CredSource {
-		return &CredSource{Name: "vault-main", Type: "vault", Config: cfg}
+		return &CredSource{Name: "vault-main", Type: "vault", Config: NewConfig(cfg)}
 	}
 	basePath := map[string]string{"kv2_mount": "kv", "secret_path": "teams/{{user.team}}/db"}
 	baseSrc := map[string]string{"vault_address": "https://vault.internal:8200", "approle_mount": "approle"}
@@ -1465,7 +1466,7 @@ func TestChainedSpecFingerprint(t *testing.T) {
 	})
 
 	t.Run("repointing the spec at another source moves it", func(t *testing.T) {
-		other := &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-other", Config: basePath}
+		other := &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-other", Config: NewConfig(basePath)}
 		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
 			chainedSpecFingerprint(other, src(baseSrc)))
 	})
@@ -1492,7 +1493,7 @@ func TestChainedSpecFingerprint(t *testing.T) {
 	})
 
 	t.Run("the spec type moves it", func(t *testing.T) {
-		other := &CredSpec{Name: "ref", Type: TypeAPIKey, Source: "vault-main", Config: basePath}
+		other := &CredSpec{Name: "ref", Type: TypeAPIKey, Source: "vault-main", Config: NewConfig(basePath)}
 		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
 			chainedSpecFingerprint(other, src(baseSrc)))
 	})
@@ -1547,9 +1548,9 @@ func TestChainedSpecFingerprint(t *testing.T) {
 		// per-process-seeded hash would satisfy. This pins the bytes themselves.
 		fp := chainedSpecFingerprint(
 			&CredSpec{Name: "ref", Type: "vault_token", Source: "vault-main",
-				Config: map[string]string{"kv2_mount": "kv", "secret_path": "teams/a/db"}},
+				Config: NewConfig(map[string]string{"kv2_mount": "kv", "secret_path": "teams/a/db"})},
 			&CredSource{Name: "vault-main", Type: "vault",
-				Config: map[string]string{"vault_address": "https://vault.internal:8200"}})
+				Config: NewConfig(map[string]string{"vault_address": "https://vault.internal:8200"})})
 		assert.Equal(t, "858b2859308fc79fa46a539f40e6110c56ed111994f7e08c8867ced2a63116b0", fp)
 	})
 
@@ -1576,8 +1577,8 @@ func TestChainedSpecFingerprint(t *testing.T) {
 
 		// Nor may a value bleed into the neighbouring field.
 		assert.NotEqual(t,
-			chainedSpecFingerprint(&CredSpec{Type: "ab", Source: "c", Config: nil}, nil),
-			chainedSpecFingerprint(&CredSpec{Type: "a", Source: "bc", Config: nil}, nil))
+			chainedSpecFingerprint(&CredSpec{Type: "ab", Source: "c", Config: Config{}}, nil),
+			chainedSpecFingerprint(&CredSpec{Type: "a", Source: "bc", Config: Config{}}, nil))
 	})
 }
 

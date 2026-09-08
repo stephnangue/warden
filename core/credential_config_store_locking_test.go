@@ -123,7 +123,7 @@ func TestCredentialConfigStore_UpdateSourceWithoutCredentialManagerDoesNotPanic(
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name:   "src",
 		Type:   "local",
-		Config: map[string]string{"key": "before"},
+		Config: credential.NewConfig(map[string]string{"key": "before"}),
 	}))
 
 	// A config change is what triggers the driver teardown, so this is the path
@@ -132,14 +132,14 @@ func TestCredentialConfigStore_UpdateSourceWithoutCredentialManagerDoesNotPanic(
 		err := store.UpdateSource(ctx, &credential.CredSource{
 			Name:   "src",
 			Type:   "local",
-			Config: map[string]string{"key": "after"},
+			Config: credential.NewConfig(map[string]string{"key": "after"}),
 		})
 		require.NoError(t, err)
 	})
 
 	updated, err := store.GetSource(ctx, "src")
 	require.NoError(t, err)
-	assert.Equal(t, "after", updated.Config["key"])
+	assert.Equal(t, "after", updated.Config.Get("key"))
 }
 
 // TestCredentialConfigStore_MutatorsDoNotDeadlockAgainstUnload is the regression test

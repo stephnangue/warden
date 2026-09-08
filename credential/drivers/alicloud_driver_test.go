@@ -42,7 +42,7 @@ func TestAlicloudDriverFactory_Type(t *testing.T) {
 
 func TestAlicloudDriverFactory_InferCredentialType(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	ct, err := f.InferCredentialType(map[string]string{})
+	ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeAlicloudKeys, ct)
 }
@@ -58,16 +58,16 @@ func TestAlicloudDriverFactory_ValidateConfig(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("empty config is valid (MVP allows it)", func(t *testing.T) {
-		assert.NoError(t, f.ValidateConfig(map[string]string{}))
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{})))
 	})
 
 	t.Run("valid config", func(t *testing.T) {
-		assert.NoError(t, f.ValidateConfig(map[string]string{
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAItest",
 			"access_key_secret": "secret",
 			"sts_endpoint":      "https://sts.aliyuncs.com",
 			"ram_endpoint":      "https://ram.aliyuncs.com",
-		}))
+		})))
 	})
 }
 
@@ -78,92 +78,92 @@ func TestAlicloudDriverFactory_ValidateConfig_AuthMethod(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr string
 	}{
 		{
 			name: "federation with a provider arn",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method":       "oidc_federation",
 				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
 				"audience":          "https://warden.example.com",
-			},
+			}),
 		},
 		{
 			name:    "federation without a provider arn",
-			config:  map[string]string{"auth_method": "oidc_federation"},
+			config:  credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
 			wantErr: "oidc_provider_arn is required",
 		},
 		{
 			name: "unknown auth_method",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method": "instance_role",
-			},
+			}),
 			wantErr: "auth_method",
 		},
 		{
 			// The static source's fields are exactly what federation removes, so
 			// carrying either is a half-converted source.
 			name: "federation carrying a key pair",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method":       "oidc_federation",
 				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
 				"access_key_id":     "LTAI-mgmt",
-			},
+			}),
 			wantErr: "access_key_id",
 		},
 		{
 			name: "federation carrying rotation config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method":          "oidc_federation",
 				"oidc_provider_arn":    "acs:ram::123456789012:oidc-provider/warden",
 				"management_user_name": "warden-management",
-			},
+			}),
 			wantErr: "management_user_name",
 		},
 		{
 			// ram_endpoint is read only by the rotation calls, which federation
 			// forecloses.
 			name: "federation carrying a ram endpoint",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method":       "oidc_federation",
 				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
 				"ram_endpoint":      "https://ram.aliyuncs.com",
-			},
+			}),
 			wantErr: "ram_endpoint",
 		},
 		{
 			name: "static carrying a provider arn",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":     "LTAI-mgmt",
 				"access_key_secret": "secret",
 				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
-			},
+			}),
 			wantErr: "oidc_provider_arn",
 		},
 		{
 			name: "static carrying an audience",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":     "LTAI-mgmt",
 				"access_key_secret": "secret",
 				"audience":          "https://warden.example.com",
-			},
+			}),
 			wantErr: "audience",
 		},
 		{
 			// A stored empty auth_method is validated as static, not skipped —
 			// GetString hands back the stored "" rather than the default.
 			name: "explicit empty auth_method is treated as static",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method":       "",
 				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
-			},
+			}),
 			wantErr: "oidc_provider_arn",
 		},
 		{
 			// Unchanged from before federation existed: nothing is required.
 			name:   "empty config is still valid",
-			config: map[string]string{},
+			config: credential.NewConfig(map[string]string{}),
 		},
 	}
 
@@ -184,12 +184,12 @@ func TestAlicloudDriverFactory_ValidateConfig_AuthMethod(t *testing.T) {
 func newAlicloudFederationDriver(t *testing.T, stsURL string) *AlicloudDriver {
 	t.Helper()
 	f := &AlicloudDriverFactory{}
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"auth_method":       "oidc_federation",
 		"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
 		"audience":          "https://warden.example.com",
 		"sts_endpoint":      stsURL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	require.NoError(t, err)
 	return d.(*AlicloudDriver)
 }
@@ -197,11 +197,11 @@ func newAlicloudFederationDriver(t *testing.T, stsURL string) *AlicloudDriver {
 func federationSpec() *credential.CredSpec {
 	return &credential.CredSpec{
 		Name: "prod",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":      "assume_role",
 			"role_arn":         "acs:ram::123456789012:role/warden-prod",
 			"duration_seconds": "1800s",
-		},
+		}),
 	}
 }
 
@@ -308,10 +308,10 @@ func TestAlicloudDriver_Federation_TransportErrorDoesNotLeakAssertion(t *testing
 func TestAlicloudDriver_Federation_ExchangeRejections(t *testing.T) {
 	t.Run("rejected on a static source", func(t *testing.T) {
 		f := &AlicloudDriverFactory{}
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAI-mgmt",
 			"access_key_secret": "secret",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 
 		_, _, _, _, err := d.(*AlicloudDriver).MintCredentialWithExchange(
 			context.Background(), federationSpec(),
@@ -337,7 +337,7 @@ func TestAlicloudDriver_Federation_ExchangeRejections(t *testing.T) {
 	t.Run("rejected for an unsupported mint_method", func(t *testing.T) {
 		drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
 		spec := federationSpec()
-		spec.Config["mint_method"] = "dynamic_keys"
+		spec.Config = spec.Config.With("mint_method", "dynamic_keys")
 
 		_, _, _, _, err := drv.MintCredentialWithExchange(
 			context.Background(), spec, &credential.ExchangeInputs{SubjectToken: "assertion"})
@@ -406,7 +406,7 @@ func TestAlicloudAssertionClaims(t *testing.T) {
 	}
 
 	t.Run("audience comes from the source", func(t *testing.T) {
-		aud, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, federationSource, nil)
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, credential.NewConfig(federationSource), credential.Config{})
 		assert.True(t, ok)
 		assert.Equal(t, "https://warden.example.com", aud)
 	})
@@ -415,34 +415,34 @@ func TestAlicloudAssertionClaims(t *testing.T) {
 		// Alibaba matches aud against the provider's registered client_ids, which
 		// the operator chooses, so there is no default to fall back to. Returning
 		// false is what makes spec-create demand assertion_audience.
-		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, map[string]string{
+		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, credential.NewConfig(map[string]string{
 			"auth_method":       "oidc_federation",
 			"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
-		}, nil)
+		}), credential.Config{})
 		assert.False(t, ok)
 	})
 
 	t.Run("a static source derives no audience", func(t *testing.T) {
-		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, map[string]string{
+		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, credential.NewConfig(map[string]string{
 			"access_key_id": "LTAI-mgmt",
 			"audience":      "https://warden.example.com",
-		}, nil)
+		}), credential.Config{})
 		assert.False(t, ok)
 	})
 
 	t.Run("resource is the role arn", func(t *testing.T) {
-		res, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, federationSource, map[string]string{
+		res, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, credential.NewConfig(federationSource), credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123456789012:role/warden-prod",
-		})
+		}))
 		assert.True(t, ok)
 		assert.Equal(t, "alicloud-ram:acs:ram::123456789012:role/warden-prod", res)
 	})
 
 	t.Run("no resource without a role arn", func(t *testing.T) {
-		_, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, federationSource, map[string]string{
+		_, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, credential.NewConfig(federationSource), credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
-		})
+		}))
 		assert.False(t, ok)
 	})
 }
@@ -460,28 +460,28 @@ func TestAlicloudDriverFactory_ValidateRotationConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr string
 	}{
 		{
 			name: "complete rotation config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":        "LTAI-mgmt",
 				"access_key_secret":    "secret",
 				"management_user_name": "warden-management",
-			},
+			}),
 		},
 		{
 			name: "missing management_user_name",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":     "LTAI-mgmt",
 				"access_key_secret": "secret",
-			},
+			}),
 			wantErr: "management_user_name",
 		},
 		{
 			name:    "missing everything",
-			config:  map[string]string{},
+			config:  credential.NewConfig(map[string]string{}),
 			wantErr: "access_key_id",
 		},
 	}
@@ -510,10 +510,10 @@ func TestAlicloudDriverFactory_Create(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 	log := createAlicloudTestLogger()
 
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAItest",
 		"access_key_secret": "secret",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	assert.Equal(t, credential.SourceTypeAlicloud, d.Type())
 }
@@ -525,13 +525,13 @@ func TestAlicloudDriverFactory_Create(t *testing.T) {
 // flows (assume_role, dynamic_keys).
 func TestAlicloudDriver_StaticKeysRejected(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":       "static_keys",
 			"access_key_id":     "x",
 			"access_key_secret": "y",
-		},
+		}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "assume_role")
@@ -539,9 +539,9 @@ func TestAlicloudDriver_StaticKeysRejected(t *testing.T) {
 
 func TestAlicloudDriver_UnsupportedMintMethod(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{"mint_method": "bogus"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "bogus"}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported or missing mint_method")
@@ -549,9 +549,9 @@ func TestAlicloudDriver_UnsupportedMintMethod(t *testing.T) {
 
 func TestAlicloudDriver_MissingMintMethod(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	})
 	assert.Error(t, err)
 }
@@ -581,20 +581,20 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "ops",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":      "assume_role",
 			"role_arn":         "acs:ram::123:role/ops",
 			"duration_seconds": "1800s",
-		},
+		}),
 	}
 
 	raw, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
@@ -633,19 +633,19 @@ func mintWithExpiration(t *testing.T, expiration, durationSeconds string) (time.
 	t.Cleanup(sts.Close)
 
 	f := &AlicloudDriverFactory{}
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	require.NoError(t, err)
 
 	_, _, ttl, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":      "assume_role",
 			"role_arn":         "acs:ram::123:role/ops",
 			"duration_seconds": durationSeconds,
-		},
+		}),
 	})
 	return ttl, err
 }
@@ -698,13 +698,13 @@ func TestAlicloudDriver_MintAssumeRole_ExpiredCredentialIsRejected(t *testing.T)
 
 func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{"mint_method": "assume_role"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "assume_role"}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "role_arn")
@@ -712,12 +712,12 @@ func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
 
 func TestAlicloudDriver_MintAssumeRole_MissingManagementKey(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/x",
-		},
+		}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "access_key_id")
@@ -727,22 +727,22 @@ func TestAlicloudDriver_MintAssumeRole_MissingManagementKey(t *testing.T) {
 
 func TestAlicloudDriver_RevokeIsNoop(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	assert.NoError(t, d.Revoke(context.Background(), ""))
 	assert.NoError(t, d.Revoke(context.Background(), "any-lease-id"))
 }
 
 func TestAlicloudDriver_DynamicKeysRejected(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":   "dynamic_keys",
 			"ram_user_name": "warden-svc",
-		},
+		}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "assume_role")
@@ -754,33 +754,33 @@ func TestAlicloudDriver_VerifySpec(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("unsupported mint_method", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+		d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{"mint_method": "bogus"},
+			Config: credential.NewConfig(map[string]string{"mint_method": "bogus"}),
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported mint_method")
 	})
 
 	t.Run("assume_role requires role_arn", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAI-mgmt",
 			"access_key_secret": "mgmt-secret",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{"mint_method": "assume_role"},
+			Config: credential.NewConfig(map[string]string{"mint_method": "assume_role"}),
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "role_arn")
 	})
 
 	t.Run("assume_role requires management keys", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+		d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "assume_role",
 				"role_arn":    "acs:ram::123:role/x",
-			},
+			}),
 		})
 		assert.Error(t, err)
 	})
@@ -803,17 +803,17 @@ func TestAlicloudDriver_VerifySpec(t *testing.T) {
 		}))
 		defer sts.Close()
 
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAI-mgmt",
 			"access_key_secret": "mgmt-secret",
 			"sts_endpoint":      sts.URL,
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "assume_role",
 				"role_arn":    "acs:ram::123:role/verify-ok",
-			},
+			}),
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "AssumeRole", receivedAction)
@@ -833,17 +833,17 @@ func TestAlicloudDriver_VerifySpec(t *testing.T) {
 		}))
 		defer sts.Close()
 
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAI-mgmt",
 			"access_key_secret": "mgmt-secret",
 			"sts_endpoint":      sts.URL,
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "assume_role",
 				"role_arn":    "acs:ram::123:role/does-not-exist",
-			},
+			}),
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "pre-flight AssumeRole")
@@ -902,17 +902,17 @@ func TestAlicloudDriver_CallSignedJSON_RetriesOnThrottling(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/retry-ok",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, hits, "first call throttled, second should succeed")
@@ -941,17 +941,17 @@ func TestAlicloudDriver_CallSignedJSON_RetriesOnInternalError(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/retry-internal",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, hits)
@@ -972,17 +972,17 @@ func TestAlicloudDriver_CallSignedJSON_DoesNotRetrySignatureMismatch(t *testing.
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/sig",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Equal(t, 1, hits, "signature mismatches must not be retried")
@@ -1005,17 +1005,17 @@ func TestAlicloudDriver_CallSignedJSON_StopsAtMaxAttempts(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/stuck",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Equal(t, alicloudMaxRetryAttempts, hits, "retries must be capped at alicloudMaxRetryAttempts")
@@ -1071,17 +1071,17 @@ func TestAlicloudDriver_CallSignedJSON_NonEnvelope4xxIsAnError(t *testing.T) {
 			defer sts.Close()
 
 			f := &AlicloudDriverFactory{}
-			d, _ := f.Create(map[string]string{
+			d, _ := f.Create(credential.NewConfig(map[string]string{
 				"access_key_id":     "LTAI-mgmt",
 				"access_key_secret": "mgmt-secret",
 				"sts_endpoint":      sts.URL,
-			}, createAlicloudTestLogger())
+			}), createAlicloudTestLogger())
 
 			err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"mint_method": "assume_role",
 					"role_arn":    "acs:ram::123:role/proxied",
-				},
+				}),
 			})
 			require.Error(t, err, "a non-envelope %d must not be treated as success", tc.status)
 			assert.Contains(t, err.Error(), fmt.Sprintf("HTTP %d", tc.status))
@@ -1136,26 +1136,26 @@ func TestAlicloudDriver_SupportsRotation(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("requires management user name", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "x",
 			"access_key_secret": "y",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		assert.False(t, d.(*AlicloudDriver).SupportsRotation())
 	})
 
 	t.Run("requires management keys", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"management_user_name": "u",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		assert.False(t, d.(*AlicloudDriver).SupportsRotation())
 	})
 
 	t.Run("all fields present", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":        "x",
 			"access_key_secret":    "y",
 			"management_user_name": "u",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		assert.True(t, d.(*AlicloudDriver).SupportsRotation())
 	})
 }
@@ -1252,12 +1252,12 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":        "LTAI-old",
 		"access_key_secret":    "old-secret",
 		"management_user_name": "warden-management",
 		"ram_endpoint":         srv.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	require.NoError(t, err)
 	drv := d.(*AlicloudDriver)
 
@@ -1308,12 +1308,12 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 func newRotationDriver(t *testing.T, srvURL, keyID string) *AlicloudDriver {
 	t.Helper()
 	f := &AlicloudDriverFactory{}
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":        keyID,
 		"access_key_secret":    "secret-" + keyID,
 		"management_user_name": "warden-management",
 		"ram_endpoint":         srvURL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	require.NoError(t, err)
 	return d.(*AlicloudDriver)
 }
@@ -1423,19 +1423,19 @@ func TestAlicloudDriver_Rotation_MissingConfig(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("missing management_user_name", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "x",
 			"access_key_secret": "y",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		_, _, _, err := d.(*AlicloudDriver).PrepareRotation(context.Background())
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "management_user_name")
 	})
 
 	t.Run("missing management keys", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"management_user_name": "u",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		_, _, _, err := d.(*AlicloudDriver).PrepareRotation(context.Background())
 		assert.Error(t, err)
 	})
@@ -1444,11 +1444,11 @@ func TestAlicloudDriver_Rotation_MissingConfig(t *testing.T) {
 func TestAlicloudDriver_Rotation_CleanupRefusesCurrentKey(t *testing.T) {
 	// Guard: CleanupRotation must not delete the currently active key.
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":        "LTAI-current",
 		"access_key_secret":    "secret",
 		"management_user_name": "warden-management",
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	err := d.(*AlicloudDriver).CleanupRotation(context.Background(), map[string]string{
 		"access_key_id":        "LTAI-current",
 		"management_user_name": "warden-management",
@@ -1520,12 +1520,12 @@ func TestAlicloudDriver_Rotation_CleanupFailsOnInterceptedResponse(t *testing.T)
 	defer srv.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":        "LTAI-new",
 		"access_key_secret":    "new-secret",
 		"management_user_name": "warden-management",
 		"ram_endpoint":         srv.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).CleanupRotation(context.Background(), map[string]string{
 		"access_key_id":        "LTAI-old",
@@ -1561,18 +1561,18 @@ func TestAlicloudDriver_ConfigAccessIsRaceFree(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":        "LTAI-gen-0",
 		"access_key_secret":    "secret-0",
 		"management_user_name": "warden-management",
 		"sts_endpoint":         sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	drv := d.(*AlicloudDriver)
 
-	spec := &credential.CredSpec{Config: map[string]string{
+	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{
 		"mint_method": "assume_role",
 		"role_arn":    "acs:ram::123:role/concurrent",
-	}}
+	})}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {

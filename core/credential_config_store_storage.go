@@ -62,7 +62,7 @@ func (s *CredentialConfigStore) persistSpec(namespaceID string, spec *credential
 		Name:           spec.Name,
 		Type:           spec.Type,
 		Source:         spec.Source,
-		Config:         spec.Config,
+		Config:         spec.Config.Map(), // leaving the type: the DTO is what gets serialized
 		MinTTL:         spec.MinTTL.String(),
 		MaxTTL:         spec.MaxTTL.String(),
 		RotationPeriod: spec.RotationPeriod.String(),
@@ -112,7 +112,7 @@ func (s *CredentialConfigStore) loadSpec(namespaceID, name string) (*credential.
 		Name:           stored.Name,
 		Type:           stored.Type,
 		Source:         stored.Source,
-		Config:         stored.Config,
+		Config:         credential.NewConfig(stored.Config),
 		MinTTL:         minTTL,
 		MaxTTL:         maxTTL,
 		RotationPeriod: rotationPeriod,
@@ -184,7 +184,7 @@ func (s *CredentialConfigStore) persistSource(namespaceID string, source *creden
 		NamespaceID:    namespaceID,
 		Name:           source.Name,
 		Type:           source.Type,
-		Config:         source.Config,
+		Config:         source.Config.Map(), // leaving the type: the DTO is what gets serialized
 		RotationPeriod: source.RotationPeriod.String(),
 		CreatedAt:      createdAt,
 		UpdatedAt:      now,
@@ -229,7 +229,7 @@ func (s *CredentialConfigStore) loadSource(namespaceID, name string) (*credentia
 	source := &credential.CredSource{
 		Name:           stored.Name,
 		Type:           stored.Type,
-		Config:         stored.Config,
+		Config:         credential.NewConfig(stored.Config),
 		RotationPeriod: rotationPeriod,
 	}
 

@@ -21,7 +21,7 @@ import (
 // The returned value is opaque: it carries a human-readable provider prefix but
 // must never be parsed back into parts, since a resource identifier (e.g. a Vault
 // KV path) can itself contain the ':' delimiter.
-func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]string) (string, bool) {
+func DeriveAssertionResource(sourceType string, sourceCfg, specCfg credential.Config) (string, bool) {
 	switch sourceType {
 	case credential.SourceTypeAWS:
 		return awsAssertionResource(specCfg)
@@ -53,7 +53,7 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]st
 // source (or rely on the driver's conventional default) instead of repeating it on
 // every spec. An explicit spec assertion_audience always takes precedence; this is
 // consulted only as the fallback.
-func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]string) (string, bool) {
+func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg credential.Config) (string, bool) {
 	switch sourceType {
 	case credential.SourceTypeGCP:
 		return gcpAssertionAudience(sourceCfg)
@@ -83,7 +83,7 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 // Gated on auth_method=oidc_federation: only a keyless source federates, so a
 // static source supplies no derived audience even if a stored config record
 // somehow carries one.
-func alicloudAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func alicloudAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", alicloudAuthMethodStatic) != alicloudAuthMethodOIDCFederation {
 		return "", false
 	}
@@ -100,7 +100,7 @@ func alicloudAssertionAudience(sourceCfg map[string]string) (string, bool) {
 //
 // The provider prefix is human-readable sugar on an opaque value — never parse it
 // back, since a role ARN contains ':' itself.
-func alicloudAssertionResource(specCfg map[string]string) (string, bool) {
+func alicloudAssertionResource(specCfg credential.Config) (string, bool) {
 	if arn := credential.GetString(specCfg, "role_arn", ""); arn != "" {
 		return "alicloud-ram:" + arn, true
 	}
@@ -117,7 +117,7 @@ func alicloudAssertionResource(specCfg map[string]string) (string, bool) {
 // Gated on auth_method=oidc_federation: only a keyless source federates, so a
 // static source supplies no derived audience even if a stored config record somehow
 // carries one.
-func kubernetesAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func kubernetesAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", kubernetesAuthMethodStatic) != kubernetesAuthMethodOIDCFederation {
 		return "", false
 	}
@@ -134,7 +134,7 @@ func kubernetesAssertionAudience(sourceCfg map[string]string) (string, bool) {
 //
 // The returned value is opaque — never parse it back, since a Kubernetes name can
 // in principle carry the separator.
-func kubernetesAssertionResource(specCfg map[string]string) (string, bool) {
+func kubernetesAssertionResource(specCfg credential.Config) (string, bool) {
 	namespace := credential.GetString(specCfg, "namespace", "")
 	sa := credential.GetString(specCfg, "service_account", "")
 	if namespace != "" && sa != "" {
@@ -153,7 +153,7 @@ func kubernetesAssertionResource(specCfg map[string]string) (string, bool) {
 // Gated on auth_method=oidc_federation: only a keyless source federates, so a static
 // (approle/token) source supplies no derived audience even if a stored config record
 // somehow carries one.
-func vaultAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func vaultAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", "") != vaultAuthMethodOIDCFederation {
 		return "", false
 	}
@@ -169,7 +169,7 @@ func vaultAssertionAudience(sourceCfg map[string]string) (string, bool) {
 // that selects which upstream engine/path the federated session actually reaches. The
 // returned value is the bare mount/path (or role) with no provider prefix; it is
 // opaque — never parse it back, as a KV path or role name can itself contain ':'.
-func vaultAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
+func vaultAssertionResource(sourceCfg, specCfg credential.Config) (string, bool) {
 	switch credential.GetString(specCfg, "mint_method", "") {
 	case "vault_token":
 		// The effective JWT-auth role: a spec override falls back to the source value.
@@ -219,7 +219,7 @@ func vaultAssertionResource(sourceCfg, specCfg map[string]string) (string, bool)
 // so only a keyless source derives an audience even if a stored config record somehow
 // carries a provider on a non-federation source (ValidateConfig already forbids that
 // combination; this is the matching derive-time guard).
-func gcpAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func gcpAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", gcpAuthMethodStatic) != gcpAuthMethodOIDCFederation {
 		return "", false
 	}

@@ -105,7 +105,7 @@ func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 // ValidateConfig validates the Config for an Azure Bearer token credential spec
 // sourceType determines the validation rules:
 // - "azure": requires service principal configuration for token minting
-func (t *AzureBearerTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *AzureBearerTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	if sourceType != credential.SourceTypeAzure {
 		return fmt.Errorf("azure_bearer_token credentials require an azure source, got: %s", sourceType)
@@ -121,19 +121,19 @@ func (t *AzureBearerTokenCredType) ValidateConfig(config map[string]string, sour
 	// A federated spec (subject_token_source set) presents a Warden assertion as a
 	// client_assertion, so it holds no client_secret. The audience/algorithm rules
 	// for warden_identity are enforced generically by ValidateExchangeSpecConfig.
-	mintMethod := config["mint_method"]
+	mintMethod := config.Get("mint_method")
 	if credential.SpecRequestsExchange(config) {
-		if config["tenant_id"] == "" {
+		if config.Get("tenant_id") == "" {
 			return fmt.Errorf("'tenant_id' is required for a keyless federated spec (a spec with subject_token_source)")
 		}
-		if config["client_secret"] != "" || config["secret_id"] != "" {
+		if config.Get("client_secret") != "" || config.Get("secret_id") != "" {
 			return fmt.Errorf("'client_secret'/'secret_id' must not be set for a keyless federated spec")
 		}
 		if mintMethod != "" && mintMethod != "bearer_token" {
 			return fmt.Errorf("mint_method %q is not supported over federation (supported: bearer_token)", mintMethod)
 		}
 	} else {
-		if config["client_secret"] == "" || config["secret_id"] == "" {
+		if config.Get("client_secret") == "" || config.Get("secret_id") == "" {
 			return fmt.Errorf("'client_secret' and 'secret_id' are required for a static azure spec")
 		}
 	}

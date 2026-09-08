@@ -103,7 +103,7 @@ func (f *GrafanaDriverFactory) Type() string {
 }
 
 // ValidateConfig validates Grafana source configuration using declarative schema.
-func (f *GrafanaDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *GrafanaDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := validateGrafanaChainedConfig(config); err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func (f *GrafanaDriverFactory) ValidateConfig(config map[string]string) error {
 // reads as keyless while storing the very secret chaining removes, and there is
 // nothing here that could use it — the fetched token authenticates every call, and
 // the paths that run without a caller are disabled rather than falling back to it.
-func validateGrafanaChainedConfig(config map[string]string) error {
+func validateGrafanaChainedConfig(config credential.Config) error {
 	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
 		// The schema cannot express "required unless another key is set", so the
 		// non-chained requirement lands here alongside its opposite.
@@ -183,17 +183,17 @@ func (f *GrafanaDriverFactory) SensitiveConfigFields() []string {
 // service-account token. Without this, a rotation_period is accepted at write time
 // and then fails every cycle forever, parked and retried by the rotation manager
 // and visible only in server logs — see credential.RotationConfigValidator.
-func (f *GrafanaDriverFactory) ValidateRotationConfig(_ map[string]string) error {
+func (f *GrafanaDriverFactory) ValidateRotationConfig(_ credential.Config) error {
 	return fmt.Errorf("rotation does not apply to a grafana source; its privileged token is issued in Grafana and rotated there, so set rotation_period=0")
 }
 
 // InferCredentialType always returns api_key for Grafana sources.
-func (f *GrafanaDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *GrafanaDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil
 }
 
 // Create instantiates a new GrafanaDriver.
-func (f *GrafanaDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *GrafanaDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &GrafanaDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGrafana,
@@ -268,7 +268,7 @@ func (d *GrafanaDriver) MintCredential(ctx context.Context, spec *credential.Cre
 	// A chained spec mints through MintFromSecret, which the minting layer routes
 	// it to. Arriving here means that routing was bypassed, so fail rather than
 	// fall through to an inline token this source does not have.
-	if d.isChained() || spec.Config[credential.ConfigSecretSpec] != "" {
+	if d.isChained() || spec.Config.Get(credential.ConfigSecretSpec) != "" {
 		return nil, nil, 0, "", fmt.Errorf("grafana: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
 			credential.ConfigSecretSpec)
 	}
@@ -342,7 +342,7 @@ func (d *GrafanaDriver) mintToken(ctx context.Context, adminToken string, spec *
 	// but this path is also reached by a spec that predates the check and by one
 	// written with verification skipped, which is the whole reason for re-checking.
 	tokenExpiry := grafanaDefaultTokenExpiry
-	if raw, present := spec.Config["token_expiry"]; present {
+	if raw, present := spec.Config.Lookup("token_expiry"); present {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
 			return nil, nil, 0, "", fmt.Errorf("token_expiry %q is not a duration (an integer and a unit, such as 30m or 24h)", raw)

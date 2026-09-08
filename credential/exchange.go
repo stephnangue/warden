@@ -93,8 +93,8 @@ const ConfigAssertionMetadataClaims = "assertion_metadata_claims"
 // AssertionMetadataKeys parses the comma-separated ConfigAssertionMetadataClaims
 // value into a de-duplicated, order-preserving list of metadata key names,
 // ignoring blank entries and surrounding whitespace. Returns nil when unset.
-func AssertionMetadataKeys(config map[string]string) []string {
-	return splitClaimKeys(config[ConfigAssertionMetadataClaims])
+func AssertionMetadataKeys(config Config) []string {
+	return splitClaimKeys(config.Get(ConfigAssertionMetadataClaims))
 }
 
 // splitClaimKeys parses a comma-separated claim-key list into a de-duplicated,
@@ -135,8 +135,8 @@ const ConfigAssertionUserClaims = "assertion_user_claims"
 // AssertionUserClaimKeys parses the comma-separated ConfigAssertionUserClaims value
 // into a de-duplicated, order-preserving list of user metadata key names. Returns
 // nil when unset.
-func AssertionUserClaimKeys(config map[string]string) []string {
-	return splitClaimKeys(config[ConfigAssertionUserClaims])
+func AssertionUserClaimKeys(config Config) []string {
+	return splitClaimKeys(config.Get(ConfigAssertionUserClaims))
 }
 
 // Assertion signing algorithms selectable per warden_identity spec via
@@ -158,8 +158,8 @@ const ConfigAssertionAlgorithm = "assertion_algorithm"
 
 // AssertionAlgorithm returns the spec's configured assertion signing algorithm,
 // defaulting to RS256 when unset.
-func AssertionAlgorithm(config map[string]string) string {
-	if a := config[ConfigAssertionAlgorithm]; a != "" {
+func AssertionAlgorithm(config Config) string {
+	if a := config.Get(ConfigAssertionAlgorithm); a != "" {
 		return a
 	}
 	return DefaultAssertionAlg
@@ -380,8 +380,8 @@ func (e *ExchangeInputs) Fingerprint() string {
 
 // SpecRequestsExchange reports whether a spec's config opts into token
 // exchange, i.e. subject_token_source is set to something other than "none".
-func SpecRequestsExchange(config map[string]string) bool {
-	src := config[ConfigSubjectTokenSource]
+func SpecRequestsExchange(config Config) bool {
+	src := config.Get(ConfigSubjectTokenSource)
 	return src != "" && src != SourceNone
 }
 
@@ -389,7 +389,7 @@ func SpecRequestsExchange(config map[string]string) bool {
 // exchange-related keys in a spec config. It does not check that any driver
 // supports exchange — an exchange spec bound to a non-exchange source fails
 // closed at mint time instead.
-func ValidateExchangeSpecConfig(config map[string]string) error {
+func ValidateExchangeSpecConfig(config Config) error {
 	if err := ValidateSchema(config,
 		StringField(ConfigSubjectTokenSource).OneOf(SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity),
 		StringField(ConfigActorTokenSource).OneOf(SourceAgentIdentity, SourceWardenIdentity, SourceNone),
@@ -401,8 +401,8 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	// the subject or the actor. Since actor≠none requires subject=user_identity
 	// (enforced below), at most one slot is ever warden_identity, so these keys apply
 	// unambiguously to whichever it is.
-	mintsAssertion := config[ConfigSubjectTokenSource] == SourceWardenIdentity ||
-		config[ConfigActorTokenSource] == SourceWardenIdentity
+	mintsAssertion := config.Get(ConfigSubjectTokenSource) == SourceWardenIdentity ||
+		config.Get(ConfigActorTokenSource) == SourceWardenIdentity
 	// A Warden-minted subject must declare the audience it is minted for — an
 	// empty/absent aud is replayable at any upstream whose trust policy does not pin
 	// aud. That check is source-aware (some source types derive the audience from
@@ -416,14 +416,14 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	// ({{agent.<claim>}}), and that holds for a forwarded agent token too: the values
 	// are login-derived and Warden-verified whichever way the subject travels. So
 	// agent_identity is permitted, where it gates templating alone.
-	if config[ConfigAssertionMetadataClaims] != "" &&
-		!mintsAssertion && config[ConfigSubjectTokenSource] != SourceAgentIdentity {
+	if config.Get(ConfigAssertionMetadataClaims) != "" &&
+		!mintsAssertion && config.Get(ConfigSubjectTokenSource) != SourceAgentIdentity {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s', or the subject is '%s'",
 			ConfigAssertionMetadataClaims, SourceWardenIdentity, SourceAgentIdentity)
 	}
 	// Projecting user claims into the assertion's warden_user claim (which also
 	// scopes a per-user secret_path) only makes sense when Warden mints the assertion.
-	if raw := config[ConfigAssertionUserClaims]; raw != "" {
+	if raw := config.Get(ConfigAssertionUserClaims); raw != "" {
 		if !mintsAssertion {
 			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 				ConfigAssertionUserClaims, SourceWardenIdentity)
@@ -437,12 +437,12 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 		}
 	}
 	// The assertion algorithm only applies to a Warden-minted assertion.
-	if config[ConfigAssertionAlgorithm] != "" && !mintsAssertion {
+	if config.Get(ConfigAssertionAlgorithm) != "" && !mintsAssertion {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 			ConfigAssertionAlgorithm, SourceWardenIdentity)
 	}
 	// Naming a resource in the assertion only makes sense when Warden mints it.
-	if config[ConfigAssertionResource] != "" && !mintsAssertion {
+	if config.Get(ConfigAssertionResource) != "" && !mintsAssertion {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 			ConfigAssertionResource, SourceWardenIdentity)
 	}
@@ -451,15 +451,15 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	// subject_token_source=user_identity. This subsumes both the old "actor needs a
 	// subject" rule and the old "actor=warden_identity needs a distinct-principal
 	// subject" rule.
-	actorSrc := config[ConfigActorTokenSource]
-	if actorSrc != "" && actorSrc != SourceNone && config[ConfigSubjectTokenSource] != SourceUserIdentity {
+	actorSrc := config.Get(ConfigActorTokenSource)
+	if actorSrc != "" && actorSrc != SourceNone && config.Get(ConfigSubjectTokenSource) != SourceUserIdentity {
 		return fmt.Errorf("field '%s': an actor is only meaningful in the delegation shape, so '%s' must be '%s'",
 			ConfigActorTokenSource, ConfigSubjectTokenSource, SourceUserIdentity)
 	}
 	// Defence in depth: one inbound token cannot be both subject and actor. Under
 	// the rule above this is unreachable (actor≠none forces subject=user_identity,
 	// so subject=agent_identity ∧ actor=agent_identity cannot arrive), but keep it.
-	if config[ConfigSubjectTokenSource] == SourceAgentIdentity && actorSrc == SourceAgentIdentity {
+	if config.Get(ConfigSubjectTokenSource) == SourceAgentIdentity && actorSrc == SourceAgentIdentity {
 		return fmt.Errorf("field '%s': cannot be '%s' when '%s' is also '%s' (one inbound token cannot be both subject and actor)",
 			ConfigActorTokenSource, SourceAgentIdentity, ConfigSubjectTokenSource, SourceAgentIdentity)
 	}

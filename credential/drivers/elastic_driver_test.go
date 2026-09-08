@@ -41,7 +41,7 @@ func TestElasticDriverFactory_SensitiveConfigFields(t *testing.T) {
 func TestElasticDriverFactory_InferCredentialType(t *testing.T) {
 	f := &ElasticDriverFactory{}
 
-	ct, err := f.InferCredentialType(map[string]string{})
+	ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeAPIKey, ct)
 }
@@ -50,55 +50,55 @@ func TestElasticDriverFactory_ValidateConfig(t *testing.T) {
 	f := &ElasticDriverFactory{}
 
 	t.Run("missing elastic_url", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"api_key": testEncodedAPIKey("id1", "secret"),
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "elastic_url")
 	})
 
 	t.Run("missing api_key", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url": "https://elastic.example.com",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "api_key")
 	})
 
 	t.Run("elastic_url rejects http scheme", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url": "http://elastic.example.com",
 			"api_key":     testEncodedAPIKey("id1", "secret"),
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "https")
 	})
 
 	t.Run("valid minimal config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url": "https://elastic.example.com",
 			"api_key":     testEncodedAPIKey("id1", "secret"),
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("valid full config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url":      "https://elastic.example.com",
 			"api_key":          testEncodedAPIKey("id1", "secret"),
 			"api_key_id":       "id1",
 			"activation_delay": "30s",
 			"key_name_prefix":  "myapp",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("invalid activation_delay", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url":      "https://elastic.example.com",
 			"api_key":          testEncodedAPIKey("id1", "secret"),
 			"activation_delay": "not-a-duration",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "activation_delay")
 	})
@@ -358,10 +358,10 @@ func newTestElasticDriver(t *testing.T, serverURL string) *ElasticDriver {
 	return &ElasticDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeElastic,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"elastic_url": serverURL,
 				"api_key":     testEncodedAPIKey("source-key-id", "source-secret"),
-			},
+			}),
 		},
 		httpClient:     &http.Client{Timeout: 5 * time.Second},
 		sourceAPIKeyID: "source-key-id",
@@ -377,7 +377,7 @@ func TestElasticDriver_Type(t *testing.T) {
 	d := &ElasticDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeElastic,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeElastic, d.Type())
@@ -387,7 +387,7 @@ func TestElasticDriver_Cleanup(t *testing.T) {
 	d := &ElasticDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeElastic,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		httpClient: &http.Client{},
 	}
@@ -397,7 +397,7 @@ func TestElasticDriver_Cleanup(t *testing.T) {
 func TestElasticDriver_SupportsRotation(t *testing.T) {
 	newDriver := func(config map[string]string, keyID string) *ElasticDriver {
 		return &ElasticDriver{
-			credSource:     &credential.CredSource{Type: credential.SourceTypeElastic, Config: config},
+			credSource:     &credential.CredSource{Type: credential.SourceTypeElastic, Config: credential.NewConfig(config)},
 			sourceAPIKeyID: keyID,
 		}
 	}
@@ -432,7 +432,7 @@ func TestElasticDriver_MintCredential(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	}
 
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
@@ -451,9 +451,9 @@ func TestElasticDriver_MintCredential_WithExpiration(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"expiration": "1h",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
@@ -472,9 +472,9 @@ func TestElasticDriver_MintCredential_WithRoleDescriptors(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"role_descriptors": `{"reader":{"indices":[{"names":["logs-*"],"privileges":["read"]}]}}`,
-		},
+		}),
 	}
 
 	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -490,9 +490,9 @@ func TestElasticDriver_MintCredential_InvalidRoleDescriptors(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"role_descriptors": "not-valid-json",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -528,9 +528,9 @@ func TestElasticDriver_MintCredential_WithCustomKeyName(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"key_name": "my-custom-key",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -561,10 +561,10 @@ func TestElasticDriver_Revoke_EmptyLeaseID(t *testing.T) {
 func TestElasticDriver_Revoke_InvalidLeaseIDFormat(t *testing.T) {
 	d := &ElasticDriver{
 		credSource: &credential.CredSource{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"elastic_url": "https://example.com",
 				"api_key":     "some-key",
-			},
+			}),
 		},
 		httpClient: &http.Client{},
 	}
@@ -615,16 +615,16 @@ func TestElasticDriver_VerifySpec(t *testing.T) {
 	d := newTestElasticDriver(t, srv.URL)
 
 	t.Run("valid credentials", func(t *testing.T) {
-		spec := &credential.CredSpec{Name: "test-spec", Config: map[string]string{}}
+		spec := &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{})}
 		err := d.VerifySpec(context.TODO(), spec)
 		require.NoError(t, err)
 	})
 
 	t.Run("invalid credentials", func(t *testing.T) {
 		d2 := newTestElasticDriver(t, srv.URL)
-		d2.credSource.Config["api_key"] = "invalid-key"
+		d2.credSource.Config = d2.credSource.Config.With("api_key", "invalid-key")
 
-		spec := &credential.CredSpec{Name: "test-spec", Config: map[string]string{}}
+		spec := &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{})}
 		err := d2.VerifySpec(context.TODO(), spec)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "spec verification failed")
@@ -646,7 +646,7 @@ func TestElasticDriver_PrepareRotation(t *testing.T) {
 
 	// New config should contain updated api_key and api_key_id
 	assert.NotEmpty(t, newConfig["api_key"])
-	assert.NotEqual(t, d.credSource.Config["api_key"], newConfig["api_key"], "new key should differ from old")
+	assert.NotEqual(t, d.credSource.Config.Get("api_key"), newConfig["api_key"], "new key should differ from old")
 	assert.Equal(t, "new-key-id-123", newConfig["api_key_id"])
 
 	// Cleanup config should contain old key ID
@@ -664,7 +664,7 @@ func TestElasticDriver_PrepareRotation_CustomActivationDelay(t *testing.T) {
 	defer srv.Close()
 
 	d := newTestElasticDriver(t, srv.URL)
-	d.credSource.Config["activation_delay"] = "5m"
+	d.credSource.Config = d.credSource.Config.With("activation_delay", "5m")
 
 	_, _, activateAfter, err := d.PrepareRotation(context.TODO())
 	require.NoError(t, err)
@@ -695,7 +695,7 @@ func TestElasticDriver_CommitRotation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Driver should now use new config
-	assert.Equal(t, newConfig["api_key"], d.credSource.Config["api_key"])
+	assert.Equal(t, newConfig["api_key"], d.credSource.Config.Get("api_key"))
 	assert.Equal(t, "new-key-id", d.sourceAPIKeyID)
 	assert.NotEqual(t, oldAPIKeyID, d.sourceAPIKeyID)
 }
@@ -722,7 +722,7 @@ func TestElasticDriver_CommitRotation_KeepsNewConfigOnFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to authenticate")
 
-	assert.Equal(t, "invalid-key", d.credSource.Config["api_key"],
+	assert.Equal(t, "invalid-key", d.credSource.Config.Get("api_key"),
 		"driver must keep the config the manager already persisted")
 	assert.Equal(t, "bad-key-id", d.sourceAPIKeyID)
 }
@@ -754,7 +754,7 @@ func TestElasticDriver_FullRotationLifecycle(t *testing.T) {
 	defer srv.Close()
 
 	d := newTestElasticDriver(t, srv.URL)
-	originalAPIKey := d.credSource.Config["api_key"]
+	originalAPIKey := d.credSource.Config.Get("api_key")
 
 	// Step 1: Prepare
 	newConfig, cleanupConfig, activateAfter, err := d.PrepareRotation(context.TODO())
@@ -764,14 +764,14 @@ func TestElasticDriver_FullRotationLifecycle(t *testing.T) {
 	// Step 2: Commit
 	err = d.CommitRotation(context.TODO(), newConfig)
 	require.NoError(t, err)
-	assert.NotEqual(t, originalAPIKey, d.credSource.Config["api_key"])
+	assert.NotEqual(t, originalAPIKey, d.credSource.Config.Get("api_key"))
 
 	// Step 3: Cleanup
 	err = d.CleanupRotation(context.TODO(), cleanupConfig)
 	require.NoError(t, err)
 
 	// Verify the driver still works after rotation
-	spec := &credential.CredSpec{Name: "post-rotation", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "post-rotation", Config: credential.NewConfig(map[string]string{})}
 	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rawData["api_key"])
@@ -788,10 +788,10 @@ func TestElasticDriverFactory_Create(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	f := &ElasticDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"elastic_url": srv.URL,
 		"api_key":     testEncodedAPIKey("source-key-id", "source-secret"),
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	elasticDriver, ok := driver.(*ElasticDriver)
@@ -807,11 +807,11 @@ func TestElasticDriverFactory_Create_WithExplicitKeyID(t *testing.T) {
 	f := &ElasticDriverFactory{}
 
 	t.Run("agreeing with the encoded key", func(t *testing.T) {
-		driver, err := f.Create(map[string]string{
+		driver, err := f.Create(credential.NewConfig(map[string]string{
 			"elastic_url": srv.URL,
 			"api_key":     testEncodedAPIKey("source-key-id", "source-secret"),
 			"api_key_id":  "source-key-id",
-		}, log)
+		}), log)
 		require.NoError(t, err)
 
 		elasticDriver := driver.(*ElasticDriver)
@@ -824,11 +824,11 @@ func TestElasticDriverFactory_Create_WithExplicitKeyID(t *testing.T) {
 	// DELETE — so an id that names a different key than the one being
 	// authenticated with would invalidate whatever key it does name.
 	t.Run("disagreeing with the encoded key is refused", func(t *testing.T) {
-		_, err := f.Create(map[string]string{
+		_, err := f.Create(credential.NewConfig(map[string]string{
 			"elastic_url": srv.URL,
 			"api_key":     testEncodedAPIKey("source-key-id", "source-secret"),
 			"api_key_id":  "explicit-id",
-		}, log)
+		}), log)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "does not match the id encoded in api_key")
 	})
@@ -841,10 +841,10 @@ func TestElasticDriverFactory_Create_InvalidKey(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	f := &ElasticDriverFactory{}
-	_, err := f.Create(map[string]string{
+	_, err := f.Create(credential.NewConfig(map[string]string{
 		"elastic_url": srv.URL,
 		"api_key":     "invalid-key",
-	}, log)
+	}), log)
 	require.Error(t, err)
 	// Either base64 decode fails or authentication fails
 	assert.True(t,
@@ -864,10 +864,10 @@ func TestElasticDriverFactory_Create_AuthenticationFails(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	f := &ElasticDriverFactory{}
-	_, err := f.Create(map[string]string{
+	_, err := f.Create(credential.NewConfig(map[string]string{
 		"elastic_url": srv.URL,
 		"api_key":     testEncodedAPIKey("id", "bad-key"),
-	}, log)
+	}), log)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Elasticsearch authentication failed")
 }
@@ -901,16 +901,16 @@ func TestElasticDriver_RequestIncludesApiKeyHeader(t *testing.T) {
 	d := &ElasticDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeElastic,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"elastic_url": srv.URL,
 				"api_key":     apiKey,
-			},
+			}),
 		},
 		httpClient:     &http.Client{Timeout: 5 * time.Second},
 		sourceAPIKeyID: "myid",
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.NoError(t, err)
 
@@ -925,7 +925,7 @@ func TestElasticDriver_ConcurrentSupportsRotation(t *testing.T) {
 	d := &ElasticDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeElastic,
-			Config: map[string]string{"api_key": "k"},
+			Config: credential.NewConfig(map[string]string{"api_key": "k"}),
 		},
 		sourceAPIKeyID: "key-123",
 	}
@@ -969,7 +969,7 @@ func TestElasticDriver_ConcurrentMintCredential(t *testing.T) {
 	errs := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		go func() {
-			spec := &credential.CredSpec{Name: "concurrent-spec", Config: map[string]string{}}
+			spec := &credential.CredSpec{Name: "concurrent-spec", Config: credential.NewConfig(map[string]string{})}
 			_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 			errs <- err
 		}()
@@ -1146,7 +1146,7 @@ func TestElasticDriver_MintRacesCommitRotation(t *testing.T) {
 
 	d := newTestElasticDriver(t, srv.URL)
 
-	spec := &credential.CredSpec{Name: "race-spec", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "race-spec", Config: credential.NewConfig(map[string]string{})}
 
 	// Each goroutine loops: the unsynchronised read was a narrow window at the
 	// top of the mint, so a single pass each could pass on timing alone.
@@ -1240,7 +1240,7 @@ func TestElasticDriver_MintCredential_RejectsEmptyExpiration(t *testing.T) {
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name:   "test-spec",
-		Config: map[string]string{"expiration": ""},
+		Config: credential.NewConfig(map[string]string{"expiration": ""}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty expiration")
@@ -1254,7 +1254,7 @@ func TestElasticDriver_MintCredential_ReturnsKeyMetadata(t *testing.T) {
 
 	_, metadata, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name:   "test-spec",
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, metadata, "the audit record should name the key that was created")
@@ -1270,11 +1270,11 @@ func newChainedElasticDriver(t *testing.T, serverURL string) *ElasticDriver {
 	return &ElasticDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeElastic,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"elastic_url":                serverURL,
 				credential.ConfigSecretSpec:  "es-cluster-key",
 				credential.ConfigSecretField: "api_key",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1284,20 +1284,20 @@ func TestElasticDriverFactory_ValidateConfig_Chained(t *testing.T) {
 	f := &ElasticDriverFactory{}
 
 	t.Run("a chained source needs no api_key", func(t *testing.T) {
-		require.NoError(t, f.ValidateConfig(map[string]string{
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url":               "https://elastic.example.com",
 			credential.ConfigSecretSpec: "es-cluster-key",
-		}))
+		})))
 	})
 
 	// Keeping the key would leave a source that reads as keyless while storing
 	// the very secret chaining removes.
 	t.Run("api_key beside secret_spec is refused", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url":               "https://elastic.example.com",
 			"api_key":                   testEncodedAPIKey("id1", "secret"),
 			credential.ConfigSecretSpec: "es-cluster-key",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must be omitted")
 	})
@@ -1305,17 +1305,17 @@ func TestElasticDriverFactory_ValidateConfig_Chained(t *testing.T) {
 	// The id is derived from the key; one kept here beside a fetched key would
 	// name one key while presenting another's.
 	t.Run("api_key_id beside secret_spec is refused", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"elastic_url":               "https://elastic.example.com",
 			"api_key_id":                "id1",
 			credential.ConfigSecretSpec: "es-cluster-key",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "api_key_id must be omitted")
 	})
 
 	t.Run("api_key is still required without secret_spec", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{"elastic_url": "https://elastic.example.com"})
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{"elastic_url": "https://elastic.example.com"}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "api_key is required")
 	})
@@ -1334,10 +1334,10 @@ func TestElasticDriverFactory_Create_ChainedMakesNoRequest(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	f := &ElasticDriverFactory{}
 
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"elastic_url":               srv.URL,
 		credential.ConfigSecretSpec: "es-cluster-key",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	require.NotNil(t, driver)
 	assert.Zero(t, reached, "creating a chained source must not authenticate")
@@ -1464,7 +1464,7 @@ func TestElasticDriver_MintFromSecret(t *testing.T) {
 	d := newChainedElasticDriver(t, srv.URL)
 
 	rawData, _, ttl, leaseID, err := d.MintFromSecret(context.TODO(),
-		&credential.CredSpec{Name: "chained-spec", Config: map[string]string{}},
+		&credential.CredSpec{Name: "chained-spec", Config: credential.NewConfig(map[string]string{})},
 		credential.SecretMaterial{
 			Data:  map[string]string{"api_key": testEncodedAPIKey("cluster-id", "cluster-secret")},
 			Field: "api_key",
@@ -1489,7 +1489,7 @@ func TestElasticDriver_MintFromSecret_MarksRejectedKey(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	spec := &credential.CredSpec{Name: "chained-spec", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "chained-spec", Config: credential.NewConfig(map[string]string{})}
 
 	d := newChainedElasticDriver(t, srv.URL)
 	_, _, _, _, err := d.MintFromSecret(context.TODO(), spec, credential.SecretMaterial{
@@ -1512,7 +1512,7 @@ func TestElasticDriver_MintCredential_RefusesChained(t *testing.T) {
 	d := newChainedElasticDriver(t, "https://unused.example.com")
 
 	_, _, _, _, err := d.MintCredential(context.TODO(),
-		&credential.CredSpec{Name: "chained-spec", Config: map[string]string{}})
+		&credential.CredSpec{Name: "chained-spec", Config: credential.NewConfig(map[string]string{})})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential chaining")
 }

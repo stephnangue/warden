@@ -203,7 +203,7 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 // The API key is stored at the spec level (like GitHub PATs). The source only
 // holds connection info (api_url). This allows multiple specs with different
 // API keys to share one source.
-func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *APIKeyCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility.
 	//
 	// Two families reach this type. One holds the key in the spec or reads it out
@@ -239,7 +239,7 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 	// credential — so it belongs on the source, and a spec-level reference would
 	// leave the source's own setting unused at mint. Say which, since "not
 	// supported" would be false.
-	if config[credential.ConfigSecretSpec] != "" && sourceType != credential.SourceTypeAPIKey {
+	if config.Get(credential.ConfigSecretSpec) != "" && sourceType != credential.SourceTypeAPIKey {
 		if sourceType == credential.SourceTypeElastic {
 			return fmt.Errorf("for an elastic source, set %s on the source (the chained api key authenticates the source's own Security API calls), not on the spec",
 				credential.ConfigSecretSpec)
@@ -258,13 +258,13 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 	// Step 3: Source-specific validation
 	switch sourceType {
 	case credential.SourceTypeVault:
-		if config["mint_method"] != "static_apikey" {
-			return fmt.Errorf("'mint_method' must be 'static_apikey' for vault source, got: %s", config["mint_method"])
+		if config.Get("mint_method") != "static_apikey" {
+			return fmt.Errorf("'mint_method' must be 'static_apikey' for vault source, got: %s", config.Get("mint_method"))
 		}
-		if config["kv2_mount"] == "" {
+		if config.Get("kv2_mount") == "" {
 			return fmt.Errorf("'kv2_mount' is required when mint_method is static_apikey")
 		}
-		if config["secret_path"] == "" {
+		if config.Get("secret_path") == "" {
 			return fmt.Errorf("'secret_path' is required when mint_method is static_apikey")
 		}
 	case credential.SourceTypeAWS:
@@ -272,8 +272,8 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		// validate the fetch config (shared with aws_access_keys) rather than requiring
 		// an api_key field here. The secret's payload must contain api_key (or be
 		// remapped to it via json_key_map).
-		if config["mint_method"] != "secrets_manager" {
-			return fmt.Errorf("'mint_method' must be 'secrets_manager' for an aws source, got: %s", config["mint_method"])
+		if config.Get("mint_method") != "secrets_manager" {
+			return fmt.Errorf("'mint_method' must be 'secrets_manager' for an aws source, got: %s", config.Get("mint_method"))
 		}
 		return validateAWSSecretsManagerSpecConfig(config, "secrets_manager")
 	case credential.SourceTypeElastic:
@@ -285,12 +285,12 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		// applied when the field is absent: set-but-empty reaches the cluster as
 		// "no expiration". A spec that says expiration= reads as though it asked
 		// for something.
-		if raw, present := config["expiration"]; present {
+		if raw, present := config.Lookup("expiration"); present {
 			if err := validateElasticTimeValue(raw); err != nil {
 				return fmt.Errorf("'expiration': %w", err)
 			}
 		}
-		if rd := config["role_descriptors"]; rd != "" {
+		if rd := config.Get("role_descriptors"); rd != "" {
 			if !json.Valid([]byte(rd)) {
 				return fmt.Errorf("'role_descriptors' is not valid JSON")
 			}
@@ -308,7 +308,7 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		// service_account_id is validated by the schema when present. It cannot be
 		// required here: it may come from the source instead, and this method is
 		// handed the source's type but never its config. The store checks that.
-		if raw, present := config["token_expiry"]; present {
+		if raw, present := config.Lookup("token_expiry"); present {
 			if err := validateGrafanaTokenExpiry(raw); err != nil {
 				return fmt.Errorf("'token_expiry': %w", err)
 			}
@@ -317,10 +317,10 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		// not a refused one: left alone, role would be accepted here and then
 		// masked on read as an unrecognised key, showing an operator their role
 		// displayed as a secret and telling them nothing.
-		if _, present := config["role"]; present {
+		if _, present := config.Lookup("role"); present {
 			return fmt.Errorf("'role' is not settable: a minted token carries the role of the service account it is issued on, which you set in Grafana when provisioning that account. Point service_account_id at an account with the role you want")
 		}
-		if _, present := config["org_id"]; present {
+		if _, present := config.Lookup("org_id"); present {
 			return fmt.Errorf("'org_id' is not settable: a service account belongs to one organization, so naming the account in service_account_id already says which. Use one source per organization")
 		}
 	default:
@@ -328,11 +328,11 @@ func (t *APIKeyCredType) ValidateConfig(config map[string]string, sourceType str
 		// another cred spec via credential chaining (secret_spec) — the two are mutually
 		// exclusive. (local reaches here only when secret_spec is unset; the guard above
 		// rejects a chained local spec.)
-		if config[credential.ConfigSecretSpec] != "" {
-			if config["api_key"] != "" {
+		if config.Get(credential.ConfigSecretSpec) != "" {
+			if config.Get("api_key") != "" {
 				return fmt.Errorf("'api_key' and 'secret_spec' are mutually exclusive (the key is fetched from the referenced secret_spec)")
 			}
-		} else if config["api_key"] == "" {
+		} else if config.Get("api_key") == "" {
 			return fmt.Errorf("'api_key' is required")
 		}
 	}
@@ -472,7 +472,7 @@ func (t *APIKeyCredType) SensitiveConfigFields() []string {
 // Reserved keys stay visible: mint locators and chaining references address the
 // mint rather than describing the credential, and masking a secret_path would hide
 // where a credential comes from while protecting nothing.
-func (t *APIKeyCredType) SensitiveConfigFieldsFor(config map[string]string) []string {
+func (t *APIKeyCredType) SensitiveConfigFieldsFor(config credential.Config) []string {
 	fields := t.SensitiveConfigFields()
 
 	known := make(map[string]bool, len(t.ConfigSchema()))
@@ -480,7 +480,7 @@ func (t *APIKeyCredType) SensitiveConfigFieldsFor(config map[string]string) []st
 		known[v.FieldName()] = true
 	}
 
-	for key := range config {
+	for key := range config.All() {
 		// Named reserved keys only. IsReservedSpecConfigKey also matches the "__"
 		// prefix, which is right for carriage — those belong to the mint pipeline
 		// — but wrong here: nothing rejects a spec-config key called "__whatever",
