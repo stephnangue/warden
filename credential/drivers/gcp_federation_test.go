@@ -46,7 +46,7 @@ func TestGCPDriverFactory_ValidateConfig_Federation(t *testing.T) {
 		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method":                "oidc_federation",
 			"workload_identity_provider": testWIFProvider,
-			"service_account_key":        `{"client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
+			"service_account_key":        `{"type":"service_account","project_id":"p","private_key_id":"kid","client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
 		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must not be set")
@@ -78,7 +78,7 @@ func TestGCPDriverFactory_ValidateConfig_Federation(t *testing.T) {
 	t.Run("workload_identity_provider rejected on static", func(t *testing.T) {
 		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method":                "static",
-			"service_account_key":        `{"client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
+			"service_account_key":        `{"type":"service_account","project_id":"p","private_key_id":"kid","client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
 			"workload_identity_provider": testWIFProvider,
 		}))
 		require.Error(t, err)
@@ -95,9 +95,13 @@ func TestGCPDriverFactory_InferCredentialType_Federation(t *testing.T) {
 		assert.Equal(t, credential.TypeGCPAccessToken, got, "mint_method=%q", mm)
 	}
 
-	got, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "cloud_sql_iam_token"}))
-	require.NoError(t, err)
-	assert.Equal(t, credential.TypeDBAuthToken, got)
+	// cloud_sql_iam_token infers a type but has no mint path, so a spec naming it
+	// used to write cleanly and fail on every request. Refused here instead — the
+	// db_auth_token validator refuses it too, for the operator who states `type`
+	// rather than leaving it inferred.
+	_, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "cloud_sql_iam_token"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not implemented")
 
 	_, err = f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "bogus"}))
 	require.Error(t, err)
@@ -187,7 +191,7 @@ func TestGCPDriver_ExchangeWIFToken(t *testing.T) {
 		d := newFederationDriver(testWIFProvider, sts.URL, "")
 		_, ttl, err := d.exchangeWIFToken(context.TODO(), "jwt", "", "scope")
 		require.NoError(t, err)
-		assert.Equal(t, gcpFederatedTokenFallbackTTL, ttl)
+		assert.Equal(t, gcpSTSTokenFallbackTTL, ttl)
 	})
 
 	t.Run("comma-separated scope normalized to space list", func(t *testing.T) {
@@ -342,9 +346,14 @@ func TestGCPDriver_MintCredentialWithExchange_UnsupportedMethod(t *testing.T) {
 }
 
 func TestGCPAssertionResource(t *testing.T) {
+	federatedSource := map[string]string{
+		"auth_method":                gcpAuthMethodOIDCFederation,
+		"workload_identity_provider": testWIFProvider,
+	}
+
 	t.Run("impersonation from spec", func(t *testing.T) {
 		res, ok := gcpAssertionResource(
-			credential.NewConfig(map[string]string{"workload_identity_provider": testWIFProvider}),
+			credential.NewConfig(federatedSource),
 			credential.NewConfig(map[string]string{"mint_method": "impersonated_access_token", "target_service_account": "bq@proj.iam.gserviceaccount.com"}),
 		)
 		assert.True(t, ok)
@@ -353,7 +362,7 @@ func TestGCPAssertionResource(t *testing.T) {
 
 	t.Run("federated from source", func(t *testing.T) {
 		res, ok := gcpAssertionResource(
-			credential.NewConfig(map[string]string{"workload_identity_provider": testWIFProvider}),
+			credential.NewConfig(federatedSource),
 			credential.NewConfig(map[string]string{"mint_method": "access_token"}),
 		)
 		assert.True(t, ok)
@@ -362,7 +371,7 @@ func TestGCPAssertionResource(t *testing.T) {
 
 	t.Run("routed via DeriveAssertionResource", func(t *testing.T) {
 		res, ok := DeriveAssertionResource(credential.SourceTypeGCP,
-			credential.NewConfig(map[string]string{"workload_identity_provider": testWIFProvider}),
+			credential.NewConfig(federatedSource),
 			credential.NewConfig(map[string]string{"mint_method": "access_token"}),
 		)
 		assert.True(t, ok)
@@ -371,6 +380,18 @@ func TestGCPAssertionResource(t *testing.T) {
 
 	t.Run("no resource when unset", func(t *testing.T) {
 		_, ok := gcpAssertionResource(credential.NewConfig(map[string]string{}), credential.NewConfig(map[string]string{"mint_method": "access_token"}))
+		assert.False(t, ok)
+	})
+
+	// A static source presents no assertion, so naming a resource for one describes a
+	// mint the exchange path refuses outright. The audience derivation gates on the
+	// same condition; this one did not, and would answer for a source that never
+	// federates anything.
+	t.Run("no resource on a static source", func(t *testing.T) {
+		_, ok := gcpAssertionResource(
+			credential.NewConfig(map[string]string{"service_account_key": "{}"}),
+			credential.NewConfig(map[string]string{"mint_method": "impersonated_access_token", "target_service_account": "bq@proj.iam.gserviceaccount.com"}),
+		)
 		assert.False(t, ok)
 	})
 }

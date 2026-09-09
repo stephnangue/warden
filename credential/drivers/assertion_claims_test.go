@@ -196,7 +196,7 @@ func TestDeriveAssertionResource(t *testing.T) {
 		{
 			name:       "gcp impersonation names the target service account",
 			sourceType: credential.SourceTypeGCP,
-			sourceCfg:  map[string]string{"workload_identity_provider": testAudGCPProvider},
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": testAudGCPProvider},
 			specCfg:    map[string]string{"mint_method": "impersonated_access_token", "target_service_account": "sa@p.iam.gserviceaccount.com"},
 			want:       "gcp-iam:sa@p.iam.gserviceaccount.com",
 			wantOK:     true,
@@ -204,7 +204,7 @@ func TestDeriveAssertionResource(t *testing.T) {
 		{
 			name:       "gcp federated names the provider from source config",
 			sourceType: credential.SourceTypeGCP,
-			sourceCfg:  map[string]string{"workload_identity_provider": testAudGCPProvider},
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": testAudGCPProvider},
 			specCfg:    map[string]string{"mint_method": "access_token"},
 			want:       "gcp-wif:" + testAudGCPProvider,
 			wantOK:     true,

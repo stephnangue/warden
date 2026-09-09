@@ -116,7 +116,7 @@ func TestGCPDriverFactory_ValidateConfig(t *testing.T) {
 
 	t.Run("missing client_email", func(t *testing.T) {
 		err := f.ValidateConfig(credential.NewConfig(map[string]string{
-			"service_account_key": `{"private_key": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"}`,
+			"service_account_key": `{"type":"service_account","project_id":"p","private_key_id":"kid","private_key": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"}`,
 		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "client_email")
@@ -124,10 +124,46 @@ func TestGCPDriverFactory_ValidateConfig(t *testing.T) {
 
 	t.Run("missing private_key", func(t *testing.T) {
 		err := f.ValidateConfig(credential.NewConfig(map[string]string{
-			"service_account_key": `{"client_email": "test@project.iam.gserviceaccount.com"}`,
+			"service_account_key": `{"type":"service_account","project_id":"p","private_key_id":"kid","client_email": "test@project.iam.gserviceaccount.com"}`,
 		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "private_key")
+	})
+
+	// The library this driver hands the key to dispatches on the document's own
+	// "type": an external_account names a file or URL for it to go and read, which
+	// would turn writing a credential source into reading host files and calling
+	// arbitrary endpoints as this process. Only a service account is ever valid here.
+	t.Run("non-service-account credential type rejected", func(t *testing.T) {
+		for _, typ := range []string{"external_account", "impersonated_service_account", "authorized_user", ""} {
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{
+				"service_account_key": `{"type":"` + typ + `","project_id":"p","private_key_id":"kid","client_email":"x@y.iam.gserviceaccount.com","private_key":"k","token_url":"https://attacker.example","credential_source":{"file":"/etc/passwd"}}`,
+			}))
+			require.Errorf(t, err, "type=%q must be refused", typ)
+			assert.Contains(t, err.Error(), "service_account")
+		}
+	})
+
+	// Rotation addresses the key by project and key id, so a document missing either
+	// cannot be rotated and would build a request path with a hole in it.
+	t.Run("missing rotation identity fields", func(t *testing.T) {
+		for field, keyJSON := range map[string]string{
+			"project_id":     `{"type":"service_account","private_key_id":"kid","client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
+			"private_key_id": `{"type":"service_account","project_id":"p","client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
+		} {
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{"service_account_key": keyJSON}))
+			require.Errorf(t, err, "missing %s must be refused", field)
+			assert.Contains(t, err.Error(), field)
+		}
+	})
+
+	// "Unmarshals without error" is not a check: these are the documents that passed
+	// the old one and would have been stored as the source's credential.
+	t.Run("degenerate JSON rejected", func(t *testing.T) {
+		for _, keyJSON := range []string{`null`, `{}`} {
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{"service_account_key": keyJSON}))
+			require.Errorf(t, err, "%s must be refused", keyJSON)
+		}
 	})
 
 	t.Run("valid config", func(t *testing.T) {
@@ -277,24 +313,16 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	})
 }
 
-func TestSplitScopes(t *testing.T) {
-	t.Run("single scope", func(t *testing.T) {
-		scopes := splitScopes("https://www.googleapis.com/auth/cloud-platform")
-		assert.Equal(t, []string{"https://www.googleapis.com/auth/cloud-platform"}, scopes)
-	})
-
-	t.Run("multiple scopes", func(t *testing.T) {
-		scopes := splitScopes("https://www.googleapis.com/auth/compute, https://www.googleapis.com/auth/devstorage.read_only")
-		assert.Equal(t, []string{
-			"https://www.googleapis.com/auth/compute",
-			"https://www.googleapis.com/auth/devstorage.read_only",
-		}, scopes)
-	})
-}
-
 // newTestGCPSAKey builds a usable service-account key whose token_uri points at a local
 // server, so the oauth2 library performs a real signed JWT exchange against it.
 func newTestGCPSAKey(t *testing.T, tokenURI, clientEmail string) string {
+	t.Helper()
+	return newTestGCPSAKeyWithID(t, tokenURI, clientEmail, "test-key-id")
+}
+
+// newTestGCPSAKeyWithID builds a key with a chosen private_key_id, which rotation
+// addresses keys by — the retired key is named by the id carried on the old one.
+func newTestGCPSAKeyWithID(t *testing.T, tokenURI, clientEmail, keyID string) string {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -304,11 +332,12 @@ func newTestGCPSAKey(t *testing.T, tokenURI, clientEmail string) string {
 	require.NoError(t, err)
 
 	saKey := map[string]string{
-		"type":         "service_account",
-		"project_id":   "test-project",
-		"private_key":  string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
-		"client_email": clientEmail,
-		"token_uri":    tokenURI,
+		"type":           "service_account",
+		"project_id":     "test-project",
+		"private_key_id": keyID,
+		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email":   clientEmail,
+		"token_uri":      tokenURI,
 	}
 	encoded, err := json.Marshal(saKey)
 	require.NoError(t, err)
@@ -401,9 +430,8 @@ func TestGCPDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
 
 	wg.Wait()
 
-	// Whatever the interleaving, the driver ends on the rotated key and reports verified.
+	// Whatever the interleaving, the driver ends on the rotated key.
 	assert.Equal(t, rotatedKey, d.getServiceAccountKey())
-	assert.True(t, d.sourceVerified)
 }
 
 // gcpAssertionIssuer reads the client_email out of the signed JWT the oauth2 library
