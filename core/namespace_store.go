@@ -993,6 +993,30 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 		}
 	}
 
+	// Release the driver instances those sources left behind. Nothing did this
+	// before, so every driver in a deleted namespace — its HTTP clients, pooled
+	// connections and cached upstream tokens — stayed alive for the life of the
+	// process.
+	//
+	// After the clear, not before: with the sources gone a mint can no longer
+	// build a replacement, so closing last also sweeps up anything created while
+	// the clear was running. Failures are logged rather than returned, since the
+	// configs are already deleted and reporting an error for a completed deletion
+	// would be worse than a leaked client.
+	if ns.core.credentialManager != nil {
+		closed, err := ns.core.credentialManager.CloseAllDriversForNamespace(nsCtx)
+		if err != nil {
+			ns.core.logger.Warn("failed to close some credential drivers for deleted namespace",
+				logger.String("namespace_id", namespaceToDelete.ID),
+				logger.Err(err))
+		}
+		if closed > 0 {
+			ns.core.logger.Debug("closed credential drivers for deleted namespace",
+				logger.String("namespace_id", namespaceToDelete.ID),
+				logger.Int("count", closed))
+		}
+	}
+
 	// Clear policies of every type. Each type lives in its own storage view and
 	// the deletion job never clears the namespace prefix wholesale, so a type
 	// missing from this loop is orphaned in storage forever.

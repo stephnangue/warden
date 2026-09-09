@@ -18,17 +18,18 @@ import (
 
 // mockRotatableDriver implements both SourceDriver and Rotatable (three-phase) for testing
 type mockRotatableDriver struct {
-	supportsRotation bool
-	prepareCount     int32
-	commitCount      int32
-	cleanupCount     int32
-	prepareError     error
-	commitError      error
-	cleanupError     error
-	preparedConfig   map[string]string
-	cleanupConfig    map[string]string
-	activateAfter    time.Duration // >0 triggers slow path
-	failUntilAttempt int32         // fail PrepareRotation until this many calls
+	supportsRotation   bool
+	prepareCount       int32
+	commitCount        int32
+	cleanupCount       int32
+	prepareError       error
+	commitError        error
+	cleanupError       error
+	preparedConfig     map[string]string
+	cleanupConfig      map[string]string
+	activateAfter      time.Duration // >0 triggers slow path
+	failUntilAttempt   int32         // fail PrepareRotation until this many calls
+	driverCleanupCount int32         // times Cleanup() ran on the driver instance
 }
 
 func (d *mockRotatableDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
@@ -44,7 +45,14 @@ func (d *mockRotatableDriver) Type() string {
 }
 
 func (d *mockRotatableDriver) Cleanup(ctx context.Context) error {
+	atomic.AddInt32(&d.driverCleanupCount, 1)
 	return nil
+}
+
+// GetDriverCleanupCount reports how many times the driver instance itself was torn
+// down, as distinct from cleanupCount, which counts rotation's cleanup stage.
+func (d *mockRotatableDriver) GetDriverCleanupCount() int {
+	return int(atomic.LoadInt32(&d.driverCleanupCount))
 }
 
 func (d *mockRotatableDriver) SupportsRotation() bool {
