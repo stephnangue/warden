@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand"
 	"strings"
 	"sync"
@@ -724,14 +725,38 @@ func (m *RotationManager) prepareSource(entry *RotationEntry) (staged *stagedRot
 	}, nil
 }
 
+// sourceWithConfig and specWithConfig return a copy carrying the rotated config,
+// leaving the original untouched.
+//
+// The config store hands back the pointer it caches, and every concurrent mint is
+// reading through it. Assigning the config field on that shared object is a data
+// race against those readers, and it publishes the new credentials before they are
+// validated and written: if the persist below then fails, the cache is left serving
+// material that never reached storage, which a restart silently reverts.
+//
+// Publishing a new object instead makes the persist the only thing that changes what
+// readers see. The map is copied too, because the staged map on a rotation entry
+// outlives this call and is serialized with the entry.
+func sourceWithConfig(source *credential.CredSource, config map[string]string) *credential.CredSource {
+	updated := *source
+	updated.Config = maps.Clone(config)
+	return &updated
+}
+
+func specWithConfig(spec *credential.CredSpec, config map[string]string) *credential.CredSpec {
+	updated := *spec
+	updated.Config = maps.Clone(config)
+	return &updated
+}
+
 // activateSourceInline runs persist + commit + cleanup synchronously (fast path for activateAfter == 0).
 func (m *RotationManager) activateSourceInline(ctx context.Context, entry *RotationEntry,
 	source *credential.CredSource, rotatable credential.Rotatable,
 	newConfig, cleanupConfig map[string]string) error {
 
 	// PERSIST
-	source.Config = newConfig
-	if err := m.core.credConfigStore.UpdateSource(ctx, source, UpdateSourceOptions{SkipConnectionTest: true}); err != nil {
+	updated := sourceWithConfig(source, newConfig)
+	if err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{SkipConnectionTest: true}); err != nil {
 		return fmt.Errorf("failed to persist rotated config for source %s: %w", entry.SourceName, err)
 	}
 
@@ -778,8 +803,8 @@ func (m *RotationManager) activateSource(entry *RotationEntry) error {
 	}
 
 	// PERSIST
-	source.Config = entry.NewConfig
-	if err := m.core.credConfigStore.UpdateSource(ctx, source, UpdateSourceOptions{SkipConnectionTest: true}); err != nil {
+	updated := sourceWithConfig(source, entry.NewConfig)
+	if err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{SkipConnectionTest: true}); err != nil {
 		return fmt.Errorf("failed to persist rotated config for source %s: %w", entry.SourceName, err)
 	}
 
@@ -873,13 +898,13 @@ func (m *RotationManager) activateSpecInline(ctx context.Context, entry *Rotatio
 	newConfig, cleanupConfig map[string]string) error {
 
 	// PERSIST
-	spec.Config = newConfig
-	if err := m.core.credConfigStore.UpdateSpec(ctx, spec); err != nil {
+	updated := specWithConfig(spec, newConfig)
+	if err := m.core.credConfigStore.UpdateSpec(ctx, updated); err != nil {
 		return fmt.Errorf("failed to persist rotated config for spec %s: %w", entry.SpecName, err)
 	}
 
 	// COMMIT
-	if err := specRotatable.CommitSpecRotation(ctx, spec, newConfig); err != nil {
+	if err := specRotatable.CommitSpecRotation(ctx, updated, newConfig); err != nil {
 		return fmt.Errorf("commit spec rotation failed for spec %s: %w", entry.SpecName, err)
 	}
 
@@ -921,13 +946,13 @@ func (m *RotationManager) activateSpec(entry *RotationEntry) error {
 	}
 
 	// PERSIST
-	spec.Config = entry.NewConfig
-	if err := m.core.credConfigStore.UpdateSpec(ctx, spec); err != nil {
+	updated := specWithConfig(spec, entry.NewConfig)
+	if err := m.core.credConfigStore.UpdateSpec(ctx, updated); err != nil {
 		return fmt.Errorf("failed to persist rotated config for spec %s: %w", entry.SpecName, err)
 	}
 
 	// COMMIT
-	if err := specRotatable.CommitSpecRotation(ctx, spec, entry.NewConfig); err != nil {
+	if err := specRotatable.CommitSpecRotation(ctx, updated, entry.NewConfig); err != nil {
 		return fmt.Errorf("commit spec rotation failed for spec %s: %w", entry.SpecName, err)
 	}
 
