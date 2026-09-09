@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand"
 	"strings"
 	"sync"
@@ -176,10 +177,15 @@ func (e *RotationEntry) GetLastError() string {
 }
 
 // GetNewConfig returns a copy of the entry's staged new config in a thread-safe manner.
+//
+// It genuinely copies. The lock only made reading the field safe; handing back the
+// map itself left the caller free to write into staged credentials that the entry
+// still owns and later serializes. maps.Clone(nil) is nil, so a cleared entry still
+// reads as nil.
 func (e *RotationEntry) GetNewConfig() map[string]string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.NewConfig
+	return maps.Clone(e.NewConfig)
 }
 
 // GetNextAction returns the entry's next action time in a thread-safe manner.
