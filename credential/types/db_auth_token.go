@@ -75,14 +75,17 @@ func NewDBAuthTokenCredType() *DBAuthTokenCredType {
 // ConfigSchema returns the declarative schema for database auth token credential config
 func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
+		// cloud_sql_iam_token stays listed so a spec naming it reaches ValidateConfig,
+		// which refuses it as unimplemented — dropping it here would answer the same
+		// spec with a generic "must be one of" that says nothing about why.
 		credential.StringField("mint_method").
 			OneOf("rds_iam_token", "redshift_iam_token", "cloud_sql_iam_token", "azure_db_iam_token").
-			Describe("Method for minting database IAM auth tokens").
+			Describe("Method for minting database IAM auth tokens (cloud_sql_iam_token is not implemented)").
 			Example("rds_iam_token"),
 
-		// db_user is required for rds_iam_token / cloud_sql_iam_token / azure_db_iam_token
-		// (enforced in ValidateConfig). Not required for redshift_iam_token because the
-		// Redshift API returns the database user mapped from the IAM identity.
+		// db_user is required for rds_iam_token / azure_db_iam_token (enforced in
+		// ValidateConfig). Not required for redshift_iam_token because the Redshift
+		// API returns the database user mapped from the IAM identity.
 		credential.StringField("db_user").
 			Describe("Database user to authenticate as").
 			Example("app_readonly"),
@@ -113,11 +116,11 @@ func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("arn:aws:iam::123456789:role/db-access"),
 
 		credential.StringField("target_service_account").
-			Describe("GCP service account to impersonate (required for cloud_sql_iam_token)").
+			Describe("GCP service account to impersonate (for cloud_sql_iam_token, which is not implemented)").
 			Example("db-reader@myproject.iam.gserviceaccount.com"),
 
 		credential.StringField("instance_connection_name").
-			Describe("Cloud SQL instance connection name (optional metadata for cloud_sql_iam_token)").
+			Describe("Cloud SQL instance connection name (for cloud_sql_iam_token, which is not implemented)").
 			Example("myproject:us-central1:mydb"),
 
 		credential.StringField("resource_uri").
@@ -190,12 +193,12 @@ func (t *DBAuthTokenCredType) ValidateConfig(config credential.Config, sourceTyp
 		if sourceType != credential.SourceTypeGCP {
 			return fmt.Errorf("cloud_sql_iam_token requires a gcp source, got: %s", sourceType)
 		}
-		if config.Get("target_service_account") == "" {
-			return fmt.Errorf("cloud_sql_iam_token requires target_service_account")
-		}
-		if config.Get("db_user") == "" {
-			return fmt.Errorf("cloud_sql_iam_token requires db_user")
-		}
+		// No gcp mint path implements this method, so a spec accepted here would
+		// write cleanly and then fail on every request with an unsupported-method
+		// error naming a key the operator set deliberately. Refuse it where the
+		// mistake is made instead. Its target_service_account and db_user
+		// requirements go with it — they describe a shape nothing consumes.
+		return fmt.Errorf("cloud_sql_iam_token is not implemented for the gcp driver")
 	case "azure_db_iam_token":
 		if sourceType != credential.SourceTypeAzure {
 			return fmt.Errorf("azure_db_iam_token requires an azure source, got: %s", sourceType)

@@ -102,7 +102,10 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS_MissingEndpoint(t *testing.T) {
 	assert.Contains(t, err.Error(), "db_endpoint")
 }
 
-func TestDBAuthTokenCredType_ValidateConfig_CloudSQL(t *testing.T) {
+// No gcp mint path implements cloud_sql_iam_token, so a spec naming it is refused
+// where it is written. Accepting it here is what let one be stored and then fail on
+// every request with an error naming a key the operator set on purpose.
+func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_Unimplemented(t *testing.T) {
 	ct := NewDBAuthTokenCredType()
 
 	config := map[string]string{
@@ -112,7 +115,8 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL(t *testing.T) {
 	}
 
 	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeGCP)
-	assert.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not implemented")
 }
 
 func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_WrongSource(t *testing.T) {

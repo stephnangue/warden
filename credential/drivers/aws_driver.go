@@ -176,12 +176,12 @@ func (f *AWSDriverFactory) ValidateConfig(config credential.Config) error {
 			Example("sts.amazonaws.com"),
 
 		credential.StringField("sts_endpoint").
-			Custom(validateAWSEndpoint).
+			Custom(validateEndpointURL).
 			Describe("Override where STS calls are sent, including the credential probe run when this source is written (default: the SDK's regional endpoint). Does not apply to the IAM, Redshift or RDS clients").
 			Example("https://sts.us-east-1.amazonaws.com"),
 
 		credential.StringField("secretsmanager_endpoint").
-			Custom(validateAWSEndpoint).
+			Custom(validateEndpointURL).
 			Describe("Override where Secrets Manager calls are sent (default: the SDK's regional endpoint)").
 			Example("https://secretsmanager.us-east-1.amazonaws.com"),
 
@@ -225,10 +225,11 @@ func (f *AWSDriverFactory) ValidateConfig(config credential.Config) error {
 	return nil
 }
 
-// validateAWSEndpoint checks an endpoint override is a URL the SDK can actually
+// validateEndpointURL checks an endpoint override is a URL a client can actually
 // send to. A keyless source runs no probe when it is written, so without this a
-// typo surfaces only on the first request that needs it.
-func validateAWSEndpoint(v string) error {
+// typo surfaces only on the first request that needs it. Shared with the other
+// drivers that expose endpoint overrides — nothing about it is AWS-specific.
+func validateEndpointURL(v string) error {
 	u, err := url.Parse(v)
 	if err != nil {
 		return fmt.Errorf("endpoint is not a valid URL: %w", err)
