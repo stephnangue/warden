@@ -54,8 +54,15 @@ type GitLabDriver struct {
 	// HTTP client for GitLab API calls
 	httpClient *http.Client
 
-	// Mutex for protecting config updates during rotation
-	configMu sync.Mutex
+	// configMu guards credSource.Config, which rotation replaces while mints are
+	// in flight. It is an RWMutex because the readers are on the mint path: every
+	// request reads the address and token, and a plain Mutex would serialize
+	// minters behind each other for what is a map lookup.
+	//
+	// Writers replace the whole map rather than writing into it, so a reader that
+	// takes one snapshot can use it without holding the lock for the rest of the
+	// call — see sourceConfig.
+	configMu sync.RWMutex
 }
 
 // gitlabChainedAuth carries the per-mint values fetched via credential chaining.
@@ -251,22 +258,32 @@ func (f *GitLabDriverFactory) Create(config map[string]string, log *logger.Gated
 
 // Config accessors
 
+// sourceConfig returns the current config map. Rotation swaps in a whole new map
+// rather than writing into the live one, so the returned map is a stable snapshot
+// and callers need not hold the lock while reading it. Callers that need several
+// keys to agree must take one snapshot and read all of them from it.
+func (d *GitLabDriver) sourceConfig() map[string]string {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.credSource.Config
+}
+
 func (d *GitLabDriver) getGitLabAddress() string {
-	return strings.TrimRight(credential.GetString(d.credSource.Config, "gitlab_address", ""), "/")
+	return strings.TrimRight(credential.GetString(d.sourceConfig(), "gitlab_address", ""), "/")
 }
 
 func (d *GitLabDriver) getAuthMethod() string {
-	return credential.GetString(d.credSource.Config, "auth_method", "pat")
+	return credential.GetString(d.sourceConfig(), "auth_method", "pat")
 }
 
 func (d *GitLabDriver) getPAT() string {
-	return credential.GetString(d.credSource.Config, "personal_access_token", "")
+	return credential.GetString(d.sourceConfig(), "personal_access_token", "")
 }
 
 // isChained reports whether this source draws its token from another cred spec
 // rather than holding one inline.
 func (d *GitLabDriver) isChained() bool {
-	return credential.GetString(d.credSource.Config, credential.ConfigSecretSpec, "") != ""
+	return credential.GetString(d.sourceConfig(), credential.ConfigSecretSpec, "") != ""
 }
 
 // verifyAuth validates the source credentials by calling a simple GitLab API endpoint
@@ -737,9 +754,11 @@ func (d *GitLabDriver) preparePATRotation(ctx context.Context) (map[string]strin
 		return nil, nil, 0, fmt.Errorf("GitLab PAT rotation returned empty token")
 	}
 
-	// Build new config with the new token
-	newConfig := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	// Build new config with the new token, from one snapshot rather than the live
+	// field, so the copy cannot straddle a concurrent swap.
+	current := d.sourceConfig()
+	newConfig := make(map[string]string, len(current))
+	for k, v := range current {
 		newConfig[k] = v
 	}
 	newConfig["personal_access_token"] = rotateResult.Token
@@ -769,7 +788,7 @@ func (d *GitLabDriver) preparePATRotation(ctx context.Context) (map[string]strin
 // The renew-secret endpoint atomically replaces the old secret, so
 // activateAfter=0 is returned (fast path, no propagation delay needed).
 func (d *GitLabDriver) prepareOAuth2Rotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
-	applicationID := credential.GetString(d.credSource.Config, "application_id", "")
+	applicationID := credential.GetString(d.sourceConfig(), "application_id", "")
 
 	// Rotate the application secret via admin API
 	path := fmt.Sprintf("/api/v4/applications/%s/renew-secret", url.PathEscape(applicationID))
@@ -789,9 +808,10 @@ func (d *GitLabDriver) prepareOAuth2Rotation(ctx context.Context) (map[string]st
 		return nil, nil, 0, fmt.Errorf("GitLab OAuth2 rotation returned empty secret")
 	}
 
-	// Build new config
-	newConfig := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	// Build new config, from one snapshot — see preparePATRotation.
+	current := d.sourceConfig()
+	newConfig := make(map[string]string, len(current))
+	for k, v := range current {
 		newConfig[k] = v
 	}
 	newConfig["application_secret"] = rotateResult.Secret
@@ -819,8 +839,11 @@ func (d *GitLabDriver) prepareOAuth2Rotation(ctx context.Context) (map[string]st
 
 // CommitRotation activates new credentials in the driver's internal state.
 func (d *GitLabDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
-	// Update the config
+	// Update the config. Under configMu like the two swaps in PrepareRotation:
+	// mints still holding this instance read the map concurrently.
+	d.configMu.Lock()
 	d.credSource.Config = newConfig
+	d.configMu.Unlock()
 
 	// Invalidate OAuth2 token cache to force re-authentication
 	d.tokenCache.InvalidateGeneration()
@@ -979,8 +1002,12 @@ func isClientSecretRejection(err error) bool {
 // mixed in from a source that still had it would name a different application than
 // the secret belongs to.
 func (d *GitLabDriver) getOAuth2Token(ctx context.Context, chained *gitlabChainedAuth) (string, string, error) {
-	applicationID := credential.GetString(d.credSource.Config, "application_id", "")
-	applicationSecret := credential.GetString(d.credSource.Config, "application_secret", "")
+	// One snapshot for both halves, for the same reason the chained case supplies
+	// both: a rotation landing between two separate reads would pair an id with a
+	// secret minted for a different generation of the application.
+	config := d.sourceConfig()
+	applicationID := credential.GetString(config, "application_id", "")
+	applicationSecret := credential.GetString(config, "application_secret", "")
 	if chained != nil {
 		applicationID = chained.applicationID
 		applicationSecret = chained.secret
