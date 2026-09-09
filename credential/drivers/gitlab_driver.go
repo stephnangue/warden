@@ -262,22 +262,41 @@ func (f *GitLabDriverFactory) Create(config credential.Config, log *logger.Gated
 // rather than writing into the live one, so the returned map is a stable snapshot
 // and callers need not hold the lock while reading it. Callers that need several
 // keys to agree must take one snapshot and read all of them from it.
+// An operation that reads more than one key must take one snapshot and read every
+// value from it. Calling this per key is correct for a single value and wrong for
+// a set: a rotation between two calls yields values from two generations.
 func (d *GitLabDriver) sourceConfig() credential.Config {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
 	return d.credSource.Config
 }
 
+// The gitlab* functions read one already-taken snapshot. An operation needing more
+// than one value takes a snapshot once and calls these, so every value it uses comes
+// from the same generation; the getX methods below are the convenience form for the
+// single-value case.
+func gitlabAddress(config credential.Config) string {
+	return strings.TrimRight(credential.GetString(config, "gitlab_address", ""), "/")
+}
+
+func gitlabAuthMethod(config credential.Config) string {
+	return credential.GetString(config, "auth_method", "pat")
+}
+
+func gitlabPAT(config credential.Config) string {
+	return credential.GetString(config, "personal_access_token", "")
+}
+
 func (d *GitLabDriver) getGitLabAddress() string {
-	return strings.TrimRight(credential.GetString(d.sourceConfig(), "gitlab_address", ""), "/")
+	return gitlabAddress(d.sourceConfig())
 }
 
 func (d *GitLabDriver) getAuthMethod() string {
-	return credential.GetString(d.sourceConfig(), "auth_method", "pat")
+	return gitlabAuthMethod(d.sourceConfig())
 }
 
 func (d *GitLabDriver) getPAT() string {
-	return credential.GetString(d.sourceConfig(), "personal_access_token", "")
+	return gitlabPAT(d.sourceConfig())
 }
 
 // isChained reports whether this source draws its token from another cred spec
@@ -888,7 +907,14 @@ func (d *GitLabDriver) CleanupRotation(_ context.Context, cleanupConfig map[stri
 // reports failures as an opaque message; a caller that must distinguish an
 // authentication rejection from any other error has no other way to see it.
 func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string, body []byte, chained *gitlabChainedAuth) ([]byte, int, error) {
-	apiURL := d.getGitLabAddress() + path
+	// One snapshot for the whole request. Reading the address, the auth method and
+	// the token separately would let a rotation landing mid-request pair values from
+	// two generations — harmless only for as long as rotation keeps touching exactly
+	// one key, which is not a property worth depending on. It is also the request
+	// path, so this is two fewer lock acquisitions per proxied call.
+	config := d.sourceConfig()
+
+	apiURL := gitlabAddress(config) + path
 
 	// Prepare headers
 	headers := make(map[string]string)
@@ -898,12 +924,12 @@ func (d *GitLabDriver) doGitLabRequest(ctx context.Context, method, path string,
 
 	// Set authentication based on auth method
 	var bearerKey string
-	switch d.getAuthMethod() {
+	switch gitlabAuthMethod(config) {
 	case "pat":
 		if chained != nil {
 			headers["PRIVATE-TOKEN"] = chained.secret
 		} else {
-			headers["PRIVATE-TOKEN"] = d.getPAT()
+			headers["PRIVATE-TOKEN"] = gitlabPAT(config)
 		}
 	case "oauth2":
 		token, key, err := d.getOAuth2Token(ctx, chained)
