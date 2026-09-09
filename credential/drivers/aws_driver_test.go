@@ -49,22 +49,22 @@ func TestAWSDriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name: "valid minimal config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 				"region":            "us-east-1",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid config with assume_role_arn",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 				"region":            "us-east-1",
@@ -72,88 +72,88 @@ func TestAWSDriverFactory_ValidateConfig(t *testing.T) {
 				"external_id":       "ext-123",
 				"session_name":      "my-session",
 				"session_duration":  "2h",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid config with endpoint overrides",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key":       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 				"region":                  "us-east-1",
 				"sts_endpoint":            "https://sts.us-east-1.amazonaws.com",
 				"secretsmanager_endpoint": "https://secretsmanager.us-east-1.amazonaws.com",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "endpoint overrides on a federation source",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method":             "oidc_federation",
 				"region":                  "us-east-1",
 				"sts_endpoint":            "https://sts.us-east-1.amazonaws.com",
 				"secretsmanager_endpoint": "https://secretsmanager.us-east-1.amazonaws.com",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "missing access_key_id",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 				"region":            "us-east-1",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "access_key_id",
 		},
 		{
 			name: "missing secret_access_key",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id": "AKIAIOSFODNN7EXAMPLE",
 				"region":        "us-east-1",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "secret_access_key",
 		},
 		{
 			name: "missing region",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "region",
 		},
 		{
 			name: "invalid session_duration",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 				"region":            "us-east-1",
 				"session_duration":  "invalid",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "session_duration",
 		},
 		{
 			name:    "oidc_federation valid without keys",
-			config:  map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"},
+			config:  credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}),
 			wantErr: false,
 		},
 		{
 			name:    "oidc_federation rejects static keys",
-			config:  map[string]string{"auth_method": "oidc_federation", "region": "us-east-1", "access_key_id": "AKIA..."},
+			config:  credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1", "access_key_id": "AKIA..."}),
 			wantErr: true,
 			errMsg:  "must not be set for auth_method=oidc_federation",
 		},
 		{
 			name:    "oidc_federation rejects assume_role_arn",
-			config:  map[string]string{"auth_method": "oidc_federation", "region": "us-east-1", "assume_role_arn": "arn:aws:iam::1:role/x"},
+			config:  credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1", "assume_role_arn": "arn:aws:iam::1:role/x"}),
 			wantErr: true,
 			errMsg:  "assume_role_arn is not supported",
 		},
 		{
 			name:    "invalid auth_method",
-			config:  map[string]string{"auth_method": "bogus", "region": "us-east-1"},
+			config:  credential.NewConfig(map[string]string{"auth_method": "bogus", "region": "us-east-1"}),
 			wantErr: true,
 			errMsg:  "auth_method",
 		},
@@ -176,7 +176,7 @@ func TestAWSDriver_Type(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAWS,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeAWS, driver.Type())
@@ -186,7 +186,7 @@ func TestAWSDriver_Cleanup(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAWS,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	err := driver.Cleanup(context.TODO())
@@ -197,7 +197,7 @@ func TestAWSDriver_Revoke_STS(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAWS,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 
@@ -238,9 +238,9 @@ func TestAWSDriver_SupportsRotation(t *testing.T) {
 			driver := &AWSDriver{
 				credSource: &credential.CredSource{
 					Type: credential.SourceTypeAWS,
-					Config: map[string]string{
+					Config: credential.NewConfig(map[string]string{
 						"access_key_id": tt.accessKey,
-					},
+					}),
 				},
 			}
 			assert.Equal(t, tt.wantResult, driver.SupportsRotation())
@@ -287,11 +287,11 @@ func TestAWSDriver_MintCredential_InvalidMethod(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAWS,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "secret",
 				"region":            "us-east-1",
-			},
+			}),
 		},
 		region: "us-east-1",
 	}
@@ -301,9 +301,9 @@ func TestAWSDriver_MintCredential_InvalidMethod(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeAWSAccessKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -315,11 +315,11 @@ func TestAWSDriver_MintCredential_TTLBelowMinimum(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAWS,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "secret",
 				"region":            "us-east-1",
-			},
+			}),
 		},
 		region: "us-east-1",
 	}
@@ -329,11 +329,11 @@ func TestAWSDriver_MintCredential_TTLBelowMinimum(t *testing.T) {
 		Name:   "test-spec",
 		Type:   credential.TypeAWSAccessKeys,
 		MinTTL: 2 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "sts_assume_role",
 			"role_arn":    "arn:aws:iam::123456789012:role/test-role",
 			"ttl":         "30m", // Below MinTTL of 2h
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -345,11 +345,11 @@ func TestAWSDriver_MintCredential_TTLExceedsMaximum(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAWS,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "secret",
 				"region":            "us-east-1",
-			},
+			}),
 		},
 		region: "us-east-1",
 	}
@@ -359,11 +359,11 @@ func TestAWSDriver_MintCredential_TTLExceedsMaximum(t *testing.T) {
 		Name:   "test-spec",
 		Type:   credential.TypeAWSAccessKeys,
 		MaxTTL: 1 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "sts_assume_role",
 			"role_arn":    "arn:aws:iam::123456789012:role/test-role",
 			"ttl":         "4h", // Above MaxTTL of 1h
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -377,7 +377,7 @@ func TestAWSDriver_Type_ViaFactory(t *testing.T) {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAWS,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeAWS, driver.Type())
@@ -390,9 +390,9 @@ func TestAWSDriver_Type_ViaFactory(t *testing.T) {
 func TestAWSDriverFactory_InferCredentialType_Redshift(t *testing.T) {
 	factory := &AWSDriverFactory{}
 
-	credType, err := factory.InferCredentialType(map[string]string{
+	credType, err := factory.InferCredentialType(credential.NewConfig(map[string]string{
 		"mint_method": "redshift_iam_token",
-	})
+	}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeDBAuthToken, credType)
 }
@@ -420,7 +420,7 @@ func TestAWSDriverFactory_InferCredentialType_SecretsManager(t *testing.T) {
 			if tc.credType != "" {
 				cfg["credential_type"] = tc.credType
 			}
-			got, err := factory.InferCredentialType(cfg)
+			got, err := factory.InferCredentialType(credential.NewConfig(cfg))
 			if tc.wantErr {
 				require.Error(t, err)
 				return
@@ -433,10 +433,10 @@ func TestAWSDriverFactory_InferCredentialType_SecretsManager(t *testing.T) {
 	// credential_type is meaningful only for secrets_manager; using it elsewhere is
 	// an explicit error, not a silent fallback to aws_access_keys.
 	t.Run("credential_type rejected for non-secrets_manager mint", func(t *testing.T) {
-		_, err := factory.InferCredentialType(map[string]string{
+		_, err := factory.InferCredentialType(credential.NewConfig(map[string]string{
 			"mint_method":     "sts_assume_role",
 			"credential_type": credential.TypeAPIKey,
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "only valid with mint_method=secrets_manager")
 	})
@@ -450,11 +450,11 @@ func newRedshiftTestDriver(t *testing.T) *AWSDriver {
 	driver := &AWSDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAWS,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "secret",
 				"region":            "us-east-1",
-			},
+			}),
 		},
 		region: "us-east-1",
 	}
@@ -468,10 +468,10 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_MissingEndpoint(t *testing.T)
 	spec := &credential.CredSpec{
 		Name: "redshift-test",
 		Type: credential.TypeDBAuthToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":        "redshift_iam_token",
 			"cluster_identifier": "my-cluster",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -485,10 +485,10 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_NoClusterOrWorkgroup(t *testi
 	spec := &credential.CredSpec{
 		Name: "redshift-test",
 		Type: credential.TypeDBAuthToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "redshift_iam_token",
 			"db_endpoint": "my-cluster.redshift.amazonaws.com",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -503,12 +503,12 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_BothClusterAndWorkgroup(t *te
 	spec := &credential.CredSpec{
 		Name: "redshift-test",
 		Type: credential.TypeDBAuthToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":        "redshift_iam_token",
 			"db_endpoint":        "x",
 			"cluster_identifier": "my-cluster",
 			"workgroup_name":     "my-wg",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -524,12 +524,12 @@ func TestAWSDriver_MintCredential_RedshiftIAMToken_DurationOutOfRange(t *testing
 			spec := &credential.CredSpec{
 				Name: "redshift-test",
 				Type: credential.TypeDBAuthToken,
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"mint_method":        "redshift_iam_token",
 					"db_endpoint":        "x",
 					"cluster_identifier": "my-cluster",
 					"duration_seconds":   d,
-				},
+				}),
 			}
 			_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 			require.Error(t, err)
@@ -546,9 +546,9 @@ func TestAWSDriver_MintCredential_UnsupportedMethodMessage_IncludesRedshift(t *t
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeAWSAccessKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "definitely-not-real",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -565,7 +565,7 @@ func TestAWSDriver_MintCredential_UnsupportedMethodMessage_IncludesRedshift(t *t
 func TestAWSDriver_Create_WIF_Keyless(t *testing.T) {
 	factory := &AWSDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := factory.Create(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}, log)
+	drv, err := factory.Create(credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}), log)
 	require.NoError(t, err)
 	require.NotNil(t, drv)
 	awsDrv := drv.(*AWSDriver)
@@ -581,11 +581,11 @@ func TestAWSDriver_MintGuards(t *testing.T) {
 	// subject_token_source) must fail clearly, not fall into authenticate() with
 	// empty keys.
 	wifDrv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})},
 		logger:     log,
 	}
 	for _, mm := range []string{"secrets_manager", "sts_assume_role"} {
-		_, _, _, _, err := wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": mm}})
+		_, _, _, _, err := wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": mm})})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "requires subject_token_source on the spec (warden_identity or agent_identity)")
 	}
@@ -596,15 +596,15 @@ func TestAWSDriver_MintGuards(t *testing.T) {
 func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})},
 		logger:     log,
 	}
-	roleSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x"}}
+	roleSpec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x"})}
 	verified := &credential.ExchangeInputs{SubjectToken: "eyJ"}
 
 	// A static source must not reach the federation path.
 	staticDrv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "static"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "static"})},
 		logger:     log,
 	}
 	_, _, _, _, err := staticDrv.MintCredentialWithExchange(context.TODO(), roleSpec, verified)
@@ -612,7 +612,7 @@ func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	assert.Contains(t, err.Error(), "auth_method=oidc_federation")
 
 	// A mint_method with no federation support is rejected before any STS call.
-	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), &credential.CredSpec{Config: map[string]string{"mint_method": "rds_iam_token"}}, verified)
+	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), &credential.CredSpec{Config: credential.NewConfig(map[string]string{"mint_method": "rds_iam_token"})}, verified)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported over auth_method=oidc_federation")
 
@@ -621,7 +621,7 @@ func TestAWSDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 	require.Error(t, err)
 
 	// For sts_assume_role, the requested TTL is bound-checked before any STS call.
-	boundedSpec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x", "ttl": "2h"}, MaxTTL: time.Hour}
+	boundedSpec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::1:role/x", "ttl": "2h"}), MaxTTL: time.Hour}
 	_, _, _, _, err = drv.MintCredentialWithExchange(context.TODO(), boundedSpec, verified)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum")
@@ -656,7 +656,7 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"})},
 		logger:     log,
 		region:     "us-east-1",
 		anonSTSClient: sts.New(sts.Options{
@@ -665,11 +665,11 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 			Credentials:  aws.AnonymousCredentials{},
 		}),
 	}
-	spec := &credential.CredSpec{Name: "wid", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "wid", Config: credential.NewConfig(map[string]string{
 		"mint_method": "sts_assume_role",
 		"role_arn":    "arn:aws:iam::123456789012:role/App",
 		"ttl":         "15m",
-	}}
+	})}
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:     "eyJ.warden.assertion",
 		SubjectTokenType: credential.TokenTypeJWT,
@@ -718,7 +718,7 @@ func TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath(t *testing.T) {
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"})},
 		logger:     log,
 		region:     "us-east-1",
 		anonSTSClient: sts.New(sts.Options{
@@ -727,11 +727,11 @@ func TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath(t *testing.T) {
 			Credentials:  aws.AnonymousCredentials{},
 		}),
 	}
-	spec := &credential.CredSpec{Name: "wid", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "wid", Config: credential.NewConfig(map[string]string{
 		"mint_method": "sts_assume_role",
 		"role_arn":    "arn:aws:iam::123456789012:role/App",
 		"ttl":         "15m",
-	}}
+	})}
 	// A forwarded inbound JWT: eager, with no ResolveSubjectToken and no
 	// SubjectCacheIdentity (the token is stable, so it keys the cache itself).
 	inputs := &credential.ExchangeInputs{
@@ -781,7 +781,7 @@ func TestAWSDriver_SecretsManager_WebIdentity_HappyPath(t *testing.T) {
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"})},
 		logger:     log,
 		region:     "us-east-1",
 		anonSTSClient: sts.New(sts.Options{
@@ -791,11 +791,11 @@ func TestAWSDriver_SecretsManager_WebIdentity_HappyPath(t *testing.T) {
 		}),
 		smBaseEndpoint: smSrv.URL,
 	}
-	spec := &credential.CredSpec{Name: "app", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "app", Config: credential.NewConfig(map[string]string{
 		"mint_method": "secrets_manager",
 		"secret_id":   "prod/app/keys",
 		"role_arn":    "arn:aws:iam::123456789012:role/WardenSecretsReader",
-	}}
+	})}
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:     "eyJ.warden.assertion",
 		SubjectTokenType: credential.TokenTypeJWT,
@@ -850,7 +850,7 @@ func TestAWSDriver_SecretsManager_APIKey_RoundTrip(t *testing.T) {
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"})},
 		logger:     log,
 		region:     "us-east-1",
 		anonSTSClient: sts.New(sts.Options{
@@ -860,12 +860,12 @@ func TestAWSDriver_SecretsManager_APIKey_RoundTrip(t *testing.T) {
 		}),
 		smBaseEndpoint: smSrv.URL,
 	}
-	spec := &credential.CredSpec{Name: "openai", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "openai", Config: credential.NewConfig(map[string]string{
 		"mint_method":     "secrets_manager",
 		"credential_type": "api_key",
 		"secret_id":       "prod/app/openai",
 		"role_arn":        "arn:aws:iam::123456789012:role/WardenSecretsReader",
-	}}
+	})}
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:     "eyJ.warden.assertion",
 		SubjectTokenType: credential.TokenTypeJWT,
@@ -896,24 +896,24 @@ func TestAWSDriver_SecretsManager_APIKey_RoundTrip(t *testing.T) {
 
 func TestAWSAssertionAudience(t *testing.T) {
 	t.Run("federation default", func(t *testing.T) {
-		aud, ok := awsAssertionAudience(map[string]string{"auth_method": "oidc_federation"})
+		aud, ok := awsAssertionAudience(credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}))
 		require.True(t, ok)
 		assert.Equal(t, "sts.amazonaws.com", aud)
 	})
 
 	t.Run("federation explicit override", func(t *testing.T) {
-		aud, ok := awsAssertionAudience(map[string]string{"auth_method": "oidc_federation", "audience": "my-client-id"})
+		aud, ok := awsAssertionAudience(credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "audience": "my-client-id"}))
 		require.True(t, ok)
 		assert.Equal(t, "my-client-id", aud)
 	})
 
 	t.Run("static source derives nothing", func(t *testing.T) {
-		_, ok := awsAssertionAudience(map[string]string{"auth_method": "static"})
+		_, ok := awsAssertionAudience(credential.NewConfig(map[string]string{"auth_method": "static"}))
 		assert.False(t, ok)
 	})
 
 	t.Run("routed via DeriveAssertionAudience", func(t *testing.T) {
-		aud, ok := DeriveAssertionAudience(credential.SourceTypeAWS, map[string]string{"auth_method": "oidc_federation"}, map[string]string{})
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeAWS, credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}), credential.NewConfig(map[string]string{}))
 		require.True(t, ok)
 		assert.Equal(t, "sts.amazonaws.com", aud)
 	})
@@ -923,23 +923,23 @@ func TestAWSValidateConfig_AudienceOnlyFederation(t *testing.T) {
 	f := &AWSDriverFactory{}
 
 	t.Run("audience rejected on static", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method":       "static",
 			"access_key_id":     "AKIA",
 			"secret_access_key": "sk",
 			"region":            "us-east-1",
 			"audience":          "sts.amazonaws.com",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "only valid for auth_method=oidc_federation")
 	})
 
 	t.Run("audience allowed on federation", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method": "oidc_federation",
 			"region":      "us-east-1",
 			"audience":    "my-client-id",
-		})
+		}))
 		require.NoError(t, err)
 	})
 }
@@ -1021,12 +1021,12 @@ func TestAWSDriver_EndpointOverride_StaticSourceValidation(t *testing.T) {
 	defer srv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 		"region":            "us-east-1",
 		"sts_endpoint":      srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"GetCallerIdentity"}, actions)
 	assert.Equal(t, srv.URL, drv.(*AWSDriver).stsEndpoint)
@@ -1041,13 +1041,13 @@ func TestAWSDriver_EndpointOverride_AssumeRoleSource(t *testing.T) {
 	defer srv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	_, err := (&AWSDriverFactory{}).Create(map[string]string{
+	_, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 		"region":            "us-east-1",
 		"assume_role_arn":   "arn:aws:iam::123456789012:role/WardenSourceRole",
 		"sts_endpoint":      srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"AssumeRole"}, actions)
 }
@@ -1064,18 +1064,18 @@ func TestAWSDriver_EndpointOverride_SecretsManagerMint(t *testing.T) {
 	defer smSrv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key":       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 		"region":                  "us-east-1",
 		"sts_endpoint":            stsSrv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	rawData, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{
 		Name:   "sm",
-		Config: map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/app"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "secrets_manager", "secret_id": "prod/app"}),
 	})
 	require.NoError(t, err)
 	assert.Contains(t, target, "GetSecretValue")
@@ -1096,19 +1096,19 @@ func TestAWSDriver_EndpointOverride_WebIdentity(t *testing.T) {
 	defer smSrv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"auth_method":             "oidc_federation",
 		"region":                  "us-east-1",
 		"sts_endpoint":            stsSrv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
-	spec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "sm", Config: credential.NewConfig(map[string]string{
 		"mint_method": "secrets_manager",
 		"secret_id":   "prod/app",
 		"role_arn":    "arn:aws:iam::123456789012:role/App",
-	}}
+	})}
 	rawData, _, _, _, err := drv.(*AWSDriver).MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{
 		SubjectToken:     "eyJ.warden.assertion",
 		SubjectTokenType: credential.TokenTypeJWT,
@@ -1124,10 +1124,10 @@ func TestAWSDriver_EndpointOverride_WebIdentity(t *testing.T) {
 // key must leave both empty, so the SDK resolves the real regional endpoints.
 func TestAWSDriver_EndpointOverride_AbsentLeavesResolverAlone(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"auth_method": "oidc_federation",
 		"region":      "us-east-1",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	awsDrv := drv.(*AWSDriver)
 	assert.Empty(t, awsDrv.stsEndpoint)
@@ -1204,7 +1204,6 @@ func newConcurrentSTSStub(t *testing.T) *concurrentSTSStub {
 	return s
 }
 
-
 // TestAWSDriver_ConcurrentMintAndRotationCommit drives mints and rotation commits
 // against one driver instance, which is how the registry hands drivers out. The
 // assertion that matters is -race staying quiet: before the client generations
@@ -1232,16 +1231,16 @@ func TestAWSDriver_ConcurrentMintAndRotationCommit(t *testing.T) {
 		"sts_endpoint":            stub.srv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
 	}
-	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(baseConfig), log)
 	require.NoError(t, err)
 	awsDrv := drv.(*AWSDriver)
 
-	roleSpec := &credential.CredSpec{Name: "role", Config: map[string]string{
+	roleSpec := &credential.CredSpec{Name: "role", Config: credential.NewConfig(map[string]string{
 		"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::123456789012:role/App", "ttl": "1h",
-	}}
-	smSpec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+	})}
+	smSpec := &credential.CredSpec{Name: "sm", Config: credential.NewConfig(map[string]string{
 		"mint_method": "secrets_manager", "secret_id": "prod/app",
-	}}
+	})}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -1297,7 +1296,7 @@ func TestAWSDriver_SnapshotSurvivesRotationCommit(t *testing.T) {
 		"region":            "us-east-1",
 		"sts_endpoint":      stub.srv.URL,
 	}
-	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(baseConfig), log)
 	require.NoError(t, err)
 	awsDrv := drv.(*AWSDriver)
 
@@ -1321,7 +1320,7 @@ func TestAWSDriver_SnapshotSurvivesRotationCommit(t *testing.T) {
 		RoleSessionName: aws.String("held"),
 	})
 	require.NoError(t, err)
-	assert.Contains(t, lastAssumeRoleScope(t, stub),"AKIAOLDEXAMPLEKEY000",
+	assert.Contains(t, lastAssumeRoleScope(t, stub), "AKIAOLDEXAMPLEKEY000",
 		"a generation taken before the commit must keep signing with its own key")
 
 	// A fresh generation picks up the rotated key, and is not the held one.
@@ -1334,7 +1333,7 @@ func TestAWSDriver_SnapshotSurvivesRotationCommit(t *testing.T) {
 		RoleSessionName: aws.String("fresh"),
 	})
 	require.NoError(t, err)
-	assert.Contains(t, lastAssumeRoleScope(t, stub),"AKIANEWEXAMPLEKEY000")
+	assert.Contains(t, lastAssumeRoleScope(t, stub), "AKIANEWEXAMPLEKEY000")
 }
 
 // lastAssumeRoleScope returns the SigV4 scope of the most recent AssumeRole the
@@ -1371,12 +1370,12 @@ func TestAWSDriver_Create_ProbeTimesOut(t *testing.T) {
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	start := time.Now()
-	_, err := (&AWSDriverFactory{}).Create(map[string]string{
+	_, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key": "secret",
 		"region":            "us-east-1",
 		"sts_endpoint":      srv.URL,
-	}, log)
+	}), log)
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 10*time.Second, "Create must give up on the probe timeout")
 }
@@ -1404,11 +1403,11 @@ func TestAWSDriver_HTTPClientReachesClients(t *testing.T) {
 		"sts_endpoint":      srv.URL,
 	}
 
-	_, err := (&AWSDriverFactory{}).Create(cfg, log)
+	_, err := (&AWSDriverFactory{}).Create(credential.NewConfig(cfg), log)
 	require.Error(t, err, "without tls_skip_verify the untrusted certificate must be rejected")
 
 	cfg["tls_skip_verify"] = "true"
-	_, err = (&AWSDriverFactory{}).Create(cfg, log)
+	_, err = (&AWSDriverFactory{}).Create(credential.NewConfig(cfg), log)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"GetCallerIdentity"}, actions)
 }
@@ -1417,9 +1416,9 @@ func TestAWSDriver_HTTPClientReachesClients(t *testing.T) {
 // signature. The token is signed locally, so no endpoint is involved.
 func TestAWSDriver_MintViaRDSIAMToken_HappyPath(t *testing.T) {
 	driver := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{
 			"access_key_id": "AKIAIOSFODNN7EXAMPLE", "secret_access_key": "secret", "region": "us-east-1",
-		}},
+		})},
 		baseCreds: credentials.NewStaticCredentialsProvider("AKIAIOSFODNN7EXAMPLE", "secret", ""),
 		region:    "us-east-1",
 	}
@@ -1427,11 +1426,11 @@ func TestAWSDriver_MintViaRDSIAMToken_HappyPath(t *testing.T) {
 
 	rawData, metadata, ttl, leaseID, err := driver.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "db",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "rds_iam_token",
 			"db_endpoint": "mydb.abc123.us-east-1.rds.amazonaws.com",
 			"db_user":     "app",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Contains(t, rawData["auth_token"], "X-Amz-Signature=")
@@ -1559,7 +1558,7 @@ func TestAWSDriver_PrepareRotation_UsesOneConfigGeneration(t *testing.T) {
 		},
 	})
 
-	drv, err := (&AWSDriverFactory{}).Create(baseConfig, log)
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(baseConfig), log)
 	require.NoError(t, err)
 	awsDrv = drv.(*AWSDriver)
 	awsDrv.iamTestEndpoint = iamSrv.URL
@@ -1595,20 +1594,20 @@ func TestAWSDriver_FederatedSecretsManagerUsesConfiguredTransport(t *testing.T) 
 	defer smSrv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"auth_method":             "oidc_federation",
 		"region":                  "us-east-1",
 		"sts_endpoint":            stsSrv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
 		"tls_skip_verify":         "true",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
-	spec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "sm", Config: credential.NewConfig(map[string]string{
 		"mint_method": "secrets_manager",
 		"secret_id":   "prod/app",
 		"role_arn":    "arn:aws:iam::123456789012:role/App",
-	}}
+	})}
 	rawData, _, _, _, err := drv.(*AWSDriver).MintCredentialWithExchange(context.TODO(), spec, &credential.ExchangeInputs{
 		SubjectToken:     "eyJ.warden.assertion",
 		SubjectTokenType: credential.TokenTypeJWT,
@@ -1737,21 +1736,21 @@ func TestAWSDriver_MintViaSTSAssumeRole_MalformedResponse(t *testing.T) {
 			srv := malformedSTSStub(t, tt.xml)
 
 			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-			drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+			drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "secret",
 				"region":            "us-east-1",
 				"sts_endpoint":      srv.URL,
-			}, log)
+			}), log)
 			require.NoError(t, err)
 
 			_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
 				Name: "role",
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"mint_method": "sts_assume_role",
 					"role_arn":    "arn:aws:iam::123456789012:role/App",
 					"ttl":         "1h",
-				},
+				}),
 			})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.errMsg)
@@ -1776,18 +1775,18 @@ func TestAWSDriver_WebIdentity_MalformedResponse(t *testing.T) {
 			srv := malformedSTSStub(t, tt.xml)
 
 			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-			drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+			drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 				"auth_method":  "oidc_federation",
 				"region":       "us-east-1",
 				"sts_endpoint": srv.URL,
-			}, log)
+			}), log)
 			require.NoError(t, err)
 
-			spec := &credential.CredSpec{Name: "wid", Config: map[string]string{
+			spec := &credential.CredSpec{Name: "wid", Config: credential.NewConfig(map[string]string{
 				"mint_method": "sts_assume_role",
 				"role_arn":    "arn:aws:iam::123456789012:role/App",
 				"ttl":         "15m",
-			}}
+			})}
 			_, _, _, _, err = drv.(*AWSDriver).MintCredentialWithExchange(context.TODO(), spec,
 				&credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenType: credential.TokenTypeJWT})
 			require.Error(t, err)
@@ -1803,13 +1802,13 @@ func TestAWSDriver_Create_AssumeRoleSource_MalformedResponse(t *testing.T) {
 	srv := malformedSTSStub(t, noCredentialsBlock)
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	_, err := (&AWSDriverFactory{}).Create(map[string]string{
+	_, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key": "secret",
 		"region":            "us-east-1",
 		"assume_role_arn":   "arn:aws:iam::123456789012:role/WardenSourceRole",
 		"sts_endpoint":      srv.URL,
-	}, log)
+	}), log)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "returned no credentials block")
 }
@@ -1859,12 +1858,12 @@ func TestAWSDriver_PrepareRotation_MalformedCreateKeyResponse(t *testing.T) {
 	defer iamSrv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
 		"secret_access_key": "old-secret",
 		"region":            "us-east-1",
 		"sts_endpoint":      stsSrv.srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	awsDrv := drv.(*AWSDriver)
 	awsDrv.iamTestEndpoint = iamSrv.URL
@@ -1883,12 +1882,12 @@ func TestAWSDriver_PrepareRotation_MalformedCreateKeyResponse(t *testing.T) {
 func rotationDriver(t *testing.T, stsURL, iamURL, accessKeyID string) *AWSDriver {
 	t.Helper()
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     accessKeyID,
 		"secret_access_key": "old-secret",
 		"region":            "us-east-1",
 		"sts_endpoint":      stsURL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	awsDrv := drv.(*AWSDriver)
 	awsDrv.iamTestEndpoint = iamURL
@@ -2022,12 +2021,12 @@ func TestAWSDriver_CommitRotation_VerifyFailureKeepsInstanceOnOldKey(t *testing.
 	defer srv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
 		"secret_access_key": "old-secret",
 		"region":            "us-east-1",
 		"sts_endpoint":      srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	awsDrv := drv.(*AWSDriver)
 
@@ -2043,11 +2042,11 @@ func TestAWSDriver_CommitRotation_VerifyFailureKeepsInstanceOnOldKey(t *testing.
 	// The instance still mints, still on the old key.
 	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "role",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "sts_assume_role",
 			"role_arn":    "arn:aws:iam::123456789012:role/App",
 			"ttl":         "1h",
-		},
+		}),
 	})
 	require.NoError(t, err)
 
@@ -2069,12 +2068,12 @@ func TestAWSDriver_CommitRotation_SwapsAfterVerify(t *testing.T) {
 	stub := newConcurrentSTSStub(t)
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAOLDEXAMPLEKEY000",
 		"secret_access_key": "old-secret",
 		"region":            "us-east-1",
 		"sts_endpoint":      stub.srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	awsDrv := drv.(*AWSDriver)
 
@@ -2087,11 +2086,11 @@ func TestAWSDriver_CommitRotation_SwapsAfterVerify(t *testing.T) {
 
 	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "role",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "sts_assume_role",
 			"role_arn":    "arn:aws:iam::123456789012:role/App",
 			"ttl":         "1h",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Contains(t, lastAssumeRoleScope(t, stub), "AKIANEWEXAMPLEKEY000")
@@ -2198,7 +2197,7 @@ func TestAWSSessionName(t *testing.T) {
 			if tt.override != "" {
 				cfg["session_name"] = tt.override
 			}
-			got, err := awsSessionName(&credential.CredSpec{Name: tt.specName, Config: cfg})
+			got, err := awsSessionName(&credential.CredSpec{Name: tt.specName, Config: credential.NewConfig(cfg)})
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "not accepted by AWS")
@@ -2239,21 +2238,21 @@ func TestAWSDriver_MintViaSTSAssumeRole_TTLBelowSTSMinimum(t *testing.T) {
 	stub := newConcurrentSTSStub(t)
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key": "secret",
 		"region":            "us-east-1",
 		"sts_endpoint":      stub.srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "role",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "sts_assume_role",
 			"role_arn":    "arn:aws:iam::123456789012:role/App",
 			"ttl":         "5m",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least 15m0s")
@@ -2312,7 +2311,7 @@ func TestAWSValidateConfig_EndpointAndActivationDelay(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := base()
 			tt.mutate(cfg)
-			err := factory.ValidateConfig(cfg)
+			err := factory.ValidateConfig(credential.NewConfig(cfg))
 			if tt.errMsg == "" {
 				require.NoError(t, err)
 				return
@@ -2328,20 +2327,20 @@ func TestAWSValidateConfig_EndpointAndActivationDelay(t *testing.T) {
 func TestAWSValidateRotationConfig(t *testing.T) {
 	factory := &AWSDriverFactory{}
 
-	require.NoError(t, factory.ValidateRotationConfig(map[string]string{
+	require.NoError(t, factory.ValidateRotationConfig(credential.NewConfig(map[string]string{
 		"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key": "secret",
 		"region":            "us-east-1",
-	}))
+	})))
 
 	for _, key := range []string{"sts_endpoint", "secretsmanager_endpoint"} {
 		t.Run(key, func(t *testing.T) {
-			err := factory.ValidateRotationConfig(map[string]string{
+			err := factory.ValidateRotationConfig(credential.NewConfig(map[string]string{
 				"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 				"secret_access_key": "secret",
 				"region":            "us-east-1",
 				key:                 "http://127.0.0.1:4566",
-			})
+			}))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "rotation_period cannot be set")
 		})
@@ -2376,12 +2375,12 @@ func recordingSMStub(t *testing.T, secretIDs *[]string) *httptest.Server {
 func federatedSecretsManagerDriver(t *testing.T, stsURL, smURL string) *AWSDriver {
 	t.Helper()
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"auth_method":             "oidc_federation",
 		"region":                  "us-east-1",
 		"sts_endpoint":            stsURL,
 		"secretsmanager_endpoint": smURL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	return drv.(*AWSDriver)
 }
@@ -2452,11 +2451,11 @@ func TestAWSDriver_TemplatedSecretID(t *testing.T) {
 			smSrv := recordingSMStub(t, &fetched)
 
 			drv := federatedSecretsManagerDriver(t, stsSrv.srv.URL, smSrv.URL)
-			spec := &credential.CredSpec{Name: "sm", Config: map[string]string{
+			spec := &credential.CredSpec{Name: "sm", Config: credential.NewConfig(map[string]string{
 				"mint_method": "secrets_manager",
 				"secret_id":   tt.secretID,
 				"role_arn":    "arn:aws:iam::123456789012:role/App",
-			}}
+			})}
 
 			rawData, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec,
 				&credential.ExchangeInputs{
@@ -2490,21 +2489,21 @@ func TestAWSDriver_TemplatedSecretID_StaticPathFailsClosed(t *testing.T) {
 	smSrv := recordingSMStub(t, &fetched)
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key":       "secret",
 		"region":                  "us-east-1",
 		"sts_endpoint":            stsSrv.srv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	_, _, _, _, err = drv.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "sm",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "secrets_manager",
 			"secret_id":   "prod/users/{{user.sub}}/datadog",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "absent from the user's projected claims")
@@ -2516,10 +2515,10 @@ func TestAWSDriver_TemplatedSecretID_StaticPathFailsClosed(t *testing.T) {
 // carries the spec's coordinate rather than the resolved one — the same as every
 // other templated coordinate in the assertion layer.
 func TestAWSAssertionResource_TemplatedSecretIDStaysRaw(t *testing.T) {
-	got, ok := awsAssertionResource(map[string]string{
+	got, ok := awsAssertionResource(credential.NewConfig(map[string]string{
 		"mint_method": "secrets_manager",
 		"secret_id":   "prod/users/{{user.sub}}/datadog",
-	})
+	}))
 	require.True(t, ok)
 	assert.Equal(t, "aws-secretsmanager:prod/users/{{user.sub}}/datadog", got)
 }
@@ -2540,18 +2539,18 @@ func TestAWSDriver_SecretRead_Static_HappyPath(t *testing.T) {
 	defer smSrv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key":       "secret",
 		"region":                  "us-east-1",
 		"sts_endpoint":            stsSrv.srv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	rawData, metadata, ttl, leaseID, err := drv.MintCredential(context.TODO(), &credential.CredSpec{
 		Name:   "datadog-keys",
-		Config: map[string]string{"mint_method": "secret_read", "secret_id": "prod/datadog/keys"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "secret_read", "secret_id": "prod/datadog/keys"}),
 	})
 	require.NoError(t, err)
 	assert.Contains(t, target, "GetSecretValue")
@@ -2582,11 +2581,11 @@ func TestAWSDriver_SecretRead_WebIdentity_HappyPath(t *testing.T) {
 	drv := federatedSecretsManagerDriver(t, stsSrv.srv.URL, smSrv.URL)
 
 	rawData, _, ttl, leaseID, err := drv.MintCredentialWithExchange(context.TODO(),
-		&credential.CredSpec{Name: "datadog-keys", Config: map[string]string{
+		&credential.CredSpec{Name: "datadog-keys", Config: credential.NewConfig(map[string]string{
 			"mint_method": "secret_read",
 			"secret_id":   "prod/datadog/keys",
 			"role_arn":    "arn:aws:iam::123456789012:role/App",
-		}},
+		})},
 		&credential.ExchangeInputs{SubjectToken: "eyJ.warden.assertion", SubjectTokenType: credential.TokenTypeJWT})
 	require.NoError(t, err)
 	assert.Contains(t, target, "GetSecretValue")
@@ -2610,24 +2609,24 @@ func TestAWSDriver_SecretRead_SelectionKeys(t *testing.T) {
 	defer smSrv.Close()
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	drv, err := (&AWSDriverFactory{}).Create(map[string]string{
+	drv, err := (&AWSDriverFactory{}).Create(credential.NewConfig(map[string]string{
 		"access_key_id":           "AKIAIOSFODNN7EXAMPLE",
 		"secret_access_key":       "secret",
 		"region":                  "us-east-1",
 		"sts_endpoint":            stsSrv.srv.URL,
 		"secretsmanager_endpoint": smSrv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	rawData, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "sm",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":   "secret_read",
 			"secret_id":     "prod/app",
 			"version_stage": "AWSPREVIOUS",
 			"version_id":    "abc-123",
 			"json_key_map":  "k=api_key",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "AWSPREVIOUS", gotBody["VersionStage"])
@@ -2639,12 +2638,12 @@ func TestAWSDriver_SecretRead_SelectionKeys(t *testing.T) {
 func TestAWSDriverFactory_InferCredentialType_SecretRead(t *testing.T) {
 	factory := &AWSDriverFactory{}
 
-	got, err := factory.InferCredentialType(map[string]string{"mint_method": "secret_read"})
+	got, err := factory.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "secret_read"}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeKeyValue, got)
 
 	// There is no shape to select when the payload is vended verbatim.
-	_, err = factory.InferCredentialType(map[string]string{"mint_method": "secret_read", "credential_type": "api_key"})
+	_, err = factory.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "secret_read", "credential_type": "api_key"}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential_type is only valid with mint_method=secrets_manager")
 }
@@ -2659,24 +2658,24 @@ func TestAWSDriverFactory_InferCredentialType_SecretRead(t *testing.T) {
 func TestAWSDriver_SecretRead_StaticSourceRefusesExchange(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	drv := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{})},
 		logger:     log,
 	}
 
 	_, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(),
-		&credential.CredSpec{Name: "sm", Config: map[string]string{
+		&credential.CredSpec{Name: "sm", Config: credential.NewConfig(map[string]string{
 			"mint_method": "secret_read", "secret_id": "prod/app", "role_arn": "arn:aws:iam::1:role/R",
-		}},
+		})},
 		&credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenType: credential.TokenTypeJWT})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires auth_method=oidc_federation on the source")
 }
 
 func TestAWSAssertionResource_SecretRead(t *testing.T) {
-	got, ok := awsAssertionResource(map[string]string{
+	got, ok := awsAssertionResource(credential.NewConfig(map[string]string{
 		"mint_method": "secret_read",
 		"secret_id":   "prod/datadog/keys",
-	})
+	}))
 	require.True(t, ok)
 	assert.Equal(t, "aws-secretsmanager:prod/datadog/keys", got)
 }
@@ -2685,26 +2684,26 @@ func TestAWSDriver_SecretRead_UnsupportedMethodMessages(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	static := &AWSDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: map[string]string{
+		credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{
 			"access_key_id": "AKIAIOSFODNN7EXAMPLE", "secret_access_key": "secret", "region": "us-east-1",
-		}},
+		})},
 		logger: log,
 		region: "us-east-1",
 	}
 	primeClients(static)
 
 	_, _, _, _, err := static.MintCredential(context.TODO(),
-		&credential.CredSpec{Name: "x", Config: map[string]string{"mint_method": "nope"}})
+		&credential.CredSpec{Name: "x", Config: credential.NewConfig(map[string]string{"mint_method": "nope"})})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'secret_read'")
 
 	federated := &AWSDriver{
 		credSource: &credential.CredSource{Type: credential.SourceTypeAWS,
-			Config: map[string]string{"auth_method": "oidc_federation"}},
+			Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})},
 		logger: log,
 	}
 	_, _, _, _, err = federated.MintCredentialWithExchange(context.TODO(),
-		&credential.CredSpec{Name: "x", Config: map[string]string{"mint_method": "nope"}},
+		&credential.CredSpec{Name: "x", Config: credential.NewConfig(map[string]string{"mint_method": "nope"})},
 		&credential.ExchangeInputs{SubjectToken: "eyJ", SubjectTokenType: credential.TokenTypeJWT})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "secret_read")

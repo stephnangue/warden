@@ -108,7 +108,7 @@ var (
 // ValidateConfig validates the Config for a key/value credential spec. Two source
 // types produce this shape: an hvault source reading KV v2 or minting a signing
 // capability, and an aws source reading a stored secret.
-func (t *KeyValueCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *KeyValueCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	switch sourceType {
 	case credential.SourceTypeVault, credential.SourceTypeAWS:
 		// Supported
@@ -133,38 +133,38 @@ func (t *KeyValueCredType) ValidateConfig(config map[string]string, sourceType s
 // type exists to carry. What they need from the config differs entirely, so each
 // states its own requirements; the driver checks the rest against the store, where a
 // locator can actually be resolved.
-func (t *KeyValueCredType) validateVaultConfig(config map[string]string) error {
-	switch config["mint_method"] {
+func (t *KeyValueCredType) validateVaultConfig(config credential.Config) error {
+	switch config.Get("mint_method") {
 	case "kv2_read":
-		if config["kv2_mount"] == "" {
+		if config.Get("kv2_mount") == "" {
 			return fmt.Errorf("'kv2_mount' is required for mint_method=kv2_read")
 		}
-		if config["secret_path"] == "" {
+		if config.Get("secret_path") == "" {
 			return fmt.Errorf("'secret_path' is required for mint_method=kv2_read")
 		}
 	case "transit_signer":
-		if config["transit_key"] == "" {
+		if config.Get("transit_key") == "" {
 			return fmt.Errorf("'transit_key' is required for mint_method=transit_signer")
 		}
 		// Checked here as well as at mint time so the mistake surfaces when the spec is
 		// written, rather than on the first request that needs it. A spec without its
 		// own role would otherwise inherit the source's, which is the one thing this
 		// mint method must never do.
-		if config["jwt_role"] == "" {
+		if config.Get("jwt_role") == "" {
 			return fmt.Errorf("'jwt_role' is required for mint_method=transit_signer: it must name a role whose policy grants only signing with the key, and inheriting the source's role would grant more")
 		}
 	default:
-		return fmt.Errorf("'mint_method' must be 'kv2_read' or 'transit_signer' for a key_value credential on an hvault source, got: %s", config["mint_method"])
+		return fmt.Errorf("'mint_method' must be 'kv2_read' or 'transit_signer' for a key_value credential on an hvault source, got: %s", config.Get("mint_method"))
 	}
 
-	return rejectForeignLocators(config, awsKeyValueLocators, config["mint_method"])
+	return rejectForeignLocators(config, awsKeyValueLocators, config.Get("mint_method"))
 }
 
 // validateAWSConfig checks the single mint method an aws source offers for this
 // type: a stored-secret read whose payload is vended under its own key names.
-func (t *KeyValueCredType) validateAWSConfig(config map[string]string) error {
-	if config["mint_method"] != "secret_read" {
-		return fmt.Errorf("'mint_method' must be 'secret_read' for a key_value credential on an aws source, got: %s", config["mint_method"])
+func (t *KeyValueCredType) validateAWSConfig(config credential.Config) error {
+	if config.Get("mint_method") != "secret_read" {
+		return fmt.Errorf("'mint_method' must be 'secret_read' for a key_value credential on an aws source, got: %s", config.Get("mint_method"))
 	}
 	if err := rejectForeignLocators(config, vaultKeyValueLocators, "secret_read"); err != nil {
 		return err
@@ -176,7 +176,7 @@ func (t *KeyValueCredType) validateAWSConfig(config map[string]string) error {
 	// the secrets_manager method offers. This one vends the payload verbatim, so
 	// there is nothing to select. The driver refuses it too, but only when the
 	// operator omits `type` and leaves it to be inferred.
-	if config["credential_type"] != "" {
+	if config.Get("credential_type") != "" {
 		return fmt.Errorf("'credential_type' does not apply to mint_method=secret_read: the payload is vended under its own key names")
 	}
 	return validateAWSSecretsManagerSpecConfig(config, "secret_read")
@@ -188,9 +188,9 @@ var vaultKeyValuePrefixes = []string{"payload."}
 
 // rejectForeignLocators refuses config keys belonging to a different source's mint
 // methods, which would be accepted and then never read.
-func rejectForeignLocators(config map[string]string, foreign []string, mintMethod string) error {
+func rejectForeignLocators(config credential.Config, foreign []string, mintMethod string) error {
 	for _, key := range foreign {
-		if config[key] != "" {
+		if config.Get(key) != "" {
 			return fmt.Errorf("'%s' does not apply to mint_method=%s", key, mintMethod)
 		}
 	}
@@ -199,8 +199,8 @@ func rejectForeignLocators(config map[string]string, foreign []string, mintMetho
 
 // rejectForeignPrefixes is the same for a passthrough bag, whose keys are named by
 // the operator and so cannot be enumerated.
-func rejectForeignPrefixes(config map[string]string, prefixes []string, mintMethod string) error {
-	for key := range config {
+func rejectForeignPrefixes(config credential.Config, prefixes []string, mintMethod string) error {
+	for key := range config.All() {
 		for _, prefix := range prefixes {
 			if strings.HasPrefix(key, prefix) {
 				return fmt.Errorf("'%s' does not apply to mint_method=%s", key, mintMethod)

@@ -93,7 +93,7 @@ func (t *GitLabAccessTokenCredType) ConfigSchema() []*credential.FieldValidator 
 }
 
 // ValidateConfig validates the Config for a GitLab access token credential spec
-func (t *GitLabAccessTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *GitLabAccessTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	if sourceType != credential.SourceTypeGitLab {
 		return fmt.Errorf("gitlab_access_token credentials require a gitlab source, got: %s", sourceType)
@@ -106,14 +106,14 @@ func (t *GitLabAccessTokenCredType) ValidateConfig(config map[string]string, sou
 	}
 
 	// Step 3: Conditional validation based on mint_method
-	mintMethod := config["mint_method"]
+	mintMethod := config.Get("mint_method")
 	switch mintMethod {
 	case "project_access_token":
-		if config["project_id"] == "" {
+		if config.Get("project_id") == "" {
 			return fmt.Errorf("'project_id' is required when mint_method is project_access_token")
 		}
 	case "group_access_token":
-		if config["group_id"] == "" {
+		if config.Get("group_id") == "" {
 			return fmt.Errorf("'group_id' is required when mint_method is group_access_token")
 		}
 	}

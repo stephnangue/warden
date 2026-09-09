@@ -144,7 +144,7 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 			errMsg:     "'role_arn' is required for keyless secret_read",
 		},
 		{
-			name:       "keyless aws secret_read with role_arn",
+			name: "keyless aws secret_read with role_arn",
 			config: map[string]string{
 				"mint_method": "secret_read", "secret_id": "prod/app",
 				"subject_token_source": "warden_identity", "role_arn": "arn:aws:iam::1:role/R",
@@ -236,7 +236,7 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, tt.sourceType)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), tt.sourceType)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errMsg != "" {

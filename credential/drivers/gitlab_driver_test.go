@@ -20,11 +20,11 @@ func newTestGitLabDriver(patToken string) *GitLabDriver {
 	return &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        "https://gitlab.example.com",
 				"auth_method":           "pat",
 				"personal_access_token": patToken,
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -49,102 +49,102 @@ func TestGitLabDriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name: "valid PAT config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":        "https://gitlab.example.com",
 				"auth_method":           "pat",
 				"personal_access_token": "glpat-xxxxx",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid PAT config with default auth_method",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":        "https://gitlab.example.com",
 				"personal_access_token": "glpat-xxxxx",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid OAuth2 config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":     "https://gitlab.example.com",
 				"auth_method":        "oauth2",
 				"application_id":     "app-123",
 				"application_secret": "secret-456",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid HTTP address",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":        "http://gitlab.local",
 				"personal_access_token": "glpat-xxxxx",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name:    "missing gitlab_address",
-			config:  map[string]string{},
+			config:  credential.NewConfig(map[string]string{}),
 			wantErr: true,
 			errMsg:  "gitlab_address",
 		},
 		{
 			name: "invalid gitlab_address scheme",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "ftp://gitlab.example.com",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must use http:// or https://",
 		},
 		{
 			name: "gitlab_address missing host",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must include a host",
 		},
 		{
 			name: "PAT mode missing token",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "pat",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "personal_access_token",
 		},
 		{
 			name: "OAuth2 mode missing application_id",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":     "https://gitlab.example.com",
 				"auth_method":        "oauth2",
 				"application_secret": "secret-456",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "application_id",
 		},
 		{
 			name: "OAuth2 mode missing application_secret",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "oauth2",
 				"application_id": "app-123",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "application_secret",
 		},
 		{
 			name: "unsupported auth_method",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "ldap",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must be one of",
 		},
@@ -200,9 +200,9 @@ func TestGitLabDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeGitLabAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid_method",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -215,7 +215,7 @@ func TestGitLabDriver_MintCredential_MissingMintMethod(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
 		Type:   credential.TypeGitLabAccessToken,
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -245,7 +245,7 @@ func TestGitLabDriver_SupportsRotation(t *testing.T) {
 			driver := &GitLabDriver{
 				credSource: &credential.CredSource{
 					Type:   credential.SourceTypeGitLab,
-					Config: config,
+					Config: credential.NewConfig(config),
 				},
 				httpClient: &http.Client{Timeout: 30 * time.Second},
 			}
@@ -280,11 +280,11 @@ func TestGitLabDriver_MintProjectAccessToken(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -292,14 +292,14 @@ func TestGitLabDriver_MintProjectAccessToken(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeGitLabAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":  "project_access_token",
 			"project_id":   "42",
 			"token_name":   "warden-test",
 			"scopes":       "api,read_api",
 			"access_level": "30",
 			"ttl":          "24h",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
@@ -329,11 +329,11 @@ func TestGitLabDriver_MintGroupAccessToken(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -341,13 +341,13 @@ func TestGitLabDriver_MintGroupAccessToken(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeGitLabAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":  "group_access_token",
 			"group_id":     "mygroup",
 			"token_name":   "warden-test",
 			"scopes":       "api",
 			"access_level": "40",
-		},
+		}),
 	}
 
 	rawData, _, _, leaseID, err := driver.MintCredential(context.Background(), spec)
@@ -368,11 +368,11 @@ func TestGitLabDriver_Revoke_ProjectAccessToken(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -392,11 +392,11 @@ func TestGitLabDriver_Revoke_GroupAccessToken(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -418,11 +418,11 @@ func TestGitLabDriver_MintProjectAccessToken_EmptyToken(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -430,13 +430,13 @@ func TestGitLabDriver_MintProjectAccessToken_EmptyToken(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeGitLabAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":  "project_access_token",
 			"project_id":   "42",
 			"token_name":   "warden-test",
 			"scopes":       "api",
 			"access_level": "30",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -454,11 +454,11 @@ func TestGitLabDriver_MintProjectAccessToken_APIError(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -466,13 +466,13 @@ func TestGitLabDriver_MintProjectAccessToken_APIError(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeGitLabAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":  "project_access_token",
 			"project_id":   "42",
 			"token_name":   "warden-test",
 			"scopes":       "api",
 			"access_level": "30",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -484,11 +484,11 @@ func TestGitLabDriver_ConfigAccessors(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        "https://gitlab.example.com/",
 				"auth_method":           "pat",
 				"personal_access_token": "glpat-test",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -503,7 +503,7 @@ func TestGitLabDriver_ConfigAccessors_Defaults(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitLab,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -536,11 +536,11 @@ func TestGitLabDriver_PrepareRotation_PAT_FastPath(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "glpat-old-token",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -555,7 +555,7 @@ func TestGitLabDriver_PrepareRotation_PAT_FastPath(t *testing.T) {
 	assert.Equal(t, 2, callCount)
 
 	// Eager update: driver config should already reflect the new token
-	assert.Equal(t, "glpat-new-rotated-token", driver.credSource.Config["personal_access_token"],
+	assert.Equal(t, "glpat-new-rotated-token", driver.credSource.Config.Get("personal_access_token"),
 		"driver config must be eagerly updated since old token is already revoked")
 }
 
@@ -578,12 +578,12 @@ func TestGitLabDriver_PrepareRotation_OAuth2_FastPath(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":     server.URL,
 				"auth_method":        "oauth2",
 				"application_id":     "app-123",
 				"application_secret": "old-secret",
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: server.Client(),
@@ -605,7 +605,7 @@ func TestGitLabDriver_PrepareRotation_OAuth2_FastPath(t *testing.T) {
 	assert.Equal(t, 1, callCount)
 
 	// Eager update: driver config and OAuth2 cache should already be updated
-	assert.Equal(t, "new-rotated-secret", driver.credSource.Config["application_secret"],
+	assert.Equal(t, "new-rotated-secret", driver.credSource.Config.Get("application_secret"),
 		"driver config must be eagerly updated since old secret is already invalidated")
 	// Token cache generation should be invalidated (internal state, can't easily test directly)
 }
@@ -774,23 +774,23 @@ func TestGitLabDriver_MintHonoursServerExpiry(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":        server.URL,
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-spec", Type: credential.TypeGitLabAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "project_access_token", "project_id": "42",
 			"token_name": "warden-test", "scopes": "api", "access_level": "30",
 			// Long enough that the driver would have asked for a much later date.
 			"ttl": "720h",
-		},
+		}),
 	}
 
 	rawData, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
@@ -806,44 +806,44 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name: "chained PAT source needs no inline token",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "pat",
 				"secret_spec":    "gitlab-pat-from-vault",
 				"secret_field":   "pat",
-			},
+			}),
 		},
 		{
 			name: "chained source accepts a cache ttl",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":   "https://gitlab.example.com",
 				"secret_spec":      "gitlab-pat-from-vault",
 				"secret_cache_ttl": "30m",
-			},
+			}),
 		},
 		{
 			name: "non-chained source still requires the inline token",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "pat",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "personal_access_token",
 		},
 		{
 			name: "chaining plus an inline token leaves a secret at rest",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":        "https://gitlab.example.com",
 				"auth_method":           "pat",
 				"secret_spec":           "gitlab-pat-from-vault",
 				"personal_access_token": "glpat-still-here",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must be omitted when secret_spec is set",
 		},
@@ -851,21 +851,21 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			// A chained oauth2 source holds neither half: the referenced spec
 			// supplies the pair.
 			name: "oauth2 chained holding neither half",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "oauth2",
 				"secret_spec":    "gitlab-app-secret",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "oauth2 chained but secret still inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address":     "https://gitlab.example.com",
 				"auth_method":        "oauth2",
 				"application_secret": "secret-456",
 				"secret_spec":        "gitlab-app-secret",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "application_secret must be omitted when secret_spec is set",
 		},
@@ -873,12 +873,12 @@ func TestGitLabDriverFactory_ValidateConfig_Chaining(t *testing.T) {
 			// The id follows the secret out of config. Keeping it would name one
 			// application while presenting a secret fetched for another.
 			name: "oauth2 chained but id still inline",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "oauth2",
 				"application_id": "app-123",
 				"secret_spec":    "gitlab-app-secret",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "application_id must be omitted when secret_spec is set",
 		},
@@ -909,12 +909,12 @@ func TestGitLabDriverFactory_Create_ChainedSkipsVerifyAuth(t *testing.T) {
 
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 	factory := &GitLabDriverFactory{}
-	driver, err := factory.Create(map[string]string{
+	driver, err := factory.Create(credential.NewConfig(map[string]string{
 		"gitlab_address":  server.URL,
 		"auth_method":     "pat",
 		"secret_spec":     "gitlab-pat-from-vault",
 		"tls_skip_verify": "true",
-	}, log)
+	}), log)
 
 	require.NoError(t, err)
 	require.NotNil(t, driver)
@@ -927,30 +927,30 @@ func TestGitLabDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
 	// token the source does not have.
 	tests := []struct {
 		name         string
-		sourceConfig map[string]string
-		specConfig   map[string]string
+		sourceConfig credential.Config
+		specConfig   credential.Config
 	}{
 		{
 			name: "secret_spec on the source",
-			sourceConfig: map[string]string{
+			sourceConfig: credential.NewConfig(map[string]string{
 				"gitlab_address": "https://gitlab.example.com",
 				"auth_method":    "pat",
 				"secret_spec":    "gitlab-pat-from-vault",
-			},
-			specConfig: map[string]string{"mint_method": "project_access_token", "project_id": "42"},
+			}),
+			specConfig: credential.NewConfig(map[string]string{"mint_method": "project_access_token", "project_id": "42"}),
 		},
 		{
 			name: "secret_spec on the spec",
-			sourceConfig: map[string]string{
+			sourceConfig: credential.NewConfig(map[string]string{
 				"gitlab_address":        "https://gitlab.example.com",
 				"auth_method":           "pat",
 				"personal_access_token": "test-pat",
-			},
-			specConfig: map[string]string{
+			}),
+			specConfig: credential.NewConfig(map[string]string{
 				"mint_method": "project_access_token",
 				"project_id":  "42",
 				"secret_spec": "gitlab-pat-from-vault",
-			},
+			}),
 		},
 	}
 
@@ -975,11 +975,11 @@ func newChainedGitLabDriver(server *httptest.Server) *GitLabDriver {
 	return &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address": server.URL,
 				"auth_method":    "pat",
 				"secret_spec":    "gitlab-pat-from-vault",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -989,14 +989,14 @@ func projectTokenSpec() *credential.CredSpec {
 	return &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeGitLabAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":  "project_access_token",
 			"project_id":   "42",
 			"token_name":   "warden-test",
 			"scopes":       "api",
 			"access_level": "30",
 			"ttl":          "24h",
-		},
+		}),
 	}
 }
 
@@ -1097,7 +1097,7 @@ func TestGitLabDriver_MintFromSecret_Errors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			driver := newChainedGitLabDriver(server)
 			if tt.authMethod != "" {
-				driver.credSource.Config["auth_method"] = tt.authMethod
+				driver.credSource.Config = driver.credSource.Config.With("auth_method", tt.authMethod)
 			}
 
 			_, _, _, _, err := driver.MintFromSecret(context.Background(), projectTokenSpec(), tt.material)
@@ -1150,11 +1150,11 @@ func TestGitLabDriver_SupportsRotation_ChainedSourceOwnsNothing(t *testing.T) {
 			driver := &GitLabDriver{
 				credSource: &credential.CredSource{
 					Type: credential.SourceTypeGitLab,
-					Config: map[string]string{
+					Config: credential.NewConfig(map[string]string{
 						"gitlab_address": "https://gitlab.example.com",
 						"auth_method":    authMethod,
 						"secret_spec":    "gitlab-pat-from-vault",
-					},
+					}),
 				},
 				httpClient: &http.Client{Timeout: 30 * time.Second},
 			}
@@ -1260,11 +1260,11 @@ func newChainedOAuth2GitLabDriver(server *httptest.Server) *GitLabDriver {
 	return &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address": server.URL,
 				"auth_method":    "oauth2",
 				"secret_spec":    "gitlab-app-secret",
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: server.Client(),
@@ -1355,12 +1355,12 @@ func TestGitLabDriver_OAuth2InlineSecretRejectionIsNotRetryable(t *testing.T) {
 	driver := &GitLabDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeGitLab,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"gitlab_address":     server.URL,
 				"auth_method":        "oauth2",
 				"application_id":     "app-123",
 				"application_secret": "stale-secret",
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: server.Client(),

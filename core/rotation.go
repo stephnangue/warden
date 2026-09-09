@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"math/rand"
 	"strings"
 	"sync"
@@ -735,17 +734,17 @@ func (m *RotationManager) prepareSource(entry *RotationEntry) (staged *stagedRot
 // material that never reached storage, which a restart silently reverts.
 //
 // Publishing a new object instead makes the persist the only thing that changes what
-// readers see. The map is copied too, because the staged map on a rotation entry
-// outlives this call and is serialized with the entry.
+// readers see. NewConfig copies the map as well, which matters because the staged
+// map on a rotation entry outlives this call and is serialized with the entry.
 func sourceWithConfig(source *credential.CredSource, config map[string]string) *credential.CredSource {
 	updated := *source
-	updated.Config = maps.Clone(config)
+	updated.Config = credential.NewConfig(config)
 	return &updated
 }
 
 func specWithConfig(spec *credential.CredSpec, config map[string]string) *credential.CredSpec {
 	updated := *spec
-	updated.Config = maps.Clone(config)
+	updated.Config = credential.NewConfig(config)
 	return &updated
 }
 

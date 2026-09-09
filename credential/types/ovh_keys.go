@@ -35,7 +35,7 @@ func (t *OVHKeysCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for an OVH credential spec
-func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *OVHKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	if sourceType != credential.SourceTypeOVH {
 		return fmt.Errorf("ovh_keys credentials require an ovh source, got: %s", sourceType)
 	}
@@ -45,13 +45,13 @@ func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType st
 		return err
 	}
 
-	mintMethod := config["mint_method"]
+	mintMethod := config.Get("mint_method")
 	switch mintMethod {
 	case "oauth2_token":
 		// The grant runs with the source's service account, so a reference parked
 		// here would describe a secret this spec never spends — and would slip past
 		// the source-level checks that gate which sources may chain at all.
-		if config[credential.ConfigSecretSpec] != "" {
+		if config.Get(credential.ConfigSecretSpec) != "" {
 			return fmt.Errorf("for an oauth2_token spec, '%s' belongs on the source: the client credential authenticates the source's own OAuth2 calls, not this spec", credential.ConfigSecretSpec)
 		}
 
@@ -59,20 +59,20 @@ func (t *OVHKeysCredType) ValidateConfig(config map[string]string, sourceType st
 		// The pair is the credential itself, so the spec must name where it comes
 		// from. Nothing mints it: this method exists precisely so that no key pair
 		// is created — and therefore left behind — on OVH's side.
-		if config[credential.ConfigSecretSpec] == "" {
+		if config.Get(credential.ConfigSecretSpec) == "" {
 			return fmt.Errorf("'access_keys' requires '%s' naming a spec that yields its access_key and secret_key", credential.ConfigSecretSpec)
 		}
 		// Refuse an inline pair rather than quietly preferring one over the other:
 		// a key pair sitting in spec config is the standing secret this method
 		// exists to avoid, and nothing here would ever rotate it.
 		for _, key := range []string{"access_key", "secret_key"} {
-			if config[key] != "" {
+			if config.Get(key) != "" {
 				return fmt.Errorf("'%s' must be omitted for access_keys; the referenced spec supplies the whole pair", key)
 			}
 		}
 		// secret_field selects a single secret, and a pair is not one. Both halves
 		// are read by name, so a field here could only be misleading.
-		if config[credential.ConfigSecretField] != "" {
+		if config.Get(credential.ConfigSecretField) != "" {
 			return fmt.Errorf("'%s' does not apply to access_keys: the referenced credential must hold both 'access_key' and 'secret_key', read by name", credential.ConfigSecretField)
 		}
 

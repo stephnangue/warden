@@ -230,7 +230,7 @@ type AzureDriver struct {
 // sourceConfig returns the current config map. Rotation swaps in a whole new map
 // rather than writing into the live one, so the result is a stable snapshot and
 // callers need not hold the lock while reading it.
-func (d *AzureDriver) sourceConfig() map[string]string {
+func (d *AzureDriver) sourceConfig() credential.Config {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
 	return d.credSource.Config
@@ -278,7 +278,7 @@ func (f *AzureDriverFactory) Type() string {
 }
 
 // ValidateConfig validates Azure driver configuration using declarative schema
-func (f *AzureDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("auth_method").
 			OneOf(azureAuthMethodStatic, azureAuthMethodOIDCFederation).
@@ -348,8 +348,8 @@ func (f *AzureDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
-func (f *AzureDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
-	mintMethod := specConfig["mint_method"]
+func (f *AzureDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
+	mintMethod := specConfig.Get("mint_method")
 	switch mintMethod {
 	case "azure_db_iam_token":
 		return credential.TypeDBAuthToken, nil
@@ -361,7 +361,7 @@ func (f *AzureDriverFactory) InferCredentialType(specConfig map[string]string) (
 }
 
 // Create instantiates a new AzureDriver
-func (f *AzureDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &AzureDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAzure,
@@ -451,7 +451,7 @@ const defaultAzureFederationAudience = "api://AzureADTokenExchange"
 // azureAssertionAudience derives the warden_identity assertion audience for an Azure
 // federation source: the source's explicit `audience`, else the conventional
 // default. Only a keyless (oidc_federation) source federates.
-func azureAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func azureAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", azureAuthMethodStatic) != azureAuthMethodOIDCFederation {
 		return "", false
 	}
@@ -463,7 +463,7 @@ func azureAssertionAudience(sourceCfg map[string]string) (string, bool) {
 // spec config only. Only bearer_token is federated; the resource is the target
 // API (resource_uri), which is coarser than a single secret — it names the API,
 // not one item behind it. Mirrors the resource_uri read in mintBearerToken.
-func azureAssertionResource(specCfg map[string]string) (string, bool) {
+func azureAssertionResource(specCfg credential.Config) (string, bool) {
 	if credential.GetString(specCfg, "mint_method", "bearer_token") != "bearer_token" {
 		return "", false
 	}
@@ -663,8 +663,8 @@ func (d *AzureDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	d.removeOrphanedPasswordCredentials(ctx, graphToken, d.getClientID(), oldSecretID, newSecretID)
 
 	// Build new config
-	newConfig := make(map[string]string, len(current))
-	for k, v := range current {
+	newConfig := make(map[string]string, current.Len())
+	for k, v := range current.All() {
 		newConfig[k] = v
 	}
 	newConfig["client_secret"] = newSecret
@@ -696,7 +696,7 @@ func (d *AzureDriver) CommitRotation(ctx context.Context, newConfig map[string]s
 	// Update config (single source of truth for credentials). Under configMu, not
 	// tokenMu: the readers are mints that never take tokenMu at all.
 	d.configMu.Lock()
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.configMu.Unlock()
 
 	// Bump generation to invalidate all cached tokens; old-generation entries
@@ -788,7 +788,7 @@ func (d *AzureDriver) PrepareSpecRotation(ctx context.Context, spec *credential.
 
 	// Build new spec config
 	newConfig := make(map[string]string)
-	for k, v := range spec.Config {
+	for k, v := range spec.Config.All() {
 		newConfig[k] = v
 	}
 	newConfig["client_secret"] = newSecret

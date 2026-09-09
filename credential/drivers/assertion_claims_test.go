@@ -119,7 +119,7 @@ func TestDeriveAssertionAudience(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			aud, ok := DeriveAssertionAudience(tc.sourceType, tc.sourceCfg, map[string]string{})
+			aud, ok := DeriveAssertionAudience(tc.sourceType, credential.NewConfig(tc.sourceCfg), credential.NewConfig(map[string]string{}))
 			assert.Equal(t, tc.wantOK, ok)
 			if tc.wantOK {
 				assert.Equal(t, tc.wantAud, aud)
@@ -321,7 +321,7 @@ func TestDeriveAssertionResource(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := DeriveAssertionResource(tc.sourceType, tc.sourceCfg, tc.specCfg)
+			got, ok := DeriveAssertionResource(tc.sourceType, credential.NewConfig(tc.sourceCfg), credential.NewConfig(tc.specCfg))
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v (value %q)", ok, tc.wantOK, got)
 			}

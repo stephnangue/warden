@@ -218,9 +218,9 @@ func (fv *FieldValidator) Validate(value string) error {
 }
 
 // ValidateSchema validates a config map against a schema defined by field validators
-func ValidateSchema(config map[string]string, validators ...*FieldValidator) error {
+func ValidateSchema(config Config, validators ...*FieldValidator) error {
 	for _, fv := range validators {
-		value, exists := config[fv.fieldName]
+		value, exists := config.Lookup(fv.fieldName)
 
 		// Check required
 		if fv.required && (!exists || value == "") {

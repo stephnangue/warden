@@ -60,7 +60,7 @@ func (t *IBMCloudKeysCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for an IBM Cloud credential spec
-func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *IBMCloudKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	switch sourceType {
 	case credential.SourceTypeVault, credential.SourceTypeIBM:
 		// Supported
@@ -75,17 +75,17 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 
 	switch sourceType {
 	case credential.SourceTypeVault:
-		if config["mint_method"] != "dynamic_ibm" {
-			return fmt.Errorf("'mint_method' must be 'dynamic_ibm' for vault source, got: %s", config["mint_method"])
+		if config.Get("mint_method") != "dynamic_ibm" {
+			return fmt.Errorf("'mint_method' must be 'dynamic_ibm' for vault source, got: %s", config.Get("mint_method"))
 		}
-		if config["ibm_mount"] == "" {
+		if config.Get("ibm_mount") == "" {
 			return fmt.Errorf("'ibm_mount' is required when mint_method is dynamic_ibm")
 		}
-		if config["role_name"] == "" {
+		if config.Get("role_name") == "" {
 			return fmt.Errorf("'role_name' is required when mint_method is dynamic_ibm")
 		}
 	case credential.SourceTypeIBM:
-		switch config["mint_method"] {
+		switch config.Get("mint_method") {
 		case "", "iam_token":
 			// Bearer-only: the IAM token minted from the source, which is the
 			// gateway's API mode. iam_token is accepted explicitly as well as by
@@ -96,7 +96,7 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 			// An inline COS pair was only ever consumed by iam_with_cos, and that
 			// method existed to serve a standing secret out of spec config.
 			for _, key := range []string{"access_key_id", "secret_access_key"} {
-				if config[key] != "" {
+				if config.Get(key) != "" {
 					return fmt.Errorf("'%s' must be omitted; a COS pair is served by an access_keys spec from its %s, never stored inline",
 						key, credential.ConfigSecretSpec)
 				}
@@ -104,7 +104,7 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 			// The grant runs with the source's api key, so a reference here would
 			// describe a secret this spec never spends. On an ibm source a
 			// spec-level reference means access_keys and nothing else.
-			if config[credential.ConfigSecretSpec] != "" {
+			if config.Get(credential.ConfigSecretSpec) != "" {
 				return fmt.Errorf("for a bearer-only spec, '%s' belongs on the source: the chained api key authenticates the source's own IAM token grant; a spec-level reference is for access_keys", credential.ConfigSecretSpec)
 			}
 
@@ -112,25 +112,25 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 			// The pair is the credential itself, so the spec must name where it
 			// comes from. Nothing mints it: this method exists precisely so that
 			// no key pair is stored here or created at IBM.
-			if config[credential.ConfigSecretSpec] == "" {
+			if config.Get(credential.ConfigSecretSpec) == "" {
 				return fmt.Errorf("'access_keys' requires '%s' naming a spec that yields its access_key_id and secret_access_key", credential.ConfigSecretSpec)
 			}
 			// Refuse an inline pair rather than quietly preferring one over the
 			// other: a pair sitting in spec config is the standing secret this
 			// method exists to avoid, and nothing here would ever rotate it.
 			for _, key := range []string{"access_key_id", "secret_access_key"} {
-				if config[key] != "" {
+				if config.Get(key) != "" {
 					return fmt.Errorf("'%s' must be omitted for access_keys; the referenced spec supplies the whole pair", key)
 				}
 			}
 			// secret_field selects a single secret, and a pair is not one. Both
 			// halves are read by name, so a field here could only mislead.
-			if config[credential.ConfigSecretField] != "" {
+			if config.Get(credential.ConfigSecretField) != "" {
 				return fmt.Errorf("'%s' does not apply to access_keys: the referenced credential must hold both 'access_key_id' and 'secret_access_key', read by name", credential.ConfigSecretField)
 			}
 
 		default:
-			return fmt.Errorf("'mint_method' must be 'iam_token' or 'access_keys' for ibm source (iam_token may be omitted), got: %s", config["mint_method"])
+			return fmt.Errorf("'mint_method' must be 'iam_token' or 'access_keys' for ibm source (iam_token may be omitted), got: %s", config.Get("mint_method"))
 		}
 	}
 

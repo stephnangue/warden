@@ -23,81 +23,81 @@ func TestGCPAccessTokenCredType_ValidateConfig(t *testing.T) {
 	ct := NewGCPAccessTokenCredType()
 
 	t.Run("valid access_token method", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "access_token",
 			"scopes":      "https://www.googleapis.com/auth/cloud-platform",
-		}, credential.SourceTypeGCP)
+		}), credential.SourceTypeGCP)
 		require.NoError(t, err)
 	})
 
 	t.Run("default mint_method is access_token", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{}, credential.SourceTypeGCP)
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{}), credential.SourceTypeGCP)
 		require.NoError(t, err)
 	})
 
 	t.Run("valid impersonated_access_token method", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method":            "impersonated_access_token",
 			"target_service_account": "target@project.iam.gserviceaccount.com",
-		}, credential.SourceTypeGCP)
+		}), credential.SourceTypeGCP)
 		require.NoError(t, err)
 	})
 
 	t.Run("impersonated_access_token missing target", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "impersonated_access_token",
-		}, credential.SourceTypeGCP)
+		}), credential.SourceTypeGCP)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "target_service_account")
 	})
 
 	t.Run("unsupported mint_method", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "invalid_method",
-		}, credential.SourceTypeGCP)
+		}), credential.SourceTypeGCP)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must be one of:")
 	})
 
 	t.Run("unsupported source type", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{}, "azure")
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{}), "azure")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "require a gcp or vault source")
 	})
 
 	t.Run("vault source - valid dynamic_gcp config", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_gcp",
 			"gcp_mount":   "gcp",
 			"role_name":   "my-roleset",
-		}, credential.SourceTypeVault)
+		}), credential.SourceTypeVault)
 		require.NoError(t, err)
 	})
 
 	t.Run("vault source - wrong mint_method", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "access_token",
 			"gcp_mount":   "gcp",
 			"role_name":   "my-roleset",
-		}, credential.SourceTypeVault)
+		}), credential.SourceTypeVault)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "'mint_method' must be 'dynamic_gcp'")
 	})
 
 	t.Run("vault source - missing gcp_mount", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_gcp",
 			"role_name":   "my-roleset",
-		}, credential.SourceTypeVault)
+		}), credential.SourceTypeVault)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "'gcp_mount' is required")
 	})
 
 	t.Run("vault source - missing role_name", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_gcp",
 			"gcp_mount":   "gcp",
-		}, credential.SourceTypeVault)
+		}), credential.SourceTypeVault)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "'role_name' is required")
 	})

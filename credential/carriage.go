@@ -44,7 +44,7 @@ type AdjunctCarrier interface {
 // prevent, one layer up.
 //
 // Returns nothing for a type that does not carry adjuncts.
-func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig map[string]string, sourceType string) (fields []string, carriable bool) {
+func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig Config, sourceType string) (fields []string, carriable bool) {
 	carrier, ok := credType.(AdjunctCarrier)
 	if !ok {
 		return nil, true
@@ -56,7 +56,7 @@ func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig map[s
 
 	declared := make(map[string]bool)
 	if carriable {
-		for _, name := range ParseAdjunctNames(sourceConfig["credential_fields"]) {
+		for _, name := range ParseAdjunctNames(sourceConfig.Get("credential_fields")) {
 			declared[name] = true
 		}
 	}
@@ -64,7 +64,7 @@ func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig map[s
 	mintParams := mintParameterFields[sourceType]
 
 	for _, field := range carrier.KnownAdjunctFields() {
-		if specConfig[field] == "" || declared[field] {
+		if specConfig.Get(field) == "" || declared[field] {
 			continue
 		}
 		// The same name means different things to different sources, so whether it

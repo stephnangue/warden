@@ -111,7 +111,7 @@ func (t *AWSIAMAccessKeysCredType) ConfigSchema() []*credential.FieldValidator {
 // - "local": only access_key_id and secret_access_key are allowed
 // - "vault": requires aws_mount/role_name (dynamic) or kv2_mount/secret_path (static KV)
 // - "aws": requires sts_assume_role (role_arn) or secrets_manager (secret_id)
-func (t *AWSIAMAccessKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *AWSIAMAccessKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
 	case credential.SourceTypeLocal, credential.SourceTypeVault, credential.SourceTypeAWS:
@@ -141,22 +141,22 @@ func (t *AWSIAMAccessKeysCredType) ValidateConfig(config map[string]string, sour
 
 // validateLocalConfig validates config for local source
 // Only access_key_id and secret_access_key are required
-func (t *AWSIAMAccessKeysCredType) validateLocalConfig(config map[string]string) error {
+func (t *AWSIAMAccessKeysCredType) validateLocalConfig(config credential.Config) error {
 	// Check for invalid fields
 	allowedFields := map[string]bool{
 		"access_key_id":     true,
 		"secret_access_key": true,
 	}
-	for key := range config {
+	for key := range config.All() {
 		if !allowedFields[key] {
 			return fmt.Errorf("invalid config field '%s' for local source; only access_key_id and secret_access_key are allowed", key)
 		}
 	}
 
-	if config["access_key_id"] == "" {
+	if config.Get("access_key_id") == "" {
 		return fmt.Errorf("'access_key_id' is required for local source")
 	}
-	if config["secret_access_key"] == "" {
+	if config.Get("secret_access_key") == "" {
 		return fmt.Errorf("'secret_access_key' is required for local source")
 	}
 	return nil
@@ -164,25 +164,25 @@ func (t *AWSIAMAccessKeysCredType) validateLocalConfig(config map[string]string)
 
 // validateVaultConfig validates config for Vault source
 // Requires mint_method to route to the correct minting strategy
-func (t *AWSIAMAccessKeysCredType) validateVaultConfig(config map[string]string) error {
-	mintMethod := config["mint_method"]
+func (t *AWSIAMAccessKeysCredType) validateVaultConfig(config credential.Config) error {
+	mintMethod := config.Get("mint_method")
 	if mintMethod == "" {
 		return fmt.Errorf("'mint_method' is required for vault source")
 	}
 
 	switch mintMethod {
 	case "static_aws":
-		if config["kv2_mount"] == "" {
+		if config.Get("kv2_mount") == "" {
 			return fmt.Errorf("'kv2_mount' is required when mint_method is static_aws")
 		}
-		if config["secret_path"] == "" {
+		if config.Get("secret_path") == "" {
 			return fmt.Errorf("'secret_path' is required when mint_method is static_aws")
 		}
 	case "dynamic_aws":
-		if config["aws_mount"] == "" {
+		if config.Get("aws_mount") == "" {
 			return fmt.Errorf("'aws_mount' is required when mint_method is dynamic_aws")
 		}
-		if config["role_name"] == "" {
+		if config.Get("role_name") == "" {
 			return fmt.Errorf("'role_name' is required when mint_method is dynamic_aws")
 		}
 	}
@@ -192,15 +192,15 @@ func (t *AWSIAMAccessKeysCredType) validateVaultConfig(config map[string]string)
 
 // validateAWSConfig validates config for AWS source
 // Requires mint_method to route between STS AssumeRole and Secrets Manager
-func (t *AWSIAMAccessKeysCredType) validateAWSConfig(config map[string]string) error {
-	mintMethod := config["mint_method"]
+func (t *AWSIAMAccessKeysCredType) validateAWSConfig(config credential.Config) error {
+	mintMethod := config.Get("mint_method")
 	if mintMethod == "" {
 		return fmt.Errorf("'mint_method' is required for aws source")
 	}
 
 	switch mintMethod {
 	case "sts_assume_role":
-		if config["role_arn"] == "" {
+		if config.Get("role_arn") == "" {
 			return fmt.Errorf("'role_arn' is required when mint_method is sts_assume_role")
 		}
 	case "secrets_manager":
@@ -217,8 +217,8 @@ func (t *AWSIAMAccessKeysCredType) validateAWSConfig(config map[string]string) e
 //
 // mintMethod names the caller's method in the errors: more than one reads a stored
 // secret, and an error naming the wrong one sends the operator to the wrong key.
-func validateAWSSecretsManagerSpecConfig(config map[string]string, mintMethod string) error {
-	if config["secret_id"] == "" {
+func validateAWSSecretsManagerSpecConfig(config credential.Config, mintMethod string) error {
+	if config.Get("secret_id") == "" {
 		return fmt.Errorf("'secret_id' is required when mint_method is %s", mintMethod)
 	}
 	// The keyless (federation) variant assumes a role via web identity before
@@ -226,7 +226,7 @@ func validateAWSSecretsManagerSpecConfig(config map[string]string, mintMethod st
 	// exchange via subject_token_source; static-auth secrets specs do not and are
 	// unaffected. (The auth_method lives on the source, which this validator does
 	// not see, so the source/exchange pairing is enforced at mint time.)
-	if credential.SpecRequestsExchange(config) && config["role_arn"] == "" {
+	if credential.SpecRequestsExchange(config) && config.Get("role_arn") == "" {
 		return fmt.Errorf("'role_arn' is required for keyless %s (a spec with subject_token_source)", mintMethod)
 	}
 	return nil

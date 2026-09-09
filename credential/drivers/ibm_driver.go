@@ -121,7 +121,7 @@ func (f *IBMDriverFactory) Type() string {
 // (the account a replacement key is created in, and how long to overlap it), which
 // a chained source hands to whoever owns the referenced spec, so leaving them is
 // dead config describing a job this source no longer does.
-func validateIBMChainedConfig(config map[string]string) error {
+func validateIBMChainedConfig(config credential.Config) error {
 	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
 		return nil
 	}
@@ -135,7 +135,7 @@ func validateIBMChainedConfig(config map[string]string) error {
 }
 
 // ValidateConfig validates IBM Cloud driver configuration using declarative schema
-func (f *IBMDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *IBMDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := validateIBMChainedConfig(config); err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func (f *IBMDriverFactory) SensitiveConfigFields() []string {
 // access_keys specs), and nothing else would have caught a rotation_period on it.
 // The chained case is refused by the store, but it is checked here too so the two
 // halves of "cannot rotate" are stated in one place.
-func (f *IBMDriverFactory) ValidateRotationConfig(config map[string]string) error {
+func (f *IBMDriverFactory) ValidateRotationConfig(config credential.Config) error {
 	if credential.GetString(config, credential.ConfigSecretSpec, "") != "" {
 		return fmt.Errorf("rotation does not apply to a chained source (%s is set); the referenced spec's owner rotates the api key",
 			credential.ConfigSecretSpec)
@@ -226,8 +226,8 @@ func (f *IBMDriverFactory) ValidateRotationConfig(config map[string]string) erro
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
-func (f *IBMDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
-	mintMethod := specConfig["mint_method"]
+func (f *IBMDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
+	mintMethod := specConfig.Get("mint_method")
 	switch mintMethod {
 	case "iam_token", "":
 		return credential.TypeOAuthBearerToken, nil
@@ -239,7 +239,7 @@ func (f *IBMDriverFactory) InferCredentialType(specConfig map[string]string) (st
 }
 
 // Create instantiates a new IBMDriver
-func (f *IBMDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *IBMDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
@@ -296,7 +296,7 @@ func (d *IBMDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	// A chained spec or source mints through MintFromSecret, which the minting layer
 	// routes it to. Reaching here means the routing was bypassed, so fail closed
 	// rather than falling back to a key this source may not even hold.
-	if spec.Config[credential.ConfigSecretSpec] != "" || d.isChained() {
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" || d.isChained() {
 		return nil, nil, 0, "", fmt.Errorf("ibm: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
 			credential.ConfigSecretSpec)
 	}
@@ -435,7 +435,7 @@ func (d *IBMDriver) mintAccessKeysFromSecret(spec *credential.CredSpec, material
 	// create refuses that combination, but a source converted to chaining afterwards
 	// is not re-validated against the specs already bound to it, so this is the guard
 	// that actually holds.
-	if spec.Config[credential.ConfigSecretSpec] == "" {
+	if spec.Config.Get(credential.ConfigSecretSpec) == "" {
 		return nil, nil, 0, "", fmt.Errorf("ibm: an access_keys spec must set its own %s naming a spec that yields its access_key_id and secret_access_key; this source's chained secret is its IAM api key, not this credential",
 			credential.ConfigSecretSpec)
 	}
@@ -519,7 +519,7 @@ func (d *IBMDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) e
 		// Reached only if the spec named no reference; a chained spec skips
 		// verification entirely. Without one there is no pair to serve, and this
 		// path makes no request, so there is nothing else to check.
-		if spec.Config[credential.ConfigSecretSpec] == "" {
+		if spec.Config.Get(credential.ConfigSecretSpec) == "" {
 			return fmt.Errorf("an access_keys spec must set %s naming a spec that yields its access_key_id and secret_access_key",
 				credential.ConfigSecretSpec)
 		}
@@ -611,7 +611,7 @@ func (d *IBMDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	}
 
 	// Rotation does not touch activation_delay, so the snapshot carries the live value.
-	activateAfter := credential.GetDuration(newConfig, "activation_delay", DefaultIBMActivationDelay)
+	activateAfter := credential.GetDuration(credential.NewConfig(newConfig), "activation_delay", DefaultIBMActivationDelay)
 
 	if d.logger != nil {
 		d.logger.Debug("prepared source API key rotation",
@@ -772,8 +772,8 @@ func (d *IBMDriver) configSnapshot() map[string]string {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
 
-	snapshot := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	snapshot := make(map[string]string, d.credSource.Config.Len())
+	for k, v := range d.credSource.Config.All() {
 		snapshot[k] = v
 	}
 	return snapshot
@@ -804,7 +804,7 @@ func (d *IBMDriver) swapConfig(newConfig map[string]string) {
 	d.configMu.Lock()
 	defer d.configMu.Unlock()
 
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.tokenCache.InvalidateGeneration()
 }
 

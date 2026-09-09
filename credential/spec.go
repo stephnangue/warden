@@ -25,8 +25,8 @@ type CredSpec struct {
 	Type string // Credential type (e.g., "aws_access_keys", "vault_token")
 
 	// Source configuration
-	Source string            // Reference to CredSource
-	Config map[string]string // Type-specific parameters (path, role_name, etc.)
+	Source string // Reference to CredSource
+	Config Config // Type-specific parameters (path, role_name, etc.)
 
 	// Constraints
 	MinTTL time.Duration // Minimum TTL for issued credentials

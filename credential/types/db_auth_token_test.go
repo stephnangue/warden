@@ -71,7 +71,7 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS(t *testing.T) {
 		"region":      "us-east-1",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -84,7 +84,7 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS_WrongSource(t *testing.T) {
 		"db_endpoint": "mydb.rds.amazonaws.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeGCP)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeGCP)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "aws source")
 }
@@ -97,7 +97,7 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS_MissingEndpoint(t *testing.T) {
 		"db_user":     "app_readonly",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "db_endpoint")
 }
@@ -111,7 +111,7 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL(t *testing.T) {
 		"target_service_account": "db-reader@myproject.iam.gserviceaccount.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeGCP)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeGCP)
 	assert.NoError(t, err)
 }
 
@@ -124,7 +124,7 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_WrongSource(t *testing.T) {
 		"target_service_account": "sa@proj.iam.gserviceaccount.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "gcp source")
 }
@@ -138,7 +138,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Azure(t *testing.T) {
 		"db_host":     "mydb.postgres.database.azure.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAzure)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAzure)
 	assert.NoError(t, err)
 }
 
@@ -150,7 +150,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Azure_MissingHost(t *testing.T) {
 		"db_user":     "app-identity",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAzure)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAzure)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "db_host")
 }
@@ -165,7 +165,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_Provisioned(t *testing.T) {
 		"region":             "us-east-1",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -179,7 +179,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_Serverless(t *testing.T) {
 		"region":         "us-east-1",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -193,7 +193,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_WithDuration(t *testing.T) 
 		"duration_seconds":   "3600",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -206,7 +206,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_WrongSource(t *testing.T) {
 		"cluster_identifier": "x",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeGCP)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeGCP)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "aws source")
 }
@@ -219,7 +219,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_MissingEndpoint(t *testing.
 		"cluster_identifier": "my-cluster",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "db_endpoint")
 }
@@ -232,7 +232,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_NoClusterOrWorkgroup(t *tes
 		"db_endpoint": "x",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cluster_identifier")
 	assert.Contains(t, err.Error(), "workgroup_name")
@@ -248,7 +248,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_BothClusterAndWorkgroup(t *
 		"workgroup_name":     "my-wg",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one")
 }
@@ -264,7 +264,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_DurationOutOfRange(t *testi
 				"cluster_identifier": "my-cluster",
 				"duration_seconds":   d,
 			}
-			err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+			err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "duration_seconds")
 		})
@@ -281,7 +281,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_InvalidDuration(t *testing.
 		"duration_seconds":   "not-a-number",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 }
 

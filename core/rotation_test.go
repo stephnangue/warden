@@ -557,19 +557,19 @@ type mockDriverFactory struct {
 }
 
 func (f *mockDriverFactory) Type() string { return "mock" }
-func (f *mockDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *mockDriverFactory) ValidateConfig(config credential.Config) error {
 	if f.rejectConfigKey != "" {
-		if _, ok := config[f.rejectConfigKey]; ok {
+		if _, ok := config.Lookup(f.rejectConfigKey); ok {
 			return fmt.Errorf("simulated validation failure for key %q", f.rejectConfigKey)
 		}
 	}
 	return nil
 }
 func (f *mockDriverFactory) SensitiveConfigFields() []string { return nil }
-func (f *mockDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *mockDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("mock driver cannot infer type")
 }
-func (f *mockDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *mockDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return f.driver, nil
 }
 
@@ -605,7 +605,7 @@ func createTestRotationManagerWithFactory(t *testing.T, factory *mockDriverFacto
 	source := &credential.CredSource{
 		Name:   "test-source",
 		Type:   "mock",
-		Config: map[string]string{"key": "value"},
+		Config: credential.NewConfig(map[string]string{"key": "value"}),
 	}
 	err = core.credConfigStore.CreateSource(ctx, source)
 	require.NoError(t, err)
@@ -864,7 +864,7 @@ func TestRotation_PersistAndRestore(t *testing.T) {
 		source := &credential.CredSource{
 			Name:   name,
 			Type:   "mock",
-			Config: map[string]string{"key": "value"},
+			Config: credential.NewConfig(map[string]string{"key": "value"}),
 		}
 		err := rm.core.credConfigStore.CreateSource(ctx, source)
 		require.NoError(t, err)
@@ -932,7 +932,7 @@ func TestRotation_StopWithInflightJobs(t *testing.T) {
 		source := &credential.CredSource{
 			Name:   name,
 			Type:   "mock",
-			Config: map[string]string{"key": "value"},
+			Config: credential.NewConfig(map[string]string{"key": "value"}),
 		}
 		_ = rm.core.credConfigStore.CreateSource(ctx, source)
 		_ = rm.RegisterSource(ctx, name, "mock", 10*time.Millisecond)
@@ -1069,9 +1069,9 @@ func TestRotation_FailedPersistLeavesCachedSourceUntouched(t *testing.T) {
 
 	src, err := core.credConfigStore.GetSource(ctx, "test-source")
 	require.NoError(t, err)
-	assert.Equal(t, "value", src.Config["key"],
+	assert.Equal(t, "value", src.Config.Get("key"),
 		"a failed persist must leave the cached source carrying its original config")
-	assert.NotContains(t, src.Config, "reject-me",
+	assert.NotContains(t, src.Config.Map(), "reject-me",
 		"config that was never persisted must not be visible to readers")
 	assert.Equal(t, 0, driver.GetCommitCount(),
 		"commit must not run once persist has failed")
@@ -1109,7 +1109,7 @@ func TestRotation_ActivateIsRaceFreeWithConcurrentReaders(t *testing.T) {
 				}
 				// Read exactly as a driver does on the mint path.
 				_ = credential.GetString(src.Config, "key", "")
-				_ = len(src.Config)
+				_ = src.Config.Len()
 			}
 		}()
 	}

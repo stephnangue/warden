@@ -116,7 +116,7 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for an OAuth bearer token credential spec.
-func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *OAuthBearerTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	switch sourceType {
 	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM, credential.SourceTypeTokenExchange:
 		// Supported
@@ -132,24 +132,24 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sour
 	// Source-specific validation
 	switch sourceType {
 	case credential.SourceTypeVault:
-		if config["mint_method"] != "oauth2" {
-			return fmt.Errorf("'mint_method' must be 'oauth2' for vault source, got: %s", config["mint_method"])
+		if config.Get("mint_method") != "oauth2" {
+			return fmt.Errorf("'mint_method' must be 'oauth2' for vault source, got: %s", config.Get("mint_method"))
 		}
-		if config["oauth2_mount"] == "" {
+		if config.Get("oauth2_mount") == "" {
 			return fmt.Errorf("'oauth2_mount' is required when mint_method is oauth2")
 		}
-		if config["credential_name"] == "" {
+		if config.Get("credential_name") == "" {
 			return fmt.Errorf("'credential_name' is required when mint_method is oauth2")
 		}
 	case credential.SourceTypeIBM:
 		// IBM source uses iam_token mint method (default); no additional spec config needed
-		if mm := config["mint_method"]; mm != "" && mm != "iam_token" {
+		if mm := config.Get("mint_method"); mm != "" && mm != "iam_token" {
 			return fmt.Errorf("'mint_method' must be 'iam_token' for ibm source, got: %s", mm)
 		}
 		// The grant runs with the source's api key, so a reference parked here would
 		// describe a secret this spec never spends — and would slip past the
 		// source-level checks that gate which sources may chain at all.
-		if config[credential.ConfigSecretSpec] != "" {
+		if config.Get(credential.ConfigSecretSpec) != "" {
 			return fmt.Errorf("for an ibm source, '%s' belongs on the source: the chained api key authenticates the source's own IAM token grant, not this spec", credential.ConfigSecretSpec)
 		}
 	case credential.SourceTypeTokenExchange:
@@ -157,7 +157,7 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config map[string]string, sour
 		// caller-derived subject. A spec that opts out (subject_token_source absent
 		// or "none") has no identity to exchange, so reject it here rather than
 		// failing opaquely at mint time.
-		if src := config[credential.ConfigSubjectTokenSource]; src == "" || src == credential.SourceNone {
+		if src := config.Get(credential.ConfigSubjectTokenSource); src == "" || src == credential.SourceNone {
 			return fmt.Errorf("'%s' is required for a token_exchange source (set '%s', '%s', or '%s')",
 				credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity)
 		}
@@ -206,12 +206,12 @@ func (t *OAuthBearerTokenCredType) SystemManagedConfigFields() []string {
 
 // RequiresConnect reports whether the spec uses the authorization_code flow, which
 // needs a one-time `cred spec connect` before it can mint.
-func (t *OAuthBearerTokenCredType) RequiresConnect(config map[string]string) bool {
-	return config["auth_method"] == "authorization_code"
+func (t *OAuthBearerTokenCredType) RequiresConnect(config credential.Config) bool {
+	return config.Get("auth_method") == "authorization_code"
 }
 
 // IsConnected reports whether the spec has been connected — a refresh token or a
 // static access token has been sealed into it.
-func (t *OAuthBearerTokenCredType) IsConnected(config map[string]string) bool {
-	return config["refresh_token"] != "" || config["access_token"] != ""
+func (t *OAuthBearerTokenCredType) IsConnected(config credential.Config) bool {
+	return config.Get("refresh_token") != "" || config.Get("access_token") != ""
 }

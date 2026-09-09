@@ -43,12 +43,12 @@ func (d *mockChainedDriver) Cleanup(_ context.Context) error          { return n
 type mockChainedFactory struct{ driver *mockChainedDriver }
 
 func (f *mockChainedFactory) Type() string { return f.driver.driverType }
-func (f *mockChainedFactory) Create(_ map[string]string, _ *logger.GatedLogger) (SourceDriver, error) {
+func (f *mockChainedFactory) Create(_ Config, _ *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
-func (f *mockChainedFactory) ValidateConfig(_ map[string]string) error { return nil }
-func (f *mockChainedFactory) SensitiveConfigFields() []string          { return nil }
-func (f *mockChainedFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *mockChainedFactory) ValidateConfig(_ Config) error   { return nil }
+func (f *mockChainedFactory) SensitiveConfigFields() []string { return nil }
+func (f *mockChainedFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("n/a")
 }
 
@@ -78,12 +78,12 @@ func (d *mockExchangeSecretDriver) Cleanup(_ context.Context) error          { r
 type mockExchangeSecretFactory struct{ driver *mockExchangeSecretDriver }
 
 func (f *mockExchangeSecretFactory) Type() string { return f.driver.driverType }
-func (f *mockExchangeSecretFactory) Create(_ map[string]string, _ *logger.GatedLogger) (SourceDriver, error) {
+func (f *mockExchangeSecretFactory) Create(_ Config, _ *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
-func (f *mockExchangeSecretFactory) ValidateConfig(_ map[string]string) error { return nil }
-func (f *mockExchangeSecretFactory) SensitiveConfigFields() []string          { return nil }
-func (f *mockExchangeSecretFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *mockExchangeSecretFactory) ValidateConfig(_ Config) error   { return nil }
+func (f *mockExchangeSecretFactory) SensitiveConfigFields() []string { return nil }
+func (f *mockExchangeSecretFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("n/a")
 }
 
@@ -124,12 +124,12 @@ func (d *mockChainedExchangeDriver) Cleanup(_ context.Context) error          { 
 type mockChainedExchangeFactory struct{ driver *mockChainedExchangeDriver }
 
 func (f *mockChainedExchangeFactory) Type() string { return f.driver.driverType }
-func (f *mockChainedExchangeFactory) Create(_ map[string]string, _ *logger.GatedLogger) (SourceDriver, error) {
+func (f *mockChainedExchangeFactory) Create(_ Config, _ *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
-func (f *mockChainedExchangeFactory) ValidateConfig(_ map[string]string) error { return nil }
-func (f *mockChainedExchangeFactory) SensitiveConfigFields() []string          { return nil }
-func (f *mockChainedExchangeFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *mockChainedExchangeFactory) ValidateConfig(_ Config) error   { return nil }
+func (f *mockChainedExchangeFactory) SensitiveConfigFields() []string { return nil }
+func (f *mockChainedExchangeFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("n/a")
 }
 
@@ -174,14 +174,14 @@ func newChainingEnv(t *testing.T) *chainingEnv {
 	require.NoError(t, err)
 
 	// Secret source + spec.
-	store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc", Config: map[string]string{}})
-	store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource", Config: map[string]string{}})
+	store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc", Config: NewConfig(map[string]string{})})
+	store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource", Config: NewConfig(map[string]string{})})
 	// Consumer source.
-	store.AddSource(&CredSource{Name: "consumersource", Type: "consumersrc", Config: map[string]string{}})
+	store.AddSource(&CredSource{Name: "consumersource", Type: "consumersrc", Config: NewConfig(map[string]string{})})
 	// Exchange-consuming secret source (for materialization tests).
-	store.AddSource(&CredSource{Name: "exchangesource", Type: "exchangesrc", Config: map[string]string{}})
+	store.AddSource(&CredSource{Name: "exchangesource", Type: "exchangesrc", Config: NewConfig(map[string]string{})})
 	// Consumer source whose driver is a ChainedExchangeMinter (token_exchange-shaped).
-	store.AddSource(&CredSource{Name: "exchangeconsumersource", Type: "exchangeconsumersrc", Config: map[string]string{}})
+	store.AddSource(&CredSource{Name: "exchangeconsumersource", Type: "exchangeconsumersrc", Config: NewConfig(map[string]string{})})
 
 	return &chainingEnv{manager: manager, store: store, secretDriver: secretFactory.driver, consumerDriver: consumer, exchangeDriver: exchange, exchangeConsumerDriver: exchangeConsumer}
 }
@@ -201,7 +201,7 @@ func chainCaller(tokenID string) Caller {
 func TestChaining_MaterialFlowsToConsumer(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	cred, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -218,9 +218,9 @@ func TestChaining_MaterialFlowsToConsumer(t *testing.T) {
 func TestChaining_SecretNotCached(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -244,7 +244,7 @@ func TestChaining_SecretNotCached(t *testing.T) {
 func TestChaining_PerCaller(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -257,11 +257,11 @@ func TestChaining_PerCaller(t *testing.T) {
 func TestChaining_DepthGuard(t *testing.T) {
 	env := newChainingEnv(t)
 	// secret-spec-2 is the terminal secret; secret-spec-1 illegally chains to it.
-	env.store.AddSpec(&CredSpec{Name: "secret-spec-2", Type: TypeVaultToken, Source: "secretsource", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "secret-spec-2", Type: TypeVaultToken, Source: "secretsource", Config: NewConfig(map[string]string{})})
 	env.store.AddSpec(&CredSpec{Name: "secret-spec-1", Type: TypeVaultToken, Source: "secretsource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec-2"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec-2"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec-1"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec-1"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -275,7 +275,7 @@ func TestChaining_FailsClosedNonChainedDriver(t *testing.T) {
 	env := newChainingEnv(t)
 	// "secretsource" driver (mockSourceDriver) does not implement ChainedSecretMinter.
 	env.store.AddSpec(&CredSpec{Name: "bad-consumer", Type: TypeVaultToken, Source: "secretsource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "bad-consumer", nil)
@@ -292,7 +292,7 @@ func TestChaining_LeaselessBackstop(t *testing.T) {
 		return map[string]interface{}{"token": "THE-SECRET"}, nil, time.Hour, "lease-xyz", nil
 	}
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -312,7 +312,7 @@ func TestChaining_TTLWithoutLeaseAccepted(t *testing.T) {
 		return map[string]interface{}{"token": "THE-SECRET"}, nil, time.Hour, "", nil
 	}
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	cred, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -331,8 +331,8 @@ func TestChaining_CacheEntryClampedToReferencedTTL(t *testing.T) {
 	}
 	// A cache TTL far longer than the referenced credential's own lifetime.
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -364,8 +364,8 @@ func TestChaining_CacheEntryKeepsShorterConfiguredTTL(t *testing.T) {
 		return map[string]interface{}{"token": "THE-SECRET"}, nil, time.Hour, "", nil
 	}
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "100ms"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -390,7 +390,7 @@ func TestChaining_SecretFieldSelection(t *testing.T) {
 		return map[string]interface{}{"alpha": "A", "beta": "B"}, nil, 0, "", nil
 	}
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "beta"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "beta"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -404,9 +404,9 @@ func TestChaining_SecretFieldSelection(t *testing.T) {
 // driver would see empty tokens (subject fails closed; actor silently dropped).
 func TestChaining_MaterializesSubjectAndActor(t *testing.T) {
 	env := newChainingEnv(t)
-	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "exchange-secret"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "exchange-secret"})})
 
 	caller := Caller{
 		TokenID:  "tokA",
@@ -436,7 +436,7 @@ func TestChaining_MaterializesSubjectAndActor(t *testing.T) {
 func TestChaining_RequiresCallerContext(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	caller := Caller{TokenID: "tokA", TokenTTL: time.Hour} // ResolveInputs nil
@@ -451,7 +451,7 @@ func TestChaining_RequiresCallerContext(t *testing.T) {
 func TestChaining_ExchangeConsumerRoutes(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSpec(&CredSpec{Name: "exch-consumer", Type: TypeVaultToken, Source: "exchangeconsumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	inputs := &ExchangeInputs{SubjectToken: "subj-user", SubjectTokenType: TokenTypeJWT}
@@ -469,7 +469,7 @@ func TestChaining_ExchangeConsumerRoutes(t *testing.T) {
 func TestChaining_ExchangeConsumerFailsClosed(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSpec(&CredSpec{Name: "bad-exch", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	inputs := &ExchangeInputs{SubjectToken: "s", SubjectTokenType: TokenTypeJWT}
@@ -493,8 +493,8 @@ func TestChaining_ExchangeConsumerRetriesOnRejection(t *testing.T) {
 		return map[string]interface{}{"token": val}, nil, 0, "", nil
 	}
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "exch2", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "exch2", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -532,8 +532,8 @@ func TestChaining_ExchangeConsumerRetriesOnIncompletePayload(t *testing.T) {
 		return map[string]interface{}{"token": val}, nil, 0, "", nil
 	}
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "exch2", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "exch2", Type: TypeVaultToken, Source: "exchangeconsumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -564,7 +564,7 @@ func TestChaining_IncompleteFreshPayloadIsNotRetried(t *testing.T) {
 	}
 	// No secret_cache_ttl: every mint fetches, so the material is never "from cache".
 	env.store.AddSpec(&CredSpec{Name: "exch1", Type: TypeVaultToken, Source: "exchangeconsumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 	env.exchangeConsumerDriver.incompleteIf = func(SecretMaterial) bool { return true }
 
 	_, err := env.manager.IssueCredential(createNamespaceContext(), chainCaller("tokA"), "exch1",
@@ -602,8 +602,8 @@ func exchangeChainCaller(agentToken, agentIdentity, userToken string, userClaims
 func TestChaining_CacheSharesAcrossConsumers(t *testing.T) {
 	env := newChainingEnv(t)
 	ttl := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: ttl})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: ttl})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(ttl)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(ttl)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA") // nil inputs -> "noexchange" key segment
@@ -621,10 +621,10 @@ func TestChaining_CacheSharesAcrossConsumers(t *testing.T) {
 // cache were agent-blind; keyed per agent they fetch twice.
 func TestChaining_CacheIsolatesPerAgent(t *testing.T) {
 	env := newChainingEnv(t)
-	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
 	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, exchangeChainCaller("tokA", "agentA", "", nil), "consumer1", nil)
@@ -639,10 +639,10 @@ func TestChaining_CacheIsolatesPerAgent(t *testing.T) {
 // a different user never receives the first user's secret.
 func TestChaining_CacheIsolatesPerUser(t *testing.T) {
 	env := newChainingEnv(t)
-	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
 	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	claims := map[string]string{"sub": "alice"}
@@ -671,10 +671,10 @@ func TestChaining_CacheIsolatesPerUser(t *testing.T) {
 // entry the old claims filled would keep answering for the new ones.
 func TestChaining_CacheIsolatesPerUserClaims(t *testing.T) {
 	env := newChainingEnv(t)
-	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
 	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 
@@ -717,10 +717,10 @@ func agentClaimsChainCaller(agentToken, agentIdentity string, agentClaims map[st
 // it, so dropping the dimension is caught here even where the key literal is not read.
 func TestChaining_CacheIsolatesPerAgentClaims(t *testing.T) {
 	env := newChainingEnv(t)
-	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
 	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 
@@ -746,7 +746,7 @@ func TestChaining_EditingTheReferencedSpecInvalidates(t *testing.T) {
 	env := newChainingEnv(t)
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
 	for _, name := range []string{"consumer1", "consumer2", "consumer3"} {
-		env.store.AddSpec(&CredSpec{Name: name, Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+		env.store.AddSpec(&CredSpec{Name: name, Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 	}
 
 	ctx := createNamespaceContext()
@@ -764,7 +764,7 @@ func TestChaining_EditingTheReferencedSpecInvalidates(t *testing.T) {
 
 	// The operator repoints the referenced spec at a different location.
 	env.store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource",
-		Config: map[string]string{"secret_path": "prod-teams/{{user.team}}/db"}})
+		Config: NewConfig(map[string]string{"secret_path": "prod-teams/{{user.team}}/db"})})
 
 	_, err = env.manager.IssueCredential(ctx, caller, "consumer3", nil)
 	require.NoError(t, err)
@@ -773,7 +773,7 @@ func TestChaining_EditingTheReferencedSpecInvalidates(t *testing.T) {
 
 	// The new key must itself be shared, or the test above would also pass with caching
 	// simply switched off — every path that declines to cache mints every time.
-	env.store.AddSpec(&CredSpec{Name: "consumer4", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer4", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 	_, err = env.manager.IssueCredential(ctx, caller, "consumer4", nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
@@ -785,8 +785,8 @@ func TestChaining_EditingTheReferencedSpecInvalidates(t *testing.T) {
 func TestChaining_EditingTheReferencedSourceInvalidates(t *testing.T) {
 	env := newChainingEnv(t)
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -796,14 +796,14 @@ func TestChaining_EditingTheReferencedSourceInvalidates(t *testing.T) {
 	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load())
 
 	env.store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc",
-		Config: map[string]string{"vault_address": "https://vault-dr.internal:8200"}})
+		Config: NewConfig(map[string]string{"vault_address": "https://vault-dr.internal:8200"})})
 
 	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
 	require.NoError(t, err)
 	require.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
 		"a source pointed somewhere else is a different fetch")
 
-	env.store.AddSpec(&CredSpec{Name: "consumer3", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer3", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 	_, err = env.manager.IssueCredential(ctx, caller, "consumer3", nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
@@ -817,10 +817,10 @@ func TestChaining_EditingTheReferencedSourceInvalidates(t *testing.T) {
 func TestChaining_RotatingTheSourceCredentialDoesNotInvalidate(t *testing.T) {
 	env := newChainingEnv(t)
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 	env.store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc",
-		Config: map[string]string{"vault_address": "https://vault.internal:8200", "secret_id": "sid-1"}})
+		Config: NewConfig(map[string]string{"vault_address": "https://vault.internal:8200", "secret_id": "sid-1"})})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -831,7 +831,7 @@ func TestChaining_RotatingTheSourceCredentialDoesNotInvalidate(t *testing.T) {
 
 	// A routine source rotation: same address, new proof.
 	env.store.AddSource(&CredSource{Name: "secretsource", Type: "secretsrc",
-		Config: map[string]string{"vault_address": "https://vault.internal:8200", "secret_id": "sid-2"}})
+		Config: NewConfig(map[string]string{"vault_address": "https://vault.internal:8200", "secret_id": "sid-2"})})
 
 	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
 	require.NoError(t, err)
@@ -850,14 +850,14 @@ func TestChaining_EditingPassThroughSpecMaterialInvalidates(t *testing.T) {
 	env := newChainingEnv(t)
 	// The referenced spec's own config carries the material, under the conventional name.
 	env.secretDriver.mintFunc = func(_ context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-		return map[string]interface{}{"token": spec.Config["api_key"]}, nil, 0, "", nil
+		return map[string]interface{}{"token": spec.Config.Get("api_key")}, nil, 0, "", nil
 	}
 	env.store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource",
-		Config: map[string]string{"api_key": "key-v1"}})
+		Config: NewConfig(map[string]string{"api_key": "key-v1"})})
 
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -868,7 +868,7 @@ func TestChaining_EditingPassThroughSpecMaterialInvalidates(t *testing.T) {
 
 	// The key leaks; the operator replaces it in place.
 	env.store.AddSpec(&CredSpec{Name: "secret-spec", Type: TypeVaultToken, Source: "secretsource",
-		Config: map[string]string{"api_key": "key-v2"}})
+		Config: NewConfig(map[string]string{"api_key": "key-v2"})})
 
 	cred, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
 	require.NoError(t, err)
@@ -891,8 +891,8 @@ func TestChaining_RetryEvictsStaleCachedSecret(t *testing.T) {
 		return map[string]interface{}{"token": val}, nil, 0, "", nil
 	}
 	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -917,7 +917,7 @@ func TestChaining_NoRetryWhenSecretFresh(t *testing.T) {
 	env := newChainingEnv(t)
 	env.consumerDriver.rejectIf = func(SecretMaterial) bool { return true } // always reject
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}}) // no secret_cache_ttl
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})}) // no secret_cache_ttl
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -934,7 +934,7 @@ func TestChaining_NoRetryOnFreshFetchWithTTL(t *testing.T) {
 	env := newChainingEnv(t)
 	env.consumerDriver.rejectIf = func(SecretMaterial) bool { return true }
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -949,11 +949,11 @@ func TestChaining_NoRetryOnFreshFetchWithTTL(t *testing.T) {
 func TestChaining_CacheTTLSourceLevel(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSource(&CredSource{Name: "consumersource-cached", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretCacheTTL: "30m"}})
+		Config: NewConfig(map[string]string{ConfigSecretCacheTTL: "30m"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-cached",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-cached",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -969,11 +969,11 @@ func TestChaining_CacheTTLSourceLevel(t *testing.T) {
 func TestChaining_CacheTTLSpecOptOut(t *testing.T) {
 	env := newChainingEnv(t)
 	env.store.AddSource(&CredSource{Name: "consumersource-cached", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretCacheTTL: "30m"}})
+		Config: NewConfig(map[string]string{ConfigSecretCacheTTL: "30m"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-cached",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "0"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "0"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-cached",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "0"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "0"})})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -996,9 +996,9 @@ func TestChaining_SourceSecretFieldNotInheritedAcrossReferences(t *testing.T) {
 	env := newChainingEnv(t)
 
 	// A second secret spec, with a differently-shaped payload from the source's.
-	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: map[string]string{}})
+	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: NewConfig(map[string]string{})})
 	env.store.AddSpec(&CredSpec{Name: "other-secret-spec", Type: TypeVaultToken, Source: "secretsource2",
-		Config: map[string]string{}})
+		Config: NewConfig(map[string]string{})})
 	env.secretDriver.mintFunc = func(_ context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		if spec.Name == "other-secret-spec" {
 			return map[string]interface{}{"token": "OTHER-SECRET"}, nil, 0, "", nil
@@ -1008,10 +1008,10 @@ func TestChaining_SourceSecretFieldNotInheritedAcrossReferences(t *testing.T) {
 
 	// The source chains a multi-key payload and needs secret_field to pick from it.
 	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "private_key"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "private_key"})})
 	// The spec overrides the reference with a payload that has no private_key.
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-chained",
-		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "other-secret-spec"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -1031,9 +1031,9 @@ func TestChaining_SourceSecretFieldNotInheritedAcrossReferences(t *testing.T) {
 func TestChaining_InheritedFieldOnMultiKeyPayloadIsTheReportedSymptom(t *testing.T) {
 	env := newChainingEnv(t)
 
-	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: map[string]string{}})
+	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: NewConfig(map[string]string{})})
 	env.store.AddSpec(&CredSpec{Name: "other-secret-spec", Type: TypeVaultToken, Source: "secretsource2",
-		Config: map[string]string{}})
+		Config: NewConfig(map[string]string{})})
 	env.secretDriver.mintFunc = func(_ context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		if spec.Name == "other-secret-spec" {
 			return map[string]interface{}{"token": "T", "expires": "later"}, nil, 0, "", nil
@@ -1042,9 +1042,9 @@ func TestChaining_InheritedFieldOnMultiKeyPayloadIsTheReportedSymptom(t *testing
 	}
 
 	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "private_key"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "private_key"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-chained",
-		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "other-secret-spec"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -1065,11 +1065,11 @@ func TestChaining_SourceModifiersApplyWhenSpecRestatesTheReference(t *testing.T)
 		return map[string]interface{}{"alpha": "A", "beta": "B"}, nil, 0, "", nil
 	}
 	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "beta", ConfigSecretCacheTTL: "30m"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "beta", ConfigSecretCacheTTL: "30m"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-chained",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-chained",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -1090,9 +1090,9 @@ func TestChaining_SourceSecretFieldStillInheritedAsADefault(t *testing.T) {
 		return map[string]interface{}{"alpha": "A", "beta": "B"}, nil, 0, "", nil
 	}
 	env.store.AddSource(&CredSource{Name: "consumersource-field", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretField: "beta"}})
+		Config: NewConfig(map[string]string{ConfigSecretField: "beta"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-field",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -1102,18 +1102,18 @@ func TestChaining_SourceSecretFieldStillInheritedAsADefault(t *testing.T) {
 
 func TestChaining_SourceCacheTTLNotInheritedAcrossReferences(t *testing.T) {
 	env := newChainingEnv(t)
-	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: map[string]string{}})
+	env.store.AddSource(&CredSource{Name: "secretsource2", Type: "secretsrc", Config: NewConfig(map[string]string{})})
 	env.store.AddSpec(&CredSpec{Name: "other-secret-spec", Type: TypeVaultToken, Source: "secretsource2",
-		Config: map[string]string{}})
+		Config: NewConfig(map[string]string{})})
 
 	// The source caches its own chained secret for 30m. Two specs override the
 	// reference; their payload must not inherit that policy.
 	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource-chained",
-		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "other-secret-spec"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource-chained",
-		Config: map[string]string{ConfigSecretSpec: "other-secret-spec"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "other-secret-spec"})})
 
 	ctx := createNamespaceContext()
 	caller := chainCaller("tokA")
@@ -1134,9 +1134,9 @@ func TestChaining_SpecFieldStillOverridesForASourceReference(t *testing.T) {
 		return map[string]interface{}{"alpha": "A", "beta": "B"}, nil, 0, "", nil
 	}
 	env.store.AddSource(&CredSource{Name: "consumersource-chained", Type: "consumersrc",
-		Config: map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "alpha"}})
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretField: "alpha"})})
 	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource-chained",
-		Config: map[string]string{ConfigSecretField: "beta"}})
+		Config: NewConfig(map[string]string{ConfigSecretField: "beta"})})
 
 	ctx := createNamespaceContext()
 	_, err := env.manager.IssueCredential(ctx, chainCaller("tokA"), "consumer", nil)
@@ -1157,10 +1157,10 @@ func TestChaining_SpecFieldStillOverridesForASourceReference(t *testing.T) {
 // that shows up as the differing identity the two callers carry.
 func TestChaining_CacheIsolatesPerRole(t *testing.T) {
 	env := newChainingEnv(t)
-	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: map[string]string{}})
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
 	cfg := map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"}
-	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
-	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: cfg})
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
 
 	ctx := createNamespaceContext()
 

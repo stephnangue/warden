@@ -2489,7 +2489,7 @@ func exchangeResolveEnv(t *testing.T) (*Core, context.Context) {
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
 	}))
 	return c, ctx
 }
@@ -2500,7 +2500,7 @@ func seedSpec(t *testing.T, c *Core, ctx context.Context, name string, config ma
 		Name:   name,
 		Type:   "vault_token",
 		Source: "local-src",
-		Config: config,
+		Config: credential.NewConfig(config),
 	}))
 }
 
@@ -2512,7 +2512,7 @@ func seedExchangeSpec(t *testing.T, c *Core, ctx context.Context, name string, c
 		Name:   name,
 		Type:   "vault_token",
 		Source: "sts-src",
-		Config: config,
+		Config: credential.NewConfig(config),
 	}))
 }
 
@@ -2539,7 +2539,7 @@ func TestCreateSpec_RejectsInvalidExchangeConfig(t *testing.T) {
 		Name:   "bad-spec",
 		Type:   "vault_token",
 		Source: "local-src",
-		Config: map[string]string{credential.ConfigActorTokenSource: credential.SourceAgentIdentity},
+		Config: credential.NewConfig(map[string]string{credential.ConfigActorTokenSource: credential.SourceAgentIdentity}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token-exchange config")
@@ -2745,16 +2745,16 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceDerived(t *testing.T) {
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
 	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
 		Name: "aws-fed", Type: credential.SourceTypeAWS,
-		Config: map[string]string{"auth_method": "oidc_federation"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
 	}))
 	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
 		Name: "wid-res", Type: "vault_token", Source: "aws-fed",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
 			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
 			"mint_method":                       "secrets_manager",
 			"secret_id":                         "prod/db",
-		},
+		}),
 	}))
 
 	te := &logical.TokenEntry{CredentialSpec: "wid-res", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
@@ -2779,18 +2779,18 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut(t *testi
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
 	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
 		Name: "aws-fed2", Type: credential.SourceTypeAWS,
-		Config: map[string]string{"auth_method": "oidc_federation"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
 	}))
 	newSpecTE := func(name string, resourceCfg string) *logical.TokenEntry {
 		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
 			Name: name, Type: "vault_token", Source: "aws-fed2",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
 				credential.ConfigAssertionAudience:  "sts.amazonaws.com",
 				credential.ConfigAssertionResource:  resourceCfg,
 				"mint_method":                       "secrets_manager",
 				"secret_id":                         "prod/db",
-			},
+			}),
 		}))
 		return &logical.TokenEntry{CredentialSpec: name, PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
 	}
@@ -3075,14 +3075,14 @@ func TestResolveExchangeInputs_RetiredSourceFailsClosedAtMint(t *testing.T) {
 
 	require.NoError(t, c.credConfigStore.persistSpec(ns.UUID, &credential.CredSpec{
 		Name: "retired-subject", Type: "vault_token", Source: "local-src",
-		Config: map[string]string{credential.ConfigSubjectTokenSource: "header"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSubjectTokenSource: "header"}),
 	}))
 	require.NoError(t, c.credConfigStore.persistSpec(ns.UUID, &credential.CredSpec{
 		Name: "retired-actor", Type: "vault_token", Source: "sts-src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 			credential.ConfigActorTokenSource:   "header",
-		},
+		}),
 	}))
 
 	t.Run("retired subject source fails closed, names the value", func(t *testing.T) {

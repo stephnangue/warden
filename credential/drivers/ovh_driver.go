@@ -90,7 +90,7 @@ func (f *OVHDriverFactory) Type() string {
 }
 
 // ValidateConfig validates OVH source configuration.
-func (f *OVHDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *OVHDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := validateOVHChainedConfig(config); err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func (f *OVHDriverFactory) ValidateConfig(config map[string]string) error {
 // because keeping it would leave a source that reads as keyless while storing
 // the very secret chaining removes, and the id because the pair authenticates
 // together — see ovhChainedAuth for what a mismatched one costs.
-func validateOVHChainedConfig(config map[string]string) error {
+func validateOVHChainedConfig(config credential.Config) error {
 	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
 		return nil
 	}
@@ -165,7 +165,7 @@ func validateOVHChainedConfig(config map[string]string) error {
 // regional default. The client secret is posted to token_url, so plaintext is
 // only permitted alongside the same tls_skip_verify a caller must already have
 // set to mean it — matching how the IBM source gates iam_endpoint.
-func validateOVHEndpointOverride(config map[string]string) func(string) error {
+func validateOVHEndpointOverride(config credential.Config) func(string) error {
 	return func(v string) error {
 		if v == "" {
 			return nil
@@ -191,12 +191,12 @@ func (f *OVHDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType always returns ovh_keys for OVH sources.
-func (f *OVHDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *OVHDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeOVHKeys, nil
 }
 
 // Create instantiates a new OVHDriver.
-func (f *OVHDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *OVHDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	endpointName := credential.GetString(config, "ovh_endpoint", "ovh-eu")
 	regionTokenURL, ok := ovhEndpoints[endpointName]
 	if !ok {
@@ -237,7 +237,7 @@ func (d *OVHDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	// a source-level reference to the client credential this grant needs. Reaching
 	// here with either means the minting layer did not route on it, and there is
 	// nothing held here to fall back to.
-	if spec.Config[credential.ConfigSecretSpec] != "" || d.isChained() {
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" || d.isChained() {
 		return nil, nil, 0, "", fmt.Errorf("ovh: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
 			credential.ConfigSecretSpec)
 	}
@@ -328,7 +328,7 @@ func (d *OVHDriver) mintAccessKeysFromSecret(spec *credential.CredSpec, material
 	// Spec create refuses that combination, but a source converted to chaining
 	// afterwards is not re-validated against the specs already bound to it, so this
 	// is the guard that actually holds.
-	if spec.Config[credential.ConfigSecretSpec] == "" {
+	if spec.Config.Get(credential.ConfigSecretSpec) == "" {
 		return nil, nil, 0, "", fmt.Errorf("ovh: an access_keys spec must set its own %s naming a spec that yields its access_key and secret_key",
 			credential.ConfigSecretSpec)
 	}
@@ -537,7 +537,7 @@ func (d *OVHDriver) VerifySpec(_ context.Context, spec *credential.CredSpec) err
 	case "access_keys":
 		// Reached only if the spec named no reference; a chained spec skips
 		// verification entirely. Without one there is no pair to serve.
-		if spec.Config[credential.ConfigSecretSpec] == "" {
+		if spec.Config.Get(credential.ConfigSecretSpec) == "" {
 			return fmt.Errorf("an access_keys spec must set %s naming a spec that yields its access_key and secret_key", credential.ConfigSecretSpec)
 		}
 		return nil

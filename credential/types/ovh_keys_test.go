@@ -104,7 +104,7 @@ func TestOVHKeysCredType_ValidateConfig_OVHSource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeOVH)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeOVH)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -120,7 +120,7 @@ func TestOVHKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 
 	for _, sourceType := range []string{credential.SourceTypeLocal, credential.SourceTypeVault, credential.SourceTypeAWS} {
 		t.Run(sourceType, func(t *testing.T) {
-			err := ct.ValidateConfig(map[string]string{"mint_method": "oauth2_token"}, sourceType)
+			err := ct.ValidateConfig(credential.NewConfig(map[string]string{"mint_method": "oauth2_token"}), sourceType)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "ovh source")
 		})

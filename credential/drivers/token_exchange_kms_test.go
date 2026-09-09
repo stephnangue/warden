@@ -144,7 +144,7 @@ func TestKMSAssertion_SignsRemotelyAndVerifies(t *testing.T) {
 	defer sts.Close()
 
 	d := newExchangeDriver(kmsSourceConfig(sts.URL), sts.Client())
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{})}
 
 	data, _, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(), spec,
 		subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),
@@ -206,7 +206,7 @@ func TestKMSAssertion_ExpiredCapabilitySkipsTheRoundTrip(t *testing.T) {
 
 	d := newExchangeDriver(kmsSourceConfig(sts.URL), sts.Client())
 	_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(),
-		&credential.CredSpec{Name: "s", Config: map[string]string{}},
+		&credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{})},
 		subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),
 		capabilityMaterial(kmsURL, map[string]string{
 			"token_expires_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
@@ -238,7 +238,7 @@ func TestKMSAssertion_SignFailureMapping(t *testing.T) {
 
 			d := newExchangeDriver(kmsSourceConfig(sts.URL), sts.Client())
 			_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(),
-				&credential.CredSpec{Name: "s", Config: map[string]string{}},
+				&credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{})},
 				subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),
 				capabilityMaterial(kmsURL, nil))
 			require.Error(t, err)
@@ -275,7 +275,7 @@ func TestKMSAssertion_MaterialExtraction(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := tokenExchangeChainedAuthFromMaterial(
-				map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT},
+				credential.NewConfig(map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}),
 				capabilityMaterial("http://kms.example", tc.over))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.errMsg)
@@ -298,7 +298,7 @@ func TestKMSAssertion_IgnoresSecretField(t *testing.T) {
 	material.Field = "transit_key"
 
 	auth, err := tokenExchangeChainedAuthFromMaterial(
-		map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}, material)
+		credential.NewConfig(map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}), material)
 	require.NoError(t, err)
 	require.NotNil(t, auth.kms)
 	assert.Equal(t, "client-assertion", auth.kms.keyName)
@@ -323,7 +323,7 @@ func TestKMSAssertion_ValidateConfig(t *testing.T) {
 		return cfg
 	}
 
-	require.NoError(t, f.ValidateConfig(base(nil)))
+	require.NoError(t, f.ValidateConfig(credential.NewConfig(base(nil))))
 
 	// A real key: the schema parses private_key before the client_auth arm runs, so a
 	// junk value would be rejected for the wrong reason and prove nothing.
@@ -336,15 +336,15 @@ func TestKMSAssertion_ValidateConfig(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		cfg    map[string]string
+		cfg    credential.Config
 		errMsg string
 	}{
-		{"no secret_spec", base(map[string]string{"secret_spec": ""}), "requires secret_spec"},
-		{"inline client_id", base(map[string]string{"client_id": "x"}), "must be omitted"},
-		{"inline private_key", base(map[string]string{"private_key": pemKey}), "must be omitted"},
-		{"inline kid", base(map[string]string{"client_assertion_kid": "k"}), "must be omitted"},
-		{"secret_field", base(map[string]string{"secret_field": "f"}), "secret_field must be omitted"},
-		{"assertion alg", base(map[string]string{"client_assertion_alg": "RS256"}), "client_assertion_alg must be omitted"},
+		{"no secret_spec", credential.NewConfig(base(map[string]string{"secret_spec": ""})), "requires secret_spec"},
+		{"inline client_id", credential.NewConfig(base(map[string]string{"client_id": "x"})), "must be omitted"},
+		{"inline private_key", credential.NewConfig(base(map[string]string{"private_key": pemKey})), "must be omitted"},
+		{"inline kid", credential.NewConfig(base(map[string]string{"client_assertion_kid": "k"})), "must be omitted"},
+		{"secret_field", credential.NewConfig(base(map[string]string{"secret_field": "f"})), "secret_field must be omitted"},
+		{"assertion alg", credential.NewConfig(base(map[string]string{"client_assertion_alg": "RS256"})), "client_assertion_alg must be omitted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -449,7 +449,7 @@ func TestKMSAssertion_ConcurrentSigningKeepsCapabilitiesApart(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			auth, err := tokenExchangeChainedAuthFromMaterial(
-				map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT},
+				credential.NewConfig(map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}),
 				capabilityMaterial(url, map[string]string{
 					"transit_key":         keyNames[i],
 					"vault_token":         tokenFor[keyNames[i]],
@@ -515,7 +515,7 @@ func TestKMSAssertion_IgnoresAmbientEnvironment(t *testing.T) {
 
 	d := newExchangeDriver(kmsSourceConfig(sts.URL), sts.Client())
 	_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(),
-		&credential.CredSpec{Name: "s", Config: map[string]string{}},
+		&credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{})},
 		subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),
 		capabilityMaterial(kmsURL, nil))
 	require.NoError(t, err, "the signing call must reach the payload's address, not an ambient agent")
@@ -581,7 +581,7 @@ func TestKMSAssertion_IDJAGSignsBothLegs(t *testing.T) {
 		"client_auth":        clientAuthKMSPrivateKeyJWT,
 		"secret_spec":        "idp-client-signer",
 	}, &http.Client{})
-	spec := &credential.CredSpec{Config: map[string]string{"audience": "https://resource-as.example.com"}}
+	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource-as.example.com"})}
 
 	rawData, _, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(), spec,
 		subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),

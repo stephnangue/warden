@@ -111,7 +111,7 @@ func (f *GitHubDriverFactory) Type() string {
 // ValidateConfig validates GitHub source configuration using declarative schema.
 // The source only holds connection info (github_url). Auth credentials are
 // validated at spec level by GitHubTokenCredType.ValidateConfig.
-func (f *GitHubDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *GitHubDriverFactory) ValidateConfig(config credential.Config) error {
 	return credential.ValidateSchema(config,
 		credential.StringField("github_url").
 			Custom(func(v string) error {
@@ -138,14 +138,14 @@ func (f *GitHubDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType always returns github_token for GitHub sources.
-func (f *GitHubDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *GitHubDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeGitHubToken, nil
 }
 
 // Create instantiates a new GitHubDriver.
 // The driver only needs the github_url from source config. Auth credentials
 // are provided per-spec at MintCredential time.
-func (f *GitHubDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *GitHubDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
@@ -174,7 +174,7 @@ func (d *GitHubDriver) getGitHubURL() string {
 // validation on load) fails with a clear migration message rather than a confusing
 // downstream error (e.g. a PAT parsed as an App private key).
 func githubMintMethod(spec *credential.CredSpec) (string, error) {
-	if spec.Config["auth_method"] != "" {
+	if spec.Config.Get("auth_method") != "" {
 		return "", fmt.Errorf("github: 'auth_method' is no longer supported; use 'mint_method' (app or pat)")
 	}
 	return credential.GetString(spec.Config, "mint_method", "app"), nil
@@ -186,7 +186,7 @@ func githubMintMethod(spec *credential.CredSpec) (string, error) {
 // reaching here with secret_spec set is a misuse and fails closed rather than
 // reading a missing inline secret. Non-chained specs are unaffected.
 func (d *GitHubDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	if spec.Config[credential.ConfigSecretSpec] != "" {
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" {
 		return nil, nil, 0, "", fmt.Errorf("github: spec uses secret_spec (credential chaining); it must mint from fetched secret material, not directly")
 	}
 	mintMethod, err := githubMintMethod(spec)

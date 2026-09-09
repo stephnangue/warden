@@ -135,7 +135,7 @@ func (f *AWSDriverFactory) Type() string {
 }
 
 // ValidateConfig validates AWS driver configuration using declarative schema
-func (f *AWSDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *AWSDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("auth_method").
 			OneOf(awsAuthMethodStatic, awsAuthMethodOIDCFederation).
@@ -247,7 +247,7 @@ func validateAWSEndpoint(v string) error {
 // no override, so a source pointed at a stand-in would mint and verify against it
 // while trying to rotate keys that only exist somewhere else — failing on a loop
 // with no indication of why.
-func (f *AWSDriverFactory) ValidateRotationConfig(config map[string]string) error {
+func (f *AWSDriverFactory) ValidateRotationConfig(config credential.Config) error {
 	if credential.GetString(config, "sts_endpoint", "") == "" &&
 		credential.GetString(config, "secretsmanager_endpoint", "") == "" {
 		return nil
@@ -263,11 +263,11 @@ func (f *AWSDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
-func (f *AWSDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
-	mintMethod := specConfig["mint_method"]
+func (f *AWSDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
+	mintMethod := specConfig.Get("mint_method")
 	// credential_type selects the stored-secret shape and is meaningful only for
 	// secrets_manager; reject it elsewhere rather than silently ignoring it.
-	if specConfig["credential_type"] != "" && mintMethod != "secrets_manager" {
+	if specConfig.Get("credential_type") != "" && mintMethod != "secrets_manager" {
 		return "", fmt.Errorf("credential_type is only valid with mint_method=secrets_manager (got mint_method=%q)", mintMethod)
 	}
 	switch mintMethod {
@@ -283,7 +283,7 @@ func (f *AWSDriverFactory) InferCredentialType(specConfig map[string]string) (st
 		// A stored secret can hold different credential shapes; the spec selects one
 		// via credential_type (default: AWS access keys). This mirrors how a Vault
 		// source vends multiple shapes — the transport is one thing, the shape another.
-		return inferSecretsManagerType(specConfig["credential_type"])
+		return inferSecretsManagerType(specConfig.Get("credential_type"))
 	case "sts_assume_role", "":
 		return credential.TypeAWSAccessKeys, nil
 	default:
@@ -306,7 +306,7 @@ func inferSecretsManagerType(credType string) (string, error) {
 }
 
 // Create instantiates a new AWSDriver
-func (f *AWSDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *AWSDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	accessKeyID := credential.GetString(config, "access_key_id", "")
 	secretAccessKey := credential.GetString(config, "secret_access_key", "")
 	region := credential.GetString(config, "region", "us-east-1")
@@ -558,7 +558,7 @@ func (d *AWSDriver) newIAMClient(creds aws.CredentialsProvider) *iam.Client {
 // sourceConfig returns the current source config for callers that need it before
 // (or without) authenticating. The map is never written in place, so the pointer
 // is a stable snapshot; a rotation swaps in a whole new map instead.
-func (d *AWSDriver) sourceConfig() map[string]string {
+func (d *AWSDriver) sourceConfig() credential.Config {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 	return d.credSource.Config
@@ -778,14 +778,14 @@ const defaultAWSFederationAudience = "sts.amazonaws.com"
 // default. Only a keyless (oidc_federation) source federates, so a static source
 // supplies no derived audience — a warden_identity spec on it must set one
 // explicitly (and would fail closed at mint anyway).
-func awsAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func awsAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", awsAuthMethodStatic) != awsAuthMethodOIDCFederation {
 		return "", false
 	}
 	return credential.GetString(sourceCfg, "audience", defaultAWSFederationAudience), true
 }
 
-func awsAssertionResource(specCfg map[string]string) (string, bool) {
+func awsAssertionResource(specCfg credential.Config) (string, bool) {
 	switch credential.GetString(specCfg, "mint_method", "") {
 	case "secrets_manager", "secret_read":
 		// A templated secret_id is carried unresolved, as every templated
@@ -1397,7 +1397,7 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	// not the live field: a commit landing mid-prepare would otherwise derive the
 	// new config from one generation while cleanup names another generation's key.
 	newConfig := make(map[string]string)
-	for k, v := range cfg {
+	for k, v := range cfg.All() {
 		newConfig[k] = v
 	}
 	newConfig["access_key_id"] = *newKey.AccessKeyId
@@ -1425,8 +1425,8 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 // CommitRotation activates the new IAM keys in driver state.
 // Called after the new config has been persisted to storage.
 func (d *AWSDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
-	newAccessKeyID := credential.GetString(newConfig, "access_key_id", "")
-	newSecretAccessKey := credential.GetString(newConfig, "secret_access_key", "")
+	newAccessKeyID := newConfig["access_key_id"]
+	newSecretAccessKey := newConfig["secret_access_key"]
 	newCreds := credentials.NewStaticCredentialsProvider(newAccessKeyID, newSecretAccessKey, "")
 
 	// Verify before touching any driver state, and outside the lock so minting
@@ -1447,7 +1447,7 @@ func (d *AWSDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.baseCreds = newCreds
 	d.baseCredsVerified = true
 

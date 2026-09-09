@@ -100,7 +100,7 @@ func (f *AlicloudDriverFactory) Type() string {
 }
 
 // ValidateConfig validates Alicloud source configuration.
-func (f *AlicloudDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *AlicloudDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("auth_method").
 			OneOf(alicloudAuthMethodStatic, alicloudAuthMethodOIDCFederation).
@@ -168,7 +168,7 @@ func (f *AlicloudDriverFactory) ValidateConfig(config map[string]string) error {
 		// here — the schema has never marked one required, and tightening that is
 		// a separate change.
 		for _, k := range []string{"oidc_provider_arn", "audience"} {
-			if config[k] != "" {
+			if config.Get(k) != "" {
 				return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, alicloudAuthMethodOIDCFederation)
 			}
 		}
@@ -180,7 +180,7 @@ func (f *AlicloudDriverFactory) ValidateConfig(config map[string]string) error {
 		// and no RAM user to rotate as — ram_endpoint included, which only the
 		// rotation calls ever read.
 		for _, k := range []string{"access_key_id", "access_key_secret", "management_user_name", "activation_delay", "ram_endpoint"} {
-			if config[k] != "" {
+			if config.Get(k) != "" {
 				return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, alicloudAuthMethodOIDCFederation)
 			}
 		}
@@ -194,12 +194,12 @@ func (f *AlicloudDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType always returns alicloud_keys for Alicloud sources.
-func (f *AlicloudDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *AlicloudDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAlicloudKeys, nil
 }
 
 // Create instantiates a new AlicloudDriver.
-func (f *AlicloudDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *AlicloudDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &AlicloudDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAlicloud,
@@ -859,7 +859,7 @@ func (d *AlicloudDriver) callJSON(
 // It mirrors SupportsRotation exactly, from the config map instead of live driver
 // state. The two must stay in step: anything SupportsRotation requires and this
 // does not becomes a source that is accepted and then fails every cycle forever.
-func (f *AlicloudDriverFactory) ValidateRotationConfig(config map[string]string) error {
+func (f *AlicloudDriverFactory) ValidateRotationConfig(config credential.Config) error {
 	var missing []string
 	for _, key := range []string{"access_key_id", "access_key_secret", "management_user_name"} {
 		if credential.GetString(config, key, "") == "" {
@@ -1020,8 +1020,8 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 	userName := credential.GetString(d.credSource.Config, "management_user_name", "")
 	activationDelay := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultAlicloudActivationDelay)
 	ramEndpoint := d.endpointLocked("ram_endpoint", DefaultAlicloudRAMEndpoint)
-	configSnapshot := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	configSnapshot := make(map[string]string, d.credSource.Config.Len())
+	for k, v := range d.credSource.Config.All() {
 		configSnapshot[k] = v
 	}
 	d.configMu.RUnlock()
@@ -1108,10 +1108,10 @@ func (d *AlicloudDriver) CommitRotation(_ context.Context, newConfig map[string]
 	d.configMu.Lock()
 	defer d.configMu.Unlock()
 
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 
 	d.logger.Info("committed rotated management access key",
-		logger.String("new_key_id", truncateID(credential.GetString(newConfig, "access_key_id", ""), 8)),
+		logger.String("new_key_id", truncateID(newConfig["access_key_id"], 8)),
 	)
 	return nil
 }

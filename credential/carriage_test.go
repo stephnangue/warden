@@ -255,15 +255,15 @@ func TestUncarriedAdjunctFields(t *testing.T) {
 
 	// An apikey source declaring nothing: fixable where it stands.
 	fields, carriable := UncarriedAdjunctFields(carrier,
-		map[string]string{"api_key": "k", "organization_id": "org", "email": "a@b.c"},
-		map[string]string{}, SourceTypeAPIKey)
+		NewConfig(map[string]string{"api_key": "k", "organization_id": "org", "email": "a@b.c"}),
+		NewConfig(map[string]string{}), SourceTypeAPIKey)
 	assert.ElementsMatch(t, []string{"organization_id", "email"}, fields)
 	assert.True(t, carriable)
 
 	// Declared: carried, so not reported.
 	fields, _ = UncarriedAdjunctFields(carrier,
-		map[string]string{"api_key": "k", "organization_id": "org"},
-		map[string]string{"credential_fields": "organization_id"}, SourceTypeAPIKey)
+		NewConfig(map[string]string{"api_key": "k", "organization_id": "org"}),
+		NewConfig(map[string]string{"credential_fields": "organization_id"}), SourceTypeAPIKey)
 	assert.Empty(t, fields)
 
 	// A source whose driver has no declaration mechanism cannot carry the field
@@ -271,21 +271,21 @@ func TestUncarriedAdjunctFields(t *testing.T) {
 	// — following that advice would change nothing and look like it had.
 	for _, srcType := range []string{SourceTypeLocal, SourceTypeVault, SourceTypeAWS} {
 		fields, carriable = UncarriedAdjunctFields(carrier,
-			map[string]string{"api_key": "k", "organization_id": "org"},
-			map[string]string{"credential_fields": "organization_id"}, srcType)
+			NewConfig(map[string]string{"api_key": "k", "organization_id": "org"}),
+			NewConfig(map[string]string{"credential_fields": "organization_id"}), srcType)
 		assert.Equal(t, []string{"organization_id"}, fields, "source type %q", srcType)
 		assert.False(t, carriable, "source type %q", srcType)
 	}
 
 	// Unset fields are not reported, and neither is a key the type does not know.
 	fields, _ = UncarriedAdjunctFields(carrier,
-		map[string]string{"api_key": "k", "some_other_key": "v"},
-		map[string]string{}, SourceTypeAPIKey)
+		NewConfig(map[string]string{"api_key": "k", "some_other_key": "v"}),
+		NewConfig(map[string]string{}), SourceTypeAPIKey)
 	assert.Empty(t, fields)
 
 	// A type that does not carry adjuncts is left alone entirely.
 	fields, carriable = UncarriedAdjunctFields(struct{}{},
-		map[string]string{"organization_id": "org"}, map[string]string{}, SourceTypeLocal)
+		NewConfig(map[string]string{"organization_id": "org"}), NewConfig(map[string]string{}), SourceTypeLocal)
 	assert.Nil(t, fields)
 	assert.True(t, carriable)
 }
@@ -298,20 +298,20 @@ func TestUncarriedAdjunctFields_MintParametersAreNotCredentialFields(t *testing.
 	carrier := stubAdjunctCarrier{fields: []string{"key_name", "organization_id"}}
 
 	fields, _ := UncarriedAdjunctFields(carrier,
-		map[string]string{"key_name": "ingest-writer"},
-		map[string]string{}, SourceTypeElastic)
+		NewConfig(map[string]string{"key_name": "ingest-writer"}),
+		NewConfig(map[string]string{}), SourceTypeElastic)
 	assert.Empty(t, fields, "key_name is what the elastic driver names the key it creates")
 
 	// The exemption is scoped to the source that spends it on the mint, and to
 	// that name alone.
 	fields, _ = UncarriedAdjunctFields(carrier,
-		map[string]string{"key_name": "prod", "organization_id": "org"},
-		map[string]string{}, SourceTypeElastic)
+		NewConfig(map[string]string{"key_name": "prod", "organization_id": "org"}),
+		NewConfig(map[string]string{}), SourceTypeElastic)
 	assert.Equal(t, []string{"organization_id"}, fields)
 
 	fields, _ = UncarriedAdjunctFields(carrier,
-		map[string]string{"key_name": "prod"},
-		map[string]string{}, SourceTypeAPIKey)
+		NewConfig(map[string]string{"key_name": "prod"}),
+		NewConfig(map[string]string{}), SourceTypeAPIKey)
 	assert.Equal(t, []string{"key_name"}, fields,
 		"on an apikey source key_name really is a credential field")
 }

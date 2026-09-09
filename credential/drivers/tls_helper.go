@@ -17,7 +17,7 @@ import (
 // generic helper. Kept as a shim so existing drivers don't need to
 // change call sites; new consumers (auth methods, future drivers) can
 // use httputil.BuildHTTPClient directly with raw PEM.
-func BuildHTTPClient(config map[string]string, timeout time.Duration) (*http.Client, error) {
+func BuildHTTPClient(config credential.Config, timeout time.Duration) (*http.Client, error) {
 	caData := credential.GetString(config, "ca_data", "")
 	skipVerify := credential.GetBool(config, "tls_skip_verify", false)
 

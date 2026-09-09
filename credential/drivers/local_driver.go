@@ -23,7 +23,7 @@ func (f *LocalDriverFactory) Type() string {
 }
 
 // Create instantiates a new LocalDriver
-func (f *LocalDriverFactory) Create(config map[string]string, logger *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *LocalDriverFactory) Create(config credential.Config, logger *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &LocalDriver{
 		logger: logger.WithSubsystem(credential.SourceTypeLocal),
 	}, nil
@@ -31,7 +31,7 @@ func (f *LocalDriverFactory) Create(config map[string]string, logger *logger.Gat
 
 // ValidateConfig validates driver-specific configuration
 // Local driver doesn't require any configuration
-func (f *LocalDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *LocalDriverFactory) ValidateConfig(config credential.Config) error {
 	return nil // No configuration needed for local driver
 }
 
@@ -41,7 +41,7 @@ func (f *LocalDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType cannot infer the type for local sources — it must be specified explicitly.
-func (f *LocalDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *LocalDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("local source supports multiple credential types; specify type explicitly")
 }
 
@@ -51,7 +51,7 @@ func (d *LocalDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	rawData := make(map[string]interface{})
 
 	// Copy SourceParams to rawData as interface map
-	for key, value := range spec.Config {
+	for key, value := range spec.Config.All() {
 		rawData[key] = value
 	}
 

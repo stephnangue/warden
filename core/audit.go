@@ -219,7 +219,7 @@ func (c *Core) buildConfigAuditEntry(decl *MountEntry, normalizedPath string) (*
 		Description: decl.Description,
 		Accessor:    accessor,
 		Config:      cfg,
-		Declarative:  true,
+		Declarative: true,
 		NamespaceID: namespace.RootNamespaceID,
 		namespace:   namespace.RootNamespace,
 	}, nil

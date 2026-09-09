@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -187,7 +186,7 @@ func (s *CredentialConfigStore) getBuiltinLocalSource() *credential.CredSource {
 	return &credential.CredSource{
 		Name:   builtinLocalSourceName,
 		Type:   "local",
-		Config: make(map[string]string), // Local driver needs no config
+		Config: credential.Config{}, // Local driver needs no config
 	}
 }
 
@@ -295,7 +294,7 @@ func (s *CredentialConfigStore) checkSpecReferencesLocked(namespaceID, specName 
 
 	var refs []string
 	for _, src := range sources {
-		if src.Config[credential.ConfigSecretSpec] == specName {
+		if src.Config.Get(credential.ConfigSecretSpec) == specName {
 			refs = append(refs, "source/"+src.Name)
 		}
 	}
@@ -303,7 +302,7 @@ func (s *CredentialConfigStore) checkSpecReferencesLocked(namespaceID, specName 
 		if spec.Name == specName {
 			continue // a spec never references itself
 		}
-		if spec.Config[credential.ConfigSecretSpec] == specName {
+		if spec.Config.Get(credential.ConfigSecretSpec) == specName {
 			refs = append(refs, "spec/"+spec.Name)
 		}
 	}
@@ -883,7 +882,7 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// tokens, discovered identity, pooled connections — to rebuild something byte
 	// for byte the same. That case stopped being hypothetical when the update path
 	// began accepting a rotation period on its own.
-	driverInputsChanged := !maps.Equal(existing.Config, source.Config)
+	driverInputsChanged := !existing.Config.Equal(source.Config)
 
 	if err := s.persistSource(ns.UUID, source); err != nil {
 		s.mu.Unlock()
@@ -943,7 +942,7 @@ func (s *CredentialConfigStore) reconcileSourceRotation(ctx context.Context, sou
 
 	eligible := source.RotationPeriod > 0 &&
 		!isFederationSource(source.Config) &&
-		source.Config[credential.ConfigSecretSpec] == ""
+		source.Config.Get(credential.ConfigSecretSpec) == ""
 
 	switch {
 	case !eligible && oldPeriod > 0:
@@ -1270,7 +1269,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				}
 				return logical.ErrBadRequestf(
 					"spec sets credential field(s) %s that source '%s' does not carry: add them to the source's credential_fields (currently %q)",
-					strings.Join(missing, ", "), spec.Source, source.Config["credential_fields"])
+					strings.Join(missing, ", "), spec.Source, source.Config.Get("credential_fields"))
 			}
 
 			// A token-exchange spec (subject_token_source set) is minted fresh per
@@ -1311,7 +1310,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// attribution), and reject a grant with no actor slot — otherwise the spec is
 	// accepted but every request fails at mint time. These are source-aware, so
 	// they live here, not in the structural validator above.
-	if actorSrc := spec.Config[credential.ConfigActorTokenSource]; actorSrc != "" && actorSrc != credential.SourceNone {
+	if actorSrc := spec.Config.Get(credential.ConfigActorTokenSource); actorSrc != "" && actorSrc != credential.SourceNone {
 		if source.Type != credential.SourceTypeTokenExchange {
 			return logical.ErrBadRequestf("field '%s': an actor token requires a '%s' source (only token exchange consumes an actor token)",
 				credential.ConfigActorTokenSource, credential.SourceTypeTokenExchange)
@@ -1326,7 +1325,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// RFC 8693 subject_token, which only the token_exchange driver consumes. Pin it
 	// to a token_exchange source so a federation driver (gcp/aws/azure/vault) can
 	// never be handed the raw user JWT as its own federation login token.
-	if spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceUserIdentity &&
+	if spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceUserIdentity &&
 		source.Type != credential.SourceTypeTokenExchange {
 		return logical.ErrBadRequestf("field '%s': '%s' requires a '%s' source",
 			credential.ConfigSubjectTokenSource, credential.SourceUserIdentity, credential.SourceTypeTokenExchange)
@@ -1338,9 +1337,9 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// otherwise it is required. This check is source-aware, so it lives here rather
 	// than in the source-agnostic structural validator above. Re-checked at mint
 	// time (defence in depth).
-	mintsAssertion := spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceWardenIdentity ||
-		spec.Config[credential.ConfigActorTokenSource] == credential.SourceWardenIdentity
-	if mintsAssertion && spec.Config[credential.ConfigAssertionAudience] == "" {
+	mintsAssertion := spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity ||
+		spec.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
+	if mintsAssertion && spec.Config.Get(credential.ConfigAssertionAudience) == "" {
 		if _, ok := drivers.DeriveAssertionAudience(source.Type, source.Config, spec.Config); !ok {
 			return logical.ErrBadRequestf("field '%s': is required when the subject or actor is '%s'",
 				credential.ConfigAssertionAudience, credential.SourceWardenIdentity)
@@ -1365,7 +1364,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// write that introduces it. Only this layer can apply it: the credential
 		// type is handed the source's TYPE but never its config, so it cannot tell
 		// a chained source from an inline one.
-		if source.Config[credential.ConfigSecretSpec] != "" {
+		if source.Config.Get(credential.ConfigSecretSpec) != "" {
 			if raw := credential.GetString(spec.Config, "token_expiry", ""); raw != "" {
 				if d, err := time.ParseDuration(raw); err == nil && d > drivers.GrafanaChainedMaxTokenExpiry {
 					return logical.ErrBadRequestf("'token_expiry' %s exceeds the %s ceiling for a chained grafana source: revocation cannot run without a caller to fetch the token as, so a minted token stays live until it expires",
@@ -1382,9 +1381,9 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// fail-fast; that block is skipped when verification is disabled or the source is
 	// local, so the authoritative eligibility guard is at mint time
 	// (MintFromSecretWithCleanup fails closed if the driver isn't a ChainedSecretMinter).
-	chainedRef := spec.Config[credential.ConfigSecretSpec]
+	chainedRef := spec.Config.Get(credential.ConfigSecretSpec)
 	if chainedRef == "" {
-		chainedRef = source.Config[credential.ConfigSecretSpec]
+		chainedRef = source.Config.Get(credential.ConfigSecretSpec)
 	}
 	if chainedRef != "" {
 		// A chained spec mints from material fetched at request time, so it embeds no
@@ -1401,7 +1400,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// would leave the source's inline secret as dead config at mint, and would
 		// slip past the source-level validation that gates which auth methods may
 		// chain at all — so reject it with clear guidance.
-		if spec.Config[credential.ConfigSecretSpec] != "" {
+		if spec.Config.Get(credential.ConfigSecretSpec) != "" {
 			switch source.Type {
 			case credential.SourceTypeTokenExchange:
 				return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
@@ -1442,7 +1441,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		}
 		// An oauth2 source that chains its client credential resolves the pair per mint,
 		// as the calling agent. Two spec-level settings cannot survive that.
-		if source.Type == credential.SourceTypeOAuth2 && source.Config[credential.ConfigSecretSpec] != "" {
+		if source.Type == credential.SourceTypeOAuth2 && source.Config.Get(credential.ConfigSecretSpec) != "" {
 			// The consent steps that seal an authorization_code grant run on the system
 			// backend with no caller, so they have no identity to fetch the chained pair
 			// as and would fall back to a client credential the source does not hold.
@@ -1467,8 +1466,8 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// here: chainedRef would be its own, and the type validator has already
 		// refused it any inline pair.)
 		if source.Type == credential.SourceTypeScaleway &&
-			source.Config[credential.ConfigSecretSpec] != "" &&
-			spec.Config[credential.ConfigSecretSpec] == "" &&
+			source.Config.Get(credential.ConfigSecretSpec) != "" &&
+			spec.Config.Get(credential.ConfigSecretSpec) == "" &&
 			credential.GetString(spec.Config, "mint_method", "") == "static_keys" {
 			return logical.ErrBadRequestf("a static_keys spec on a chained scaleway source (secret_spec %q) must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret is a management key, not this credential", chainedRef)
 		}
@@ -1482,7 +1481,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// the type registry is unavailable and credType is nil, which is also why
 		// the store's own tests are what exercise it.
 		if source.Type == credential.SourceTypeOVH &&
-			spec.Config[credential.ConfigSecretSpec] == "" &&
+			spec.Config.Get(credential.ConfigSecretSpec) == "" &&
 			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
 			return logical.ErrBadRequestf("an access_keys spec must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret (%q) is a client credential, not this pair", chainedRef)
 		}
@@ -1491,7 +1490,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// token grant is made with, so routing this spec by it would mint from the
 		// wrong secret entirely.
 		if source.Type == credential.SourceTypeIBM &&
-			spec.Config[credential.ConfigSecretSpec] == "" &&
+			spec.Config.Get(credential.ConfigSecretSpec) == "" &&
 			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
 			return logical.ErrBadRequestf("an access_keys spec must set its own secret_spec naming a spec that yields its access_key_id and secret_access_key; the source's chained secret (%q) is its IAM api key, not this pair", chainedRef)
 		}
@@ -1517,8 +1516,8 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// secret_cache_ttl (spec or source) must parse as a duration; otherwise a typo
 		// (e.g. "30min") would silently disable caching, so an operator who meant to opt
 		// in gets no signal. GetDuration swallows the parse error at mint, so reject here.
-		for _, cfg := range []map[string]string{spec.Config, source.Config} {
-			if raw, ok := cfg[credential.ConfigSecretCacheTTL]; ok && raw != "" {
+		for _, cfg := range []credential.Config{spec.Config, source.Config} {
+			if raw, ok := cfg.Lookup(credential.ConfigSecretCacheTTL); ok && raw != "" {
 				if _, perr := time.ParseDuration(raw); perr != nil {
 					return logical.ErrBadRequestf("field '%s': %q is not a valid duration: %v", credential.ConfigSecretCacheTTL, raw, perr)
 				}
@@ -1647,7 +1646,7 @@ const authMethodOIDCFederation = "oidc_federation"
 // or spec (secret_spec), whose secret lives in the spec it references. Those are
 // gated separately, by the chained-source rule in validateSource and the
 // chained-spec rule in CreateSpec.
-func isFederationSource(config map[string]string) bool {
+func isFederationSource(config credential.Config) bool {
 	return credential.GetString(config, "auth_method", "") == authMethodOIDCFederation
 }
 
@@ -1670,7 +1669,7 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 
 	// Credential chaining: a source-level secret_spec makes every spec on this
 	// source draw its secret from the referenced spec. Validate that reference.
-	if ref := source.Config[credential.ConfigSecretSpec]; ref != "" {
+	if ref := source.Config.Get(credential.ConfigSecretSpec); ref != "" {
 		if err := s.validateSecretSpecRef(ctx, ref); err != nil {
 			return err
 		}
@@ -1855,7 +1854,7 @@ func (s *CredentialConfigStore) CheckSpecReferences(ctx context.Context, specNam
 
 	var refs []string
 	for _, src := range sources {
-		if src.Config[credential.ConfigSecretSpec] == specName {
+		if src.Config.Get(credential.ConfigSecretSpec) == specName {
 			refs = append(refs, "source/"+src.Name)
 		}
 	}
@@ -1863,7 +1862,7 @@ func (s *CredentialConfigStore) CheckSpecReferences(ctx context.Context, specNam
 		if spec.Name == specName {
 			continue // a spec never references itself
 		}
-		if spec.Config[credential.ConfigSecretSpec] == specName {
+		if spec.Config.Get(credential.ConfigSecretSpec) == specName {
 			refs = append(refs, "spec/"+spec.Name)
 		}
 	}
@@ -1891,14 +1890,14 @@ func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref s
 		return fmt.Errorf("failed to validate secret_spec %q: %w", ref, err)
 	}
 
-	if refSpec.Config[credential.ConfigSecretSpec] != "" {
+	if refSpec.Config.Get(credential.ConfigSecretSpec) != "" {
 		return logical.ErrBadRequestf("secret_spec %q must not itself set secret_spec (chaining is limited to one hop)", ref)
 	}
 	refSource, err := s.GetSource(ctx, refSpec.Source)
 	if err != nil {
 		return fmt.Errorf("secret_spec %q: failed to load its source %q: %w", ref, refSpec.Source, err)
 	}
-	if refSource.Config[credential.ConfigSecretSpec] != "" {
+	if refSource.Config.Get(credential.ConfigSecretSpec) != "" {
 		return logical.ErrBadRequestf("secret_spec %q's source must not set secret_spec (chaining is limited to one hop)", ref)
 	}
 
@@ -1914,12 +1913,12 @@ func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref s
 	// session-pinned requirement is on the REFERENCED spec regardless.) Reject anything else
 	// (including an unset/"none" subject, which would otherwise degrade to the
 	// non-exchange path and fail late with an opaque backend error).
-	switch refSpec.Config[credential.ConfigSubjectTokenSource] {
+	switch refSpec.Config.Get(credential.ConfigSubjectTokenSource) {
 	case credential.SourceWardenIdentity, credential.SourceAgentIdentity:
 		// session-pinned — safe
 	default:
 		return logical.ErrBadRequestf("secret_spec %q must set subject_token_source=%s or %s (got %q); a chained secret must be minted as the session-pinned caller",
-			ref, credential.SourceWardenIdentity, credential.SourceAgentIdentity, refSpec.Config[credential.ConfigSubjectTokenSource])
+			ref, credential.SourceWardenIdentity, credential.SourceAgentIdentity, refSpec.Config.Get(credential.ConfigSubjectTokenSource))
 	}
 
 	return nil

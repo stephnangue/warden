@@ -899,9 +899,9 @@ func TestNamespaceStore_ClearNamespaceResources(t *testing.T) {
 		Source: "test-src",
 		MinTTL: 1 * time.Minute,
 		MaxTTL: 1 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"token": "test-token",
-		},
+		}),
 	}))
 
 	// Register rotation entry

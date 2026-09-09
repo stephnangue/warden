@@ -84,7 +84,7 @@ func (f *ScalewayDriverFactory) Type() string {
 }
 
 // ValidateConfig validates Scaleway source configuration.
-func (f *ScalewayDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *ScalewayDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := validateChainedConfig(config); err != nil {
 		return err
 	}
@@ -161,7 +161,7 @@ func (f *ScalewayDriverFactory) ValidateConfig(config map[string]string) error {
 // keys go with it for a different reason: their only consumer is rotation, which a
 // chained source hands to whoever owns the referenced spec, so leaving them is dead
 // config that describes a job this source no longer does.
-func validateChainedConfig(config map[string]string) error {
+func validateChainedConfig(config credential.Config) error {
 	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
 		return nil
 	}
@@ -180,12 +180,12 @@ func (f *ScalewayDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType always returns scaleway_keys for Scaleway sources.
-func (f *ScalewayDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *ScalewayDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeScalewayKeys, nil
 }
 
 // Create instantiates a new ScalewayDriver.
-func (f *ScalewayDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *ScalewayDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &ScalewayDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeScaleway,
@@ -315,7 +315,7 @@ func (d *ScalewayDriver) MintCredential(ctx context.Context, spec *credential.Cr
 	// A chained spec mints through MintFromSecret, which the minting layer routes it
 	// to. Arriving here means that routing was bypassed, so fail rather than fall
 	// through to inline material this source or spec does not have.
-	if spec.Config[credential.ConfigSecretSpec] != "" || d.isChained() {
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" || d.isChained() {
 		return nil, nil, 0, "", fmt.Errorf("scaleway: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
 			credential.ConfigSecretSpec)
 	}
@@ -390,7 +390,7 @@ func (d *ScalewayDriver) mintStaticFromSecret(spec *credential.CredSpec, materia
 	// Spec create refuses that combination, but a source converted to chaining
 	// afterwards is not re-validated against the specs already bound to it, so this
 	// is the guard that actually holds.
-	if spec.Config[credential.ConfigSecretSpec] == "" {
+	if spec.Config.Get(credential.ConfigSecretSpec) == "" {
 		return nil, nil, 0, "", fmt.Errorf("scaleway: a static_keys spec must set its own %s naming a spec that yields its access_key and secret_key; this source's chained secret is a management key, not this credential",
 			credential.ConfigSecretSpec)
 	}
@@ -701,8 +701,8 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 	d.configMu.RLock()
 	managementKey := d.getManagementSecretKeyLocked()
 	managementAccessKey := credential.GetString(d.credSource.Config, "management_access_key", "")
-	configSnapshot := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	configSnapshot := make(map[string]string, d.credSource.Config.Len())
+	for k, v := range d.credSource.Config.All() {
 		configSnapshot[k] = v
 	}
 	d.configMu.RUnlock()
@@ -804,7 +804,7 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 	// Read from the snapshot taken under the lock above, not from the live map:
 	// two network round trips have happened since, and a concurrent CommitRotation
 	// may have replaced the map in the meantime.
-	activateAfter := credential.GetDuration(configSnapshot, "activation_delay", DefaultScalewayActivationDelay)
+	activateAfter := credential.GetDuration(credential.NewConfig(configSnapshot), "activation_delay", DefaultScalewayActivationDelay)
 	return newConfig, cleanupConfig, activateAfter, nil
 }
 
@@ -891,10 +891,10 @@ func (d *ScalewayDriver) CommitRotation(ctx context.Context, newConfig map[strin
 	d.configMu.Lock()
 	defer d.configMu.Unlock()
 
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 
 	d.logger.Info("committed rotated management key",
-		logger.String("new_access_key", truncateID(credential.GetString(newConfig, "management_access_key", ""), 8)),
+		logger.String("new_access_key", truncateID(newConfig["management_access_key"], 8)),
 	)
 
 	return nil
@@ -967,7 +967,7 @@ func (d *ScalewayDriver) verifyStaticKeys(ctx context.Context, spec *credential.
 	// A chained spec holds no pair to verify — it is fetched per mint, as the
 	// caller, and there is no caller here. Reporting "no secret_key configured"
 	// would describe config that is absent on purpose.
-	if spec.Config[credential.ConfigSecretSpec] != "" {
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" {
 		return nil
 	}
 

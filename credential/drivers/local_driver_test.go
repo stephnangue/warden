@@ -36,7 +36,7 @@ func TestLocalDriverFactory_Type(t *testing.T) {
 
 func TestLocalDriverFactory_ValidateConfig(t *testing.T) {
 	f := &LocalDriverFactory{}
-	assert.NoError(t, f.ValidateConfig(map[string]string{}))
+	assert.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{})))
 }
 
 func TestLocalDriverFactory_SensitiveConfigFields(t *testing.T) {
@@ -46,28 +46,28 @@ func TestLocalDriverFactory_SensitiveConfigFields(t *testing.T) {
 
 func TestLocalDriverFactory_Create(t *testing.T) {
 	f := &LocalDriverFactory{}
-	driver, err := f.Create(map[string]string{}, testDriverLogger())
+	driver, err := f.Create(credential.NewConfig(map[string]string{}), testDriverLogger())
 	require.NoError(t, err)
 	assert.Equal(t, credential.SourceTypeLocal, driver.Type())
 }
 
 func TestLocalDriverFactory_InferCredentialType(t *testing.T) {
 	f := &LocalDriverFactory{}
-	_, err := f.InferCredentialType(map[string]string{})
+	_, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "specify type explicitly")
 }
 
 func TestLocalDriver_MintCredential(t *testing.T) {
 	f := &LocalDriverFactory{}
-	driver, _ := f.Create(map[string]string{}, testDriverLogger())
+	driver, _ := f.Create(credential.NewConfig(map[string]string{}), testDriverLogger())
 
 	spec := &credential.CredSpec{
 		Name: "test",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"username": "admin",
 			"password": "secret",
-		},
+		}),
 	}
 
 	data, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
@@ -80,13 +80,13 @@ func TestLocalDriver_MintCredential(t *testing.T) {
 
 func TestLocalDriver_Revoke(t *testing.T) {
 	f := &LocalDriverFactory{}
-	driver, _ := f.Create(map[string]string{}, testDriverLogger())
+	driver, _ := f.Create(credential.NewConfig(map[string]string{}), testDriverLogger())
 	assert.NoError(t, driver.Revoke(context.Background(), "lease"))
 }
 
 func TestLocalDriver_Cleanup(t *testing.T) {
 	f := &LocalDriverFactory{}
-	driver, _ := f.Create(map[string]string{}, testDriverLogger())
+	driver, _ := f.Create(credential.NewConfig(map[string]string{}), testDriverLogger())
 	assert.NoError(t, driver.Cleanup(context.Background()))
 }
 

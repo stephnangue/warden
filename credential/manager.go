@@ -425,14 +425,14 @@ func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver Sourc
 // than swallowed, so a transient error can't silently route a chained spec down the
 // direct (non-chained) mint path.
 func (m *Manager) secretSpecRef(ctx context.Context, spec *CredSpec) (string, error) {
-	if ref := spec.Config[ConfigSecretSpec]; ref != "" {
+	if ref := spec.Config.Get(ConfigSecretSpec); ref != "" {
 		return ref, nil
 	}
 	src, err := m.configStore.GetSource(ctx, spec.Source)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve source %q for credential chaining: %w", spec.Source, err)
 	}
-	return src.Config[ConfigSecretSpec], nil
+	return src.Config.Get(ConfigSecretSpec), nil
 }
 
 // issueChained mints a consuming credential whose secret comes from a referenced
@@ -708,7 +708,7 @@ func (m *Manager) fetchUncached(ctx context.Context, caller Caller, secretRef st
 // caches one payload under a policy picked for another, silently opting the spec
 // into caching it never asked for.
 func (m *Manager) secretCacheTTL(ctx context.Context, spec *CredSpec) time.Duration {
-	if _, ok := spec.Config[ConfigSecretCacheTTL]; ok {
+	if _, ok := spec.Config.Lookup(ConfigSecretCacheTTL); ok {
 		return GetDuration(spec.Config, ConfigSecretCacheTTL, 0)
 	}
 	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil {
@@ -739,9 +739,9 @@ func (m *Manager) secretCacheTTL(ctx context.Context, spec *CredSpec) time.Durat
 // "secret_field %q is empty or absent" citing a field the spec's operator never
 // set, and its TTL caches a secret whose owner never opted in.
 func sourceModifiersApply(spec *CredSpec, src *CredSource) bool {
-	return spec.Config[ConfigSecretSpec] == "" ||
-		src.Config[ConfigSecretSpec] == "" ||
-		spec.Config[ConfigSecretSpec] == src.Config[ConfigSecretSpec]
+	return spec.Config.Get(ConfigSecretSpec) == "" ||
+		src.Config.Get(ConfigSecretSpec) == "" ||
+		spec.Config.Get(ConfigSecretSpec) == src.Config.Get(ConfigSecretSpec)
 }
 
 // invalidateChainedSecret evicts a cached secret and forgets any in-flight singleflight
@@ -849,6 +849,11 @@ func writeHashField(h hash.Hash, s string) {
 // The entry count is written first: without it the fields run together with whatever
 // surrounds them, so a config key named like an adjacent literal could move a pair across
 // that boundary without changing the digest.
+// hashConfig is hashStringMap over a Config.
+func hashConfig(h hash.Hash, c Config, exclude map[string]struct{}) {
+	hashStringMap(h, c.Map(), exclude)
+}
+
 func hashStringMap(h hash.Hash, m map[string]string, exclude map[string]struct{}) {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -943,12 +948,12 @@ func chainedSpecFingerprint(spec *CredSpec, src *CredSource) string {
 		writeHashField(h, "spec")
 		writeHashField(h, spec.Type)
 		writeHashField(h, spec.Source)
-		hashStringMap(h, spec.Config, perMintSpecFields)
+		hashConfig(h, spec.Config, perMintSpecFields)
 	}
 	if src != nil {
 		writeHashField(h, "src")
 		writeHashField(h, src.Type)
-		hashStringMap(h, src.Config, rotatedSourceProofFields)
+		hashConfig(h, src.Config, rotatedSourceProofFields)
 	}
 
 	return hex.EncodeToString(h.Sum(nil))
@@ -978,11 +983,11 @@ func copyStringMap(in map[string]string) map[string]string {
 // still works: both concern the same payload. See sourceModifiersApply for the one
 // case that does not.
 func (m *Manager) resolveSecretField(ctx context.Context, spec *CredSpec, credB *Credential) string {
-	if f := spec.Config[ConfigSecretField]; f != "" {
+	if f := spec.Config.Get(ConfigSecretField); f != "" {
 		return f
 	}
 	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil && sourceModifiersApply(spec, src) {
-		if f := src.Config[ConfigSecretField]; f != "" {
+		if f := src.Config.Get(ConfigSecretField); f != "" {
 			return f
 		}
 	}
@@ -1124,17 +1129,13 @@ func (m *Manager) consumeRotatedRefreshToken(ctx context.Context, spec *CredSpec
 		MinTTL:         spec.MinTTL,
 		MaxTTL:         spec.MaxTTL,
 		RotationPeriod: spec.RotationPeriod,
-		Config:         make(map[string]string, len(spec.Config)),
 	}
-	for k, v := range spec.Config {
-		updated.Config[k] = v
-	}
-	updated.Config["refresh_token"] = newToken
+	updated.Config = spec.Config.With("refresh_token", newToken)
 	// Keep refresh_token_expires_at in step with the rotated token when the provider
 	// returned a fresh expiry. If it rotated the token without one, leave the prior
 	// value untouched rather than assert an expiry we no longer know.
 	if exp, isStr := rotatedExpiry.(string); hasExpiry && isStr && exp != "" {
-		updated.Config["refresh_token_expires_at"] = exp
+		updated.Config = updated.Config.With("refresh_token_expires_at", exp)
 	}
 	if err := m.configStore.PersistRotatedSpec(ctx, updated); err != nil {
 		m.log.Error("failed to persist rotated refresh token; spec must be reconnected if mints start failing",
@@ -1148,7 +1149,7 @@ func (m *Manager) consumeRotatedRefreshToken(ctx context.Context, spec *CredSpec
 // retains a stale refresh_token after switching to client_credentials takes this
 // path harmlessly (the write-back is a no-op since no reserved key is surfaced).
 func needsRefreshTokenWriteBack(spec *CredSpec) bool {
-	return spec.Config["refresh_token"] != ""
+	return spec.Config.Get("refresh_token") != ""
 }
 
 // LockSpec serializes spec-config mutations (refresh-token write-back and the

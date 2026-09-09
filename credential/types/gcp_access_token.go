@@ -98,7 +98,7 @@ func (t *GCPAccessTokenCredType) ConfigSchema() []*credential.FieldValidator {
 // sourceType determines the validation rules:
 // - "gcp": requires service account configuration for token minting
 // - "hvault": requires Vault GCP engine configuration for dynamic_gcp
-func (t *GCPAccessTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *GCPAccessTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
 	case credential.SourceTypeGCP, credential.SourceTypeVault:
@@ -118,19 +118,19 @@ func (t *GCPAccessTokenCredType) ValidateConfig(config map[string]string, source
 	case credential.SourceTypeGCP:
 		mintMethod := credential.GetString(config, "mint_method", "access_token")
 		if mintMethod == "impersonated_access_token" {
-			if config["target_service_account"] == "" {
+			if config.Get("target_service_account") == "" {
 				return fmt.Errorf("'target_service_account' is required when mint_method is impersonated_access_token")
 			}
 		}
 	case credential.SourceTypeVault:
-		mintMethod := config["mint_method"]
+		mintMethod := config.Get("mint_method")
 		if mintMethod != "dynamic_gcp" {
 			return fmt.Errorf("'mint_method' must be 'dynamic_gcp' for vault source, got: %s", mintMethod)
 		}
-		if config["gcp_mount"] == "" {
+		if config.Get("gcp_mount") == "" {
 			return fmt.Errorf("'gcp_mount' is required when mint_method is dynamic_gcp")
 		}
-		if config["role_name"] == "" {
+		if config.Get("role_name") == "" {
 			return fmt.Errorf("'role_name' is required when mint_method is dynamic_gcp")
 		}
 	}

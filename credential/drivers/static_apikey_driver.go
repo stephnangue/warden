@@ -49,7 +49,7 @@ func (f *StaticAPIKeyDriverFactory) Type() string {
 }
 
 // ValidateConfig validates source configuration using declarative schema.
-func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *StaticAPIKeyDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("api_url").
 			Custom(func(v string) error {
@@ -118,7 +118,7 @@ func (f *StaticAPIKeyDriverFactory) ValidateConfig(config map[string]string) err
 	// an ignored config key would leave the source declaring nothing, its specs
 	// minting without the fields they set, and the providers reading them taking
 	// their fallback branch — a working-looking mount. Fail on the write instead.
-	if _, ok := config["optional_metadata"]; ok {
+	if _, ok := config.Lookup("optional_metadata"); ok {
 		return fmt.Errorf("optional_metadata has been renamed to credential_fields (the fields land in the credential's data, which may be secret, not in its non-secret metadata)")
 	}
 
@@ -143,12 +143,12 @@ func (f *StaticAPIKeyDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType returns the credential type for API key sources.
-func (f *StaticAPIKeyDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *StaticAPIKeyDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil
 }
 
 // Create instantiates a new StaticAPIKeyDriver.
-func (f *StaticAPIKeyDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *StaticAPIKeyDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &StaticAPIKeyDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeAPIKey,
@@ -187,7 +187,7 @@ func (d *StaticAPIKeyDriver) getAPIURL() string {
 // reaching here with secret_spec set is a misuse and fails closed rather than reading a
 // missing inline key. Non-chained specs are unaffected. The key is static — no TTL, no lease.
 func (d *StaticAPIKeyDriver) MintCredential(_ context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	if spec.Config[credential.ConfigSecretSpec] != "" || d.credSource.Config[credential.ConfigSecretSpec] != "" {
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" || d.credSource.Config.Get(credential.ConfigSecretSpec) != "" {
 		return nil, nil, 0, "", fmt.Errorf("%s: spec uses secret_spec (credential chaining); it must mint from fetched secret material, not directly", d.displayName())
 	}
 
@@ -338,7 +338,7 @@ func (d *StaticAPIKeyDriver) VerifySpec(ctx context.Context, spec *credential.Cr
 }
 
 // buildAPIKeyAuthHeaders builds authentication headers based on source config.
-func buildAPIKeyAuthHeaders(config map[string]string, apiKey string) map[string]string {
+func buildAPIKeyAuthHeaders(config credential.Config, apiKey string) map[string]string {
 	headerType := credential.GetString(config, "auth_header_type", apiKeyAuthBearer)
 	headers := map[string]string{"Accept": "application/json"}
 
@@ -388,7 +388,7 @@ func parseExtraHeaders(raw string) (map[string]string, error) {
 // parseCredentialFields parses comma-separated field names from source config.
 // Delegates to the shared splitter so the names this driver writes into the
 // declaration are split exactly as the parser splits them reading it back.
-func parseCredentialFields(config map[string]string) []string {
+func parseCredentialFields(config credential.Config) []string {
 	return credential.ParseAdjunctNames(credential.GetString(config, "credential_fields", ""))
 }
 

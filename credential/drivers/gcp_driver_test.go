@@ -101,37 +101,37 @@ func TestGCPDriverFactory_ValidateConfig(t *testing.T) {
 	f := &GCPDriverFactory{}
 
 	t.Run("missing service_account_key", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{})
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "service_account_key")
 	})
 
 	t.Run("invalid JSON", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account_key": "not-json",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "valid JSON")
 	})
 
 	t.Run("missing client_email", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account_key": `{"private_key": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"}`,
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "client_email")
 	})
 
 	t.Run("missing private_key", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account_key": `{"client_email": "test@project.iam.gserviceaccount.com"}`,
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "private_key")
 	})
 
 	t.Run("valid config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account_key": `{
 				"type": "service_account",
 				"project_id": "my-project",
@@ -140,7 +140,7 @@ func TestGCPDriverFactory_ValidateConfig(t *testing.T) {
 				"client_email": "test@my-project.iam.gserviceaccount.com",
 				"client_id": "123456789"
 			}`,
-		})
+		}))
 		require.NoError(t, err)
 	})
 }
@@ -149,7 +149,7 @@ func TestGCPDriver_Type(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeGCP, d.Type())
@@ -159,7 +159,7 @@ func TestGCPDriver_Cleanup(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Cleanup(context.TODO()))
@@ -169,7 +169,7 @@ func TestGCPDriver_Revoke_NoOp(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Revoke(context.TODO(), "some-lease-id"))
@@ -179,7 +179,7 @@ func TestGCPDriver_SupportsRotation(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.True(t, d.SupportsRotation())
@@ -189,15 +189,15 @@ func TestGCPDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid_method",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -209,16 +209,16 @@ func TestGCPDriver_MintCredential_ImpersonationMissingTarget(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		tokenCache: NewTokenCache(),
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "impersonated_access_token",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -230,7 +230,7 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	t.Run("valid key", func(t *testing.T) {
 		d := &GCPDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"service_account_key": `{
 						"type": "service_account",
 						"project_id": "my-project",
@@ -239,7 +239,7 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 						"client_email": "test@my-project.iam.gserviceaccount.com",
 						"client_id": "123456789"
 					}`,
-				},
+				}),
 			},
 		}
 
@@ -253,7 +253,7 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	t.Run("empty key", func(t *testing.T) {
 		d := &GCPDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{},
+				Config: credential.NewConfig(map[string]string{}),
 			},
 		}
 
@@ -265,9 +265,9 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	t.Run("invalid JSON", func(t *testing.T) {
 		d := &GCPDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"service_account_key": "not-json",
-				},
+				}),
 			},
 		}
 
@@ -342,7 +342,7 @@ func TestGCPDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
 	d = &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")},
+			Config: credential.NewConfig(map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -376,7 +376,7 @@ func TestGCPDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")},
+			Config: credential.NewConfig(map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -460,7 +460,7 @@ func TestGCPDriver_TokenFromRetiredKeyIsNeverServed(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, oldSA)},
+			Config: credential.NewConfig(map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, oldSA)}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},

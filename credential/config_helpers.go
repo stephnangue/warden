@@ -11,24 +11,24 @@ import (
 // Since all config values are stored as strings, drivers need to parse them to their expected types
 
 // GetString returns the string value for a config key, or defaultValue if not found
-func GetString(config map[string]string, key string, defaultValue string) string {
-	if val, ok := config[key]; ok {
+func GetString(config Config, key string, defaultValue string) string {
+	if val, ok := config.Lookup(key); ok {
 		return val
 	}
 	return defaultValue
 }
 
 // GetStringRequired returns the string value for a config key, or an error if not found
-func GetStringRequired(config map[string]string, key string) (string, error) {
-	if val, ok := config[key]; ok && val != "" {
+func GetStringRequired(config Config, key string) (string, error) {
+	if val, ok := config.Lookup(key); ok && val != "" {
 		return val, nil
 	}
 	return "", fmt.Errorf("required config key '%s' not found or empty", key)
 }
 
 // GetInt returns the integer value for a config key, or defaultValue if not found or invalid
-func GetInt(config map[string]string, key string, defaultValue int) int {
-	if val, ok := config[key]; ok {
+func GetInt(config Config, key string, defaultValue int) int {
+	if val, ok := config.Lookup(key); ok {
 		if i, err := strconv.Atoi(val); err == nil {
 			return i
 		}
@@ -37,8 +37,8 @@ func GetInt(config map[string]string, key string, defaultValue int) int {
 }
 
 // GetIntRequired returns the integer value for a config key, or an error if not found or invalid
-func GetIntRequired(config map[string]string, key string) (int, error) {
-	val, ok := config[key]
+func GetIntRequired(config Config, key string) (int, error) {
+	val, ok := config.Lookup(key)
 	if !ok {
 		return 0, fmt.Errorf("required config key '%s' not found", key)
 	}
@@ -50,8 +50,8 @@ func GetIntRequired(config map[string]string, key string) (int, error) {
 }
 
 // GetInt64 returns the int64 value for a config key, or defaultValue if not found or invalid
-func GetInt64(config map[string]string, key string, defaultValue int64) int64 {
-	if val, ok := config[key]; ok {
+func GetInt64(config Config, key string, defaultValue int64) int64 {
+	if val, ok := config.Lookup(key); ok {
 		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 			return i
 		}
@@ -61,8 +61,8 @@ func GetInt64(config map[string]string, key string, defaultValue int64) int64 {
 
 // GetBool returns the boolean value for a config key, or defaultValue if not found or invalid
 // Accepts: "true", "false", "1", "0", "yes", "no", "on", "off" (case-insensitive)
-func GetBool(config map[string]string, key string, defaultValue bool) bool {
-	if val, ok := config[key]; ok {
+func GetBool(config Config, key string, defaultValue bool) bool {
+	if val, ok := config.Lookup(key); ok {
 		if b, err := strconv.ParseBool(val); err == nil {
 			return b
 		}
@@ -71,8 +71,8 @@ func GetBool(config map[string]string, key string, defaultValue bool) bool {
 }
 
 // GetBoolRequired returns the boolean value for a config key, or an error if not found or invalid
-func GetBoolRequired(config map[string]string, key string) (bool, error) {
-	val, ok := config[key]
+func GetBoolRequired(config Config, key string) (bool, error) {
+	val, ok := config.Lookup(key)
 	if !ok {
 		return false, fmt.Errorf("required config key '%s' not found", key)
 	}
@@ -85,8 +85,8 @@ func GetBoolRequired(config map[string]string, key string) (bool, error) {
 
 // GetDuration returns the duration value for a config key, or defaultValue if not found or invalid
 // Accepts duration strings like "30s", "5m", "1h", etc.
-func GetDuration(config map[string]string, key string, defaultValue time.Duration) time.Duration {
-	if val, ok := config[key]; ok {
+func GetDuration(config Config, key string, defaultValue time.Duration) time.Duration {
+	if val, ok := config.Lookup(key); ok {
 		if d, err := time.ParseDuration(val); err == nil {
 			return d
 		}
@@ -95,8 +95,8 @@ func GetDuration(config map[string]string, key string, defaultValue time.Duratio
 }
 
 // GetDurationRequired returns the duration value for a config key, or an error if not found or invalid
-func GetDurationRequired(config map[string]string, key string) (time.Duration, error) {
-	val, ok := config[key]
+func GetDurationRequired(config Config, key string) (time.Duration, error) {
+	val, ok := config.Lookup(key)
 	if !ok {
 		return 0, fmt.Errorf("required config key '%s' not found", key)
 	}
@@ -111,9 +111,9 @@ func GetDurationRequired(config map[string]string, key string) (time.Duration, e
 // stripping the prefix from the returned keys. Keys equal to the prefix (empty
 // suffix) are skipped. For example, with prefix "token_param.", a config key
 // "token_param.resource" returns as "resource".
-func GetPrefixed(config map[string]string, prefix string) map[string]string {
+func GetPrefixed(config Config, prefix string) map[string]string {
 	result := make(map[string]string)
-	for k, v := range config {
+	for k, v := range config.All() {
 		if strings.HasPrefix(k, prefix) {
 			stripped := strings.TrimPrefix(k, prefix)
 			if stripped != "" {
@@ -126,10 +126,10 @@ func GetPrefixed(config map[string]string, prefix string) map[string]string {
 
 // ValidateRequired checks that all required config keys are present and non-empty
 // Returns an error listing all missing keys if any are not found
-func ValidateRequired(config map[string]string, requiredKeys ...string) error {
+func ValidateRequired(config Config, requiredKeys ...string) error {
 	var missing []string
 	for _, key := range requiredKeys {
-		if val, ok := config[key]; !ok || val == "" {
+		if val, ok := config.Lookup(key); !ok || val == "" {
 			missing = append(missing, key)
 		}
 	}
@@ -197,10 +197,10 @@ var (
 // secret_version is narrower than json_key_map: a store with its own version
 // addressing spells it differently (version_id / version_stage), so secret_version
 // is accepted only where a numbered read applies.
-func ValidateSecretSelection(config map[string]string, sourceType string) error {
-	mintMethod := config["mint_method"]
+func ValidateSecretSelection(config Config, sourceType string) error {
+	mintMethod := config.Get("mint_method")
 
-	if keyMap := config["json_key_map"]; keyMap != "" {
+	if keyMap := config.Get("json_key_map"); keyMap != "" {
 		if _, ok := mintMethodsHonoringKeyMap[sourceType][mintMethod]; !ok {
 			return fmt.Errorf("'json_key_map' selects fields of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, and secrets_manager and secret_read on an aws source", mintMethod)
 		}
@@ -209,7 +209,7 @@ func ValidateSecretSelection(config map[string]string, sourceType string) error 
 		}
 	}
 
-	if _, ok := mintMethodsHonoringSecretVersion[sourceType][mintMethod]; !ok && config["secret_version"] != "" {
+	if _, ok := mintMethodsHonoringSecretVersion[sourceType][mintMethod]; !ok && config.Get("secret_version") != "" {
 		return fmt.Errorf("'secret_version' pins a revision of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, and key_vault_secret on an azure source", mintMethod)
 	}
 

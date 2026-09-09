@@ -104,7 +104,7 @@ func (t *GitHubTokenCredType) ConfigSchema() []*credential.FieldValidator {
 // ValidateConfig validates the Config for a GitHub token credential spec.
 // Auth credentials (PAT token, App private key, etc.) are stored at spec level,
 // not on the source. The source only holds connection info (github_url).
-func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *GitHubTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	switch sourceType {
 	case credential.SourceTypeGitHub, credential.SourceTypeLocal:
@@ -123,10 +123,10 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 	if sourceType == credential.SourceTypeLocal {
 		// Local source: must have static token, mint_method not needed. A local
 		// source has no keyless path, so credential chaining does not apply.
-		if config[credential.ConfigSecretSpec] != "" {
+		if config.Get(credential.ConfigSecretSpec) != "" {
 			return fmt.Errorf("secret_spec (credential chaining) is not supported with a local source")
 		}
-		if config["token"] == "" {
+		if config.Get("token") == "" {
 			return fmt.Errorf("'token' is required for local source")
 		}
 		return nil
@@ -134,12 +134,12 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 
 	// The dispatch key was renamed auth_method -> mint_method to match the rest of
 	// the credential drivers; reject the old key with a clear migration message.
-	if config["auth_method"] != "" {
+	if config.Get("auth_method") != "" {
 		return fmt.Errorf("'auth_method' is no longer supported for github_token; use 'mint_method' (app or pat)")
 	}
 
 	// GitHub source: mint_method is required
-	mintMethod := config["mint_method"]
+	mintMethod := config.Get("mint_method")
 	if mintMethod == "" {
 		return fmt.Errorf("'mint_method' is required for github source")
 	}
@@ -147,31 +147,31 @@ func (t *GitHubTokenCredType) ValidateConfig(config map[string]string, sourceTyp
 	// When secret_spec is set, the secret (App private key or PAT) is fetched from
 	// the referenced spec at mint time rather than stored inline; the inline secret
 	// field must then be absent.
-	chained := config[credential.ConfigSecretSpec] != ""
+	chained := config.Get(credential.ConfigSecretSpec) != ""
 
 	// Conditional validation based on mint_method
 	switch mintMethod {
 	case "app":
 		// App identifiers are non-secret and always required.
-		if config["app_id"] == "" {
+		if config.Get("app_id") == "" {
 			return fmt.Errorf("'app_id' is required when mint_method is app")
 		}
-		if config["installation_id"] == "" {
+		if config.Get("installation_id") == "" {
 			return fmt.Errorf("'installation_id' is required when mint_method is app")
 		}
 		if chained {
-			if config["private_key"] != "" {
+			if config.Get("private_key") != "" {
 				return fmt.Errorf("'private_key' and 'secret_spec' are mutually exclusive (the private key is fetched from the referenced secret_spec)")
 			}
-		} else if config["private_key"] == "" {
+		} else if config.Get("private_key") == "" {
 			return fmt.Errorf("'private_key' (or 'secret_spec') is required when mint_method is app")
 		}
 	case "pat":
 		if chained {
-			if config["token"] != "" {
+			if config.Get("token") != "" {
 				return fmt.Errorf("'token' and 'secret_spec' are mutually exclusive (the token is fetched from the referenced secret_spec)")
 			}
-		} else if config["token"] == "" {
+		} else if config.Get("token") == "" {
 			return fmt.Errorf("'token' (or 'secret_spec') is required when mint_method is pat")
 		}
 	}

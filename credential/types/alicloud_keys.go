@@ -65,7 +65,7 @@ func (t *AlicloudKeysCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for an Alicloud credential spec
-func (t *AlicloudKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *AlicloudKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// A vault source is not supported: it would need a static_alicloud mint method,
 	// which the Vault driver has never implemented. It used to be accepted here and
 	// then failed at the first mint.
@@ -78,10 +78,10 @@ func (t *AlicloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 		return err
 	}
 
-	if mintMethod := config["mint_method"]; mintMethod != "assume_role" {
+	if mintMethod := config.Get("mint_method"); mintMethod != "assume_role" {
 		return fmt.Errorf("'mint_method' must be 'assume_role' for alicloud source, got: %s", mintMethod)
 	}
-	if config["role_arn"] == "" {
+	if config.Get("role_arn") == "" {
 		return fmt.Errorf("'role_arn' is required for assume_role")
 	}
 

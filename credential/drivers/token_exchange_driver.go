@@ -35,7 +35,7 @@ const tokenTypeIDJAG = "urn:ietf:params:oauth:token-type:id-jag"
 // rfc8693 and id_jag both carry the actor. It lets the config store reject an
 // actor spec bound to a jwt_bearer source at create time (single source of truth
 // for the grant string, mirroring DeriveAssertionAudience living here).
-func TokenExchangeSupportsActor(sourceCfg map[string]string) bool {
+func TokenExchangeSupportsActor(sourceCfg credential.Config) bool {
 	return credential.GetString(sourceCfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantJWTBearer
 }
 
@@ -132,7 +132,7 @@ func (f *TokenExchangeDriverFactory) Type() string {
 
 // ValidateConfig validates source configuration. VerifySpec never runs for
 // exchange specs, so the factory is the place strict validation lives.
-func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) error {
 	skip := credential.GetBool(config, "tls_skip_verify", false)
 	if err := credential.ValidateSchema(config,
 		credential.StringField("token_url").
@@ -306,7 +306,7 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config map[string]string) er
 // source that fetches its client credential per mint. keys are whatever the chosen
 // client_auth calls for; client_id is always checked, since none of the rest are
 // meaningful apart from the client they belong to.
-func rejectInlineClientCredential(config map[string]string, keys ...string) error {
+func rejectInlineClientCredential(config credential.Config, keys ...string) error {
 	for _, key := range append(keys, "client_id") {
 		if credential.GetString(config, key, "") != "" {
 			return fmt.Errorf("%s must be omitted when secret_spec is set; the referenced spec supplies the whole client credential", key)
@@ -321,12 +321,12 @@ func (f *TokenExchangeDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType returns the credential type for token_exchange sources.
-func (f *TokenExchangeDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *TokenExchangeDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeOAuthBearerToken, nil
 }
 
 // Create instantiates a new TokenExchangeDriver.
-func (f *TokenExchangeDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *TokenExchangeDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	client, err := BuildHTTPClient(config, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
@@ -385,7 +385,7 @@ func (d *TokenExchangeDriver) MintCredentialWithExchangeFromSecret(ctx context.C
 // Every "the payload lacks what I need" error carries ErrChainedSecretIncomplete, so a
 // cached payload that predates a key it now has to hold is refetched once rather than
 // failing for the rest of its secret_cache_ttl.
-func tokenExchangeChainedAuthFromMaterial(cfg map[string]string, material credential.SecretMaterial) (*tokenExchangeChainedAuth, error) {
+func tokenExchangeChainedAuthFromMaterial(cfg credential.Config, material credential.SecretMaterial) (*tokenExchangeChainedAuth, error) {
 	// The id is never the secret. A payload holding nothing but an id resolves that
 	// lone key as the secret field — the single-key shortcut has no way to know
 	// better — and without this the same value would be spent as both halves of the
@@ -791,7 +791,7 @@ func (d *TokenExchangeDriver) addResources(form url.Values, spec *credential.Cre
 // the `resources` key (which is why the resource can vary with source config, not
 // just spec — see the SubjectCacheIdentity note). Only a lone resource is named; zero or
 // several yield no claim, since a scalar claim can't express a set.
-func tokenExchangeAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
+func tokenExchangeAssertionResource(sourceCfg, specCfg credential.Config) (string, bool) {
 	raw := credential.GetString(specCfg, "resources", "")
 	if raw == "" {
 		raw = credential.GetString(sourceCfg, "resources", "")
@@ -803,7 +803,7 @@ func tokenExchangeAssertionResource(sourceCfg, specCfg map[string]string) (strin
 	return "oauth-resource:" + fields[0], true
 }
 
-// resolve returns spec.Config[key] when set, else the source config value.
+// resolve returns spec.Config.Get(key) when set, else the source config value.
 func (d *TokenExchangeDriver) resolve(spec *credential.CredSpec, key string) string {
 	if spec != nil {
 		if v := credential.GetString(spec.Config, key, ""); v != "" {

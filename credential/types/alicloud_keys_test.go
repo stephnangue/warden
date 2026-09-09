@@ -66,7 +66,7 @@ func TestAlicloudKeysCredType_ValidateConfig_AlicloudSource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeAlicloud)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeAlicloud)
 			if tt.errMsg == "" {
 				assert.NoError(t, err)
 				return
@@ -82,21 +82,21 @@ func TestAlicloudKeysCredType_ValidateConfig_AlicloudSource(t *testing.T) {
 // mint. It is refused at create now.
 func TestAlicloudKeysCredType_ValidateConfig_VaultSourceRejected(t *testing.T) {
 	ct := &AlicloudKeysCredType{}
-	err := ct.ValidateConfig(map[string]string{
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 		"mint_method": "static_alicloud",
 		"kv2_mount":   "secret",
 		"secret_path": "alicloud/prod/keys",
-	}, credential.SourceTypeVault)
+	}), credential.SourceTypeVault)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "alicloud source")
 }
 
 func TestAlicloudKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 	ct := &AlicloudKeysCredType{}
-	err := ct.ValidateConfig(map[string]string{
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 		"mint_method": "assume_role",
 		"role_arn":    "acs:ram::123456789012:role/warden",
-	}, credential.SourceTypeAWS)
+	}), credential.SourceTypeAWS)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "alicloud source")
 }

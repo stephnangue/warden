@@ -85,7 +85,7 @@ func (f *OAuth2DriverFactory) Type() string {
 // client_id/client_secret are optional here because the authorization_code flow
 // keeps them on the spec, and a chained source (secret_spec) holds neither;
 // presence is checked at mint time.
-func (f *OAuth2DriverFactory) ValidateConfig(config map[string]string) error {
+func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("client_id").
 			Describe("OAuth2 client ID (source-level for client_credentials; may be set per-spec)").
@@ -245,12 +245,12 @@ func (f *OAuth2DriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType returns the credential type for OAuth2 sources.
-func (f *OAuth2DriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *OAuth2DriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeOAuthBearerToken, nil
 }
 
 // Create instantiates a new OAuth2Driver.
-func (f *OAuth2DriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *OAuth2DriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeOAuth2,
@@ -295,7 +295,7 @@ type oauth2TokenResponse struct {
 	ErrorDescription string `json:"error_description"`
 }
 
-// resolve returns spec.Config[key] when set, else the source config value, else def.
+// resolve returns spec.Config.Get(key) when set, else the source config value, else def.
 // This lets a spec override or supply source-level keys (e.g. client_id,
 // client_secret, scopes) — needed for the authorization_code flow where those
 // live on the spec.
@@ -851,7 +851,7 @@ func (d *OAuth2Driver) VerifySpec(ctx context.Context, spec *credential.CredSpec
 }
 
 // buildOAuth2AuthHeaders builds authentication headers based on auth_header_type config.
-func buildOAuth2AuthHeaders(config map[string]string, token string) map[string]string {
+func buildOAuth2AuthHeaders(config credential.Config, token string) map[string]string {
 	headerType := credential.GetString(config, "auth_header_type", oauth2AuthBearer)
 	headers := map[string]string{"Accept": "application/json"}
 

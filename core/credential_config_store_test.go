@@ -319,9 +319,9 @@ func TestCredentialConfigStore_CreateSource(t *testing.T) {
 	source := &credential.CredSource{
 		Name: "test-source",
 		Type: "local",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"path": "/secrets",
-		},
+		}),
 	}
 
 	// Create source
@@ -349,8 +349,8 @@ func TestCredentialConfigStore_CreateSource(t *testing.T) {
 	if retrieved.Type != source.Type {
 		t.Errorf("expected type %s, got %s", source.Type, retrieved.Type)
 	}
-	if retrieved.Config["path"] != "/secrets" {
-		t.Errorf("expected path /secrets, got %s", retrieved.Config["path"])
+	if retrieved.Config.Get("path") != "/secrets" {
+		t.Errorf("expected path /secrets, got %s", retrieved.Config.Get("path"))
 	}
 }
 
@@ -392,7 +392,7 @@ func TestCredentialConfigStore_SecretSpecReference(t *testing.T) {
 	// Referencing a non-existent secret-spec is rejected.
 	badConsumer := &credential.CredSpec{
 		Name: "bad", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "missing"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "missing"}),
 	}
 	err := store.CreateSpec(ctx, badConsumer)
 	require.Error(t, err)
@@ -400,11 +400,11 @@ func TestCredentialConfigStore_SecretSpecReference(t *testing.T) {
 
 	// A secret-spec that does not request exchange is rejected as a reference.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
-		Name: "plain-secret", Type: "vault_token", Source: "src", Config: map[string]string{},
+		Name: "plain-secret", Type: "vault_token", Source: "src", Config: credential.NewConfig(map[string]string{}),
 	}))
 	err = store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "bad2", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "plain-secret"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "plain-secret"}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "subject_token_source")
@@ -412,14 +412,14 @@ func TestCredentialConfigStore_SecretSpecReference(t *testing.T) {
 	// A valid referenced secret-spec requests exchange (minted as the caller).
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "secret-spec", Type: "vault_token", Source: "src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"subject_token_source": "warden_identity",
 			"assertion_audience":   "test-aud",
-		},
+		}),
 	}))
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "consumer", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "secret-spec"}),
 	}))
 
 	// Deleting the referenced secret-spec is blocked while a consumer points at it.
@@ -439,18 +439,18 @@ func TestCredentialConfigStore_SecretSpecReference_Restrictions(t *testing.T) {
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
 	}))
 
 	// A user_identity referenced spec is per-request/per-user, not session-pinned →
 	// rejected as a reference.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "user-secret", Type: "vault_token", Source: "sts-src",
-		Config: map[string]string{"subject_token_source": "user_identity"},
+		Config: credential.NewConfig(map[string]string{"subject_token_source": "user_identity"}),
 	}))
 	err := store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "consumer-user", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "user-secret"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "user-secret"}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session-pinned")
@@ -458,16 +458,16 @@ func TestCredentialConfigStore_SecretSpecReference_Restrictions(t *testing.T) {
 	// A valid warden_identity referenced spec.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "wid-secret", Type: "vault_token", Source: "src",
-		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "aud"},
+		Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "aud"}),
 	}))
 	// A chained consumer that ALSO sets its own exchange config is rejected.
 	err = store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "consumer-dbl", Type: "vault_token", Source: "src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSecretSpec: "wid-secret",
 			"subject_token_source":      "warden_identity",
 			"assertion_audience":        "aud",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must not also set")
@@ -480,12 +480,12 @@ func TestCredentialConfigStore_SecretCacheTTLValidation(t *testing.T) {
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "secret-spec", Type: "vault_token", Source: "src",
-		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "aud"},
+		Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "aud"}),
 	}))
 
 	err := store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "bad-ttl", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "30min"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "30min"}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a valid duration")
@@ -493,11 +493,11 @@ func TestCredentialConfigStore_SecretCacheTTLValidation(t *testing.T) {
 	// A valid duration (and "0" to opt out) are accepted.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "ok-ttl", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "30m"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "30m"}),
 	}))
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "optout-ttl", Type: "vault_token", Source: "src",
-		Config: map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "0"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "secret-spec", credential.ConfigSecretCacheTTL: "0"}),
 	}))
 }
 
@@ -511,20 +511,20 @@ func TestCredentialConfigStore_ChainedExchangeAccepted(t *testing.T) {
 	// before the source that references it.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "wid-secret", Type: "vault_token", Source: "src",
-		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+		Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
 		// No client_id: a chained source holds neither half of the client credential,
 		// so both come from the referenced spec's payload.
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693", credential.ConfigSecretSpec: "wid-secret"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693", credential.ConfigSecretSpec: "wid-secret"}),
 	}))
 
 	// A token_exchange consumer with secret_spec (source-level) + its own subject source
 	// is accepted (unlike consumer-dbl on a non-exchange source).
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "internal-api", Type: "oauth_bearer_token", Source: "sts-src",
-		Config: map[string]string{"subject_token_source": "user_identity", "audience": "https://api.internal.example.com"},
+		Config: credential.NewConfig(map[string]string{"subject_token_source": "user_identity", "audience": "https://api.internal.example.com"}),
 	}))
 }
 
@@ -844,11 +844,11 @@ func (f *testDriverFactory) Type() string {
 	return f.driverType
 }
 
-func (f *testDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *testDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &testDriver{}, nil
 }
 
-func (f *testDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *testDriverFactory) ValidateConfig(config credential.Config) error {
 	return nil
 }
 
@@ -856,7 +856,7 @@ func (f *testDriverFactory) SensitiveConfigFields() []string {
 	return []string{}
 }
 
-func (f *testDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *testDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("test driver cannot infer type")
 }
 
@@ -1036,7 +1036,7 @@ func TestCredentialConfigStore_ValidateSpec_ExchangeRotation(t *testing.T) {
 			name: "exchange spec is exempt from the rotation_period requirement",
 			spec: &credential.CredSpec{
 				Name: "exchange-no-rotation", Type: "rotating_type", Source: "local-src",
-				Config: exchangeCfg, MinTTL: time.Minute, MaxTTL: time.Hour,
+				Config: credential.NewConfig(exchangeCfg), MinTTL: time.Minute, MaxTTL: time.Hour,
 			},
 			expectError: false,
 		},
@@ -1044,7 +1044,7 @@ func TestCredentialConfigStore_ValidateSpec_ExchangeRotation(t *testing.T) {
 			name: "exchange spec must not set rotation_period",
 			spec: &credential.CredSpec{
 				Name: "exchange-with-rotation", Type: "rotating_type", Source: "local-src",
-				Config: exchangeCfg, RotationPeriod: 24 * time.Hour, MinTTL: time.Minute, MaxTTL: time.Hour,
+				Config: credential.NewConfig(exchangeCfg), RotationPeriod: 24 * time.Hour, MinTTL: time.Minute, MaxTTL: time.Hour,
 			},
 			expectError: true,
 			errorMsg:    "not supported",
@@ -1076,11 +1076,11 @@ func TestCredentialConfigStore_ValidateSpec_ActorWardenIdentity(t *testing.T) {
 	store.core.credentialDriverRegistry = nil // skip the test-mint block
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "jwtbearer-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "jwt_bearer"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "jwt_bearer"}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
 
@@ -1092,7 +1092,7 @@ func TestCredentialConfigStore_ValidateSpec_ActorWardenIdentity(t *testing.T) {
 		for k, v := range cfg {
 			full[k] = v
 		}
-		return &credential.CredSpec{Name: name, Type: "vault_token", Source: source, Config: full}
+		return &credential.CredSpec{Name: name, Type: "vault_token", Source: source, Config: credential.NewConfig(full)}
 	}
 
 	tests := []struct {
@@ -1153,21 +1153,21 @@ func TestCredentialConfigStore_ValidateSpec_UserIdentitySubjectRequiresTokenExch
 	store.core.credentialDriverRegistry = nil // skip the test-mint block
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
 
 	// Accepted on a token_exchange source (no actor, no assertion → no audience).
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "user-subj-ok", Type: "vault_token", Source: "sts-src",
-		Config: map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity}),
 	}))
 
 	// Rejected on a non-token_exchange (federation) source — the subject pin fires
 	// on its own, no actor present to mask it.
 	err := store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "user-subj-bad", Type: "vault_token", Source: "local-src",
-		Config: map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity}),
 	})
 	require.Error(t, err)
 	if !contains(err.Error(), "user_identity") || !contains(err.Error(), "token_exchange") {
@@ -1184,7 +1184,7 @@ func TestCredentialConfigStore_ValidateSpec_ActorSourceRequiresTokenExchange(t *
 	store.core.credentialDriverRegistry = nil // skip the test-mint block
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
 
@@ -1204,11 +1204,11 @@ func TestCredentialConfigStore_ValidateSpec_ActorSourceRequiresTokenExchange(t *
 			// subject=user_identity so the actor pairing is valid regardless of actor source.
 			err := store.CreateSpec(ctx, &credential.CredSpec{
 				Name: fmt.Sprintf("actor-spec-%d", i), Type: "vault_token", Source: tt.source,
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 					credential.ConfigActorTokenSource:   tt.actorSrc,
 					credential.ConfigAssertionAudience:  "https://sts.example/aud",
-				},
+				}),
 			})
 			if tt.errorMsg == "" {
 				require.NoError(t, err)
@@ -1241,7 +1241,7 @@ func (t *testCredentialType) ConfigSchema() []*credential.FieldValidator {
 	return nil // No schema required for test type
 }
 
-func (t *testCredentialType) ValidateConfig(config map[string]string, sourceName string) error {
+func (t *testCredentialType) ValidateConfig(config credential.Config, sourceName string) error {
 	// No validation required for test type
 	return nil
 }
@@ -1306,9 +1306,9 @@ func TestCredentialConfigStore_ValidateSource_ConfigValidation(t *testing.T) {
 			source: &credential.CredSource{
 				Name: "valid-config-source",
 				Type: "validating_driver",
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"required_param": "value",
-				},
+				}),
 			},
 			expectError: false,
 		},
@@ -1317,7 +1317,7 @@ func TestCredentialConfigStore_ValidateSource_ConfigValidation(t *testing.T) {
 			source: &credential.CredSource{
 				Name:   "missing-config-source",
 				Type:   "validating_driver",
-				Config: map[string]string{},
+				Config: credential.NewConfig(map[string]string{}),
 			},
 			expectError: true,
 			errorMsg:    "invalid config for source type 'validating_driver'",
@@ -1350,11 +1350,11 @@ func (f *validatingDriverFactory) Type() string {
 	return "validating_driver"
 }
 
-func (f *validatingDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *validatingDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &testDriver{}, nil
 }
 
-func (f *validatingDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *validatingDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateRequired(config, "required_param"); err != nil {
 		return err
 	}
@@ -1365,7 +1365,7 @@ func (f *validatingDriverFactory) SensitiveConfigFields() []string {
 	return []string{}
 }
 
-func (f *validatingDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *validatingDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("validating driver cannot infer type")
 }
 
@@ -1404,9 +1404,9 @@ func TestCredentialConfigStore_ValidateSpec_SourceParamsValidation(t *testing.T)
 				Name:   "valid-params-spec",
 				Type:   "validating_type",
 				Source: "test-source",
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"required_field": "value",
-				},
+				}),
 				MinTTL: 5 * time.Minute,
 				MaxTTL: 1 * time.Hour,
 			},
@@ -1418,7 +1418,7 @@ func TestCredentialConfigStore_ValidateSpec_SourceParamsValidation(t *testing.T)
 				Name:   "missing-params-spec",
 				Type:   "validating_type",
 				Source: "test-source",
-				Config: map[string]string{},
+				Config: credential.NewConfig(map[string]string{}),
 				MinTTL: 5 * time.Minute,
 				MaxTTL: 1 * time.Hour,
 			},
@@ -1462,7 +1462,7 @@ func (t *validatingCredentialType) ConfigSchema() []*credential.FieldValidator {
 	return nil // No schema required for test type
 }
 
-func (t *validatingCredentialType) ValidateConfig(config map[string]string, sourceName string) error {
+func (t *validatingCredentialType) ValidateConfig(config credential.Config, sourceName string) error {
 	if err := credential.ValidateRequired(config, "required_field"); err != nil {
 		return err
 	}
@@ -1570,7 +1570,7 @@ func TestCredentialConfigStore_BuiltinLocalSource(t *testing.T) {
 		localSource := &credential.CredSource{
 			Name:   "local",
 			Type:   "local",
-			Config: map[string]string{"some": "config"},
+			Config: credential.NewConfig(map[string]string{"some": "config"}),
 		}
 
 		err := store.UpdateSource(ctx, localSource)
@@ -1601,10 +1601,10 @@ func TestCredentialConfigStore_BuiltinLocalSource(t *testing.T) {
 			Name:   "test-local-spec",
 			Type:   "vault_token",
 			Source: "local",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kv2_mount":   "secret",
 				"secret_path": "db/creds",
-			},
+			}),
 			MinTTL: time.Hour,
 			MaxTTL: 24 * time.Hour,
 		}
@@ -1729,12 +1729,12 @@ func TestCredentialConfigStore_ClearNamespace_Isolation(t *testing.T) {
 type connectGatedDriverFactory struct{}
 
 func (f *connectGatedDriverFactory) Type() string { return "connect_driver" }
-func (f *connectGatedDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *connectGatedDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &connectGatedDriver{}, nil
 }
-func (f *connectGatedDriverFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *connectGatedDriverFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *connectGatedDriverFactory) SensitiveConfigFields() []string               { return nil }
-func (f *connectGatedDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *connectGatedDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "connect_cred", nil
 }
 
@@ -1753,11 +1753,11 @@ type connectGatedCredType struct {
 	testCredentialType
 }
 
-func (t *connectGatedCredType) RequiresConnect(config map[string]string) bool {
-	return config["auth_method"] == "authorization_code"
+func (t *connectGatedCredType) RequiresConnect(config credential.Config) bool {
+	return config.Get("auth_method") == "authorization_code"
 }
-func (t *connectGatedCredType) IsConnected(config map[string]string) bool {
-	return config["refresh_token"] != "" || config["access_token"] != ""
+func (t *connectGatedCredType) IsConnected(config credential.Config) bool {
+	return config.Get("refresh_token") != "" || config.Get("access_token") != ""
 }
 
 func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
@@ -1774,7 +1774,7 @@ func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
 	// even though MintCredential would error.
 	unconnected := &credential.CredSpec{
 		Name: "gh", Type: "connect_cred", Source: "gh-src",
-		Config: map[string]string{"auth_method": "authorization_code"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code"}),
 	}
 	require.NoError(t, store.CreateSpec(ctx, unconnected),
 		"unconnected authcode spec should create with the test-mint skipped")
@@ -1782,7 +1782,7 @@ func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
 	// (b) rotation_period is rejected for a connect-gated spec.
 	err := store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "gh-rot", Type: "connect_cred", Source: "gh-src",
-		Config:         map[string]string{"auth_method": "authorization_code"},
+		Config:         credential.NewConfig(map[string]string{"auth_method": "authorization_code"}),
 		RotationPeriod: time.Hour,
 	})
 	require.Error(t, err)
@@ -1796,7 +1796,7 @@ func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
 	} {
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "gh-conn-" + connectedCfg["refresh_token"] + connectedCfg["access_token"],
-			Type: "connect_cred", Source: "gh-src", Config: connectedCfg,
+			Type: "connect_cred", Source: "gh-src", Config: credential.NewConfig(connectedCfg),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "credential test failed")
@@ -1804,7 +1804,7 @@ func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
 
 	// (d) Updating the unconnected spec to a connected config runs the test-mint
 	// (fails) — unless SkipVerification is set, which the connect seal / write-back use.
-	unconnected.Config["refresh_token"] = "rt"
+	unconnected.Config = unconnected.Config.With("refresh_token", "rt")
 	err = store.UpdateSpec(ctx, unconnected)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential test failed")
@@ -1818,12 +1818,12 @@ func TestCredentialConfigStore_ValidateSpec_ConnectGating(t *testing.T) {
 type fakeHvaultFactory struct{}
 
 func (f *fakeHvaultFactory) Type() string { return credential.SourceTypeVault }
-func (f *fakeHvaultFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *fakeHvaultFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &testDriver{}, nil
 }
-func (f *fakeHvaultFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *fakeHvaultFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *fakeHvaultFactory) SensitiveConfigFields() []string               { return nil }
-func (f *fakeHvaultFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *fakeHvaultFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeVaultToken, nil
 }
 
@@ -1839,24 +1839,24 @@ func TestCredentialConfigStore_ValidateSource_HvaultRotationPeriod(t *testing.T)
 
 	tests := []struct {
 		name        string
-		config      map[string]string
+		config      credential.Config
 		expectError bool
 		errorMsg    string
 	}{
 		{
 			name:        "oidc_federation without rotation_period is allowed",
-			config:      map[string]string{"auth_method": "oidc_federation", "jwt_role": "warden-agents"},
+			config:      credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "jwt_role": "warden-agents"}),
 			expectError: false,
 		},
 		{
 			name:        "approle without rotation_period is rejected",
-			config:      map[string]string{"auth_method": "approle"},
+			config:      credential.NewConfig(map[string]string{"auth_method": "approle"}),
 			expectError: true,
 			errorMsg:    "rotation_period is required",
 		},
 		{
 			name:        "empty auth_method without rotation_period is rejected",
-			config:      map[string]string{},
+			config:      credential.NewConfig(map[string]string{}),
 			expectError: true,
 			errorMsg:    "rotation_period is required",
 		},
@@ -1886,12 +1886,12 @@ func TestCredentialConfigStore_ValidateSource_HvaultRotationPeriod(t *testing.T)
 type fakeFederationFactory struct{ sourceType string }
 
 func (f *fakeFederationFactory) Type() string { return f.sourceType }
-func (f *fakeFederationFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *fakeFederationFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &testDriver{}, nil
 }
-func (f *fakeFederationFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *fakeFederationFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *fakeFederationFactory) SensitiveConfigFields() []string               { return nil }
-func (f *fakeFederationFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *fakeFederationFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil
 }
 
@@ -1922,7 +1922,7 @@ func TestCredentialConfigStore_FederationSourceRejectsRotationPeriod(t *testing.
 			err := store.CreateSource(ctx, &credential.CredSource{
 				Name:           "fed-src",
 				Type:           sourceType,
-				Config:         map[string]string{"auth_method": "oidc_federation"},
+				Config:         credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
 				RotationPeriod: 48 * time.Hour,
 			})
 			require.Error(t, err)
@@ -1932,7 +1932,7 @@ func TestCredentialConfigStore_FederationSourceRejectsRotationPeriod(t *testing.
 			require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 				Name:   "fed-src",
 				Type:   sourceType,
-				Config: map[string]string{"auth_method": "oidc_federation"},
+				Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
 			}))
 		})
 	}
@@ -1952,7 +1952,7 @@ func TestCredentialConfigStore_FederationRotationGateRunsOnUpdate(t *testing.T) 
 	updated := &credential.CredSource{
 		Name:           "fed-src",
 		Type:           credential.SourceTypeAWS,
-		Config:         map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"},
+		Config:         credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}),
 		RotationPeriod: 48 * time.Hour,
 	}
 
@@ -1971,16 +1971,16 @@ func TestCredentialConfigStore_FederationRotationGateRunsOnUpdate(t *testing.T) 
 type unrotatableFactory struct{ sourceType string }
 
 func (f *unrotatableFactory) Type() string { return f.sourceType }
-func (f *unrotatableFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *unrotatableFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &testDriver{}, nil
 }
-func (f *unrotatableFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *unrotatableFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *unrotatableFactory) SensitiveConfigFields() []string               { return nil }
-func (f *unrotatableFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *unrotatableFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil
 }
-func (f *unrotatableFactory) ValidateRotationConfig(config map[string]string) error {
-	if config["management_user_name"] == "" {
+func (f *unrotatableFactory) ValidateRotationConfig(config credential.Config) error {
+	if config.Get("management_user_name") == "" {
 		return fmt.Errorf("management_user_name is required")
 	}
 	return nil
@@ -2011,7 +2011,7 @@ func TestCredentialConfigStore_UnrotatableSourceRejectsRotationPeriod(t *testing
 		err := store.CreateSource(ctx, &credential.CredSource{
 			Name:           "unrotatable",
 			Type:           credential.SourceTypeAlicloud,
-			Config:         map[string]string{"access_key_id": "LTAI-mgmt"},
+			Config:         credential.NewConfig(map[string]string{"access_key_id": "LTAI-mgmt"}),
 			RotationPeriod: 48 * time.Hour,
 		})
 		require.Error(t, err)
@@ -2024,10 +2024,10 @@ func TestCredentialConfigStore_UnrotatableSourceRejectsRotationPeriod(t *testing
 		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 			Name: "rotatable",
 			Type: credential.SourceTypeAlicloud,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"access_key_id":        "LTAI-mgmt",
 				"management_user_name": "warden-management",
-			},
+			}),
 			RotationPeriod: 48 * time.Hour,
 		}))
 	})
@@ -2037,7 +2037,7 @@ func TestCredentialConfigStore_UnrotatableSourceRejectsRotationPeriod(t *testing
 		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 			Name:   "no-rotation",
 			Type:   credential.SourceTypeAlicloud,
-			Config: map[string]string{"access_key_id": "LTAI-mgmt"},
+			Config: credential.NewConfig(map[string]string{"access_key_id": "LTAI-mgmt"}),
 		}))
 	})
 
@@ -2048,7 +2048,7 @@ func TestCredentialConfigStore_UnrotatableSourceRejectsRotationPeriod(t *testing
 		err := store.validateSource(ctx, &credential.CredSource{
 			Name:           "unrotatable",
 			Type:           credential.SourceTypeAlicloud,
-			Config:         map[string]string{"access_key_id": "LTAI-mgmt"},
+			Config:         credential.NewConfig(map[string]string{"access_key_id": "LTAI-mgmt"}),
 			RotationPeriod: 48 * time.Hour,
 		}, false)
 		require.Error(t, err)
@@ -2074,7 +2074,7 @@ func TestCredentialConfigStore_ChainedSpecRejectsRotationPeriod(t *testing.T) {
 		// Session-pinned, as validateSecretSpecRef requires of a referenced spec.
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "ref-secret", Type: "vault_token", Source: "src",
-			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+			Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"}),
 		}))
 		return store, ctx
 	}
@@ -2082,15 +2082,15 @@ func TestCredentialConfigStore_ChainedSpecRejectsRotationPeriod(t *testing.T) {
 	t.Run("chained on the spec", func(t *testing.T) {
 		store, ctx := setup(t)
 		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
-			Name: "apikey-src", Type: credential.SourceTypeAPIKey, Config: map[string]string{},
+			Name: "apikey-src", Type: credential.SourceTypeAPIKey, Config: credential.NewConfig(map[string]string{}),
 		}))
 
 		chained := &credential.CredSpec{
 			Name: "chained-rotating", Type: credential.TypeAPIKey, Source: "apikey-src",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				credential.ConfigSecretSpec:  "ref-secret",
 				credential.ConfigSecretField: "api_key",
-			},
+			}),
 			RotationPeriod: 24 * time.Hour,
 		}
 		err := store.CreateSpec(ctx, chained)
@@ -2112,12 +2112,12 @@ func TestCredentialConfigStore_ChainedSpecRejectsRotationPeriod(t *testing.T) {
 		store, ctx := setup(t)
 		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 			Name: "apikey-chained-src", Type: credential.SourceTypeAPIKey,
-			Config: map[string]string{credential.ConfigSecretSpec: "ref-secret"},
+			Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "ref-secret"}),
 		}))
 
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "inherits-chaining", Type: credential.TypeAPIKey, Source: "apikey-chained-src",
-			Config:         map[string]string{credential.ConfigSecretField: "api_key"},
+			Config:         credential.NewConfig(map[string]string{credential.ConfigSecretField: "api_key"}),
 			RotationPeriod: 24 * time.Hour,
 		})
 		require.Error(t, err)
@@ -2135,7 +2135,7 @@ func TestCredentialConfigStore_GitLabChaining(t *testing.T) {
 	// Referenced secret-spec: session-pinned, as validateSecretSpecRef requires.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "gl-pat", Type: "vault_token", Source: "src",
-		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+		Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"}),
 	}))
 
 	gitlabSource := func(name string, extra map[string]string) *credential.CredSource {
@@ -2147,7 +2147,7 @@ func TestCredentialConfigStore_GitLabChaining(t *testing.T) {
 		for k, v := range extra {
 			cfg[k] = v
 		}
-		return &credential.CredSource{Name: name, Type: credential.SourceTypeGitLab, Config: cfg}
+		return &credential.CredSource{Name: name, Type: credential.SourceTypeGitLab, Config: credential.NewConfig(cfg)}
 	}
 
 	// A chained gitlab source carries no inline token and is accepted.
@@ -2178,7 +2178,7 @@ func TestCredentialConfigStore_GitLabChaining(t *testing.T) {
 	// the source and needs no chaining config of its own.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "gl-backend", Type: credential.TypeGitLabAccessToken, Source: "gl-keyless",
-		Config: specConfig(nil),
+		Config: credential.NewConfig(specConfig(nil)),
 	}))
 
 	// Spec-level secret_spec would leave the source's inline token as dead config
@@ -2186,7 +2186,7 @@ func TestCredentialConfigStore_GitLabChaining(t *testing.T) {
 	// guidance rather than silently accepted.
 	err = store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "gl-spec-level", Type: credential.TypeGitLabAccessToken, Source: "gl-keyless",
-		Config: specConfig(map[string]string{credential.ConfigSecretSpec: "gl-pat"}),
+		Config: credential.NewConfig(specConfig(map[string]string{credential.ConfigSecretSpec: "gl-pat"})),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "set secret_spec on the source")
@@ -2204,41 +2204,41 @@ func TestCredentialConfigStore_ScalewayChaining(t *testing.T) {
 	for _, name := range []string{"scw-mgmt", "scw-pair"} {
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: name, Type: "vault_token", Source: "src",
-			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+			Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"}),
 		}))
 	}
 
 	// A chained scaleway source carries no management key of its own.
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "scw-keyless", Type: credential.SourceTypeScaleway,
-		Config: map[string]string{credential.ConfigSecretSpec: "scw-mgmt"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "scw-mgmt"}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "scw-inline", Type: credential.SourceTypeScaleway,
-		Config: map[string]string{"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+		Config: credential.NewConfig(map[string]string{"management_secret_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}),
 	}))
 
 	// dynamic_keys inherits the source's chain and needs no config of its own.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "scw-dynamic", Type: credential.TypeScalewayKeys, Source: "scw-keyless",
-		Config: map[string]string{"mint_method": "dynamic_keys", "application_id": "app-1"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "dynamic_keys", "application_id": "app-1"}),
 	}))
 
 	// A static_keys spec names its own reference, and may sit on the same source.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "scw-static", Type: credential.TypeScalewayKeys, Source: "scw-keyless",
-		Config: map[string]string{"mint_method": "static_keys", credential.ConfigSecretSpec: "scw-pair"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "static_keys", credential.ConfigSecretSpec: "scw-pair"}),
 	}))
 
 	// Source-level routing would hand a static_keys spec the management payload,
 	// which is not its credential.
 	err := store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "scw-static-inheriting", Type: credential.TypeScalewayKeys, Source: "scw-keyless",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_keys",
 			"access_key":  "SCWXXXXXXXXXXXXXXXXX",
 			"secret_key":  "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must set its own secret_spec")
@@ -2253,7 +2253,7 @@ func TestCredentialConfigStore_ScalewayChaining(t *testing.T) {
 	// Rotation belongs to whoever owns the referenced secret.
 	rotating := &credential.CredSource{
 		Name: "scw-rotating", Type: credential.SourceTypeScaleway,
-		Config: map[string]string{credential.ConfigSecretSpec: "scw-mgmt"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "scw-mgmt"}),
 	}
 	rotating.RotationPeriod = 24 * time.Hour
 	err = store.CreateSource(ctx, rotating)
@@ -2275,26 +2275,26 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 	// Referenced secret-spec: session-pinned, as validateSecretSpecRef requires.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "idp-client-credential", Type: "vault_token", Source: "src",
-		Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+		Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"}),
 	}))
 
 	// The keyless source stores neither half of the client credential.
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "oauth-keyless", Type: credential.SourceTypeOAuth2,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"token_url":                  "https://identity.example.com/oauth/token",
 			credential.ConfigSecretSpec:  "idp-client-credential",
 			credential.ConfigSecretField: "client_secret",
-		},
+		}),
 	}))
 
 	// Rotation belongs to whoever owns the referenced secret, not to this source.
 	rotating := &credential.CredSource{
 		Name: "oauth-rotating", Type: credential.SourceTypeOAuth2,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"token_url":                 "https://identity.example.com/oauth/token",
 			credential.ConfigSecretSpec: "idp-client-credential",
-		},
+		}),
 		RotationPeriod: 24 * time.Hour,
 	}
 	err := store.CreateSource(ctx, rotating)
@@ -2305,14 +2305,14 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 	// config of its own.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "api", Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
-		Config: map[string]string{"scope": "read"},
+		Config: credential.NewConfig(map[string]string{"scope": "read"}),
 	}))
 
 	// Spec-level secret_spec would shadow the source's and leave the mint with no
 	// client credential.
 	err = store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "spec-level", Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
-		Config: map[string]string{credential.ConfigSecretSpec: "idp-client-credential"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "idp-client-credential"}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "for an oauth2 source, set secret_spec on the source")
@@ -2321,7 +2321,7 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 	// identity to fetch the chained pair as.
 	err = store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "consent", Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
-		Config: map[string]string{"auth_method": "authorization_code"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code"}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "supports auth_method=client_credentials only")
@@ -2331,7 +2331,7 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 	for _, key := range []string{"client_id", "client_secret"} {
 		err = store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "inline-" + key, Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless",
-			Config: map[string]string{key: "inline-value"},
+			Config: credential.NewConfig(map[string]string{key: "inline-value"}),
 		})
 		require.Error(t, err, key)
 		assert.Contains(t, err.Error(), key+" must be omitted when the source sets secret_spec")
@@ -2349,12 +2349,12 @@ type leasingDriverFactory struct {
 }
 
 func (f *leasingDriverFactory) Type() string { return "leasing_driver" }
-func (f *leasingDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *leasingDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &leasingDriver{factory: f}, nil
 }
-func (f *leasingDriverFactory) ValidateConfig(config map[string]string) error { return nil }
+func (f *leasingDriverFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *leasingDriverFactory) SensitiveConfigFields() []string               { return nil }
-func (f *leasingDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *leasingDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "leasing_cred", nil
 }
 
@@ -2421,7 +2421,7 @@ func TestCredentialConfigStore_ValidateSpec_ReleasesTestMintLease(t *testing.T) 
 
 		s := spec("churn")
 		require.NoError(t, store.CreateSpec(ctx, s))
-		s.Config = map[string]string{"changed": "yes"}
+		s.Config = credential.NewConfig(map[string]string{"changed": "yes"})
 		require.NoError(t, store.UpdateSpec(ctx, s))
 		assert.Equal(t, []string{"lease-update", "lease-update"}, factory.revoked,
 			"a spec edit test-mints again, so it must release again")
@@ -2462,7 +2462,7 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 	for _, name := range []string{"ovh-client-cred", "ovh-pair"} {
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: name, Type: "vault_token", Source: "src",
-			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+			Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"}),
 		}))
 	}
 
@@ -2470,12 +2470,12 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 	// needs no service account and no chain of its own.
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "ovh-src", Type: credential.SourceTypeOVH,
-		Config: map[string]string{"ovh_endpoint": "ovh-eu"},
+		Config: credential.NewConfig(map[string]string{"ovh_endpoint": "ovh-eu"}),
 	}))
 
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "ovh-s3", Type: credential.TypeOVHKeys, Source: "ovh-src",
-		Config: map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"}),
 	}))
 
 	// The referenced spec is now load-bearing for a live spec and cannot be
@@ -2485,14 +2485,14 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 	t.Run("an access_keys spec may not ride a source-level reference", func(t *testing.T) {
 		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 			Name: "ovh-keyless", Type: credential.SourceTypeOVH,
-			Config: map[string]string{credential.ConfigSecretSpec: "ovh-client-cred"},
+			Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "ovh-client-cred"}),
 		}))
 
 		// Inheriting the source's chain would hand this spec the client credential,
 		// which is not the pair it describes.
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "ovh-s3-inheriting", Type: credential.TypeOVHKeys, Source: "ovh-keyless",
-			Config: map[string]string{"mint_method": "access_keys"},
+			Config: credential.NewConfig(map[string]string{"mint_method": "access_keys"}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must set its own secret_spec")
@@ -2500,7 +2500,7 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 		// Naming its own reference is fine on the very same source.
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "ovh-s3-own", Type: credential.TypeOVHKeys, Source: "ovh-keyless",
-			Config: map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"},
+			Config: credential.NewConfig(map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"}),
 		}))
 	})
 
@@ -2510,7 +2510,7 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 		// source-level checks that gate which sources may chain at all.
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "ovh-token-chained", Type: credential.TypeOVHKeys, Source: "ovh-src",
-			Config: map[string]string{"mint_method": "oauth2_token", credential.ConfigSecretSpec: "ovh-client-cred"},
+			Config: credential.NewConfig(map[string]string{"mint_method": "oauth2_token", credential.ConfigSecretSpec: "ovh-client-cred"}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "set secret_spec on the source")
@@ -2519,7 +2519,7 @@ func TestCredentialConfigStore_OVHChaining(t *testing.T) {
 	t.Run("a chained spec cannot also carry a rotation period", func(t *testing.T) {
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "ovh-s3-rotating", Type: credential.TypeOVHKeys, Source: "ovh-src",
-			Config:         map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"},
+			Config:         credential.NewConfig(map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ovh-pair"}),
 			RotationPeriod: time.Hour,
 		})
 		require.Error(t, err)
@@ -2537,7 +2537,7 @@ func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
 	for _, name := range []string{"ibm-api-key", "ibm-cos-pair"} {
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: name, Type: "vault_token", Source: "src",
-			Config: map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"},
+			Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_audience": "vault"}),
 		}))
 	}
 
@@ -2545,14 +2545,14 @@ func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
 	// the IAM token grant is made with, not any spec's credential.
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "ibm-src", Type: credential.SourceTypeIBM,
-		Config: map[string]string{credential.ConfigSecretSpec: "ibm-api-key"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "ibm-api-key"}),
 	}))
 
 	// Inheriting that reference would hand this spec the api key, which is not the
 	// pair it describes — it would mint from the wrong secret entirely.
 	err := store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "ibm-cos-inheriting", Type: credential.TypeIBMCloudKeys, Source: "ibm-src",
-		Config: map[string]string{"mint_method": "access_keys"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "access_keys"}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must set its own secret_spec")
@@ -2560,7 +2560,7 @@ func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
 	// Naming its own reference is fine on the very same source.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "ibm-cos-own", Type: credential.TypeIBMCloudKeys, Source: "ibm-src",
-		Config: map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ibm-cos-pair"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "access_keys", credential.ConfigSecretSpec: "ibm-cos-pair"}),
 	}))
 
 	// The other direction: a bearer spec's api key is a source concern, so a
@@ -2568,7 +2568,7 @@ func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
 	t.Run("a bearer spec may not carry a reference of its own", func(t *testing.T) {
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "ibm-bearer-chained", Type: credential.TypeIBMCloudKeys, Source: "ibm-src",
-			Config: map[string]string{credential.ConfigSecretSpec: "ibm-api-key"},
+			Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "ibm-api-key"}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "set secret_spec on the source")
@@ -2579,7 +2579,7 @@ func TestCredentialConfigStore_IBMAccessKeysNeedsItsOwnReference(t *testing.T) {
 	t.Run("a chained source may not carry a rotation period", func(t *testing.T) {
 		err := store.CreateSource(ctx, &credential.CredSource{
 			Name: "ibm-rotating", Type: credential.SourceTypeIBM,
-			Config:         map[string]string{credential.ConfigSecretSpec: "ibm-api-key"},
+			Config:         credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "ibm-api-key"}),
 			RotationPeriod: time.Hour,
 		})
 		require.Error(t, err)
@@ -2599,7 +2599,7 @@ func TestCredentialConfigStore_UpdateSourceClosesDriverOnlyOnConfigChange(t *tes
 
 	src := &credential.CredSource{
 		Name: "driver-src", Type: "local",
-		Config:         map[string]string{"key": "v1"},
+		Config:         credential.NewConfig(map[string]string{"key": "v1"}),
 		RotationPeriod: 48 * time.Hour,
 	}
 	require.NoError(t, store.CreateSource(ctx, src))
@@ -2618,7 +2618,7 @@ func TestCredentialConfigStore_UpdateSourceClosesDriverOnlyOnConfigChange(t *tes
 		"an update that changes no driver input must not tear the driver down")
 
 	// Config changed: the instance must be rebuilt from it.
-	src.Config = map[string]string{"key": "v2"}
+	src.Config = credential.NewConfig(map[string]string{"key": "v2"})
 	require.NoError(t, store.UpdateSource(ctx, src))
 
 	afterConfigChange, err := core.credentialManager.GetOrCreateDriver(ctx, "driver-src")
@@ -2649,7 +2649,7 @@ func TestCredentialConfigStore_RotationScheduleFollowsUpdates(t *testing.T) {
 	t.Run("source", func(t *testing.T) {
 		src := &credential.CredSource{
 			Name: "rot-src", Type: "local",
-			Config:         map[string]string{"key": "v"},
+			Config:         credential.NewConfig(map[string]string{"key": "v"}),
 			RotationPeriod: 48 * time.Hour,
 		}
 		require.NoError(t, store.CreateSource(ctx, src))
@@ -2695,7 +2695,7 @@ func TestCredentialConfigStore_RotationScheduleFollowsUpdates(t *testing.T) {
 
 		spec := &credential.CredSpec{
 			Name: "rot-spec", Type: credential.TypeAPIKey, Source: "rot-src",
-			Config:         map[string]string{"api_key": "v"},
+			Config:         credential.NewConfig(map[string]string{"api_key": "v"}),
 			RotationPeriod: 48 * time.Hour,
 		}
 		require.NoError(t, store.CreateSpec(ctx, spec))
@@ -2733,10 +2733,10 @@ func TestCredentialConfigStore_ValidateSpec_UpstreamMintingSources(t *testing.T)
 		sourceType string
 		// grafana mints on an account the operator provisioned, so its spec must
 		// name one; the others create the credential's container themselves.
-		specConfig map[string]string
+		specConfig credential.Config
 	}{
-		{sourceType: credential.SourceTypeElastic, specConfig: map[string]string{}},
-		{sourceType: credential.SourceTypeGrafana, specConfig: map[string]string{"service_account_id": "42"}},
+		{sourceType: credential.SourceTypeElastic, specConfig: credential.NewConfig(map[string]string{})},
+		{sourceType: credential.SourceTypeGrafana, specConfig: credential.NewConfig(map[string]string{"service_account_id": "42"})},
 	} {
 		t.Run(tc.sourceType, func(t *testing.T) {
 			source := &credential.CredSource{Name: tc.sourceType + "-src", Type: tc.sourceType}
@@ -2772,13 +2772,13 @@ func TestCredentialConfigStore_ValidateSpec_GrafanaNeedsAServiceAccount(t *testi
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "g-default", Type: credential.SourceTypeGrafana,
-		Config: map[string]string{"service_account_id": "7"},
+		Config: credential.NewConfig(map[string]string{"service_account_id": "7"}),
 	}))
 
 	newSpec := func(name, source string, config map[string]string) *credential.CredSpec {
 		return &credential.CredSpec{
 			Name: name, Type: credential.TypeAPIKey, Source: source,
-			MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: config,
+			MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: credential.NewConfig(config),
 		}
 	}
 
@@ -2820,11 +2820,11 @@ func TestCredentialConfigStore_ValidateSpec_ElasticKeyNameIsAMintParameter(t *te
 		Source: "es-src",
 		MinTTL: 5 * time.Minute,
 		MaxTTL: 1 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"key_name":         "ingest-writer",
 			"expiration":       "24h",
 			"role_descriptors": `{"reader":{"indices":[{"names":["logs-*"],"privileges":["read"]}]}}`,
-		},
+		}),
 	}))
 
 	// The same key on an apikey source is a credential field, and is still held
@@ -2838,7 +2838,7 @@ func TestCredentialConfigStore_ValidateSpec_ElasticKeyNameIsAMintParameter(t *te
 		Source: "ak-src",
 		MinTTL: 5 * time.Minute,
 		MaxTTL: 1 * time.Hour,
-		Config: map[string]string{"api_key": "sk-test", "key_name": "prod"},
+		Config: credential.NewConfig(map[string]string{"api_key": "sk-test", "key_name": "prod"}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential_fields")
@@ -2858,28 +2858,28 @@ func TestCredentialConfigStore_ValidateSpec_ElasticChainsAtTheSource(t *testing.
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "es-cluster-key", Type: "vault_token", Source: "src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"subject_token_source": "warden_identity",
 			"assertion_audience":   "test-aud",
-		},
+		}),
 	}))
 
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "es-chained", Type: credential.SourceTypeElastic,
-		Config: map[string]string{credential.ConfigSecretSpec: "es-cluster-key"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "es-cluster-key"}),
 	}))
 
 	t.Run("a spec on a chained source needs no reference of its own", func(t *testing.T) {
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "es-chained-spec", Type: credential.TypeAPIKey, Source: "es-chained",
-			Config: map[string]string{"expiration": "1h"},
+			Config: credential.NewConfig(map[string]string{"expiration": "1h"}),
 		}))
 	})
 
 	t.Run("a spec-level reference is refused with guidance", func(t *testing.T) {
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "es-spec-level", Type: credential.TypeAPIKey, Source: "es-chained",
-			Config: map[string]string{credential.ConfigSecretSpec: "es-cluster-key"},
+			Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "es-cluster-key"}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "set secret_spec on the source")
@@ -2898,17 +2898,17 @@ func TestCredentialConfigStore_UpdateSource_GrafanaDefaultAccountIsLoadBearing(t
 
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "gf-default", Type: credential.SourceTypeGrafana,
-		Config: map[string]string{"admin_token": "glsa_x", "service_account_id": "42"},
+		Config: credential.NewConfig(map[string]string{"admin_token": "glsa_x", "service_account_id": "42"}),
 	}))
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "gf-silent", Type: credential.TypeAPIKey, Source: "gf-default",
-		MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: map[string]string{},
+		MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: credential.NewConfig(map[string]string{}),
 	}))
 
 	t.Run("removing the default a silent spec relies on is refused", func(t *testing.T) {
 		err := store.UpdateSource(ctx, &credential.CredSource{
 			Name: "gf-default", Type: credential.SourceTypeGrafana,
-			Config: map[string]string{"admin_token": "glsa_x"},
+			Config: credential.NewConfig(map[string]string{"admin_token": "glsa_x"}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "relies on this source's service_account_id default")
@@ -2922,11 +2922,11 @@ func TestCredentialConfigStore_UpdateSource_GrafanaDefaultAccountIsLoadBearing(t
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "gf-explicit", Type: credential.TypeAPIKey, Source: "gf-default",
 			MinTTL: 5 * time.Minute, MaxTTL: time.Hour,
-			Config: map[string]string{"service_account_id": "57"},
+			Config: credential.NewConfig(map[string]string{"service_account_id": "57"}),
 		}))
 		err := store.UpdateSource(ctx, &credential.CredSource{
 			Name: "gf-default", Type: credential.SourceTypeGrafana,
-			Config: map[string]string{"admin_token": "glsa_x"},
+			Config: credential.NewConfig(map[string]string{"admin_token": "glsa_x"}),
 		})
 		// Still refused, but for gf-silent — never for gf-explicit.
 		require.Error(t, err)
@@ -2946,31 +2946,31 @@ func TestCredentialConfigStore_ValidateSpec_GrafanaChainsAtTheSource(t *testing.
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "grafana-admin-token", Type: "vault_token", Source: "src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"subject_token_source": "warden_identity",
 			"assertion_audience":   "test-aud",
-		},
+		}),
 	}))
 
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "grafana-chained", Type: credential.SourceTypeGrafana,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSecretSpec: "grafana-admin-token",
 			"service_account_id":        "42",
-		},
+		}),
 	}))
 
 	t.Run("a spec on a chained source needs no reference of its own", func(t *testing.T) {
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "grafana-chained-spec", Type: credential.TypeAPIKey, Source: "grafana-chained",
-			Config: map[string]string{"token_expiry": "1h"},
+			Config: credential.NewConfig(map[string]string{"token_expiry": "1h"}),
 		}))
 	})
 
 	t.Run("a spec-level reference is refused with guidance", func(t *testing.T) {
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "grafana-spec-level", Type: credential.TypeAPIKey, Source: "grafana-chained",
-			Config: map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+			Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "set secret_spec on the source")
@@ -2982,7 +2982,7 @@ func TestCredentialConfigStore_ValidateSpec_GrafanaChainsAtTheSource(t *testing.
 		err := store.CreateSource(ctx, &credential.CredSource{
 			Name: "grafana-chained-rotating", Type: credential.SourceTypeGrafana,
 			RotationPeriod: time.Hour,
-			Config:         map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+			Config:         credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rotation_period does not apply to a chained source")
@@ -2993,11 +2993,11 @@ func TestCredentialConfigStore_ValidateSpec_GrafanaChainsAtTheSource(t *testing.
 	t.Run("a chained source still needs a service account", func(t *testing.T) {
 		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 			Name: "grafana-chained-bare", Type: credential.SourceTypeGrafana,
-			Config: map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+			Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"}),
 		}))
 		err := store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "grafana-no-account", Type: credential.TypeAPIKey, Source: "grafana-chained-bare",
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "service_account_id is required")
@@ -3015,28 +3015,28 @@ func TestCredentialConfigStore_ValidateSpec_GrafanaChainedTokenExpiryIsCapped(t 
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 		Name: "gf-token", Type: "vault_token", Source: "src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"subject_token_source": "warden_identity",
 			"assertion_audience":   "test-aud",
-		},
+		}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "gf-chained", Type: credential.SourceTypeGrafana,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSecretSpec: "gf-token",
 			"service_account_id":        "42",
-		},
+		}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "gf-inline", Type: credential.SourceTypeGrafana,
-		Config: map[string]string{"admin_token": "glsa_x", "service_account_id": "42"},
+		Config: credential.NewConfig(map[string]string{"admin_token": "glsa_x", "service_account_id": "42"}),
 	}))
 
 	spec := func(name, source, expiry string) *credential.CredSpec {
 		return &credential.CredSpec{
 			Name: name, Type: credential.TypeAPIKey, Source: source,
 			MinTTL: 5 * time.Minute, MaxTTL: time.Hour,
-			Config: map[string]string{"token_expiry": expiry},
+			Config: credential.NewConfig(map[string]string{"token_expiry": expiry}),
 		}
 	}
 
@@ -3072,11 +3072,11 @@ func TestCredentialConfigStore_ValidateSpec_AWSKeyValueChainingSource(t *testing
 
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "aws-fed", Type: credential.SourceTypeAWS,
-		Config: map[string]string{"auth_method": "oidc_federation", "region": "eu-west-1"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "eu-west-1"}),
 	}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "datadog-src", Type: credential.SourceTypeAPIKey,
-		Config: map[string]string{"credential_fields": "application_key"},
+		Config: credential.NewConfig(map[string]string{"credential_fields": "application_key"}),
 	}))
 
 	referenced := func(name string, extra map[string]string) *credential.CredSpec {
@@ -3091,7 +3091,7 @@ func TestCredentialConfigStore_ValidateSpec_AWSKeyValueChainingSource(t *testing
 		}
 		return &credential.CredSpec{
 			Name: name, Type: credential.TypeKeyValue, Source: "aws-fed",
-			MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: cfg,
+			MinTTL: 5 * time.Minute, MaxTTL: time.Hour, Config: credential.NewConfig(cfg),
 		}
 	}
 
@@ -3103,10 +3103,10 @@ func TestCredentialConfigStore_ValidateSpec_AWSKeyValueChainingSource(t *testing
 		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
 			Name: "datadog-cred", Type: credential.TypeAPIKey, Source: "datadog-src",
 			MinTTL: 5 * time.Minute, MaxTTL: time.Hour,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				credential.ConfigSecretSpec:  "datadog-keys-in-aws",
 				credential.ConfigSecretField: "api_key",
-			},
+			}),
 		}))
 	})
 

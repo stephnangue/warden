@@ -127,8 +127,8 @@ func (d *GCPDriver) configSnapshot() map[string]string {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	snapshot := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	snapshot := make(map[string]string, d.credSource.Config.Len())
+	for k, v := range d.credSource.Config.All() {
 		snapshot[k] = v
 	}
 	return snapshot
@@ -155,7 +155,7 @@ func (f *GCPDriverFactory) Type() string {
 }
 
 // ValidateConfig validates GCP driver configuration using declarative schema
-func (f *GCPDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *GCPDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("auth_method").
 			OneOf(gcpAuthMethodStatic, gcpAuthMethodOIDCFederation).
@@ -231,8 +231,8 @@ func (f *GCPDriverFactory) SensitiveConfigFields() []string {
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
-func (f *GCPDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
-	mintMethod := specConfig["mint_method"]
+func (f *GCPDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
+	mintMethod := specConfig.Get("mint_method")
 	switch mintMethod {
 	case "cloud_sql_iam_token":
 		return credential.TypeDBAuthToken, nil
@@ -244,7 +244,7 @@ func (f *GCPDriverFactory) InferCredentialType(specConfig map[string]string) (st
 }
 
 // Create instantiates a new GCPDriver
-func (f *GCPDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *GCPDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
@@ -653,7 +653,7 @@ func validateGCPLifetime(spec *credential.CredSpec, lifetime string) error {
 // spec targets, for the warden_resource assertion claim. Pure: reads source/spec
 // config only, no network or driver state. The provider prefix is human-readable
 // sugar on an opaque value — never parse it back.
-func gcpAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
+func gcpAssertionResource(sourceCfg, specCfg credential.Config) (string, bool) {
 	// Default mirrors the federated mint_method dispatch in MintCredentialWithExchange
 	// (empty → access_token) so the named resource matches what the exchange reaches.
 	// A static source has no workload_identity_provider, so access_token still yields
@@ -736,7 +736,7 @@ func (d *GCPDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 	}
 
 	// Rotation does not touch activation_delay, so the snapshot carries the live value.
-	activateAfter := credential.GetDuration(newConfig, "activation_delay", DefaultGCPActivationDelay)
+	activateAfter := credential.GetDuration(credential.NewConfig(newConfig), "activation_delay", DefaultGCPActivationDelay)
 
 	if d.logger != nil {
 		d.logger.Debug("prepared source SA key rotation",
@@ -755,7 +755,7 @@ func (d *GCPDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	// in flight against the retired key cannot file its result under the new
 	// generation — getSourceToken reads the generation before it reads the key.
 	d.authMu.Lock()
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 	d.tokenCache.InvalidateGeneration()
 	d.sourceVerified = false
 	d.authMu.Unlock()
