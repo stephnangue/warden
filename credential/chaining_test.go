@@ -1184,3 +1184,38 @@ func TestChaining_CacheIsolatesPerRole(t *testing.T) {
 	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(),
 		"one role across two sessions must still share its cached secret")
 }
+
+// TestChaining_ResolvesEachSourceOnce asserts that a chained issuance reads each
+// source it needs exactly once.
+//
+// Every helper that wanted a source-level value used to ask the store again: the
+// chaining reference, then the cache TTL, then the secret field. Three reads of the
+// consuming source per issuance. That was not just repeated work — the store's cache
+// has no TTL, discards the return of its Set, and may reject or evict at any moment,
+// so those reads could return different objects with no rotation running, and a spec
+// could be routed as chained against one generation of its source while its cache
+// policy and secret field came from another.
+func TestChaining_ResolvesEachSourceOnce(t *testing.T) {
+	env := newChainingEnv(t)
+	defer env.manager.Stop()
+
+	env.store.AddSpec(&CredSpec{
+		Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"}),
+	})
+
+	ctx := createNamespaceContext()
+	env.store.resetSourceReads()
+
+	cred, err := env.manager.IssueCredential(ctx, chainCaller("tok"), "consumer", nil)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+
+	// One for the consuming pair, one for the referenced pair — the two the issuance
+	// genuinely needs — plus the read each driver build pairs with a generation so it
+	// can refuse to install a driver built from config that went stale mid-build.
+	assert.LessOrEqual(t, env.store.sourceReadCount("consumersource"), 2,
+		"the consuming source must be resolved once for the request, not once per helper")
+	assert.LessOrEqual(t, env.store.sourceReadCount("secretsource"), 2,
+		"the referenced spec's source must be resolved once for the request")
+}

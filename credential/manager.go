@@ -363,16 +363,18 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 // on a real cache miss (or, for a chained secret-spec, on the non-caching path so
 // the fetched secret is never cached).
 func (m *Manager) issueCredential(ctx context.Context, caller Caller, specName string, inputs *ExchangeInputs) (*Credential, error) {
-	// Step 1: Resolve credential spec using SpecResolver
-	spec, err := m.specResolver.ResolveSpec(ctx, specName)
+	// Step 1: Resolve the spec and the source it binds to, once. Everything below
+	// reads that one pair rather than asking the store again per helper.
+	bound, err := m.resolveBound(ctx, specName)
 	if err != nil {
 		return nil, err
 	}
+	spec := bound.spec
 
 	// Credential chaining: when the spec (or its source) references another cred
 	// spec as its secret source, mint that referenced spec as the same caller and
 	// mint this credential from the fetched material. Spec-level reference wins.
-	secretRef, err := m.secretSpecRef(ctx, spec)
+	secretRef, err := bound.secretSpecRef()
 	if err != nil {
 		return nil, err
 	}
@@ -382,9 +384,9 @@ func (m *Manager) issueCredential(ctx context.Context, caller Caller, specName s
 		// client-auth secret — route to the exchange-aware chaining path. Otherwise the
 		// plain chaining path (mint directly from the fetched material) applies.
 		if inputs != nil {
-			return m.issueChainedExchange(ctx, caller, spec, secretRef, inputs)
+			return m.issueChainedExchange(ctx, caller, bound, secretRef, inputs)
 		}
-		return m.issueChained(ctx, caller, spec, secretRef)
+		return m.issueChained(ctx, caller, bound, secretRef)
 	}
 
 	// Step 2: Get or create source driver using DriverCoordinator
@@ -419,20 +421,47 @@ func (m *Manager) mintAndParse(ctx context.Context, spec *CredSpec, driver Sourc
 	return cred, nil
 }
 
+// boundSpec is a spec together with the source it binds to, resolved once at the top
+// of an issuance and threaded down.
+//
+// Resolving per helper was not merely redundant work. The config store's cache has
+// no TTL, discards the return of its Set, and may reject or evict an entry at any
+// time, so two reads of one source name within a single request could hand back two
+// different objects with no rotation running at all. Everything downstream now reads
+// one pair.
+//
+// sourceErr is carried rather than returned at resolve time. A spec that names its
+// own secret_spec never needed its source, so failing the issuance early would break
+// specs that work today.
+type boundSpec struct {
+	spec      *CredSpec
+	source    *CredSource
+	sourceErr error
+}
+
+// resolveBound reads the spec and its source once.
+func (m *Manager) resolveBound(ctx context.Context, specName string) (boundSpec, error) {
+	spec, err := m.specResolver.ResolveSpec(ctx, specName)
+	if err != nil {
+		return boundSpec{}, err
+	}
+	source, srcErr := m.configStore.GetSource(ctx, spec.Source)
+	return boundSpec{spec: spec, source: source, sourceErr: srcErr}, nil
+}
+
 // secretSpecRef returns the referenced secret-spec name for credential chaining:
 // spec-level (ConfigSecretSpec on the spec) wins over source-level (on the source).
-// Returns "" when the spec is not chained. A source-read failure is returned rather
+// Returns "" when the spec is not chained. A source-read failure is reported rather
 // than swallowed, so a transient error can't silently route a chained spec down the
 // direct (non-chained) mint path.
-func (m *Manager) secretSpecRef(ctx context.Context, spec *CredSpec) (string, error) {
-	if ref := spec.Config.Get(ConfigSecretSpec); ref != "" {
+func (b boundSpec) secretSpecRef() (string, error) {
+	if ref := b.spec.Config.Get(ConfigSecretSpec); ref != "" {
 		return ref, nil
 	}
-	src, err := m.configStore.GetSource(ctx, spec.Source)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve source %q for credential chaining: %w", spec.Source, err)
+	if b.sourceErr != nil {
+		return "", fmt.Errorf("failed to resolve source %q for credential chaining: %w", b.spec.Source, b.sourceErr)
 	}
-	return src.Config.Get(ConfigSecretSpec), nil
+	return b.source.Config.Get(ConfigSecretSpec), nil
 }
 
 // issueChained mints a consuming credential whose secret comes from a referenced
@@ -440,13 +469,14 @@ func (m *Manager) secretSpecRef(ctx context.Context, spec *CredSpec) (string, er
 // the secret material, and hands it to the consuming driver. By default the fetched
 // secret is not cached (re-minted on every consuming-credential miss); a consumer may
 // opt into source-scoped caching via secret_cache_ttl (see resolveChainedSecretData).
-func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpec, secretRef string) (*Credential, error) {
+func (m *Manager) issueChained(ctx context.Context, caller Caller, bound boundSpec, secretRef string) (*Credential, error) {
+	spec := bound.spec
 	ctx, inputsB, err := m.chainPreamble(ctx, caller, spec, secretRef)
 	if err != nil {
 		return nil, err
 	}
 
-	return m.resolveAndMintChained(ctx, caller, spec, secretRef, inputsB,
+	return m.resolveAndMintChained(ctx, caller, bound, secretRef, inputsB,
 		func(ctx context.Context, spec *CredSpec, material SecretMaterial) (*Credential, error) {
 			driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
 			if err != nil {
@@ -461,13 +491,14 @@ func (m *Manager) issueChained(ctx context.Context, caller Caller, spec *CredSpe
 // (cached per secret_cache_ttl) and performs the exchange using the consuming spec's own
 // exchange inputs plus the fetched material. Reuses resolveAndMintChained, so caching,
 // per-agent/per-user isolation, and evict-and-retry are inherited from the generic path.
-func (m *Manager) issueChainedExchange(ctx context.Context, caller Caller, spec *CredSpec, secretRef string, inputs *ExchangeInputs) (*Credential, error) {
+func (m *Manager) issueChainedExchange(ctx context.Context, caller Caller, bound boundSpec, secretRef string, inputs *ExchangeInputs) (*Credential, error) {
+	spec := bound.spec
 	ctx, inputsB, err := m.chainPreamble(ctx, caller, spec, secretRef)
 	if err != nil {
 		return nil, err
 	}
 
-	return m.resolveAndMintChained(ctx, caller, spec, secretRef, inputsB,
+	return m.resolveAndMintChained(ctx, caller, bound, secretRef, inputsB,
 		func(ctx context.Context, spec *CredSpec, material SecretMaterial) (*Credential, error) {
 			driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, spec.Source)
 			if err != nil {
@@ -516,16 +547,17 @@ func (m *Manager) chainPreamble(ctx context.Context, caller Caller, spec *CredSp
 func (m *Manager) resolveAndMintChained(
 	ctx context.Context,
 	caller Caller,
-	spec *CredSpec,
+	bound boundSpec,
 	secretRef string,
 	inputsB *ExchangeInputs,
 	mintFn func(ctx context.Context, spec *CredSpec, material SecretMaterial) (*Credential, error),
 ) (*Credential, error) {
-	data, typ, fromCache, key, err := m.resolveChainedSecretData(ctx, caller, spec, secretRef, inputsB)
+	spec := bound.spec
+	data, typ, fromCache, key, err := m.resolveChainedSecretData(ctx, caller, bound, secretRef, inputsB)
 	if err != nil {
 		return nil, err
 	}
-	material := m.buildSecretMaterial(ctx, spec, data, typ)
+	material := m.buildSecretMaterial(bound, data, typ)
 
 	cred, err := mintFn(ctx, spec, material)
 	if err != nil && fromCache && (errors.Is(err, ErrChainedSecretRejected) || errors.Is(err, ErrRefreshTokenRejected) || errors.Is(err, ErrChainedSecretIncomplete)) {
@@ -533,11 +565,11 @@ func (m *Manager) resolveAndMintChained(
 		// something the driver needs — evict it and retry once with a fresh fetch, in
 		// case it was rotated or completed at the source after we cached it.
 		m.invalidateChainedSecret(key)
-		data, typ, _, _, rerr := m.resolveChainedSecretData(ctx, caller, spec, secretRef, inputsB)
+		data, typ, _, _, rerr := m.resolveChainedSecretData(ctx, caller, bound, secretRef, inputsB)
 		if rerr != nil {
 			return nil, rerr
 		}
-		return mintFn(ctx, spec, m.buildSecretMaterial(ctx, spec, data, typ))
+		return mintFn(ctx, spec, m.buildSecretMaterial(bound, data, typ))
 	}
 	return cred, err
 }
@@ -545,8 +577,8 @@ func (m *Manager) resolveAndMintChained(
 // buildSecretMaterial resolves the secret_field for the consuming spec and wraps the
 // fetched data as SecretMaterial. The field is resolved per-consumer (not cached),
 // using a synthetic Credential so resolveSecretField's type-based fallback still works.
-func (m *Manager) buildSecretMaterial(ctx context.Context, spec *CredSpec, data map[string]string, typ string) SecretMaterial {
-	field := m.resolveSecretField(ctx, spec, &Credential{Data: data, Type: typ})
+func (m *Manager) buildSecretMaterial(bound boundSpec, data map[string]string, typ string) SecretMaterial {
+	field := m.resolveSecretField(bound, &Credential{Data: data, Type: typ})
 	return SecretMaterial{Data: data, Field: field}
 }
 
@@ -616,8 +648,8 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 // retry. A ttl <= 0, or a context without a namespace, disables caching and fetches
 // directly — the behaviour-preserving default. An entry never outlives the referenced
 // credential: a lifetime reported by the fetch caps the configured ttl.
-func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, spec *CredSpec, secretRef string, inputsB *ExchangeInputs) (data map[string]string, typ string, fromCache bool, key string, err error) {
-	ttl := m.secretCacheTTL(ctx, spec)
+func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, bound boundSpec, secretRef string, inputsB *ExchangeInputs) (data map[string]string, typ string, fromCache bool, key string, err error) {
+	ttl := bound.secretCacheTTL()
 	if ttl <= 0 {
 		return m.fetchUncached(ctx, caller, secretRef, inputsB)
 	}
@@ -707,15 +739,15 @@ func (m *Manager) fetchUncached(ctx context.Context, caller Caller, secretRef st
 // one secret's rotation profile, so inheriting it across a different reference
 // caches one payload under a policy picked for another, silently opting the spec
 // into caching it never asked for.
-func (m *Manager) secretCacheTTL(ctx context.Context, spec *CredSpec) time.Duration {
-	if _, ok := spec.Config.Lookup(ConfigSecretCacheTTL); ok {
-		return GetDuration(spec.Config, ConfigSecretCacheTTL, 0)
+func (b boundSpec) secretCacheTTL() time.Duration {
+	if _, ok := b.spec.Config.Lookup(ConfigSecretCacheTTL); ok {
+		return GetDuration(b.spec.Config, ConfigSecretCacheTTL, 0)
 	}
-	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil {
-		if !sourceModifiersApply(spec, src) {
+	if b.sourceErr == nil && b.source != nil {
+		if !sourceModifiersApply(b.spec, b.source) {
 			return 0
 		}
-		return GetDuration(src.Config, ConfigSecretCacheTTL, 0)
+		return GetDuration(b.source.Config, ConfigSecretCacheTTL, 0)
 	}
 	return 0
 }
@@ -982,12 +1014,12 @@ func copyStringMap(in map[string]string) map[string]string {
 // A spec refining the field for a source-level reference is the coherent case and
 // still works: both concern the same payload. See sourceModifiersApply for the one
 // case that does not.
-func (m *Manager) resolveSecretField(ctx context.Context, spec *CredSpec, credB *Credential) string {
-	if f := spec.Config.Get(ConfigSecretField); f != "" {
+func (m *Manager) resolveSecretField(bound boundSpec, credB *Credential) string {
+	if f := bound.spec.Config.Get(ConfigSecretField); f != "" {
 		return f
 	}
-	if src, err := m.configStore.GetSource(ctx, spec.Source); err == nil && src != nil && sourceModifiersApply(spec, src) {
-		if f := src.Config.Get(ConfigSecretField); f != "" {
+	if bound.sourceErr == nil && bound.source != nil && sourceModifiersApply(bound.spec, bound.source) {
+		if f := bound.source.Config.Get(ConfigSecretField); f != "" {
 			return f
 		}
 	}
