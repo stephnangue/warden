@@ -15,14 +15,28 @@ type DriverRegistry struct {
 	factories map[string]SourceDriverFactory // type -> factory
 	instances map[string]SourceDriver        // {namespace}:{source_name} -> driver instance
 	log       *logger.GatedLogger
+
+	// generations counts how many times each source key has been invalidated.
+	//
+	// A driver is built outside this lock, from a source read outside it, so the
+	// config it was built from can go stale before the instance is installed —
+	// and because a registry hit is a plain map lookup, a stale instance
+	// installed once is served until the next config change or a restart.
+	//
+	// Callers therefore read the generation before reading the source and hand it
+	// back at install time; an install whose generation has moved is refused and
+	// the caller re-reads. Checking at install rather than on lookup keeps the
+	// hot path a single map read, and keeps driver teardown off the mint path.
+	generations map[string]uint64
 }
 
 // NewDriverRegistry creates a new driver registry
 func NewDriverRegistry(log *logger.GatedLogger) *DriverRegistry {
 	return &DriverRegistry{
-		factories: make(map[string]SourceDriverFactory),
-		instances: make(map[string]SourceDriver),
-		log:       log,
+		factories:   make(map[string]SourceDriverFactory),
+		instances:   make(map[string]SourceDriver),
+		generations: make(map[string]uint64),
+		log:         log,
 	}
 }
 
@@ -52,12 +66,32 @@ func (r *DriverRegistry) qualifiedKey(ctx context.Context, sourceName string) (s
 	return fmt.Sprintf("%s:%s", ns.ID, sourceName), nil
 }
 
+// Generation returns the current invalidation count for a source key. Read it
+// before reading the source, and pass it to CreateDriver: that is what lets
+// CreateDriver tell whether the config the driver was built from is still current.
+func (r *DriverRegistry) Generation(ctx context.Context, sourceName string) (uint64, error) {
+	qualifiedName, err := r.qualifiedKey(ctx, sourceName)
+	if err != nil {
+		return 0, err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.generations[qualifiedName], nil
+}
+
 // CreateDriver creates a driver instance for the given source
 // The driver is stored with a namespace-qualified key to prevent collisions
 // between sources with the same name in different namespaces.
 // Returns the driver and a boolean indicating if a new driver was created (true)
 // or an existing driver was returned (false).
-func (r *DriverRegistry) CreateDriver(ctx context.Context, sourceName string, source *CredSource) (SourceDriver, bool, error) {
+//
+// observedGeneration is the value Generation returned before the source was read.
+// If the key has been invalidated since, the source this driver was built from is
+// no longer current and the install is refused with ErrDriverConfigChanged rather
+// than pinning stale config in the registry.
+func (r *DriverRegistry) CreateDriver(ctx context.Context, sourceName string, source *CredSource, observedGeneration uint64) (SourceDriver, bool, error) {
 	qualifiedName, err := r.qualifiedKey(ctx, sourceName)
 	if err != nil {
 		return nil, false, err
@@ -69,6 +103,10 @@ func (r *DriverRegistry) CreateDriver(ctx context.Context, sourceName string, so
 	// Check if instance already exists
 	if driver, exists := r.instances[qualifiedName]; exists {
 		return driver, false, nil
+	}
+
+	if r.generations[qualifiedName] != observedGeneration {
+		return nil, false, ErrDriverConfigChanged
 	}
 
 	// Get factory for source type
@@ -150,6 +188,11 @@ func (r *DriverRegistry) CloseDriver(ctx context.Context, sourceName string) err
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Bump the generation whether or not an instance is present. An invalidation
+	// with nothing cached still matters: a mint that has already read the old
+	// source config and not yet installed its driver must be refused.
+	r.generations[qualifiedName]++
+
 	driver, exists := r.instances[qualifiedName]
 	if !exists {
 		// Driver doesn't exist - nothing to clean up
@@ -204,6 +247,7 @@ func (r *DriverRegistry) CloseAllForNamespace(ctx context.Context) (int, error) 
 	var lastErr error
 
 	for _, key := range toClose {
+		r.generations[key]++
 		driver := r.instances[key]
 		if err := driver.Cleanup(ctx); err != nil {
 			r.log.Warn("driver cleanup failed during namespace cleanup",

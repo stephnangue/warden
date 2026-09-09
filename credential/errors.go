@@ -24,6 +24,11 @@ var (
 	// ErrDriverCreationFailed is returned when driver creation failed
 	ErrDriverCreationFailed = errors.New("driver creation failed")
 
+	// ErrDriverConfigChanged is returned when a driver was built from a source
+	// config that stopped being current before the instance could be installed.
+	// The caller re-reads the source and tries again; it is not surfaced to users.
+	ErrDriverConfigChanged = errors.New("source config changed while building driver")
+
 	// ErrCredentialNotFound is returned when a credential is not found in storage
 	ErrCredentialNotFound = errors.New("credential not found")
 
