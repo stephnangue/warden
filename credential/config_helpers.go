@@ -175,15 +175,17 @@ var (
 	mintMethodsHonoringKeyMap = map[string]map[string]struct{}{
 		SourceTypeVault: {"static_aws": {}, "static_apikey": {}, "kv2_read": {}},
 		SourceTypeAWS:   {"secrets_manager": {}, "secret_read": {}},
+		SourceTypeGCP:   {"secret_read": {}},
 	}
 
 	// secret_version pins a revision, which each store spells its own way: a
-	// number for KV v2, an opaque identifier for Key Vault. A store that spells it
-	// differently again (version_id / version_stage on Secrets Manager) is absent
-	// here, so pinning there keeps using its own keys.
+	// number for KV v2 and for Secret Manager, an opaque identifier for Key Vault.
+	// A store that spells it differently again (version_id / version_stage on
+	// Secrets Manager) is absent here, so pinning there keeps using its own keys.
 	mintMethodsHonoringSecretVersion = map[string]map[string]struct{}{
 		SourceTypeVault: {"static_aws": {}, "static_apikey": {}, "kv2_read": {}},
 		SourceTypeAzure: {"key_vault_secret": {}},
+		SourceTypeGCP:   {"secret_read": {}},
 	}
 )
 
@@ -202,7 +204,7 @@ func ValidateSecretSelection(config Config, sourceType string) error {
 
 	if keyMap := config.Get("json_key_map"); keyMap != "" {
 		if _, ok := mintMethodsHonoringKeyMap[sourceType][mintMethod]; !ok {
-			return fmt.Errorf("'json_key_map' selects fields of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, and secrets_manager and secret_read on an aws source", mintMethod)
+			return fmt.Errorf("'json_key_map' selects fields of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, secrets_manager and secret_read on an aws source, and secret_read on a gcp source", mintMethod)
 		}
 		if err := validateKeyMapSyntax(keyMap); err != nil {
 			return err
@@ -210,7 +212,7 @@ func ValidateSecretSelection(config Config, sourceType string) error {
 	}
 
 	if _, ok := mintMethodsHonoringSecretVersion[sourceType][mintMethod]; !ok && config.Get("secret_version") != "" {
-		return fmt.Errorf("'secret_version' pins a revision of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, and key_vault_secret on an azure source", mintMethod)
+		return fmt.Errorf("'secret_version' pins a revision of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, key_vault_secret on an azure source, and secret_read on a gcp source", mintMethod)
 	}
 
 	return nil

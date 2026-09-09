@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,7 +48,19 @@ const (
 	defaultGCPSTSHost            = "https://sts.googleapis.com"
 	defaultGCPIAMCredentialsHost = "https://iamcredentials.googleapis.com"
 	defaultGCPIAMHost            = "https://iam.googleapis.com"
+	defaultGCPSecretManagerHost  = "https://secretmanager.googleapis.com"
 )
+
+// gcpMaxSecretPayloadSize is the largest secret Secret Manager stores. It bounds the
+// decoded payload, not the response: the payload arrives base64-encoded inside a JSON
+// envelope, so the body carrying a legal 64KiB secret is half again as large.
+const gcpMaxSecretPayloadSize = 64 * 1024
+
+// gcpFederatedFetchLifetime is how long the impersonated token used for a single
+// secret read is asked to live. The read happens immediately and the token is then
+// discarded, so this is a floor on clock skew rather than a working lifetime — the
+// spec's TTL bounds govern the secret it returns, not this.
+const gcpFederatedFetchLifetime = "900s"
 
 // OAuth2 scopes this driver requests. cloud-platform authorizes the token mints and
 // the impersonation call; the narrower iam scope authorizes only the key-management
@@ -133,6 +147,7 @@ type GCPDriver struct {
 	stsHost            string
 	iamCredentialsHost string
 	iamHost            string
+	secretManagerHost  string
 }
 
 // Config accessors — single source of truth is credSource.Config. Each takes authMu,
@@ -244,6 +259,11 @@ func (f *GCPDriverFactory) ValidateConfig(config credential.Config) error {
 			Describe("Override where service-account impersonation calls are sent (default: the public GCP endpoint). Does not apply to the IAM key-management calls rotation makes").
 			Example("https://iamcredentials.googleapis.com"),
 
+		credential.StringField("secretmanager_endpoint").
+			Custom(validateEndpointURL).
+			Describe("Override where Secret Manager reads are sent (default: the public GCP endpoint)").
+			Example("https://secretmanager.googleapis.com"),
+
 		credential.DurationField("activation_delay").
 			Describe("How long to wait after creating a rotated service-account key before activating it, covering IAM propagation").
 			Example("2m"),
@@ -304,12 +324,13 @@ func (f *GCPDriverFactory) ValidateConfig(config credential.Config) error {
 // oidc_federation, and a federated source is already refused a rotation_period
 // before any driver sees it. Naming it here would be a rule that can never fire.
 func (f *GCPDriverFactory) ValidateRotationConfig(config credential.Config) error {
-	if credential.GetString(config, "iamcredentials_endpoint", "") == "" {
+	if credential.GetString(config, "iamcredentials_endpoint", "") == "" &&
+		credential.GetString(config, "secretmanager_endpoint", "") == "" {
 		return nil
 	}
 	return fmt.Errorf("rotation_period cannot be set on a source that overrides " +
-		"iamcredentials_endpoint: rotation manages service account keys in the real " +
-		"project, which that override does not redirect")
+		"iamcredentials_endpoint or secretmanager_endpoint: rotation manages service " +
+		"account keys in the real project, which those overrides do not redirect")
 }
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
@@ -328,6 +349,10 @@ func (f *GCPDriverFactory) InferCredentialType(specConfig credential.Config) (st
 		// made. The same refusal lives in the db_auth_token validator, which is the
 		// path taken when the operator states `type` instead of leaving it inferred.
 		return "", fmt.Errorf("mint_method %q is not implemented for the gcp driver", mintMethod)
+	case "secret_read":
+		// A stored secret vended under its own key names, with no primary field to
+		// select — the shape a chained consumer reads by name.
+		return credential.TypeKeyValue, nil
 	case "", "access_token", "impersonated_access_token":
 		return credential.TypeGCPAccessToken, nil
 	default:
@@ -349,6 +374,8 @@ func (f *GCPDriverFactory) Create(config credential.Config, log *logger.GatedLog
 		iamCredentialsHost: strings.TrimRight(
 			credential.GetString(config, "iamcredentials_endpoint", defaultGCPIAMCredentialsHost), "/"),
 		iamHost: defaultGCPIAMHost,
+		secretManagerHost: strings.TrimRight(
+			credential.GetString(config, "secretmanager_endpoint", defaultGCPSecretManagerHost), "/"),
 	}
 
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)
@@ -391,8 +418,10 @@ func (d *GCPDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 		return d.mintAccessToken(ctx, spec)
 	case "impersonated_access_token":
 		return d.mintImpersonatedAccessToken(ctx, spec)
+	case "secret_read":
+		return d.mintViaSecretRead(ctx, spec)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GCP driver; use 'access_token' or 'impersonated_access_token'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GCP driver; use 'access_token', 'impersonated_access_token' or 'secret_read'", mintMethod)
 	}
 }
 
@@ -615,6 +644,220 @@ func ttlFromExpireTime(expireTime string, fallback time.Duration) time.Duration 
 }
 
 // ============================================================================
+// Secret Manager reads (mint_method=secret_read)
+// ============================================================================
+
+// resolveSecretVersionPath builds the resource a secret read addresses, resolving any
+// {{user.<claim>}} / {{agent.<claim>}} template in the secret name first so one spec
+// can serve many callers and each reads only its own secret.
+//
+// secret_name may be a bare id or an already-qualified resource. A bare id needs the
+// project alongside it; a qualified one carries its own, and pairing it with `project`
+// is refused where the spec is written rather than silently preferring one of two
+// answers. An absent version reads the current one, which is how a spec follows
+// rotation of the secret it names.
+func resolveSecretVersionPath(spec *credential.CredSpec, userClaims, agentClaims map[string]string) (string, error) {
+	name, err := credential.GetStringRequired(spec.Config, "secret_name")
+	if err != nil {
+		return "", err
+	}
+	name, err = resolveClaimTemplate(name, userClaims, agentClaims, "secret_name")
+	if err != nil {
+		return "", err
+	}
+
+	// Every segment is escaped, as every other interpolated GCP path in this driver
+	// is. Without it a name carrying "#" truncates the request — reading a different
+	// version than the spec names while defeating the write-time rule against
+	// addressing two — and one carrying "?" turns the read into a different call
+	// entirely. The write-time charset checks make those unwritable; escaping here
+	// means a config that drifted past them still cannot reshape the request.
+	project := credential.GetString(spec.Config, "project", "")
+	secretID := name
+
+	if rest, ok := strings.CutPrefix(name, "projects/"); ok {
+		// A qualified resource carries its own project; its shape is checked where
+		// the spec is written.
+		parts := strings.Split(rest, "/secrets/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "", fmt.Errorf("'secret_name' must read 'projects/<project>/secrets/<name>' when fully qualified, got: %s", name)
+		}
+		project, secretID = parts[0], parts[1]
+	} else if project == "" {
+		return "", fmt.Errorf("'project' is required when 'secret_name' is a bare secret id")
+	}
+
+	version := credential.GetString(spec.Config, "secret_version", "")
+	if version == "" {
+		version = "latest"
+	}
+
+	return fmt.Sprintf("projects/%s/secrets/%s/versions/%s",
+		url.PathEscape(project), url.PathEscape(secretID), url.PathEscape(version)), nil
+}
+
+// fetchSecret reads a Secret Manager payload with the given bearer token and returns
+// it as the credential's data. The token may be the source's own (static auth) or one
+// obtained for this caller through federation.
+//
+// The returned TTL is zero and there is no lease: a stored secret does not expire and
+// nothing here can revoke it. Its freshness is bounded by the consuming spec's
+// secret_cache_ttl, not by a lease this could invent.
+func (d *GCPDriver) fetchSecret(ctx context.Context, bearerToken string, spec *credential.CredSpec,
+	userClaims, agentClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+
+	versionPath, err := resolveSecretVersionPath(spec, userClaims, agentClaims)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
+	respBody, err := d.doGCPRequest(ctx, gcpAPIRequest{
+		method:      "GET",
+		url:         d.secretManagerHost + "/v1/" + versionPath + ":access",
+		bearerToken: bearerToken,
+		okStatuses:  []int{http.StatusOK},
+		operation:   "accessSecretVersion",
+	})
+	if err != nil {
+		return nil, nil, 0, "", fmt.Errorf("failed to read secret %q: %w", versionPath, err)
+	}
+
+	var accessResp struct {
+		Name    string `json:"name"`
+		Payload struct {
+			Data       string `json:"data"`
+			DataCrc32c string `json:"dataCrc32c"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(respBody, &accessResp); err != nil {
+		return nil, nil, 0, "", fmt.Errorf("failed to decode secret response: %w", err)
+	}
+
+	decoded, err := base64Decode(accessResp.Payload.Data)
+	if err != nil {
+		return nil, nil, 0, "", fmt.Errorf("failed to decode secret payload: %w", err)
+	}
+	if len(decoded) == 0 {
+		return nil, nil, 0, "", fmt.Errorf("secret %q has an empty payload", versionPath)
+	}
+	if len(decoded) > gcpMaxSecretPayloadSize {
+		return nil, nil, 0, "", fmt.Errorf("secret %q payload is %d bytes, beyond the %d Secret Manager stores", versionPath, len(decoded), gcpMaxSecretPayloadSize)
+	}
+	// The service returns a checksum for exactly this purpose. Verifying it costs a
+	// pass over bytes we already hold and turns a truncated payload into an error
+	// rather than a credential that is quietly wrong.
+	if err := verifySecretCRC32C(decoded, accessResp.Payload.DataCrc32c); err != nil {
+		return nil, nil, 0, "", fmt.Errorf("secret %q failed its integrity check: %w", versionPath, err)
+	}
+
+	rawData, err := parseSecretPayload(decoded)
+	if err != nil {
+		return nil, nil, 0, "", fmt.Errorf("secret %q: %w", versionPath, err)
+	}
+	rawData = credential.ApplyKeyMap(rawData, credential.GetString(spec.Config, "json_key_map", ""))
+	if len(rawData) == 0 {
+		return nil, nil, 0, "", fmt.Errorf("secret %q yielded no fields; check 'json_key_map' against the stored payload", versionPath)
+	}
+
+	if d.logger != nil {
+		d.logger.Debug("read GCP Secret Manager secret",
+			logger.String("spec", spec.Name),
+			logger.String("secret", versionPath),
+		)
+	}
+
+	return rawData, nil, 0, "", nil
+}
+
+// parseSecretPayload turns raw secret bytes into the credential's fields.
+//
+// Secret Manager stores arbitrary bytes, so unlike a store that holds documents there
+// is no single right shape. A JSON object of scalars is vended under its own key names
+// — the multi-field secret a chained consumer reads by name, with numbers and booleans
+// rendered as strings because that is the only shape this credential type carries.
+// Anything that is not a JSON object at all, a plain API key being the common case, is
+// vended whole under "value".
+//
+// A document containing a nested object or array is refused rather than vended either
+// way. Blobbing it under "value" would be actively dangerous: a consuming spec that
+// names no secret_field takes the sole key when there is only one, so the entire
+// document — every secret stored beside the wanted one — would be sent upstream as the
+// credential. Dropping the nested field and keeping the rest would be quietly lossy.
+// Neither is worth the convenience of accepting a shape nothing here can represent.
+func parseSecretPayload(decoded []byte) (map[string]interface{}, error) {
+	var fields map[string]interface{}
+	if err := json.Unmarshal(decoded, &fields); err != nil || fields == nil {
+		// Not a JSON object: the payload is one opaque secret.
+		return map[string]interface{}{"value": string(decoded)}, nil
+	}
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("payload is an empty JSON object, carrying no secret")
+	}
+
+	out := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		switch typed := v.(type) {
+		case string:
+			out[k] = typed
+		case bool:
+			out[k] = strconv.FormatBool(typed)
+		case float64:
+			// encoding/json decodes every JSON number as a float64. Render integers
+			// without a decimal point so a stored port or id reads back as written.
+			out[k] = strconv.FormatFloat(typed, 'f', -1, 64)
+		case nil:
+			return nil, fmt.Errorf("payload field %q is null", k)
+		default:
+			return nil, fmt.Errorf("payload field %q holds a nested object or array, which a key/value credential cannot carry; store it as its own secret, or as a string", k)
+		}
+	}
+	return out, nil
+}
+
+// verifySecretCRC32C checks the payload against the checksum the service reports.
+//
+// The field is optional, so its absence is not a failure — refusing a secret the
+// service chose not to checksum would fail closed on something carrying no evidence of
+// corruption. A checksum that is present but unreadable is different: the envelope is
+// then demonstrably not what the service sends, which is exactly what this guards
+// against, so it fails rather than skipping the check.
+func verifySecretCRC32C(payload []byte, want string) error {
+	if want == "" {
+		return nil
+	}
+	expected, err := strconv.ParseUint(want, 10, 32)
+	if err != nil {
+		return fmt.Errorf("reported checksum %q is not a 32-bit value: %w", want, err)
+	}
+	if got := uint64(crc32.Checksum(payload, crc32.MakeTable(crc32.Castagnoli))); got != expected {
+		return fmt.Errorf("checksum %d does not match the %d reported", got, expected)
+	}
+	return nil
+}
+
+// mintViaSecretRead reads the secret with the source's own credentials.
+//
+// Neither principal's claims are available here: this path runs when the spec sets no
+// subject_token_source, so nothing on the request was verified into claims. Passing
+// nil means a templated secret_name fails closed rather than being sent literally —
+// which matters, because a store will happily return a secret actually named
+// "prod/{{user.sub}}" to whoever can create one.
+func (d *GCPDriver) mintViaSecretRead(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// target_service_account is honoured only over federation, where the caller's own
+	// assertion authorizes the impersonation. Accepting it here and reading as the
+	// source instead would vend a secret under an authority the operator did not name.
+	if credential.GetString(spec.Config, "target_service_account", "") != "" {
+		return nil, nil, 0, "", fmt.Errorf("gcp: 'target_service_account' applies to mint_method=secret_read only over auth_method=oidc_federation; a static source reads as itself")
+	}
+
+	token, _, err := d.getSourceToken(ctx, []string{gcpCloudPlatformScope})
+	if err != nil {
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire GCP access token: %w", err)
+	}
+	return d.fetchSecret(ctx, token, spec, nil, nil)
+}
+
+// ============================================================================
 // ExchangeMinter Interface Implementation (Workload Identity Federation)
 // ============================================================================
 
@@ -727,8 +970,29 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		}
 		return rawData, metadata, ttl, "", nil
 
+	case "secret_read":
+		// The credential is the stored secret, not the token that reads it, so the
+		// token is asked for a short fixed life and discarded straight after. The
+		// caller's claims travel with the fetch: a templated secret name resolves
+		// from them, scoping the read to the principals on this request.
+		fedToken, _, err := d.exchangeWIFToken(ctx, inputs.SubjectToken, inputs.SubjectTokenType, gcpFederationScope)
+		if err != nil {
+			return nil, nil, 0, "", err
+		}
+
+		readToken := fedToken
+		if targetSA := credential.GetString(spec.Config, "target_service_account", ""); targetSA != "" {
+			readToken, _, err = d.generateAccessToken(ctx, fedToken, targetSA,
+				[]string{gcpCloudPlatformScope}, gcpFederatedFetchLifetime)
+			if err != nil {
+				return nil, nil, 0, "", err
+			}
+		}
+
+		return d.fetchSecret(ctx, readToken, spec, inputs.UserClaims, inputs.AgentClaims)
+
 	default:
-		return nil, nil, 0, "", fmt.Errorf("gcp: mint_method %q is not supported over auth_method=oidc_federation (supported: impersonated_access_token, access_token)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("gcp: mint_method %q is not supported over auth_method=oidc_federation (supported: impersonated_access_token, access_token, secret_read)", mintMethod)
 	}
 }
 
@@ -851,6 +1115,15 @@ func gcpAssertionResource(sourceCfg, specCfg credential.Config) (string, bool) {
 	case "access_token":
 		if p := credential.GetString(sourceCfg, "workload_identity_provider", ""); p != "" {
 			return "gcp-wif:" + p, true
+		}
+	case "secret_read":
+		// A templated secret name is carried unresolved, as every templated coordinate
+		// is here: this runs before the exchange that produces the claims it would
+		// resolve from. A policy conditioning on this claim therefore pins the spec,
+		// not the individual secret — per-principal scoping is enforced where the
+		// resolved read happens, by the permissions on the identity doing it.
+		if n := credential.GetString(specCfg, "secret_name", ""); n != "" {
+			return "gcp-secretmanager:" + n, true
 		}
 	}
 	return "", false

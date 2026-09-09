@@ -128,6 +128,7 @@ var reservedSpecConfigKeys = map[string]struct{}{
 	"kv2_mount":       {},
 	"secret_path":     {},
 	"secret_id":       {},
+	"secret_name":     {},
 	"role_arn":        {},
 	"version_stage":   {},
 	"version_id":      {},
@@ -135,6 +136,15 @@ var reservedSpecConfigKeys = map[string]struct{}{
 	"credential_type": {},
 	"json_key_map":    {},
 }
+
+// Deliberately absent: `project` and `target_service_account`, the other two keys a
+// gcp secret_read spec addresses its secret with. Both are ordinary words an operator
+// may already have named a credential field — an apikey source listing `project` in
+// credential_fields is entirely plausible — and reserving a name here stops that field
+// being carried, silently, on mounts that have nothing to do with GCP. Same reasoning
+// as mintParameterFields above: a name that is a locator for one source and a
+// credential field for another cannot be settled globally. `secret_name` is listed
+// because it is already Key Vault's locator too, and is nobody's credential field.
 
 // reservedRawDataPrefix marks keys that belong to the mint pipeline rather than
 // to the credential — RawAdjunctFieldsKey and the rotated-refresh-token keys. No

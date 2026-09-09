@@ -370,3 +370,29 @@ func TestValidateRequired(t *testing.T) {
 	assert.Error(t, ValidateRequired(NewConfig(cfg), "empty"))
 	assert.NoError(t, ValidateRequired(NewConfig(cfg)))
 }
+
+// Both selection keys fail open by nature — an ignored json_key_map vends the
+// unprojected payload, an ignored secret_version vends the current revision — so a
+// gcp secret_read spec setting either must be recognised here or it looks filtered or
+// pinned while being neither.
+func TestValidateSecretSelection_GCPSecretRead(t *testing.T) {
+	t.Run("both keys apply to secret_read", func(t *testing.T) {
+		require.NoError(t, ValidateSecretSelection(NewConfig(map[string]string{
+			"mint_method": "secret_read", "json_key_map": "api_key=token", "secret_version": "3",
+		}), SourceTypeGCP))
+	})
+
+	// Secret Manager numbers its versions, so secret_version is the right spelling
+	// here — unlike Secrets Manager, which has its own version_id/version_stage.
+	t.Run("neither applies to a token mint", func(t *testing.T) {
+		err := ValidateSecretSelection(NewConfig(map[string]string{
+			"mint_method": "access_token", "json_key_map": "a=b",
+		}), SourceTypeGCP)
+		require.Error(t, err)
+
+		err = ValidateSecretSelection(NewConfig(map[string]string{
+			"mint_method": "access_token", "secret_version": "3",
+		}), SourceTypeGCP)
+		require.Error(t, err)
+	})
+}

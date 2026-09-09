@@ -94,7 +94,7 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci"},
 			sourceType: credential.SourceTypeAzure,
 			wantErr:    true,
-			errMsg:     "require an hvault or aws source",
+			errMsg:     "require an hvault, aws or gcp source",
 		},
 		{
 			name:       "wrong mint_method",
@@ -327,4 +327,158 @@ func TestKeyValueCredType_NoSecretInConfig(t *testing.T) {
 	// The secret lives only in minted Data, never in persisted config.
 	assert.Nil(t, ct.SensitiveConfigFields())
 	assert.Nil(t, ct.FieldSchemas())
+}
+
+// A gcp source reading Secret Manager is the third shape this type carries. The rows
+// below pin what distinguishes it: how a secret is addressed, and that a spec cannot
+// mix one store's locators into another's.
+func TestKeyValueCredType_ValidateConfig_GCP(t *testing.T) {
+	ct := NewKeyValueCredType()
+
+	validate := func(cfg map[string]string) error {
+		return ct.ValidateConfig(credential.NewConfig(cfg), credential.SourceTypeGCP)
+	}
+
+	t.Run("bare id with its project", func(t *testing.T) {
+		require.NoError(t, validate(map[string]string{
+			"mint_method": "secret_read", "secret_name": "datadog-keys", "project": "acme-prod",
+		}))
+	})
+
+	t.Run("fully qualified resource", func(t *testing.T) {
+		require.NoError(t, validate(map[string]string{
+			"mint_method": "secret_read", "secret_name": "projects/acme-prod/secrets/datadog-keys",
+		}))
+	})
+
+	// The two spellings each name a project, and accepting both at once would leave
+	// two answers to the same question with nothing to say which wins.
+	t.Run("qualified resource rejects a separate project", func(t *testing.T) {
+		err := validate(map[string]string{
+			"mint_method": "secret_read", "secret_name": "projects/acme-prod/secrets/datadog-keys",
+			"project": "other",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already names its project")
+	})
+
+	t.Run("bare id requires a project", func(t *testing.T) {
+		err := validate(map[string]string{"mint_method": "secret_read", "secret_name": "datadog-keys"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "'project' is required")
+	})
+
+	t.Run("secret_name is required", func(t *testing.T) {
+		err := validate(map[string]string{"mint_method": "secret_read", "project": "acme-prod"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "secret_name")
+	})
+
+	// A version is a separate key, so a name carrying one would address two at once.
+	t.Run("a malformed qualified resource is refused", func(t *testing.T) {
+		for _, name := range []string{
+			"projects/acme-prod/secrets/datadog-keys/versions/3",
+			"projects/acme-prod/secrets",
+			"projects//secrets/x",
+		} {
+			err := validate(map[string]string{"mint_method": "secret_read", "secret_name": name})
+			require.Errorf(t, err, "%q must be refused", name)
+		}
+	})
+
+	t.Run("only secret_read is offered", func(t *testing.T) {
+		err := validate(map[string]string{"mint_method": "kv2_read", "secret_name": "x", "project": "p"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be 'secret_read'")
+	})
+
+	t.Run("credential_type does not apply", func(t *testing.T) {
+		err := validate(map[string]string{
+			"mint_method": "secret_read", "secret_name": "x", "project": "p", "credential_type": "api_key",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential_type")
+	})
+
+	// A locator belonging to another store would be accepted and then never read,
+	// leaving a spec that reads as configured for something it is not doing.
+	t.Run("foreign locators are refused", func(t *testing.T) {
+		for _, key := range []string{"secret_id", "role_arn", "version_stage", "kv2_mount", "secret_path", "transit_key"} {
+			err := validate(map[string]string{
+				"mint_method": "secret_read", "secret_name": "x", "project": "p", key: "v",
+			})
+			require.Errorf(t, err, "%s must be refused on a gcp spec", key)
+		}
+	})
+}
+
+// The rejection runs in every direction: a gcp locator on an hvault or aws spec is as
+// inert as an aws locator on a gcp one.
+func TestKeyValueCredType_GCPLocatorsRejectedElsewhere(t *testing.T) {
+	ct := NewKeyValueCredType()
+
+	for _, key := range []string{"secret_name", "project", "target_service_account"} {
+		t.Run("hvault refuses "+key, func(t *testing.T) {
+			err := ct.ValidateConfig(credential.NewConfig(map[string]string{
+				"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "a/b", key: "v",
+			}), credential.SourceTypeVault)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key)
+		})
+
+		t.Run("aws refuses "+key, func(t *testing.T) {
+			err := ct.ValidateConfig(credential.NewConfig(map[string]string{
+				"mint_method": "secret_read", "secret_id": "prod/keys", key: "v",
+			}), credential.SourceTypeAWS)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key)
+		})
+	}
+}
+
+// A locator becomes a segment of the request path, so its charset is enforced where
+// the spec is written. Without this a name carrying "#" or "?" reshapes the request,
+// letting a spec read a resource other than the one it appears to name.
+func TestKeyValueCredType_GCP_LocatorCharsets(t *testing.T) {
+	ct := NewKeyValueCredType()
+	validate := func(cfg map[string]string) error {
+		return ct.ValidateConfig(credential.NewConfig(cfg), credential.SourceTypeGCP)
+	}
+
+	for _, name := range []string{
+		"keys/versions/2:access#", "keys?alt=media", "../../other", "with space", "keys#frag",
+	} {
+		t.Run("bare name rejects "+name, func(t *testing.T) {
+			err := validate(map[string]string{"mint_method": "secret_read", "secret_name": name, "project": "acme-prod"})
+			require.Errorf(t, err, "%q must be refused", name)
+		})
+	}
+
+	for _, project := range []string{"p#x", "p?x", "p/x", "with space"} {
+		t.Run("project rejects "+project, func(t *testing.T) {
+			err := validate(map[string]string{"mint_method": "secret_read", "secret_name": "keys", "project": project})
+			require.Errorf(t, err, "%q must be refused", project)
+		})
+	}
+
+	// A template's value is constrained where it is resolved, so the literal parts
+	// around it are what get checked here.
+	t.Run("a claim template is allowed in a bare name", func(t *testing.T) {
+		require.NoError(t, validate(map[string]string{
+			"mint_method": "secret_read", "secret_name": "per-agent-{{agent.sub}}", "project": "acme-prod",
+		}))
+	})
+}
+
+// These configure a token mint. A stored-secret read obtains and discards its own
+// token, so both would be accepted and never read.
+func TestKeyValueCredType_GCP_RejectsTokenMintKeys(t *testing.T) {
+	ct := NewKeyValueCredType()
+	for _, key := range []string{"scopes", "lifetime"} {
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
+			"mint_method": "secret_read", "secret_name": "keys", "project": "acme-prod", key: "v",
+		}), credential.SourceTypeGCP)
+		require.Errorf(t, err, "%s must be refused on a secret_read spec", key)
+		assert.Contains(t, err.Error(), key)
+	}
 }
