@@ -4,6 +4,7 @@
 package core
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 
 // TestCBP_PathCondition_EndToEnd parses a policy with a path-level CEL
 // condition, compiles it into a CBP, and exercises allow/deny through
-// AllowOperation. The condition reads request.data (body) and token.metadata
+// AllowOperation. The condition reads request.data (body) and agent.metadata
 // (from the TokenEntry threaded into AllowOperation).
 func TestCBP_PathCondition_EndToEnd(t *testing.T) {
 	ctx := testContext()
@@ -24,7 +25,7 @@ func TestCBP_PathCondition_EndToEnd(t *testing.T) {
 	policy := testParsePolicy(t, `
 		path "db/issue-grant" {
 			capabilities = ["create"]
-			condition = "request.data.ttl_seconds <= 3600 && token.metadata.env == 'prod'"
+			condition = "request.data.ttl_seconds <= 3600 && agent.metadata.env == 'prod'"
 		}
 	`)
 	cbp, err := NewCBP(ctx, []*Policy{policy})
@@ -60,7 +61,7 @@ func TestCBP_PathCondition_EndToEnd(t *testing.T) {
 }
 
 // TestCBP_PathCondition_RecordsInputs confirms a deciding path-level condition
-// snapshots its referenced request/token values into ConditionResult.Inputs
+// snapshots its referenced request/agent values into ConditionResult.Inputs
 // (in clear — salting is an audit-layer opt-in).
 func TestCBP_PathCondition_RecordsInputs(t *testing.T) {
 	ctx := testContext()
@@ -68,7 +69,7 @@ func TestCBP_PathCondition_RecordsInputs(t *testing.T) {
 	policy := testParsePolicy(t, `
 		path "db/issue-grant" {
 			capabilities = ["create"]
-			condition = "request.data.model == 'sonnet' && token.metadata.env == 'prod'"
+			condition = "request.data.model == 'sonnet' && agent.metadata.env == 'prod'"
 		}
 	`)
 	cbp, err := NewCBP(ctx, []*Policy{policy})
@@ -85,7 +86,7 @@ func TestCBP_PathCondition_RecordsInputs(t *testing.T) {
 	require.NotNil(t, res.Condition)
 	require.NotNil(t, res.Condition.Inputs)
 	assert.Equal(t, "opus", res.Condition.Inputs["request.data.model"])
-	assert.Equal(t, "prod", res.Condition.Inputs["token.metadata.env"])
+	assert.Equal(t, "prod", res.Condition.Inputs["agent.metadata.env"])
 }
 
 // TestCBP_PathCondition_MissingDataFailsClosed confirms a condition over an
@@ -183,8 +184,8 @@ func TestCBP_PathCondition_CapCheckOnlySkips(t *testing.T) {
 // the same path OR across policies (more policies admit more requests).
 func TestCBP_PathCondition_MultiPolicyOR(t *testing.T) {
 	ctx := testContext()
-	a := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "token.metadata.team == 'red'" }`)
-	b := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "token.metadata.team == 'blue'" }`)
+	a := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'red'" }`)
+	b := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'blue'" }`)
 	cbp, err := NewCBP(ctx, []*Policy{a, b})
 	require.NoError(t, err)
 
@@ -198,13 +199,13 @@ func TestCBP_PathCondition_MultiPolicyOR(t *testing.T) {
 
 // TestCBP_PathCondition_MergeUnionBuildsAllFields guards the activation-pruning
 // union: two merged conditions read *different* namespace fields, so the shared
-// activation must build the union (request.data AND token.metadata). If it
+// activation must build the union (request.data AND agent.metadata). If it
 // pruned to only the first condition's fields, the second would hit a missing
 // key and fail closed — so "gold" (satisfying only policy B) proves both were
 // built.
 func TestCBP_PathCondition_MergeUnionBuildsAllFields(t *testing.T) {
 	ctx := testContext()
-	a := testParsePolicy(t, `path "kv/x" { capabilities = ["read"] condition = "token.metadata.env == 'prod'" }`)
+	a := testParsePolicy(t, `path "kv/x" { capabilities = ["read"] condition = "agent.metadata.env == 'prod'" }`)
 	b := testParsePolicy(t, `path "kv/x" { capabilities = ["read"] condition = "request.data.tier == 'gold'" }`)
 	cbp, err := NewCBP(ctx, []*Policy{a, b})
 	require.NoError(t, err)
@@ -225,7 +226,7 @@ func TestCBP_PathCondition_MergeUnionBuildsAllFields(t *testing.T) {
 // admits everything), overriding another policy's condition.
 func TestCBP_PathCondition_UnconditionalGrantWins(t *testing.T) {
 	ctx := testContext()
-	a := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "token.metadata.team == 'red'" }`)
+	a := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'red'" }`)
 	b := testParsePolicy(t, `path "x" { capabilities = ["read"] }`) // unconditional
 	cbp, err := NewCBP(ctx, []*Policy{a, b})
 	require.NoError(t, err)
@@ -268,17 +269,17 @@ func TestCBP_ConditionsBlockRemoved(t *testing.T) {
 	`)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conditions {} block has been removed")
-	assert.Contains(t, err.Error(), "token.metadata")
+	assert.Contains(t, err.Error(), "agent.metadata")
 }
 
 // TestCBP_RequestNamespace confirms request.namespace (the request's target
-// namespace) is exposed and can be compared against token.namespace (where the
+// namespace) is exposed and can be compared against agent.namespace (where the
 // token was minted) — e.g. to deny a parent-namespace token acting in a child
 // namespace. Both values are captured in the audited Inputs.
 func TestCBP_RequestNamespace(t *testing.T) {
 	env, err := baseCELEnv()
 	require.NoError(t, err)
-	src := "token.namespace == request.namespace"
+	src := "agent.namespace == request.namespace"
 	cond, err := compileCELCondition(env, src)
 	require.NoError(t, err)
 
@@ -292,7 +293,7 @@ func TestCBP_RequestNamespace(t *testing.T) {
 	require.NotNil(t, res)
 	assert.Equal(t, "allow", res.Decision)
 	assert.Equal(t, "team-a/", res.Inputs["request.namespace"])
-	assert.Equal(t, "team-a/", res.Inputs["token.namespace"])
+	assert.Equal(t, "team-a/", res.Inputs["agent.namespace"])
 
 	// Same token acting in child namespace team-a/team-b/ -> deny.
 	ok, res = evaluatePathConditions([]*compiledCondition{cond}, req, te, now, "team-a/team-b/")
@@ -343,7 +344,7 @@ func BenchmarkAllowOperation_WithCondition(b *testing.B) {
 	policy, _ := ParseCBPPolicy(namespace.RootNamespace, `
 		path "db/issue-grant" {
 			capabilities = ["create"]
-			condition = "request.data.ttl_seconds <= 3600 && token.metadata.env == 'prod'"
+			condition = "request.data.ttl_seconds <= 3600 && agent.metadata.env == 'prod'"
 		}
 	`)
 	cbp, _ := NewCBP(ctx, []*Policy{policy})
@@ -356,5 +357,49 @@ func BenchmarkAllowOperation_WithCondition(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cbp.AllowOperation(ctx, req, te, false)
+	}
+}
+
+// TestCBP_PathCondition_RenamedFields drives the three token_-prefixed fields
+// through the real pruned path: compile -> celAnalyzeRefs -> AgtFields ->
+// lazy activation -> eval.
+//
+// This is the regression guard for the rename's sharpest edge. celAnalyzeRefs
+// records the CEL field name ("token_type") and buildPrincipalNS gates on
+// f.has("token_type"); if those two strings ever disagree, the field is pruned
+// away, the expression hits a missing key, and every request denies. Because
+// `agent` is a dyn map that is not a compile error — so only an end-to-end
+// evaluation catches it. A unit test over buildPrincipalNS with all:true cannot:
+// has() short-circuits on all and returns true for any string.
+func TestCBP_PathCondition_RenamedFields(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "db/issue-grant" {
+			capabilities = ["create"]
+			condition = "agent.token_type == 'cert_role' && agent.token_ttl_seconds <= 3600 && agent.token_expires_at > 0"
+		}
+	`)
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	expireAt := time.Now().Add(30 * time.Minute)
+	te := &logical.TokenEntry{Type: "cert_role", ExpireAt: expireAt}
+	res := cbp.AllowOperation(ctx, &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "db/issue-grant",
+	}, te, false)
+
+	assert.True(t, res.Allowed, "renamed fields must resolve through the pruned activation")
+	require.NotNil(t, res.Condition)
+	require.NotNil(t, res.Condition.Inputs)
+	// The audit keys carry the new spelling — this is what a salt_fields entry
+	// has to match.
+	assert.Equal(t, "cert_role", res.Condition.Inputs["agent.token_type"])
+	assert.Contains(t, res.Condition.Inputs, "agent.token_ttl_seconds")
+	assert.Equal(t, strconv.FormatInt(expireAt.Unix(), 10), res.Condition.Inputs["agent.token_expires_at"])
+	// The pre-rename spellings must not appear as audit keys.
+	for _, k := range []string{"agent.type", "agent.ttl_seconds", "agent.expires_at"} {
+		assert.NotContains(t, res.Condition.Inputs, k)
 	}
 }

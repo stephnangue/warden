@@ -457,8 +457,8 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	// when at least one set carries a CEL condition; nil otherwise so the
 	// common no-condition path allocates nothing extra.
 	var act *celActivation
-	if reqF, tokF, callF, found := mcpConditionFields(sets); found {
-		act = newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celTokenInputFromEntry(te, now), tokF, now, nil)
+	if reqF, agtF, callF, found := mcpConditionFields(sets); found {
+		act = newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celPrincipalInputFromEntry(te, now), agtF, now, nil)
 		act.callFields = callF
 	}
 
@@ -486,18 +486,18 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 // sets that carry a CEL condition, and whether any condition exists. The union
 // prunes the shared per-request activation to only the fields the conditions
 // read (reused across every call in a batch).
-func mcpConditionFields(sets []*CBPMCPRules) (reqF, tokF, callF fieldSet, found bool) {
+func mcpConditionFields(sets []*CBPMCPRules) (reqF, agtF, callF fieldSet, found bool) {
 	for _, s := range sets {
 		if s == nil || s.Condition == nil {
 			continue
 		}
 		if !found {
-			reqF, tokF, callF = s.Condition.ReqFields, s.Condition.TokFields, s.Condition.CallFields
+			reqF, agtF, callF = s.Condition.ReqFields, s.Condition.AgtFields, s.Condition.CallFields
 			found = true
 			continue
 		}
 		reqF = unionFieldSets(reqF, s.Condition.ReqFields)
-		tokF = unionFieldSets(tokF, s.Condition.TokFields)
+		agtF = unionFieldSets(agtF, s.Condition.AgtFields)
 		callF = unionFieldSets(callF, s.Condition.CallFields)
 	}
 	return

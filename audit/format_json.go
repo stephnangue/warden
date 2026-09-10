@@ -226,7 +226,7 @@ func (f *JSONFormat) saltPolicyResultsField(ctx context.Context, pr *PolicyResul
 	case "condition":
 		// "...condition.inputs" salts every referenced-input value;
 		// "...condition.inputs.<dotted-key>" salts one (the input map keys are
-		// themselves dotted, e.g. token.metadata.env, so rejoin the tail).
+		// themselves dotted, e.g. agent.metadata.env, so rejoin the tail).
 		if pr.Condition == nil || len(parts) < 2 || parts[1] != "inputs" {
 			return nil
 		}

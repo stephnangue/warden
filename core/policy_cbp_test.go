@@ -36,7 +36,7 @@ func testParsePolicy(t testing.TB, rules string) *Policy {
 // One CBP, two different tokens, opposite outcomes driven purely by token data.
 func TestCBP_ConditionIsIdentityIndependent(t *testing.T) {
 	ctx := testContext()
-	p := testParsePolicy(t, `path "secret/x" { capabilities = ["read"] condition = "token.metadata.env == 'prod'" }`)
+	p := testParsePolicy(t, `path "secret/x" { capabilities = ["read"] condition = "agent.metadata.env == 'prod'" }`)
 	cbp, err := NewCBP(ctx, []*Policy{p})
 	require.NoError(t, err)
 
@@ -64,7 +64,7 @@ func TestCBP_CompiledConditionSharedAcrossCallers(t *testing.T) {
 	ps := core.policyStore
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	p := testParsePolicy(t, `path "secret/x" { capabilities = ["read"] condition = "token.metadata.env == 'prod'" }`)
+	p := testParsePolicy(t, `path "secret/x" { capabilities = ["read"] condition = "agent.metadata.env == 'prod'" }`)
 	p.Name = "cond"
 	p.Type = PolicyTypeCBP
 	require.NoError(t, ps.SetPolicy(ctx, p, nil))
