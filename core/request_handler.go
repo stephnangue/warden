@@ -663,7 +663,7 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 			retErr = multierror.Append(retErr, errType)
 		}
 
-		// Build the error response for audit logging
+		// Build the error response
 		var resp *logical.Response
 		if ctErr == ErrInternalError {
 			resp = nil
@@ -671,15 +671,23 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 			resp = logical.ErrorResponse(logical.ErrInternal(ctErr.Error()))
 		}
 
-		// Audit the failed response - ensures complete request/response pair in audit log
-		respAuditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, nil, ctErr)
-		if _, auditErr := c.auditManager.LogResponse(ctx, respAuditEntry); auditErr != nil {
-			c.logger.Error("failed to audit login failure response",
-				logger.String("path", req.Path),
-				logger.Err(auditErr),
-			)
-		}
-
+		// No response audit here, for the same reason as the token-check denial
+		// below: handleCancelableRequest audits the response of every request it
+		// handles, so auditing here too would record this one twice.
+		//
+		// The other caller — the transparent-auth internal login — audits no
+		// response at all, so this branch would have been that sub-request's only
+		// response entry. Removing it matches how a *successful* internal login
+		// already behaves (a request entry, no response entry), so the asymmetry
+		// predates this and is not introduced by dropping the call.
+		//
+		// This branch is unreachable today in any case: CheckToken is called here
+		// with unauth=true, which swallows every token/CBP fetch error and skips
+		// the policy gate entirely, and its remaining exits need a backend that
+		// either declares an ExistenceCheck (none does) or lists one path as both
+		// Root and Unauthenticated (none does). It is kept rather than deleted so
+		// that if a future backend makes it live, it fails as one audit entry
+		// rather than silently as two.
 		if ctErr == ErrInternalError {
 			return nil, auth, retErr
 		}
@@ -1102,15 +1110,20 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				resp = logical.ErrorResponse(ctErr)
 			}
 
-			// Audit the failed response
-			respAuditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, te, ctErr)
-			if _, auditErr := c.auditManager.LogResponse(ctx, respAuditEntry); auditErr != nil {
-				c.logger.Error("failed to audit token check failure response",
-					logger.String("path", req.Path),
-					logger.Err(auditErr),
-				)
-			}
-
+			// No response audit here. handleCancelableRequest audits the response
+			// of every request once this returns, so auditing again would record
+			// a denial twice — and anything counting audit events (denial rate
+			// limits, alerting, compliance tallies) would see two rejections
+			// where one occurred.
+			//
+			// The caller's entry carries the same response, auth and token entry
+			// (it re-reads req.TokenEntry(), which was set before any denial can
+			// occur). For a permission denial its error IS this ctErr. For the
+			// default class above — neither internal nor permission-denied —
+			// retErr is a generic invalid-request instead, so that entry's Error
+			// field is less specific than this one was; the exact ctErr is still
+			// recorded on the request entry below and in the audited response
+			// body, so nothing leaves the audit record.
 			if errwrap.Contains(retErr, ErrInternalError.Error()) {
 				return nil, auth, retErr
 			}
