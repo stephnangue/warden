@@ -5,6 +5,7 @@ package helpers
 import (
 	"crypto/ecdsa"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -268,4 +269,139 @@ func UserLegRequest(t *testing.T, port int, agentCertPEM string, headers map[str
 	}
 	u := fmt.Sprintf("%s/v1/%s/gateway/v1/secret/data/e2e/app-config", NodeURL(port), UserLegMount)
 	return DoRequest(t, "GET", u, all, "")
+}
+
+// =============================================================================
+// Agent-user binding
+// =============================================================================
+//
+// A binding is decided cryptographically at the IdP and enforced at the gateway,
+// per request. Where the IdP has decided nothing, the gateway decides and
+// enforces in one step. Both land on the same machinery — a CEL condition
+// comparing a value carried on the USER's token against the agent's own identity
+// — and differ only in where the compared value came from.
+//
+// When the IdP decided: it attests the pairing with RFC 8693 `act.sub` ("agent A
+// acting for user B"), mapped with a JSON Pointer,
+// metadata_claims { "/act/sub" = "acting_agent" }, and the gateway verifies the
+// agent presenting the request is the one attested.
+//
+// This harness runs the other case. Hydra's client_credentials grant emits no
+// `act` claim, so there is no IdP decision to enforce and the rule is decided
+// here: the user's own `sub` must match the agent's principal. The claim
+// mapping, the condition layer and the per-request evaluation are the same; only
+// the provenance of the compared value differs — so what stays unexercised is
+// the JSON Pointer into a nested `act` claim, which is unit-covered instead.
+const (
+	// UserLegBindingPolicy carries the binding condition. It deliberately does
+	// NOT also grant the unconditioned `-access` policy: conditions merge with
+	// OR across policies covering one path, so attaching both would let the
+	// unconditioned grant allow everything and the binding would prove nothing.
+	UserLegBindingPolicy = "e2e-userleg-binding"
+
+	// UserLegBoundRole is a cert role whose allowed CN is the value the user's
+	// mapped claim carries, so a certificate minted with that CN satisfies the
+	// binding.
+	UserLegBoundRole = "e2e-userleg-bound"
+
+	// UserLegUnboundRole is a cert role for the stock `agent-*` certificates.
+	// It carries the same binding policy, so a request through it is denied by
+	// the CONDITION rather than by authorization — which is what makes the deny
+	// case evidence of the binding working.
+	UserLegUnboundRole = "e2e-userleg-unbound"
+
+	// UserLegActingAgentKey is the metadata key the mapped claim lands on.
+	UserLegActingAgentKey = "acting_agent"
+)
+
+// SetupUserLegBinding installs the binding policy, the two cert roles, and the
+// claim mapping on the user role. actingAgent is the value the user's mapped
+// claim will carry; the caller reads it off the actual user token rather than
+// assuming it, so the fixture cannot drift from what the IdP issues.
+func SetupUserLegBinding(t *testing.T, port int, actingAgent string) {
+	t.Helper()
+
+	policy := fmt.Sprintf(
+		`path \"%s/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n  condition = \"user.present && user.metadata.%s == agent.principal\"\n}`,
+		UserLegMount, UserLegActingAgentKey)
+	mustAPI(t, port, "POST", "sys/policies/cbp/"+UserLegBindingPolicy,
+		fmt.Sprintf(`{"policy":"%s"}`, policy), "create binding policy")
+
+	// Map the claim onto the user role. Additive: other tests read the user's
+	// identity, not its metadata, so they are unaffected.
+	//
+	// Role writes are create-only — a POST over an existing role is a 409, not
+	// an update — so every mutation here deletes first. Setup must be
+	// re-runnable: these tests share one role and each installs the fixture.
+	SetUserLegClaimMapping(t, port, true)
+
+	for role, cns := range map[string]string{
+		UserLegBoundRole:   fmt.Sprintf("%q", actingAgent),
+		UserLegUnboundRole: `"agent-*"`,
+	} {
+		APIRequest(t, "DELETE", "auth/cert/role/"+role, port, "")
+		mustAPI(t, port, "POST", "auth/cert/role/"+role,
+			fmt.Sprintf(`{"allowed_common_names":[%s],"token_policies":["%s"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`,
+				cns, UserLegBindingPolicy),
+			"create cert role "+role)
+	}
+}
+
+// SetUserLegClaimMapping rewrites the user role with or without the
+// acting-agent claim mapping, so a test can remove the mapping and watch the
+// binding fail closed.
+func SetUserLegClaimMapping(t *testing.T, port int, mapped bool) {
+	t.Helper()
+	body := `{"user_claim":"sub","token_ttl":3600}`
+	if mapped {
+		body = fmt.Sprintf(`{"user_claim":"sub","metadata_claims":{"sub":%q},"token_ttl":3600}`,
+			UserLegActingAgentKey)
+	}
+	APIRequest(t, "DELETE", "auth/user-jwt/role/"+UserLegAuthRole, port, "")
+	mustAPI(t, port, "POST", "auth/user-jwt/role/"+UserLegAuthRole, body, "write user role")
+}
+
+// TeardownUserLegBinding removes what SetupUserLegBinding created and restores
+// the user role to its unmapped shape.
+func TeardownUserLegBinding(t *testing.T, port int) {
+	t.Helper()
+	APIRequest(t, "DELETE", "auth/cert/role/"+UserLegBoundRole, port, "")
+	APIRequest(t, "DELETE", "auth/cert/role/"+UserLegUnboundRole, port, "")
+	APIRequest(t, "DELETE", "sys/policies/cbp/"+UserLegBindingPolicy, port, "")
+	SetUserLegClaimMapping(t, port, false)
+}
+
+// UserLegRequestAs is UserLegRequest against a caller-chosen cert role, so a
+// test can drive the same mount through roles with different bound CNs.
+func UserLegRequestAs(t *testing.T, port int, role, agentCertPEM string, headers map[string]string) (int, []byte) {
+	t.Helper()
+	all := map[string]string{"X-Warden-Role": role}
+	if agentCertPEM != "" {
+		all["X-SSL-Client-Cert"] = URLEncodePEM(agentCertPEM)
+	}
+	for k, v := range headers {
+		all[k] = v
+	}
+	u := fmt.Sprintf("%s/v1/%s/gateway/v1/secret/data/e2e/app-config", NodeURL(port), UserLegMount)
+	return DoRequest(t, "GET", u, all, "")
+}
+
+// JWTSubject returns the `sub` claim of a compact JWS, so a test can bind a
+// fixture to the identity the IdP actually issued instead of hardcoding it.
+func JWTSubject(t *testing.T, token string) string {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		t.Fatalf("not a compact JWS: %d segments", len(parts))
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(DecodeJWTSegment(t, parts[1]), &claims); err != nil {
+		t.Fatalf("decode JWT claims: %v", err)
+	}
+	if claims.Sub == "" {
+		t.Fatal("user token carries no sub claim; the binding fixture has nothing to bind to")
+	}
+	return claims.Sub
 }
