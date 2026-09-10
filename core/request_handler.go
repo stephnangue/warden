@@ -824,6 +824,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// Help requests are never streaming - they should return help text, not proxy upstream.
 	isStreaming := c.isStreamingRequest(ctx, req.Path) && req.Operation != logical.HelpOperation
 
+	// Whether this mount is a protected resource — i.e. whether a user
+	// credential can be presented at all. Resolved inside the streaming branch
+	// below, but declared here so the policy-denial path can read it: a deny
+	// that a user might remedy is answered with a challenge only when there is
+	// somewhere to send the client.
+	var userLegMount bool
+
 	if !isStreaming {
 		if err := c.parseRequestBody(req); err != nil {
 			return logical.ErrorResponse(err), nil, nil
@@ -938,6 +945,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// rule collapses to the pre-0.20 behaviour and userCred stays empty.
 		userAuthPath, userAuthRole := c.resolveUserAuthConfig(ctx, matchingBackend)
 		userLeg := userAuthPath != ""
+		userLegMount = userLeg
 
 		// Reject the one genuinely ambiguous credential combination rather than
 		// resolving it silently. X-Warden-Token is the operator credential and
@@ -1108,6 +1116,24 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				resp = nil
 			} else {
 				resp = logical.ErrorResponse(ctErr)
+			}
+
+			// A policy denied because no user rode a request that could have
+			// carried one. 403 is the wrong answer: nothing in a real client
+			// stack acts on it, so the caller concludes it is forbidden when one
+			// OAuth round trip away it might succeed. Answer 401 and name where
+			// to authenticate, exactly as the credential layer already does when
+			// a spec requires a user (see exchangeInputError).
+			//
+			// Swapping resp here rather than at the return is what keeps the
+			// audit honest: handleCancelableRequest audits whatever this returns,
+			// so the logged status is the 401 the client actually received. The
+			// request entry still records the policy denial and its
+			// ConditionResult, and user_absent on that record is what explains
+			// why a denial went out as an invitation to authenticate.
+			if challenge := c.userChallengeForDeny(ctx, req, auth, userLegMount); challenge != nil {
+				resp = challenge
+				retErr = nil
 			}
 
 			// No response audit here. handleCancelableRequest audits the response

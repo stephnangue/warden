@@ -137,6 +137,68 @@ func TestAccessPathMintError(t *testing.T) {
 	})
 }
 
+// TestUserChallengeForDeny pins the conversion of a policy denial into a user
+// challenge, and — more importantly — every case where it must NOT fire.
+//
+// A 401 is an invitation to authenticate. Sending one where a user could never
+// be presented tells a client to do something that cannot work, which is the
+// same fault accessPathMintError exists to avoid.
+func TestUserChallengeForDeny(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := challengeTestCore(t, true)
+
+	req := func(streamed bool) *logical.Request {
+		return &logical.Request{
+			Path:        "github/gateway/user",
+			MountPoint:  "github/",
+			Streamed:    streamed,
+			HTTPRequest: httptest.NewRequest(http.MethodGet, "/v1/github/gateway/user", nil),
+		}
+	}
+	denyAuth := func(userAbsent bool) *logical.Auth {
+		return &logical.Auth{Condition: &logical.ConditionResult{
+			Decision: "deny", Expression: "user.present", UserAbsent: userAbsent,
+		}}
+	}
+
+	t.Run("converts a user-absent deny into a bare challenge", func(t *testing.T) {
+		resp := core.userChallengeForDeny(ctx, req(true), denyAuth(true), true)
+		require.NotNil(t, resp, "a streaming request on a user-leg mount must be challenged")
+		// StatusCode is what writeLogicalResponse puts on the wire; asserting
+		// only the error code would pass even if the response carried no status.
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+		got := resp.Headers.Get("WWW-Authenticate")
+		assert.Contains(t, got, "resource_metadata=",
+			"a challenge that names nowhere to go is no better than the 403")
+		assert.NotContains(t, got, "invalid_token",
+			"nothing was presented, so naming a credential invalid would be a lie")
+	})
+
+	t.Run("no conversion when the deny was not about a missing user", func(t *testing.T) {
+		assert.Nil(t, core.userChallengeForDeny(ctx, req(true), denyAuth(false), true))
+	})
+
+	// captureUserContext runs only on gateway requests, so elsewhere no user
+	// could have ridden along and no retry can change the outcome.
+	t.Run("no conversion on a non-streaming request", func(t *testing.T) {
+		assert.Nil(t, core.userChallengeForDeny(ctx, req(false), denyAuth(true), true))
+	})
+
+	// Without user_auth_path there is no authorization server to name.
+	t.Run("no conversion on a mount with no user leg", func(t *testing.T) {
+		assert.Nil(t, core.userChallengeForDeny(ctx, req(true), denyAuth(true), false))
+	})
+
+	// Both nil shapes are reachable: auth is nil when the agent's own token
+	// failed, and Condition is nil on a capability deny, which returns before
+	// the condition gate runs. Either would panic on a bare field access.
+	t.Run("survives the nil shapes the deny path actually produces", func(t *testing.T) {
+		assert.Nil(t, core.userChallengeForDeny(ctx, req(true), nil, true))
+		assert.Nil(t, core.userChallengeForDeny(ctx, req(true), &logical.Auth{}, true))
+	})
+}
+
 // TestChallengeURLIsActuallyServed is the anti-drift check: the URL a challenge
 // names must be one the metadata endpoint resolves. The two are derived
 // independently, and a mismatch fails silently — the client follows the link,

@@ -422,6 +422,113 @@ func userReq(path string, userMeta map[string]string) *logical.Request {
 	return req
 }
 
+// TestCBP_UserAbsent covers the flag that turns a policy denial into a user
+// challenge. Its whole job is to answer "might acquiring a user change this?",
+// so the cases that must NOT set it matter as much as the ones that must.
+func TestCBP_UserAbsent(t *testing.T) {
+	ctx := testContext()
+	agentTE := &logical.TokenEntry{
+		PrincipalID: "agent-gateway",
+		Metadata:    map[string]string{"team": "platform"},
+	}
+
+	denyWith := func(t *testing.T, condition string, req *logical.Request) *logical.ConditionResult {
+		t.Helper()
+		policy := testParsePolicy(t, `
+			path "vault-gw/gateway" {
+				capabilities = ["create"]
+				condition = "`+condition+`"
+			}
+		`)
+		cbp, err := NewCBP(ctx, []*Policy{policy})
+		require.NoError(t, err)
+		res := cbp.AllowOperation(ctx, req, agentTE, false)
+		require.False(t, res.Allowed)
+		require.NotNil(t, res.Condition)
+		return res.Condition
+	}
+
+	noUser := func() *logical.Request {
+		return &logical.Request{Operation: logical.CreateOperation, Path: "vault-gw/gateway"}
+	}
+
+	// The guarded shape: user.present short-circuits, so this is a clean false.
+	t.Run("guarded condition, user absent", func(t *testing.T) {
+		c := denyWith(t, "user.present && user.metadata.acting_agent == agent.principal", noUser())
+		assert.True(t, c.UserAbsent)
+		assert.Empty(t, c.ErrorKind, "the guard makes absence a decision, not an error")
+	})
+
+	// The unguarded shape takes the ERROR branch instead — user.metadata binds
+	// to an empty map, so the access is a no_such_key. An implementation that
+	// set the flag only where `deciding` is built on the false branch would give
+	// this shape a bare 403 while the guarded one got a challenge.
+	t.Run("unguarded condition, user absent", func(t *testing.T) {
+		c := denyWith(t, "user.metadata.acting_agent == agent.principal", noUser())
+		assert.True(t, c.UserAbsent, "the error branch must set the flag too")
+		assert.Equal(t, "no_such_key", c.ErrorKind)
+	})
+
+	// A user IS present and simply does not match. Acquiring one cannot help —
+	// they already have one.
+	t.Run("user present but mismatched", func(t *testing.T) {
+		req := noUser()
+		req.User = &logical.UserPrincipal{
+			TokenEntry: &logical.TokenEntry{Metadata: map[string]string{"acting_agent": "agent-other"}},
+		}
+		c := denyWith(t, "user.present && user.metadata.acting_agent == agent.principal", req)
+		assert.False(t, c.UserAbsent)
+	})
+
+	// No condition reads the user, so a user is irrelevant to the outcome.
+	t.Run("condition does not reference the user", func(t *testing.T) {
+		c := denyWith(t, "agent.principal == 'someone-else'", noUser())
+		assert.False(t, c.UserAbsent)
+	})
+
+	// Deny means every OR'd condition failed, so a user-referencing one anywhere
+	// in the list is enough — even when an unrelated condition is the one
+	// recorded as deciding.
+	t.Run("mixed list, only one references the user", func(t *testing.T) {
+		a := testParsePolicy(t, `path "vault-gw/gateway" { capabilities = ["create"] condition = "agent.principal == 'nobody'" }`)
+		// `== true` because a condition must evaluate to bool and a dyn-map field
+		// types as dyn; a bare `user.present` is rejected at write time.
+		b := testParsePolicy(t, `path "vault-gw/gateway" { capabilities = ["create"] condition = "user.present == true" }`)
+		cbp, err := NewCBP(ctx, []*Policy{a, b})
+		require.NoError(t, err)
+		res := cbp.AllowOperation(ctx, noUser(), agentTE, false)
+		require.False(t, res.Allowed)
+		require.NotNil(t, res.Condition)
+		assert.True(t, res.Condition.UserAbsent)
+	})
+
+	// A capability denial returns before the condition gate, so there is no
+	// ConditionResult at all and nothing can be converted to a challenge.
+	t.Run("capability deny produces no condition result", func(t *testing.T) {
+		policy := testParsePolicy(t, `path "vault-gw/gateway" { capabilities = ["read"] condition = "user.present == true" }`)
+		cbp, err := NewCBP(ctx, []*Policy{policy})
+		require.NoError(t, err)
+		res := cbp.AllowOperation(ctx, noUser(), agentTE, false) // create, not read
+		assert.False(t, res.Allowed)
+		assert.Nil(t, res.Condition)
+	})
+
+	// The flag is a syntactic over-approximation: this condition can never pass
+	// however good the user token is. It still draws the flag, so the client
+	// makes one wasted round trip — but the retry arrives WITH a user, which
+	// clears the flag and terminates at a 403. Pins that it cannot loop.
+	t.Run("unsatisfiable user condition terminates", func(t *testing.T) {
+		const cond = "user.present && agent.principal == 'alice'"
+		first := denyWith(t, cond, noUser())
+		assert.True(t, first.UserAbsent, "over-approximates: a user might have helped")
+
+		withUser := noUser()
+		withUser.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}}
+		second := denyWith(t, cond, withUser)
+		assert.False(t, second.UserAbsent, "retry must not draw a second challenge")
+	})
+}
+
 // TestCBP_UserCondition_ConsentBinding drives the agent-user binding end to end
 // through the pruned activation: allow when the IdP's act.sub (mapped to the
 // acting_agent metadata key) names this agent, deny when it names another.

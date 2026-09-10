@@ -200,3 +200,50 @@ func (c *Core) attachUserRequiredChallenge(ctx context.Context, req *logical.Req
 	}
 	c.attachUserChallenge(ctx, req, resp, false)
 }
+
+// userChallengeForDeny converts a policy denial into a 401 carrying the user
+// challenge, when the denial was caused by the absence of a user principal on a
+// request that could have carried one. Returns nil to leave the denial as the
+// 403 it already is.
+//
+// Why 401 rather than 403. RFC 9110 §15.5.4 permits a client to retry a 403
+// "with new or different credentials", and §11.6.1 permits the challenge on a
+// non-401 response — so 403 + WWW-Authenticate would be legal. It does not work
+// in practice: deployed OAuth, RFC 9728 and MCP client stacks begin discovery on
+// 401 only, so a challenge on a 403 is correct on the wire and ignored by every
+// client that would act on it. The credential layer already answers this same
+// situation with 401 (see exchangeInputError), and without this the wire
+// behaviour would depend on whether the operator expressed the requirement in a
+// credential spec or in a policy condition.
+//
+// The gate is narrow, because a 401 is a lie wherever a user cannot be acquired
+// and presented:
+//
+//   - req.Streamed — captureUserContext runs only on gateway requests, so
+//     elsewhere no user could ever have ridden along and the caller can do
+//     nothing about it. Same reasoning as accessPathMintError, which returns 500
+//     on the access path for that structural impossibility; a policy denial
+//     stays a 403 instead because a policy is a reusable document and a user.*
+//     condition may legitimately span paths it was not written for.
+//   - userLegMount — with no user_auth_path there is no authorization server to
+//     name, so the challenge would point nowhere and the condition is
+//     unsatisfiable forever.
+//
+// Both nil checks are load-bearing: auth is nil when the agent's own token
+// failed, and auth.Condition is nil on a capability denial, which returns before
+// the condition gate ever runs.
+func (c *Core) userChallengeForDeny(ctx context.Context, req *logical.Request, auth *logical.Auth, userLegMount bool) *logical.Response {
+	if !req.Streamed || !userLegMount {
+		return nil
+	}
+	if auth == nil || auth.Condition == nil || !auth.Condition.UserAbsent {
+		return nil
+	}
+
+	resp := logical.ErrorResponse(logical.ErrUnauthorized(
+		"a policy for this path requires a user principal and none was presented"))
+	// invalidToken=false: nothing was presented, and RFC 6750 §3.1 says a
+	// request lacking any authentication information gets no error code.
+	c.attachUserChallenge(ctx, req, resp, false)
+	return resp
+}
