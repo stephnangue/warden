@@ -133,16 +133,18 @@ type PathRules struct {
 	// gates). Compiled at parse time into pc.Permissions.Conditions.
 	ConditionHCL string `hcl:"condition"`
 
-	// MCPHCL is the parsed `mcp { }` block. Nil when no such block is
-	// present on this path stanza. Stored on PathRules as the HCL
-	// decode target; the parser then validates it and appends a
-	// CBPMCPRules entry to pc.Permissions.MCP.
+	// MCPHCL is the decode target for the removed `mcp { }` block. It exists
+	// only so parsePaths can detect a policy still carrying one and reject it
+	// with a directed error pointing at sys/policies/mcp/<name>; a non-nil
+	// value never reaches canonicalisation.
 	MCPHCL *MCPRulesHCL `hcl:"mcp"`
 }
 
-// MCPRulesHCL is the HCL decode shape of one `mcp { }` block. Each
-// field corresponds to one operator-facing key inside the block; the
-// parser canonicalises (lowercases) all entries and validates wildcard
+// MCPRulesHCL is the canonical decode shape of one MCP rule-set. An MCP
+// policy's path stanza flattens into it (see mcpPolicyPathHCL.flatten), and
+// it is also the decode target for the removed `mcp { }` block so that block
+// can be detected and rejected. Each field corresponds to one
+// operator-facing key; the parser canonicalises (lowercases) all entries and validates wildcard
 // patterns before populating the internal CBPMCPRules form.
 type MCPRulesHCL struct {
 	AllowedMethods   []string            `hcl:"allowed_methods"`
@@ -169,16 +171,16 @@ type CBPPermissions struct {
 	// (OR across policies). Programs are immutable and shared (not deep-copied)
 	// across merged CBPs.
 	Conditions []*compiledCondition
-	// MCP holds mcp { } rule-sets from all merged policies for this path.
+	// MCP holds MCP rule-sets from all merged policies for this path.
 	// nil/empty means no MCP enforcement applies. Non-nil: each entry is one
-	// source stanza's mcp block; a request is allowed if at least one set
+	// source stanza's rules; a request is allowed if at least one set
 	// allows it (OR between sets), with the strongest-reason audit picked
 	// on full deny. Populated by parsePaths via append per stanza so multiple
 	// `path` blocks at the same path layer naturally into multiple rule-sets.
 	MCP []*CBPMCPRules
 }
 
-// CBPMCPRules holds one merged mcp { } rule-set after validation and
+// CBPMCPRules holds one merged MCP rule-set after validation and
 // canonicalisation. All list entries are lowercased; param-name keys
 // are lowercased and hyphens preserved. Patterns use trailing-`*` only
 // per the policy Semantics; the parser rejects leading or internal `*`
@@ -391,9 +393,11 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			return multierror.Prefix(err, fmt.Sprintf("path %q:", key))
 		}
 
-		// Checked here rather than beside the other rule handling further down:
-		// the deny capability jumps to PathFinished, which would skip a check
-		// placed there and let a denying stanza carry the removed block forever.
+		// Checked before the deny capability's `goto PathFinished`, which would
+		// skip a check placed later in the loop body and let a denying stanza
+		// carry the removed block forever. Because this rejects every non-nil
+		// MCPHCL, no `mcp { }` block ever reaches canonicalisation — MCPHCL is
+		// a detector, not a decode path (see its field doc).
 		if pc.MCPHCL != nil {
 			return fmt.Errorf("path %q: the mcp { } block has been removed from capability policies — "+
 				"MCP rules now live in their own policy, written to sys/policies/mcp/<name>, whose "+
@@ -512,14 +516,6 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			}
 			pc.Permissions.Conditions = []*compiledCondition{cond}
 		}
-
-		if pc.MCPHCL != nil {
-			rules, err := canonicaliseMCPRules(pc.MCPHCL)
-			if err != nil {
-				return fmt.Errorf("path %q: %w", key, err)
-			}
-			pc.Permissions.MCP = append(pc.Permissions.MCP, rules)
-		}
 	PathFinished:
 		paths = append(paths, &pc)
 	}
@@ -567,7 +563,7 @@ func normalizePathPattern(ns *namespace.Namespace, key string) (path string, isP
 	return path, isPrefix, hasSegmentWildcards, nil
 }
 
-// canonicaliseMCPRules converts a parsed mcp { } HCL block into the
+// canonicaliseMCPRules converts a parsed MCP rule-set into the
 // internal CBPMCPRules form, validating wildcard patterns and
 // lowercasing all entries so AllowOperation can do case-insensitive
 // equality and prefix matching at request time without re-canonicalising.

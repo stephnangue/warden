@@ -393,7 +393,7 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry
 	case desc.Calls == nil && desc.ParseErr == nil:
 		// Backend opted out of MCP enforcement for this specific
 		// request shape (e.g. non-POST verb on a multi-method MCP
-		// endpoint). The mcp{} block doesn't apply to body-less
+		// endpoint). MCP rules don't apply to body-less
 		// verbs; return nil so the cap-level check decides.
 		return nil
 	case desc.ParseErr != nil:

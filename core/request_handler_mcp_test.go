@@ -69,7 +69,7 @@ func TestExtractMCPDescriptor_NotMCPBackend(t *testing.T) {
 // (non-nil, no Calls, no ParseErr). decideMCP uses this to distinguish
 // "backend declined for this request shape" from "no MCP-aware backend
 // at all", which lets MCP Streamable HTTP's GET/DELETE share the URL
-// with the POST that mcp{} gates.
+// with the POST that an MCP policy gates.
 func TestExtractMCPDescriptor_OptsOutPerRequest(t *testing.T) {
 	c := &Core{}
 	req := newReq(t, `{"jsonrpc":"2.0","method":"tools/list"}`)

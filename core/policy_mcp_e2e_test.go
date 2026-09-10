@@ -63,7 +63,7 @@ func (b *mcpMockBackendAlt) ShouldEnforceMCPPolicy(_ *logical.Request) (bool, in
 
 // nonMCPBackend deliberately does NOT implement MCPPolicyEnforced.
 // Used to prove the extractor fails the type assertion and leaves the
-// descriptor nil, so decideMCP denies missing_body when mcp{} is in
+// descriptor nil, so decideMCP denies missing_body when MCP rules are in
 // scope.
 type nonMCPBackend struct {
 	logical.Backend
@@ -394,14 +394,14 @@ path "mcp/gateway/*" {
 
 // =============================================================================
 // Opt-out paths — the backend declines per-request or doesn't
-// implement the marker at all. With mcp{} in scope this is a deny
-// (defence in depth); without mcp{} this is a clean passthrough.
+// implement the marker at all. With MCP rules in scope this is a deny
+// (defence in depth); without them this is a clean passthrough.
 // =============================================================================
 
 // Backend opts out per-request (ShouldEnforceMCPPolicy returns false)
-// and mcp{} is in scope → request passes through. This is the canonical
+// and MCP rules are in scope → request passes through. This is the canonical
 // MCP Streamable HTTP shape: GET on the same /gateway URL as the POST
-// that mcp{} gates. The body-authoritative block can't meaningfully
+// that an MCP policy gates. Body-authoritative rules can't meaningfully
 // apply to a verb the backend declared body-less, so decideMCP skips
 // evaluation and the cap-level check decides. Without this behavior,
 // every MCP-spec-compliant client that opens an SSE notification
@@ -430,11 +430,11 @@ path "mcp/gateway/*" {
 
 	assert.True(t, res.Allowed)
 	assert.Nil(t, res.MCPDecision,
-		"empty sentinel skips mcp{} evaluation; cap-level check decides")
+		"empty sentinel skips MCP evaluation; cap-level check decides")
 }
 
-// Same opt-out, no mcp{} in scope → matcher never runs, request
-// passes through cleanly. Symmetry with the mcp{}-in-scope test: the
+// Same opt-out, no MCP rules in scope → matcher never runs, request
+// passes through cleanly. Symmetry with the rules-in-scope test: the
 // empty sentinel is installed either way, and decideMCP isn't even
 // called because permissions.MCP is empty.
 func TestMCPE2E_PerRequestOptOut_NoMCPBlock_PassesThrough(t *testing.T) {
@@ -447,7 +447,7 @@ path "mcp/gateway/*" {
 	runExtract(req, &mcpMockBackend{enforce: false, cap: 0})
 
 	require.NotNil(t, req.MCPDescriptor,
-		"opt-out installs the empty sentinel regardless of whether mcp{} is in scope")
+		"opt-out installs the empty sentinel regardless of whether MCP rules are in scope")
 	require.Nil(t, req.MCPDescriptor.Calls)
 	require.Nil(t, req.MCPDescriptor.ParseErr)
 

@@ -52,7 +52,7 @@ func TestEvaluateMCPDescriptor_BatchAllAllowed(t *testing.T) {
 }
 
 // Empty descriptor (zero calls) returns nil — the caller is
-// responsible for denying when an mcp{} block is in scope but no body
+// responsible for denying when MCP rules are in scope but no body
 // was parseable. decideMCP handles that in the evaluator wrapper.
 func TestEvaluateMCPDescriptor_NoCallsReturnsNil(t *testing.T) {
 	sets := []*CBPMCPRules{{

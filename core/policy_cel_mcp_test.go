@@ -124,9 +124,9 @@ func TestMCPCond_RecordsInputs(t *testing.T) {
 	assert.Equal(t, "2000", res.MCPDecision.Condition.Inputs["call.args.amount"])
 }
 
-// TestMCPCond_TokenNamespace confirms an MCP condition can read the token
+// TestMCPCond_AgentNamespace confirms an MCP condition can read the agent
 // namespace (threaded via the TokenEntry), not just call.*.
-func TestMCPCond_TokenNamespace(t *testing.T) {
+func TestMCPCond_AgentNamespace(t *testing.T) {
 	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]

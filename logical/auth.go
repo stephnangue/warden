@@ -35,10 +35,10 @@ type Auth struct {
 	// requesting path.
 	PolicyResults *sdklogical.PolicyResults `json:"policy_results"`
 
-	// MCPDecision carries the MCP-specific policy decision when an mcp { }
-	// block was consulted during CBP evaluation. nil when no such block
-	// applied (every non-MCP request, plus MCP-mount requests whose bound
-	// policies contain no mcp block). Flows through buildAuditAuth into
+	// MCPDecision carries the MCP-specific policy decision when an MCP
+	// rule-set was consulted during CBP evaluation. nil when no rule-set
+	// applied (every non-MCP request, plus MCP-mount requests with no MCP
+	// policy rule-set at the path). Flows through buildAuditAuth into
 	// audit.PolicyResults.MCPDecision and is also consumed by the
 	// deny-response path to populate the WWW-Authenticate header and the
 	// OAuth-shaped 403 body.
@@ -77,7 +77,7 @@ type Auth struct {
 	Metadata map[string]string
 }
 
-// MCPDecision records the outcome of evaluating an mcp { } policy block
+// MCPDecision records the outcome of evaluating an MCP rule-set
 // against a request. Populated on every branch (allow and deny) so the
 // audit layer can render the decision unconditionally. The JSON tags
 // double as the wire shape exposed in audit records under
@@ -161,7 +161,7 @@ type MCPDecision struct {
 	// which set's deny surfaces on a multi-set deny.
 	BatchIndex *int `json:"batch_index,omitempty"`
 
-	// Condition carries the CEL condition decision when an mcp{} condition
+	// Condition carries the CEL condition decision when an MCP policy condition
 	// was evaluated for this call. Populated when RuleType is "condition" or
 	// "condition_error"; nil when no condition applied.
 	Condition *ConditionResult `json:"condition,omitempty"`
