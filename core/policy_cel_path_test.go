@@ -403,3 +403,115 @@ func TestCBP_PathCondition_RenamedFields(t *testing.T) {
 		assert.NotContains(t, res.Condition.Inputs, k)
 	}
 }
+
+// userReq builds a gateway-shaped request carrying a user principal.
+func userReq(path string, userMeta map[string]string) *logical.Request {
+	req := &logical.Request{Operation: logical.CreateOperation, Path: path}
+	if userMeta != nil {
+		req.User = &logical.UserPrincipal{
+			TokenEntry: &logical.TokenEntry{
+				PrincipalID: "user-8f21c3",
+				RoleName:    "human",
+				Metadata:    userMeta,
+			},
+			// A bearer secret. It must never reach an activation, which the
+			// audit assertion below checks.
+			RawToken: "eyJ.super.secret",
+		}
+	}
+	return req
+}
+
+// TestCBP_UserCondition_ConsentBinding drives the agent-user binding end to end
+// through the pruned activation: allow when the IdP's act.sub (mapped to the
+// acting_agent metadata key) names this agent, deny when it names another.
+//
+// This is the round-trip guard for the user leg's pruning invariant, the same
+// class of defect TestCBP_PathCondition_RenamedFields covers for the agent leg:
+// if celAnalyzeRefs and buildPrincipalNS ever disagree on a key, the field is
+// pruned away and every request denies, with no compile error to catch it.
+func TestCBP_UserCondition_ConsentBinding(t *testing.T) {
+	ctx := testContext()
+
+	policy := testParsePolicy(t, `
+		path "vault-gw/gateway" {
+			capabilities = ["create"]
+			condition = "user.present && user.metadata.acting_agent == agent.principal && user.metadata.team == agent.metadata.team"
+		}
+	`)
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+
+	agentTE := &logical.TokenEntry{
+		PrincipalID: "agent-gateway",
+		Metadata:    map[string]string{"team": "platform"},
+	}
+
+	t.Run("allows when act.sub names this agent", func(t *testing.T) {
+		req := userReq("vault-gw/gateway", map[string]string{
+			"acting_agent": "agent-gateway",
+			"team":         "platform",
+		})
+		res := cbp.AllowOperation(ctx, req, agentTE, false)
+		assert.True(t, res.Allowed)
+	})
+
+	t.Run("denies when act.sub names a different agent", func(t *testing.T) {
+		req := userReq("vault-gw/gateway", map[string]string{
+			"acting_agent": "agent-other",
+			"team":         "platform",
+		})
+		res := cbp.AllowOperation(ctx, req, agentTE, false)
+		assert.False(t, res.Allowed, "a user token minted for another agent must be denied")
+
+		// Auditability is the reason this binding reads a mapped metadata key
+		// rather than indexing user.actors: both sides of the comparison have
+		// to land in the record, or the operator sees a denial without the
+		// value that caused it.
+		require.NotNil(t, res.Condition)
+		require.NotNil(t, res.Condition.Inputs)
+		assert.Equal(t, "agent-other", res.Condition.Inputs["user.metadata.acting_agent"])
+		assert.Equal(t, "agent-gateway", res.Condition.Inputs["agent.principal"])
+	})
+
+	t.Run("denies when no user credential rode the request", func(t *testing.T) {
+		res := cbp.AllowOperation(ctx, userReq("vault-gw/gateway", nil), agentTE, false)
+		assert.False(t, res.Allowed, "user.present false must deny, not error")
+		require.NotNil(t, res.Condition)
+		assert.Empty(t, res.Condition.ErrorKind, "absence is a policy decision, not an eval error")
+	})
+
+	// evaluatePathConditions seeds its field-sets from the first condition and
+	// unions the rest. With a single condition only the seed runs, so a dropped
+	// union goes unnoticed until two policies name the same path — then the
+	// second condition's user fields are pruned away and it denies on a missing
+	// key. Cross-policy OR means the binding must still allow here.
+	t.Run("unions user fields across two policies on one path", func(t *testing.T) {
+		unrelated := testParsePolicy(t, `
+			path "vault-gw/gateway" {
+				capabilities = ["create"]
+				condition = "agent.principal == 'nobody'"
+			}
+		`)
+		merged, err := NewCBP(ctx, []*Policy{unrelated, policy})
+		require.NoError(t, err)
+
+		req := userReq("vault-gw/gateway", map[string]string{
+			"acting_agent": "agent-gateway",
+			"team":         "platform",
+		})
+		res := merged.AllowOperation(ctx, req, agentTE, false)
+		assert.True(t, res.Allowed,
+			"the second policy's user.* fields must survive the field-set union")
+	})
+
+	t.Run("denies when the acting_agent mapping is absent", func(t *testing.T) {
+		// Dropping /act/sub from the role's metadata_claims removes the key, so
+		// the binding fails closed rather than silently passing.
+		req := userReq("vault-gw/gateway", map[string]string{"team": "platform"})
+		res := cbp.AllowOperation(ctx, req, agentTE, false)
+		assert.False(t, res.Allowed)
+		require.NotNil(t, res.Condition)
+		assert.Equal(t, "no_such_key", res.Condition.ErrorKind)
+	})
+}

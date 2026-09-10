@@ -15,7 +15,7 @@ import (
 // Production switch: a request reaches AllowOperation with no
 // descriptor attached (e.g. the routed backend doesn't implement
 // MCPPolicyEnforced or declined this request) and the matched policy
-// has an mcp{} block in scope. Body-authoritative enforcement fails
+// has MCP rules in scope. Body-authoritative enforcement fails
 // CLOSED — the decision is deny with rule_type missing_body.
 func TestDecideMCP_NilDescriptorDeniesMissingBody(t *testing.T) {
 	sets := []*CBPMCPRules{{
@@ -93,13 +93,13 @@ func TestDecideMCP_DescriptorMatcherAllows(t *testing.T) {
 // ShouldEnforceMCPPolicy declines for a specific request (typically a
 // non-POST verb on a multi-method MCP endpoint). decideMCP must
 // return nil (skip evaluation) for this shape so the cap-level check
-// can decide — the mcp{} block is body-authoritative and can't
+// can decide — an MCP policy is body-authoritative and can't
 // meaningfully gate a verb the backend declared body-less.
 //
 // This is what lets MCP Streamable HTTP's GET (notification SSE
 // stream) and DELETE (session terminate) share the same URL as the
-// POST that mcp{} gates without the multi-method path tripping
-// missing_body. The nil-descriptor case (genuine misconfig: mcp{}
+// POST that an MCP policy gates without the multi-method path tripping
+// missing_body. The nil-descriptor case (genuine misconfig: MCP rules
 // bound to a non-MCP backend) still fails closed, covered by
 // TestDecideMCP_DescriptorMissingFailsClosed.
 func TestDecideMCP_EmptyDescriptorSkipsEvaluation(t *testing.T) {
@@ -115,7 +115,7 @@ func TestDecideMCP_EmptyDescriptorSkipsEvaluation(t *testing.T) {
 	assert.Nil(t, d, "decideMCP must return nil for the per-request opt-out sentinel so the cap-level check decides")
 }
 
-// Empty sets — no mcp{} block in scope — returns nil. The
+// Empty sets — no MCP rules in scope — returns nil. The
 // AllowOperation caller treats nil as "no MCP enforcement applied"
 // and continues to parameter validation.
 func TestDecideMCP_EmptySetsReturnNil(t *testing.T) {

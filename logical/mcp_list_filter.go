@@ -7,7 +7,7 @@ package logical
 // items the caller is actually allowed to use, so discovery matches
 // enforcement: what an agent sees in tools/list is what it can call.
 //
-// The policy layer builds it (over the matched mcp{} rule-sets) and hangs it
+// The policy layer builds it (over the matched MCP rule-sets) and hangs it
 // on Request.MCPListFilter when it allows a list request whose family the
 // policy governs. A gateway that finds it non-nil buffers the upstream list
 // response and drops every item whose name Keep rejects; a nil filter means

@@ -259,8 +259,8 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 //
 // Stanzas at the same normalized path key merge additively, so several MCP
 // policies covering one path contribute several rule-sets and evaluateMCPCall's
-// cross-set OR decides between them — the same shape the mcp { } block had when
-// two CBP policies named the same path.
+// cross-set OR decides between them — the same shape the removed `mcp { }`
+// block had when two CBP policies named the same path.
 func (a *CBP) insertMCPPolicy(policy *Policy) error {
 	for _, pc := range policy.Paths {
 		if !pc.Expiration.IsZero() && time.Now().After(pc.Expiration) {

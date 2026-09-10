@@ -5,6 +5,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -56,14 +57,20 @@ func mustCompile(t *testing.T, env *cel.Env, src string) cel.Program {
 	return c.Program
 }
 
-// baseAct is a minimal request/agent activation for path-level tests.
+// baseAct is a minimal request/agent activation for path-level tests. The user
+// leg is absent (Present false), which is the common shape.
 func baseAct(req celRequestInput, agt celPrincipalInput, now time.Time) map[string]any {
-	return buildBaseActivation(req, agt, now)
+	return buildBaseActivation(req, agt, celPrincipalInput{}, now)
+}
+
+// userAct is baseAct with both legs occupied.
+func userAct(req celRequestInput, agt, usr celPrincipalInput, now time.Time) map[string]any {
+	return buildBaseActivation(req, agt, usr, now)
 }
 
 // mcpAct is a base activation plus a single call namespace.
 func mcpAct(now time.Time, tool string, args map[string]logical.ParamValue) map[string]any {
-	base := buildBaseActivation(celRequestInput{Path: "mcp/x", Operation: "update"}, celPrincipalInput{}, now)
+	base := buildBaseActivation(celRequestInput{Path: "mcp/x", Operation: "update"}, celPrincipalInput{}, celPrincipalInput{}, now)
 	return addCallToActivation(base, "tools/call", tool, args, 0)
 }
 
@@ -128,7 +135,7 @@ func TestCEL_RuntimeCostLimitDenies(t *testing.T) {
 		t.Fatalf("expected the expression to compile under the injected bound: %v", err)
 	}
 	now := time.Unix(0, 0).UTC()
-	act := buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celPrincipalInput{}, now)
+	act := buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celPrincipalInput{}, celPrincipalInput{}, now)
 	ok, err := evalCELCondition(c.Program, act)
 	if ok {
 		t.Fatal("cost-exceeded eval must not allow")
@@ -175,7 +182,7 @@ func TestCEL_ErrorKind(t *testing.T) {
 		t.Fatalf("seam compile: %v", err)
 	}
 	_, err = evalCELCondition(c.Program,
-		buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celPrincipalInput{}, now))
+		buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celPrincipalInput{}, celPrincipalInput{}, now))
 	mustErrKind("cost limit", err, "cost_exceeded")
 
 	// eval_error — any error outside the known categories maps to the catch-all.
@@ -471,7 +478,7 @@ func TestCEL_AgentFieldNames(t *testing.T) {
 	// It cannot catch a fieldSet-key/map-key disagreement, because has() short
 	// -circuits on all — TestCBP_PathCondition_RenamedFields drives the pruned
 	// path for that.
-	ns := buildPrincipalNS(agt, fieldSet{all: true})
+	ns := buildPrincipalNS(agt, fieldSet{all: true}, legAgent)
 
 	for _, k := range []string{
 		"principal", "role", "namespace", "policies", "metadata", "actors",
@@ -497,5 +504,149 @@ func TestCEL_AgentFieldNames(t *testing.T) {
 	}
 	if got := ns["token_expires_at"]; got != now.Add(time.Minute).Unix() {
 		t.Errorf("agent.token_expires_at = %v, want %v", got, now.Add(time.Minute).Unix())
+	}
+}
+
+// TestCEL_UserNamespace covers the user leg's field set: what it exposes, what
+// it deliberately does not, and how absence reads.
+func TestCEL_UserNamespace(t *testing.T) {
+	base := mustEnv(t, false)
+	now := time.Unix(1_757_404_800, 0)
+	agt := celPrincipalInput{
+		Present: true, Principal: "agent-gateway", Type: "cert_role",
+		Policies: []string{"vault-gw-bound"},
+		Metadata: map[string]string{"team": "platform"},
+	}
+	usr := celPrincipalInput{
+		Present: true, Principal: "user-8f21c3", Role: "human", Type: "jwt_role",
+		Policies: []string{"should-never-surface"},
+		Metadata: map[string]string{"team": "platform"},
+	}
+
+	t.Run("fields resolve and mirror the agent leg", func(t *testing.T) {
+		act := userAct(celRequestInput{}, agt, usr, now)
+		for _, src := range []string{
+			"user.present == true",
+			"user.principal == 'user-8f21c3'",
+			"user.role == 'human'",
+			"user.token_type == 'jwt_role'",
+			"user.metadata.team == agent.metadata.team",
+		} {
+			ok, err := evalCELCondition(mustCompile(t, base, src), act)
+			if err != nil || !ok {
+				t.Errorf("%q: ok=%v err=%v", src, ok, err)
+			}
+		}
+	})
+
+	// The user never authorizes, so exposing its policy list would invite
+	// `"admin" in user.policies` — a condition that reads like an authorization
+	// check and is not one. Suppression is at the builder, so it holds even
+	// under all:true.
+	t.Run("policies suppressed on the user leg only", func(t *testing.T) {
+		if _, ok := buildPrincipalNS(usr, fieldSet{all: true}, legUser)["policies"]; ok {
+			t.Error("user.policies must not be built")
+		}
+		if _, ok := buildPrincipalNS(agt, fieldSet{all: true}, legAgent)["policies"]; !ok {
+			t.Error("agent.policies must still be built")
+		}
+		// It is a runtime no-such-key deny, not a compile error: `user` is a
+		// dyn map, so the checker cannot reject the field.
+		act := userAct(celRequestInput{}, agt, usr, now)
+		ok, err := evalCELCondition(mustCompile(t, base, "'admin' in user.policies"), act)
+		if ok {
+			t.Error("user.policies must not evaluate true")
+		}
+		if got := celErrorKind(err); got != "no_such_key" {
+			t.Errorf("error kind = %q, want no_such_key (err: %v)", got, err)
+		}
+	})
+
+	// The user's raw credential is a bearer secret. celPrincipalInput has no
+	// field to carry it, so today this is structural — the assertion exists to
+	// fail loudly if someone ever adds one and wires it into the namespace.
+	t.Run("raw user credential cannot reach the namespace", func(t *testing.T) {
+		const secret = "eyJ.super.secret"
+		in := celUserInputFromPrincipal(&logical.UserPrincipal{
+			TokenEntry: &logical.TokenEntry{
+				PrincipalID: "user-8f21c3",
+				Metadata:    map[string]string{"team": "platform"},
+			},
+			RawToken: secret,
+		}, now)
+		for k, v := range buildPrincipalNS(in, fieldSet{all: true}, legUser) {
+			if strings.Contains(fmt.Sprint(v), secret) {
+				t.Errorf("raw user credential surfaced at user.%s", k)
+			}
+		}
+	})
+
+	t.Run("absent user leg is present=false, not an error", func(t *testing.T) {
+		act := baseAct(celRequestInput{}, agt, now) // user leg empty
+		ok, err := evalCELCondition(mustCompile(t, base, "user.present == true"), act)
+		if err != nil {
+			t.Fatalf("user.present must resolve even with no user: %v", err)
+		}
+		if ok {
+			t.Error("user.present should be false with no user credential")
+		}
+		// agent.present is always true wherever a condition evaluates.
+		ok, err = evalCELCondition(mustCompile(t, base, "agent.present == true"), act)
+		if err != nil || !ok {
+			t.Errorf("agent.present: ok=%v err=%v", ok, err)
+		}
+	})
+
+	// A condition must evaluate to bool, and a dyn-map field types as dyn — so a
+	// bare `user.present` is rejected at write time while the guard form that
+	// operators actually write compiles, because `_&&_` yields bool. This is
+	// pre-existing for every dyn-map boolean (request.transparent behaves the
+	// same); pinned here so the guard idiom cannot regress.
+	t.Run("guard idiom compiles, bare field does not", func(t *testing.T) {
+		if _, err := compileCELCondition(base, "user.present && user.metadata.team == 'platform'"); err != nil {
+			t.Errorf("guard idiom must compile: %v", err)
+		}
+		_, err := compileCELCondition(base, "user.present")
+		if err == nil {
+			t.Error("a bare dyn field is not a bool condition; expected rejection")
+		} else if !strings.Contains(err.Error(), "must evaluate to bool") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("absent metadata key fails closed", func(t *testing.T) {
+		act := userAct(celRequestInput{}, agt, usr, now)
+		ok, err := evalCELCondition(mustCompile(t, base, "user.metadata.nope == 'x'"), act)
+		if ok {
+			t.Error("absent metadata key must not allow")
+		}
+		if got := celErrorKind(err); got != "no_such_key" {
+			t.Errorf("error kind = %q, want no_such_key", got)
+		}
+	})
+}
+
+// TestCEL_UserCostEstimated proves `user` is wired into celCostEstimator.
+//
+// The discriminating assertion is the ACCEPTANCE one. A root missing from
+// EstimateSize gets no size from us and cel-go falls back to
+// UnknownSizeEstimate (MaxUint64), so a single comprehension over user.metadata
+// would estimate as infinite and be rejected at write time. Asserting that a
+// pathological expression is rejected proves nothing — that happens either way.
+func TestCEL_UserCostEstimated(t *testing.T) {
+	env := mustEnv(t, false)
+
+	// Fails iff `user` is dropped from EstimateSize.
+	if _, err := compileCELCondition(env, "user.metadata.exists(k, k == 'team')"); err != nil {
+		t.Fatalf("a single comprehension over user.metadata must compile: %v", err)
+	}
+
+	// The budget still bites for genuinely pathological input.
+	_, err := compileCELCondition(env, "user.metadata.all(k, user.metadata.all(j, k == j))")
+	if err == nil {
+		t.Fatal("nested comprehension over user.metadata should be rejected at write time")
+	}
+	if !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("expected a cost-limit error, got: %v", err)
 	}
 }

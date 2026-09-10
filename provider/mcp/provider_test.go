@@ -102,7 +102,7 @@ func TestExtractBearerToken_UnsupportedType(t *testing.T) {
 }
 
 // The enforcement gate decides whether a request is subject to body-authoritative
-// mcp { } rules. It has to decline anything whose body is not a JSON-RPC call —
+// MCP rules. It has to decline anything whose body is not a JSON-RPC call —
 // SSE reconnects and session closes carry no method to authorise — while
 // admitting every shape a real client's POST takes.
 
