@@ -498,7 +498,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 				"source_ip → cidrContains(\"…\", request.client_ip); "+
 				"time_window → now.getHours(tz)/getMinutes(tz); "+
 				"day_of_week → now.getDayOfWeek(\"UTC\"); "+
-				"token_metadata → token.metadata.<key>", key)
+				"token_metadata → agent.metadata.<key>", key)
 		}
 
 		if pc.ConditionHCL != "" {

@@ -28,11 +28,11 @@ import (
 // evaluator.
 //
 // Design notes:
-//   - Two envs: a base env (request/token/now) for path-level conditions and an
-//     MCP env (base + call) for mcp{} conditions. Two envs make a path-level
+//   - Two envs: a base env (request/agent/now) for path-level conditions and an
+//     MCP env (base + call) for MCP policies conditions. Two envs make a path-level
 //     condition that references call.* a COMPILE error, not a silent runtime
 //     deny.
-//   - request/token/call are map(string, dyn): the env is shared across every
+//   - request/agent/call are map(string, dyn): the env is shared across every
 //     tool/path and cannot know an arbitrary argument's type. Type discipline is
 //     achieved at activation-build time (values typed from their source); a
 //     type-mismatched comparison surfaces as a runtime error → fail-closed deny.
@@ -48,11 +48,16 @@ import (
 //	  request.mount_point, request.mount_type, request.mount_class,
 //	  request.mount_accessor, request.transparent, request.namespace,
 //	  request.data.<k>
-//	token.principal, token.role, token.type, token.namespace,
-//	  token.policies (list), token.metadata.<k>, token.actors (list of
-//	  {subject}), token.ttl_seconds, token.expires_at
+//	agent.principal, agent.role, agent.namespace, agent.policies (list),
+//	  agent.metadata.<k>, agent.actors (list of {subject}),
+//	  agent.token_type, agent.token_ttl_seconds, agent.token_expires_at
 //	now (timestamp)
-//	call.method, call.tool, call.args.<k>, call.batch_index   (mcp{} only)
+//	call.method, call.tool, call.args.<k>, call.batch_index   (MCP policy only)
+//
+// `agent` is the request's authenticating principal. The three token_-prefixed
+// fields describe the credential it authenticated with, not the principal
+// itself — agent.token_type carries values like jwt_role/cert_role, which name
+// how the agent authenticated rather than a kind of agent.
 //
 // Secret material (token value, accessor, client token) is never exposed.
 
@@ -71,7 +76,7 @@ const (
 	maxConditionCost uint64 = 1_000_000
 
 	// celInputSizeBound is the size (map entries / string length) the cost
-	// estimator assumes for the dynamic-map variables (request/token/call) that
+	// estimator assumes for the dynamic-map variables (request/agent/call) that
 	// cel-go cannot size itself. It is a heuristic for the *write-time* check —
 	// large enough to admit reasonable expressions, small enough to reject
 	// pathological ones (e.g. nested comprehensions, ~size² cost). It is
@@ -98,10 +103,10 @@ type celRequestInput struct {
 	Data          map[string]any
 }
 
-// celTokenInput is the non-secret token context mapped into the `token`
+// celPrincipalInput is the non-secret principal context mapped into the `agent`
 // namespace. Decoupled from *logical.TokenEntry so the activation builder stays
 // unit-testable; the wiring layer adapts the token entry into this.
-type celTokenInput struct {
+type celPrincipalInput struct {
 	Principal     string
 	Role          string
 	Type          string
@@ -120,7 +125,7 @@ func buildCELEnv(mcp bool) (*cel.Env, error) {
 	opts := []cel.EnvOption{
 		// request-wide namespaces; dyn maps (see design note).
 		cel.Variable("request", cel.MapType(cel.StringType, cel.DynType)),
-		cel.Variable("token", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("agent", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("now", cel.TimestampType),
 
 		// Optional types for concise optional-arg access: call.args.?x.orValue(d).
@@ -170,6 +175,9 @@ func celCIDRContainsFunc() cel.EnvOption {
 
 // celCostEstimator supplies input size bounds for our dynamic-map variables so
 // env.EstimateCost can bound an expression's worst-case cost at compile time.
+// Every dynamic-map root must appear in EstimateSize below: a root omitted here
+// falls through to cel-go's own default sizing, silently under-counting the
+// write-time bound for every expression that reads it.
 // cel-go owns the per-operation base costs; this only feeds the sizes cel-go
 // cannot infer.
 type celCostEstimator struct {
@@ -179,7 +187,7 @@ type celCostEstimator struct {
 func (e celCostEstimator) EstimateSize(node checker.AstNode) *checker.SizeEstimate {
 	if path := node.Path(); len(path) > 0 {
 		switch path[0] {
-		case "request", "token", "call":
+		case "request", "agent", "call":
 			return &checker.SizeEstimate{Min: 0, Max: e.maxSize}
 		}
 	}
@@ -206,7 +214,7 @@ func compileCELCondition(env *cel.Env, src string) (*compiledCondition, error) {
 func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound uint64) (*compiledCondition, error) {
 	ast, iss := env.Compile(src)
 	if iss != nil && iss.Err() != nil {
-		return nil, fmt.Errorf("condition does not compile: %w", iss.Err())
+		return nil, fmt.Errorf("condition does not compile: %w", celRenameHint(iss.Err()))
 	}
 	if !ast.OutputType().IsExactType(cel.BoolType) {
 		return nil, fmt.Errorf("condition must evaluate to bool, got %s", ast.OutputType())
@@ -237,16 +245,36 @@ func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound 
 	if err != nil {
 		return nil, fmt.Errorf("condition program construction failed: %w", err)
 	}
-	paths, segs, reqF, tokF, callF := celAnalyzeRefs(ast)
+	paths, segs, reqF, agtF, callF := celAnalyzeRefs(ast)
 	return &compiledCondition{
 		Source:     src,
 		Program:    prg,
 		RefPaths:   paths,
 		RefSegs:    segs,
 		ReqFields:  reqF,
-		TokFields:  tokF,
+		AgtFields:  agtF,
 		CallFields: callF,
 	}, nil
+}
+
+// celRenameHint appends migration guidance when a compile failure is an
+// undeclared reference to `token` — the namespace `agent` replaced. Both the
+// policy-write path and the policy-load path surface compile errors, so an
+// operator upgrading with stored `token.*` conditions meets this error at the
+// moment they most need to be told what changed, rather than a bare
+// "undeclared reference".
+func celRenameHint(err error) error {
+	if err == nil {
+		return nil
+	}
+	s := err.Error()
+	if !strings.Contains(s, "undeclared reference to 'token'") {
+		return err
+	}
+	return fmt.Errorf("%w (the `token` namespace was renamed to `agent`: "+
+		"token.principal/role/namespace/policies/metadata/actors are now agent.*, "+
+		"and token.type/ttl_seconds/expires_at are now "+
+		"agent.token_type/token_ttl_seconds/token_expires_at)", err)
 }
 
 // celCostIsSizeDependent reports whether an expression's worst-case cost grows
@@ -303,7 +331,7 @@ func unionFieldSets(a, b fieldSet) fieldSet {
 }
 
 // celAnalyzeRefs walks the checked AST once and returns both (a) the dotted
-// audit paths an expression reads — e.g. token.metadata.env — and (b) the
+// audit paths an expression reads — e.g. agent.metadata.env — and (b) the
 // top-level field-sets per root used to prune the activation.
 //
 // Audit paths capture only clean, Ident-rooted field-selection chains; has()
@@ -317,8 +345,8 @@ func unionFieldSets(a, b fieldSet) fieldSet {
 // A bare root Ident that is not a Select operand sets all=true for that root, so
 // pruning never drops a field the expression needs (an under-built field would
 // be a missing key → fail-closed deny).
-func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call fieldSet) {
-	req, tok, call = fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}
+func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, agt, call fieldSet) {
+	req, agt, call = fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}
 	native := a.NativeRep()
 	if native == nil || native.Expr() == nil {
 		return
@@ -328,7 +356,7 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 	consumed := map[int64]bool{}     // operand of some Select — an intermediate node
 	skip := map[int64]bool{}         // container of an index/optional access — not a field path
 	identCovered := map[int64]bool{} // root-Ident IDs that are a Select operand
-	var rootIdents []celast.Expr     // Idents named request/token/call
+	var rootIdents []celast.Expr     // Idents named request/agent/call
 	celast.PostOrderVisit(native.Expr(), celast.NewExprVisitor(func(e celast.Expr) {
 		switch e.Kind() {
 		case celast.SelectKind:
@@ -341,8 +369,8 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 				case "request":
 					req.fields[s.FieldName()] = true
 					identCovered[op.ID()] = true
-				case "token":
-					tok.fields[s.FieldName()] = true
+				case "agent":
+					agt.fields[s.FieldName()] = true
 					identCovered[op.ID()] = true
 				case "call":
 					call.fields[s.FieldName()] = true
@@ -351,7 +379,7 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 			}
 		case celast.IdentKind:
 			switch e.AsIdent() {
-			case "request", "token", "call":
+			case "request", "agent", "call":
 				rootIdents = append(rootIdents, e)
 			}
 		case celast.CallKind:
@@ -395,8 +423,8 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 		switch id.AsIdent() {
 		case "request":
 			req.all = true
-		case "token":
-			tok.all = true
+		case "agent":
+			agt.all = true
 		case "call":
 			call.all = true
 		}
@@ -405,8 +433,13 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 }
 
 // celSelectPath reconstructs the dotted path for a Select chain top (e.g.
-// token.metadata.env). Returns ok=false if the chain contains a test-only
-// select (has()) or does not bottom out on a request/token/call Ident.
+// agent.metadata.env). Returns ok=false if the chain contains a test-only
+// select (has()) or does not bottom out on a request/agent/call Ident.
+//
+// The returned path is the operator's own spelling and is what lands in
+// ConditionResult.Inputs — and therefore what an audit device's salt_fields
+// entry must match verbatim. Renaming a namespace or field here renames the
+// audit key with it.
 func celSelectPath(e celast.Expr) (string, bool) {
 	var fields []string
 	cur := e
@@ -422,7 +455,7 @@ func celSelectPath(e celast.Expr) (string, bool) {
 		return "", false
 	}
 	switch cur.AsIdent() {
-	case "request", "token", "call":
+	case "request", "agent", "call":
 	default:
 		return "", false
 	}
@@ -492,42 +525,51 @@ func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
 	return m
 }
 
-// emptyStringMap is a shared, never-mutated empty map bound to token.metadata
-// when a token carries none — non-nil (so absent-key access fails closed)
+// emptyStringMap is a shared, never-mutated empty map bound to agent.metadata
+// when a principal carries none — non-nil (so absent-key access fails closed)
 // without a per-request allocation.
 var emptyStringMap = map[string]string{}
 
-// buildTokenNS builds the `token` namespace, including only the fields f marks
-// as referenced (all fields when f.all). The expensive fields (metadata copy,
-// actors/policies slices) are built only when referenced. metadata is non-nil.
-func buildTokenNS(tok celTokenInput, f fieldSet) map[string]any {
+// buildPrincipalNS builds a principal namespace, including only the fields f
+// marks as referenced (all fields when f.all). The expensive fields (metadata
+// copy, actors/policies slices) are built only when referenced. metadata is
+// non-nil.
+//
+// The token_-prefixed keys describe the credential rather than the principal:
+// token_type carries values like jwt_role/cert_role, which name how the
+// principal authenticated, not a kind of principal.
+func buildPrincipalNS(p celPrincipalInput, f fieldSet) map[string]any {
 	m := make(map[string]any, len(f.fields))
 	if f.has("principal") {
-		m["principal"] = tok.Principal
+		m["principal"] = p.Principal
 	}
 	if f.has("role") {
-		m["role"] = tok.Role
+		m["role"] = p.Role
 	}
-	if f.has("type") {
-		m["type"] = tok.Type
+	if f.has("token_type") {
+		m["token_type"] = p.Type
 	}
 	if f.has("namespace") {
-		m["namespace"] = tok.NamespacePath
+		m["namespace"] = p.NamespacePath
 	}
 	if f.has("metadata") {
 		// Bind the string map by reference — CEL adapts it via reflection — rather
 		// than copying into a map[string]any. emptyStringMap keeps it non-nil (so
-		// has(token.metadata.x) is false and absent-key access fails closed)
+		// has(agent.metadata.x) is false and absent-key access fails closed)
 		// without allocating.
-		if tok.Metadata != nil {
-			m["metadata"] = tok.Metadata
+		//
+		// Safe only because a TokenEntry's Metadata is never mutated post-mint:
+		// the entry is a shared cached pointer, so a post-mint write would be a
+		// data race against concurrent evaluations.
+		if p.Metadata != nil {
+			m["metadata"] = p.Metadata
 		} else {
 			m["metadata"] = emptyStringMap
 		}
 	}
 	if f.has("actors") {
-		acts := make([]any, 0, len(tok.Actors))
-		for _, a := range tok.Actors {
+		acts := make([]any, 0, len(p.Actors))
+		for _, a := range p.Actors {
 			acts = append(acts, map[string]any{
 				"subject": a.Subject,
 			})
@@ -535,17 +577,17 @@ func buildTokenNS(tok celTokenInput, f fieldSet) map[string]any {
 		m["actors"] = acts
 	}
 	if f.has("policies") {
-		policies := make([]any, 0, len(tok.Policies))
-		for _, p := range tok.Policies {
-			policies = append(policies, p)
+		policies := make([]any, 0, len(p.Policies))
+		for _, pol := range p.Policies {
+			policies = append(policies, pol)
 		}
 		m["policies"] = policies
 	}
-	if f.has("ttl_seconds") {
-		m["ttl_seconds"] = tok.TTLSeconds
+	if f.has("token_ttl_seconds") {
+		m["token_ttl_seconds"] = p.TTLSeconds
 	}
-	if f.has("expires_at") {
-		m["expires_at"] = tok.ExpiresAtUnix
+	if f.has("token_expires_at") {
+		m["token_expires_at"] = p.ExpiresAtUnix
 	}
 	return m
 }
@@ -553,34 +595,34 @@ func buildTokenNS(tok celTokenInput, f fieldSet) map[string]any {
 // buildBaseActivation eagerly builds the full activation map. Retained for unit
 // tests; the request path uses celActivation (lazy) to avoid building
 // namespaces an expression never references.
-func buildBaseActivation(req celRequestInput, tok celTokenInput, now time.Time) map[string]any {
+func buildBaseActivation(req celRequestInput, agt celPrincipalInput, now time.Time) map[string]any {
 	return map[string]any{
 		"request": buildRequestNS(req, fieldSet{all: true}),
-		"token":   buildTokenNS(tok, fieldSet{all: true}),
+		"agent":   buildPrincipalNS(agt, fieldSet{all: true}),
 		"now":     now,
 	}
 }
 
 // celActivation is a lazy interpreter.Activation: it builds each top-level
-// namespace (request/token/call) only when the expression resolves it, so an
+// namespace (request/agent/call) only when the expression resolves it, so an
 // expression touching only one namespace doesn't allocate the others. One
 // activation is built per evaluation (never shared), so the memoization is not
 // a concurrency concern.
 type celActivation struct {
 	req        celRequestInput
 	reqFields  fieldSet
-	tok        celTokenInput
-	tokFields  fieldSet
+	agt        celPrincipalInput
+	agtFields  fieldSet
 	callFields fieldSet // used when building the per-call namespace (MCP)
 	now        time.Time
 	call       map[string]any // nil for path-level conditions
 
 	reqNS map[string]any
-	tokNS map[string]any
+	agtNS map[string]any
 }
 
-func newCELActivation(req celRequestInput, reqFields fieldSet, tok celTokenInput, tokFields fieldSet, now time.Time, call map[string]any) *celActivation {
-	return &celActivation{req: req, reqFields: reqFields, tok: tok, tokFields: tokFields, now: now, call: call}
+func newCELActivation(req celRequestInput, reqFields fieldSet, agt celPrincipalInput, agtFields fieldSet, now time.Time, call map[string]any) *celActivation {
+	return &celActivation{req: req, reqFields: reqFields, agt: agt, agtFields: agtFields, now: now, call: call}
 }
 
 func (a *celActivation) Parent() interpreter.Activation { return nil }
@@ -592,11 +634,11 @@ func (a *celActivation) ResolveName(name string) (any, bool) {
 			a.reqNS = buildRequestNS(a.req, a.reqFields)
 		}
 		return a.reqNS, true
-	case "token":
-		if a.tokNS == nil {
-			a.tokNS = buildTokenNS(a.tok, a.tokFields)
+	case "agent":
+		if a.agtNS == nil {
+			a.agtNS = buildPrincipalNS(a.agt, a.agtFields)
 		}
-		return a.tokNS, true
+		return a.agtNS, true
 	case "now":
 		return a.now, true
 	case "call":
@@ -610,7 +652,7 @@ func (a *celActivation) ResolveName(name string) (any, bool) {
 }
 
 // addCallToActivation layers the per-call `call` namespace onto a base
-// activation for an mcp{} condition. args are typed from ParamValue.Kind;
+// activation for an MCP Policy condition. args are typed from ParamValue.Kind;
 // non-scalar / null / missing values are omitted so absent-key access fails
 // closed. Mutates and returns base.
 func addCallToActivation(base map[string]any, method, tool string, matchArgs map[string]logical.ParamValue, batchIndex int) map[string]any {
@@ -672,20 +714,20 @@ func paramValueToCEL(pv logical.ParamValue) (any, bool) {
 type compiledCondition struct {
 	Source  string
 	Program cel.Program
-	// RefPaths are the dotted request/token/call variable paths the expression
+	// RefPaths are the dotted request/agent/call variable paths the expression
 	// reads, snapshotted into the audited ConditionResult.Inputs at eval time.
 	// RefSegs is the pre-split form (compile-time) so eval avoids strings.Split.
 	RefPaths []string
 	RefSegs  [][]string
-	// ReqFields/TokFields/CallFields are the top-level namespace fields the
+	// ReqFields/AgtFields/CallFields are the top-level namespace fields the
 	// expression reads, used to build only the referenced parts of the activation.
 	ReqFields  fieldSet
-	TokFields  fieldSet
+	AgtFields  fieldSet
 	CallFields fieldSet
 }
 
 // Package-level envs, built once and reused. The base env compiles path-level
-// conditions; the MCP env (base + call.*) compiles mcp{} conditions.
+// conditions; the MCP env (base + call.*) compiles MCP policy conditions.
 var (
 	baseEnvOnce sync.Once
 	baseEnv     *cel.Env
@@ -709,7 +751,7 @@ func mcpCELEnv() (*cel.Env, error) {
 // celRequestInputFromRequest adapts a *logical.Request into the request context
 // exposed to expressions. All fields are populated before policy evaluation.
 // nsPath is the request's target namespace (namespace.FromContext at eval),
-// exposed as request.namespace — distinct from token.namespace (where the token
+// exposed as request.namespace — distinct from agent.namespace (where the token
 // was minted). It is not derivable from mount_point, which concatenates the
 // namespace prefix with the mount path.
 func celRequestInputFromRequest(req *logical.Request, nsPath string) celRequestInput {
@@ -730,19 +772,19 @@ func celRequestInputFromRequest(req *logical.Request, nsPath string) celRequestI
 	}
 }
 
-// celTokenInputFromEntry adapts a *logical.TokenEntry into the non-secret token
-// context exposed to expressions. now is the once-per-request snapshot used to
-// derive the remaining TTL.
-func celTokenInputFromEntry(te *logical.TokenEntry, now time.Time) celTokenInput {
+// celPrincipalInputFromEntry adapts a *logical.TokenEntry into the non-secret
+// principal context exposed to expressions. now is the once-per-request
+// snapshot used to derive the remaining TTL.
+func celPrincipalInputFromEntry(te *logical.TokenEntry, now time.Time) celPrincipalInput {
 	if te == nil {
-		return celTokenInput{}
+		return celPrincipalInput{}
 	}
 	var ttl, expires int64
 	if !te.ExpireAt.IsZero() {
 		ttl = int64(te.ExpireAt.Sub(now).Seconds())
 		expires = te.ExpireAt.Unix()
 	}
-	return celTokenInput{
+	return celPrincipalInput{
 		Principal:     te.PrincipalID,
 		Role:          te.RoleName,
 		Type:          te.Type,
@@ -781,12 +823,12 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 	}
 	// Build the activation pruned to the union of fields the conditions read.
 	// The common single-condition case reuses its field-sets with no allocation.
-	reqF, tokF := conds[0].ReqFields, conds[0].TokFields
+	reqF, agtF := conds[0].ReqFields, conds[0].AgtFields
 	for _, c := range conds[1:] {
 		reqF = unionFieldSets(reqF, c.ReqFields)
-		tokF = unionFieldSets(tokF, c.TokFields)
+		agtF = unionFieldSets(agtF, c.AgtFields)
 	}
-	act := newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celTokenInputFromEntry(te, now), tokF, now, nil)
+	act := newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celPrincipalInputFromEntry(te, now), agtF, now, nil)
 
 	var deciding *logical.ConditionResult
 	for _, c := range conds {
@@ -830,7 +872,7 @@ func resolveConditionInputs(refPaths []string, refSegs [][]string, act *celActiv
 			case map[string]any:
 				cur, ok = mm[s]
 			case map[string]string:
-				// token.metadata is bound as a string map (see buildTokenNS).
+				// agent.metadata is bound as a string map (see buildPrincipalNS).
 				cur, ok = mm[s]
 			default:
 				cur, ok = nil, false
@@ -851,8 +893,8 @@ func resolveConditionInputs(refPaths []string, refSegs [][]string, act *celActiv
 }
 
 // formatCELValue renders a resolved activation value as an audit string.
-// Scalars format precisely; non-scalars (lists/maps such as token.policies /
-// token.actors) fall back to %v.
+// Scalars format precisely; non-scalars (lists/maps such as agent.policies /
+// agent.actors) fall back to %v.
 func formatCELValue(v any) string {
 	switch t := v.(type) {
 	case string:

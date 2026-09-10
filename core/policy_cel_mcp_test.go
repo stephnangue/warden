@@ -135,7 +135,7 @@ path "mcp/gateway/*" {
 path "mcp/gateway/*" {
   methods { allowed = ["tools/call"] }
   tools { allowed = ["create_payment"] }
-  condition = "token.metadata.env == 'prod'"
+  condition = "agent.metadata.env == 'prod'"
 }
 `)
 	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_payment","arguments":{"amount":1}},"id":1}`

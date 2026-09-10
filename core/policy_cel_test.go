@@ -56,14 +56,14 @@ func mustCompile(t *testing.T, env *cel.Env, src string) cel.Program {
 	return c.Program
 }
 
-// baseAct is a minimal request/token activation for path-level tests.
-func baseAct(req celRequestInput, tok celTokenInput, now time.Time) map[string]any {
-	return buildBaseActivation(req, tok, now)
+// baseAct is a minimal request/agent activation for path-level tests.
+func baseAct(req celRequestInput, agt celPrincipalInput, now time.Time) map[string]any {
+	return buildBaseActivation(req, agt, now)
 }
 
 // mcpAct is a base activation plus a single call namespace.
 func mcpAct(now time.Time, tool string, args map[string]logical.ParamValue) map[string]any {
-	base := buildBaseActivation(celRequestInput{Path: "mcp/x", Operation: "update"}, celTokenInput{}, now)
+	base := buildBaseActivation(celRequestInput{Path: "mcp/x", Operation: "update"}, celPrincipalInput{}, now)
 	return addCallToActivation(base, "tools/call", tool, args, 0)
 }
 
@@ -128,7 +128,7 @@ func TestCEL_RuntimeCostLimitDenies(t *testing.T) {
 		t.Fatalf("expected the expression to compile under the injected bound: %v", err)
 	}
 	now := time.Unix(0, 0).UTC()
-	act := buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celTokenInput{}, now)
+	act := buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celPrincipalInput{}, now)
 	ok, err := evalCELCondition(c.Program, act)
 	if ok {
 		t.Fatal("cost-exceeded eval must not allow")
@@ -175,7 +175,7 @@ func TestCEL_ErrorKind(t *testing.T) {
 		t.Fatalf("seam compile: %v", err)
 	}
 	_, err = evalCELCondition(c.Program,
-		buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celTokenInput{}, now))
+		buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celPrincipalInput{}, now))
 	mustErrKind("cost limit", err, "cost_exceeded")
 
 	// eval_error — any error outside the known categories maps to the catch-all.
@@ -191,9 +191,9 @@ func TestCEL_ErrorKind(t *testing.T) {
 func TestCEL_ActorVerifiedKeyDenies(t *testing.T) {
 	base := mustEnv(t, false)
 	now := time.Unix(0, 0).UTC()
-	act := baseAct(celRequestInput{}, celTokenInput{Actors: []logical.ActorRef{{Subject: "agent"}}}, now)
+	act := baseAct(celRequestInput{}, celPrincipalInput{Actors: []logical.ActorRef{{Subject: "agent"}}}, now)
 
-	_, err := evalCELCondition(mustCompile(t, base, "token.actors.all(a, a.verified)"), act)
+	_, err := evalCELCondition(mustCompile(t, base, "agent.actors.all(a, a.verified)"), act)
 	if err == nil {
 		t.Fatal("referencing the removed a.verified key must error at eval, not pass")
 	}
@@ -202,13 +202,13 @@ func TestCEL_ActorVerifiedKeyDenies(t *testing.T) {
 	}
 
 	// The surviving field still evaluates cleanly.
-	got, err := evalCELCondition(mustCompile(t, base, "token.actors.all(a, a.subject != '')"), act)
+	got, err := evalCELCondition(mustCompile(t, base, "agent.actors.all(a, a.subject != '')"), act)
 	if err != nil || !got {
 		t.Fatalf("a.subject must evaluate true: got=%v err=%v", got, err)
 	}
 }
 
-// TestCEL_ReferencedPaths locks in the dotted request/token/call paths captured
+// TestCEL_ReferencedPaths locks in the dotted request/agent/call paths captured
 // for audit Inputs: clean field-selection chains are captured; has(),
 // index/optional access, and now.* are not.
 func TestCEL_ReferencedPaths(t *testing.T) {
@@ -218,18 +218,18 @@ func TestCEL_ReferencedPaths(t *testing.T) {
 		src  string
 		want []string
 	}{
-		{"token+call scalars", true,
-			"token.metadata.env == 'prod' && call.args.amount <= 1500",
-			[]string{"call.args.amount", "token.metadata.env"}},
+		{"agent+call scalars", true,
+			"agent.metadata.env == 'prod' && call.args.amount <= 1500",
+			[]string{"agent.metadata.env", "call.args.amount"}},
 		{"has and index and optional contribute nothing", true,
 			`has(request.data.x) && request.data["k"] == "v" && call.args.?y.orValue(0) <= 3`,
 			nil},
 		{"nested token + list arg", false,
-			"token.principal == 'a' && size(token.policies) > 0",
-			[]string{"token.policies", "token.principal"}},
+			"agent.principal == 'a' && size(agent.policies) > 0",
+			[]string{"agent.policies", "agent.principal"}},
 		{"now not captured", false,
-			`now.getHours("UTC") < 18 && token.metadata.env == "prod"`,
-			[]string{"token.metadata.env"}},
+			`now.getHours("UTC") < 18 && agent.metadata.env == "prod"`,
+			[]string{"agent.metadata.env"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,16 +261,16 @@ func TestCEL_FieldRefs(t *testing.T) {
 		name           string
 		mcp            bool
 		src            string
-		req, tok, cal  map[string]bool
-		reqAll, tokAll bool
+		req, agt, cal  map[string]bool
+		reqAll, agtAll bool
 	}{
-		{name: "scalar select", src: "token.metadata.env == 'prod'", tok: fs("metadata")},
+		{name: "scalar select", src: "agent.metadata.env == 'prod'", agt: fs("metadata")},
 		{name: "has()", src: "has(request.data.x)", req: fs("data")},
 		{name: "index", src: `request.data["k"] == "v"`, req: fs("data")},
 		{name: "optional", mcp: true, src: "call.args.?amount.orValue(0) <= 3", cal: fs("args")},
-		{name: "comprehension", src: "size(token.actors) > 0 && token.actors.all(a, a.subject != '')", tok: fs("actors")},
-		{name: "multi-field", src: "request.data.x <= 1 && request.namespace == token.namespace", req: fs("data", "namespace"), tok: fs("namespace")},
-		{name: "bare root -> all", src: "size(token) > 0 || token.metadata.env == 'x'", tok: fs("metadata"), tokAll: true},
+		{name: "comprehension", src: "size(agent.actors) > 0 && agent.actors.all(a, a.subject != '')", agt: fs("actors")},
+		{name: "multi-field", src: "request.data.x <= 1 && request.namespace == agent.namespace", req: fs("data", "namespace"), agt: fs("namespace")},
+		{name: "bare root -> all", src: "size(agent) > 0 || agent.metadata.env == 'x'", agt: fs("metadata"), agtAll: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -287,7 +287,7 @@ func TestCEL_FieldRefs(t *testing.T) {
 				}
 			}
 			check("request", c.ReqFields, tc.reqAll, tc.req)
-			check("token", c.TokFields, tc.tokAll, tc.tok)
+			check("agent", c.AgtFields, tc.agtAll, tc.agt)
 			check("call", c.CallFields, false, tc.cal)
 		})
 	}
@@ -346,32 +346,32 @@ func TestCEL_StringVsNumericFailsClosed(t *testing.T) {
 }
 
 func TestCEL_TokenMetadataSet(t *testing.T) {
-	prg := mustCompile(t, mustEnv(t, false), "token.metadata.env in ['dev', 'staging']")
+	prg := mustCompile(t, mustEnv(t, false), "agent.metadata.env in ['dev', 'staging']")
 	now := time.Unix(0, 0).UTC()
 
-	got, err := evalCELCondition(prg, baseAct(celRequestInput{}, celTokenInput{Metadata: map[string]string{"env": "dev"}}, now))
+	got, err := evalCELCondition(prg, baseAct(celRequestInput{}, celPrincipalInput{Metadata: map[string]string{"env": "dev"}}, now))
 	if err != nil || !got {
 		t.Fatalf("env=dev: got=%v err=%v, want true", got, err)
 	}
-	got, err = evalCELCondition(prg, baseAct(celRequestInput{}, celTokenInput{Metadata: map[string]string{"env": "prod"}}, now))
+	got, err = evalCELCondition(prg, baseAct(celRequestInput{}, celPrincipalInput{Metadata: map[string]string{"env": "prod"}}, now))
 	if err != nil || got {
 		t.Fatalf("env=prod: got=%v err=%v, want false", got, err)
 	}
 	// Absent key fails closed (matches the old token_metadata semantics).
-	if _, err := evalCELCondition(prg, baseAct(celRequestInput{}, celTokenInput{}, now)); err == nil {
+	if _, err := evalCELCondition(prg, baseAct(celRequestInput{}, celPrincipalInput{}, now)); err == nil {
 		t.Fatal("absent metadata key: expected eval error (fail-closed)")
 	}
 }
 
 func TestCEL_PoliciesMembership(t *testing.T) {
-	prg := mustCompile(t, mustEnv(t, false), "'admin' in token.policies")
+	prg := mustCompile(t, mustEnv(t, false), "'admin' in agent.policies")
 	now := time.Unix(0, 0).UTC()
 
-	got, err := evalCELCondition(prg, baseAct(celRequestInput{}, celTokenInput{Policies: []string{"admin", "reader"}}, now))
+	got, err := evalCELCondition(prg, baseAct(celRequestInput{}, celPrincipalInput{Policies: []string{"admin", "reader"}}, now))
 	if err != nil || !got {
 		t.Fatalf("admin present: got=%v err=%v, want true", got, err)
 	}
-	got, err = evalCELCondition(prg, baseAct(celRequestInput{}, celTokenInput{Policies: []string{"reader"}}, now))
+	got, err = evalCELCondition(prg, baseAct(celRequestInput{}, celPrincipalInput{Policies: []string{"reader"}}, now))
 	if err != nil || got {
 		t.Fatalf("admin absent: got=%v err=%v, want false", got, err)
 	}
@@ -381,16 +381,16 @@ func TestCEL_CIDRContains(t *testing.T) {
 	prg := mustCompile(t, mustEnv(t, false), "cidrContains('10.0.0.0/8', request.client_ip)")
 	now := time.Unix(0, 0).UTC()
 
-	got, err := evalCELCondition(prg, baseAct(celRequestInput{ClientIP: "10.1.2.3"}, celTokenInput{}, now))
+	got, err := evalCELCondition(prg, baseAct(celRequestInput{ClientIP: "10.1.2.3"}, celPrincipalInput{}, now))
 	if err != nil || !got {
 		t.Fatalf("in-range: got=%v err=%v, want true", got, err)
 	}
-	got, err = evalCELCondition(prg, baseAct(celRequestInput{ClientIP: "192.168.1.1"}, celTokenInput{}, now))
+	got, err = evalCELCondition(prg, baseAct(celRequestInput{ClientIP: "192.168.1.1"}, celPrincipalInput{}, now))
 	if err != nil || got {
 		t.Fatalf("out-of-range: got=%v err=%v, want false", got, err)
 	}
 	// A malformed client IP yields an error (fail-closed).
-	if _, err := evalCELCondition(prg, baseAct(celRequestInput{ClientIP: "not-an-ip"}, celTokenInput{}, now)); err == nil {
+	if _, err := evalCELCondition(prg, baseAct(celRequestInput{ClientIP: "not-an-ip"}, celPrincipalInput{}, now)); err == nil {
 		t.Fatal("invalid ip: expected eval error")
 	}
 }
@@ -399,12 +399,12 @@ func TestCEL_TimeFunctions(t *testing.T) {
 	prg := mustCompile(t, mustEnv(t, false), `now.getHours("UTC") >= 8 && now.getHours("UTC") < 18`)
 
 	inHours := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
-	got, err := evalCELCondition(prg, baseAct(celRequestInput{}, celTokenInput{}, inHours))
+	got, err := evalCELCondition(prg, baseAct(celRequestInput{}, celPrincipalInput{}, inHours))
 	if err != nil || !got {
 		t.Fatalf("09:00 UTC: got=%v err=%v, want true", got, err)
 	}
 	outHours := time.Date(2026, 6, 30, 22, 0, 0, 0, time.UTC)
-	got, err = evalCELCondition(prg, baseAct(celRequestInput{}, celTokenInput{}, outHours))
+	got, err = evalCELCondition(prg, baseAct(celRequestInput{}, celPrincipalInput{}, outHours))
 	if err != nil || got {
 		t.Fatalf("22:00 UTC: got=%v err=%v, want false", got, err)
 	}
@@ -414,12 +414,88 @@ func TestCEL_RequestMountFields(t *testing.T) {
 	prg := mustCompile(t, mustEnv(t, false), `request.mount_type == "aws" && request.transparent`)
 	now := time.Unix(0, 0).UTC()
 
-	got, err := evalCELCondition(prg, baseAct(celRequestInput{MountType: "aws", Transparent: true}, celTokenInput{}, now))
+	got, err := evalCELCondition(prg, baseAct(celRequestInput{MountType: "aws", Transparent: true}, celPrincipalInput{}, now))
 	if err != nil || !got {
 		t.Fatalf("aws+transparent: got=%v err=%v, want true", got, err)
 	}
-	got, err = evalCELCondition(prg, baseAct(celRequestInput{MountType: "vault", Transparent: true}, celTokenInput{}, now))
+	got, err = evalCELCondition(prg, baseAct(celRequestInput{MountType: "vault", Transparent: true}, celPrincipalInput{}, now))
 	if err != nil || got {
 		t.Fatalf("vault: got=%v err=%v, want false", got, err)
+	}
+}
+
+// TestCEL_TokenNamespaceRemoved pins the hard cut. `token` is no longer a
+// declared namespace, so every stored condition using it fails to compile —
+// which, because policies are re-parsed on load, is what makes the upgrade
+// breaking. The error must name the replacement: an operator meets it at policy
+// load with no other signal about what changed.
+func TestCEL_TokenNamespaceRemoved(t *testing.T) {
+	for _, src := range []string{
+		"token.metadata.env == 'prod'",
+		"token.principal == 'x'",
+		"size(token.actors) > 0",
+		"token.type == 'jwt_role'",
+		"size(token) > 0",
+	} {
+		t.Run(src, func(t *testing.T) {
+			_, err := compileCELCondition(mustEnv(t, false), src)
+			if err == nil {
+				t.Fatalf("compile %q: want error, got none", src)
+			}
+			if !strings.Contains(err.Error(), "renamed to `agent`") {
+				t.Errorf("compile %q: error does not name the rename: %v", src, err)
+			}
+		})
+	}
+}
+
+// TestCEL_AgentFieldNames pins the field set exactly. The three token_-prefixed
+// names are the half-rename an implementer is most likely to leave behind, and
+// a stale name is not a compile error — `agent` is a dyn map, so it resolves to
+// a runtime no-such-key and a fail-closed deny that reads as a policy decision
+// rather than a bug.
+func TestCEL_AgentFieldNames(t *testing.T) {
+	now := time.Unix(1_757_404_800, 0)
+	agt := celPrincipalInput{
+		Principal:     "agent-gateway",
+		Role:          "gw",
+		Type:          "cert_role",
+		NamespacePath: "team-a/",
+		Policies:      []string{"p"},
+		Metadata:      map[string]string{"team": "platform"},
+		Actors:        []logical.ActorRef{{Subject: "broker"}},
+		TTLSeconds:    60,
+		ExpiresAtUnix: now.Add(time.Minute).Unix(),
+	}
+	// all:true deliberately: this asserts the builder's key set in isolation.
+	// It cannot catch a fieldSet-key/map-key disagreement, because has() short
+	// -circuits on all — TestCBP_PathCondition_RenamedFields drives the pruned
+	// path for that.
+	ns := buildPrincipalNS(agt, fieldSet{all: true})
+
+	for _, k := range []string{
+		"principal", "role", "namespace", "policies", "metadata", "actors",
+		"token_type", "token_ttl_seconds", "token_expires_at",
+	} {
+		if _, ok := ns[k]; !ok {
+			t.Errorf("agent.%s missing", k)
+		}
+	}
+	// The pre-rename spellings must be gone, not merely aliased.
+	for _, k := range []string{"type", "ttl_seconds", "expires_at"} {
+		if _, ok := ns[k]; ok {
+			t.Errorf("agent.%s still built — half-rename", k)
+		}
+	}
+	// Assert values, not just presence: the two time fields are adjacent
+	// int64s, so a builder that swapped them would pass a presence-only check.
+	if got := ns["token_type"]; got != "cert_role" {
+		t.Errorf("agent.token_type = %v, want cert_role", got)
+	}
+	if got := ns["token_ttl_seconds"]; got != int64(60) {
+		t.Errorf("agent.token_ttl_seconds = %v, want 60", got)
+	}
+	if got := ns["token_expires_at"]; got != now.Add(time.Minute).Unix() {
+		t.Errorf("agent.token_expires_at = %v, want %v", got, now.Add(time.Minute).Unix())
 	}
 }

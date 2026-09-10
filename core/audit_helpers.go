@@ -161,7 +161,7 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 			}
 			// Surface the path-level CEL condition decision (non-MCP paths)
 			// so denials carry their reason. Already Sanitized at evaluation.
-			// The condition's referenced inputs (incl. any token.metadata.*
+			// The condition's referenced inputs (incl. any agent.metadata.*
 			// it read) ride ConditionResult.Inputs.
 			if auth.Condition != nil {
 				auditAuth.PolicyResults.Condition = auth.Condition

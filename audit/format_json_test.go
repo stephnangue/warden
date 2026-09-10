@@ -651,7 +651,7 @@ func TestFormatResponse(t *testing.T) {
 }
 
 // TestFormatConditionInputsSalting exercises salt_fields for the CEL condition
-// inputs map, whose keys are themselves dotted (token.metadata.env).
+// inputs map, whose keys are themselves dotted (agent.metadata.env).
 func TestFormatConditionInputsSalting(t *testing.T) {
 	mockSalt := func(ctx context.Context, data string) (string, error) {
 		return "hmac-sha256:" + data + "-salted", nil
@@ -664,9 +664,10 @@ func TestFormatConditionInputsSalting(t *testing.T) {
 					Allowed: false,
 					Condition: &logical.ConditionResult{
 						Decision:   "deny",
-						Expression: "token.metadata.env == 'prod'",
+						Expression: "agent.metadata.env == 'prod'",
 						Inputs: map[string]string{
-							"token.metadata.env": "staging",
+							"agent.metadata.env": "staging",
+							"agent.token_type":   "jwt_role",
 							"request.data.model": "opus",
 						},
 					},
@@ -695,25 +696,54 @@ func TestFormatConditionInputsSalting(t *testing.T) {
 
 	t.Run("clear by default", func(t *testing.T) {
 		in := format(t, nil)
-		if in["token.metadata.env"] != "staging" || in["request.data.model"] != "opus" {
+		if in["agent.metadata.env"] != "staging" || in["request.data.model"] != "opus" {
 			t.Errorf("inputs should be clear, got %v", in)
 		}
 	})
 
 	t.Run("salt all inputs", func(t *testing.T) {
 		in := format(t, []string{"auth.policy_results.condition.inputs"})
-		if !salted(in["token.metadata.env"]) || !salted(in["request.data.model"]) {
+		if !salted(in["agent.metadata.env"]) || !salted(in["request.data.model"]) {
 			t.Errorf("all inputs should be salted, got %v", in)
 		}
 	})
 
 	t.Run("salt one dotted key", func(t *testing.T) {
 		in := format(t, []string{"auth.policy_results.condition.inputs.request.data.model"})
-		if in["token.metadata.env"] != "staging" {
-			t.Errorf("other input must stay clear, got %q", in["token.metadata.env"])
+		if in["agent.metadata.env"] != "staging" {
+			t.Errorf("other input must stay clear, got %q", in["agent.metadata.env"])
 		}
 		if !salted(in["request.data.model"]) {
 			t.Errorf("request.data.model should be salted, got %q", in["request.data.model"])
+		}
+	})
+
+	// The `token` -> `agent` rename moved every condition-input key, and
+	// salt_fields matches those keys verbatim. A stale selector therefore does
+	// not error or warn — it simply stops matching, and the value it used to
+	// protect starts logging in clear. These two cases pin that fail-open so it
+	// is visible in the suite rather than in an audit log.
+	t.Run("pre-rename selector no longer matches", func(t *testing.T) {
+		in := format(t, []string{"auth.policy_results.condition.inputs.token.metadata.env"})
+		if salted(in["agent.metadata.env"]) {
+			t.Errorf("stale token.* selector must not salt the renamed key, got %q", in["agent.metadata.env"])
+		}
+		if in["agent.metadata.env"] != "staging" {
+			t.Errorf("value should be untouched and in clear, got %q", in["agent.metadata.env"])
+		}
+	})
+
+	// The three token_-prefixed fields are the sharp edge: substituting
+	// `token.` -> `agent.` across an audit config fixes agent.metadata.* but
+	// turns token.type into agent.type, which names nothing.
+	t.Run("token_-prefixed field needs the full new name", func(t *testing.T) {
+		naive := format(t, []string{"auth.policy_results.condition.inputs.agent.type"})
+		if salted(naive["agent.token_type"]) {
+			t.Errorf("agent.type must not match agent.token_type, got %q", naive["agent.token_type"])
+		}
+		correct := format(t, []string{"auth.policy_results.condition.inputs.agent.token_type"})
+		if !salted(correct["agent.token_type"]) {
+			t.Errorf("agent.token_type selector should salt, got %q", correct["agent.token_type"])
 		}
 	})
 }
