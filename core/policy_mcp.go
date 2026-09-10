@@ -15,7 +15,7 @@ import (
 )
 
 // MCP rule_type values produced by AllowOperation when evaluating an
-// mcp { } block. These strings appear in audit records under
+// MCP rule-set. These strings appear in audit records under
 // auth.policy_results.mcp_decision.rule_type and the response-body
 // renderer keys off them to pick the per-rule-type message template.
 //
@@ -457,8 +457,12 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	// when at least one set carries a CEL condition; nil otherwise so the
 	// common no-condition path allocates nothing extra.
 	var act *celActivation
-	if reqF, agtF, callF, found := mcpConditionFields(sets); found {
-		act = newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celPrincipalInputFromEntry(te, now), agtF, now, nil)
+	if reqF, agtF, usrF, callF, found := mcpConditionFields(sets); found {
+		act = newCELActivation(
+			celRequestInputFromRequest(req, nsPath), reqF,
+			celPrincipalInputFromEntry(te, now), agtF,
+			celUserInputFromRequest(req, now), usrF,
+			now, nil)
 		act.callFields = callF
 	}
 
@@ -486,18 +490,19 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 // sets that carry a CEL condition, and whether any condition exists. The union
 // prunes the shared per-request activation to only the fields the conditions
 // read (reused across every call in a batch).
-func mcpConditionFields(sets []*CBPMCPRules) (reqF, agtF, callF fieldSet, found bool) {
+func mcpConditionFields(sets []*CBPMCPRules) (reqF, agtF, usrF, callF fieldSet, found bool) {
 	for _, s := range sets {
 		if s == nil || s.Condition == nil {
 			continue
 		}
 		if !found {
-			reqF, agtF, callF = s.Condition.ReqFields, s.Condition.AgtFields, s.Condition.CallFields
+			reqF, agtF, usrF, callF = s.Condition.ReqFields, s.Condition.AgtFields, s.Condition.UsrFields, s.Condition.CallFields
 			found = true
 			continue
 		}
 		reqF = unionFieldSets(reqF, s.Condition.ReqFields)
 		agtF = unionFieldSets(agtF, s.Condition.AgtFields)
+		usrF = unionFieldSets(usrF, s.Condition.UsrFields)
 		callF = unionFieldSets(callF, s.Condition.CallFields)
 	}
 	return

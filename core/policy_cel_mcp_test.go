@@ -272,3 +272,97 @@ func BenchmarkMCPDecide_Batch3_NoCondition(b *testing.B) {
 func BenchmarkMCPDecide_Batch3_WithCondition(b *testing.B) {
 	benchMCP(b, benchMCPWithCond, benchMCPBatch, nil)
 }
+
+// TestMCPCond_UserNamespace confirms the user leg reaches MCP policy condition, and
+// that mcpConditionFields unions UsrFields across rule-sets.
+//
+// The union is the sharp edge here: it prunes the activation shared by every
+// call in a batch, so a set whose UsrFields is dropped evaluates against a
+// namespace missing the field it reads — a no-such-key deny with no compile
+// error.
+//
+// Set ordering is load-bearing. mcpConditionFields seeds its field-sets from
+// the first condition-carrying set and unions the rest, so the user-referencing
+// set must come SECOND: put it first and it is seeded rather than unioned, and
+// the test passes even with the union removed.
+func TestMCPCond_UserNamespace(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "call.args.amount <= 1"
+}
+
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "user.present && user.metadata.acting_agent == agent.principal"
+}
+`)
+	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"pay","arguments":{"amount":9000}},"id":1}`
+	agentTE := &logical.TokenEntry{PrincipalID: "agent-gateway"}
+
+	withUser := func(actingAgent string) *logical.Request {
+		req := mcpReq(t, body)
+		req.User = &logical.UserPrincipal{
+			TokenEntry: &logical.TokenEntry{
+				Metadata: map[string]string{"acting_agent": actingAgent},
+			},
+		}
+		return req
+	}
+
+	bound := cbp.AllowOperation(testContext(), withUser("agent-gateway"), agentTE, false)
+	assert.True(t, bound.Allowed, "user condition must resolve in an MCP policy condition")
+
+	other := cbp.AllowOperation(testContext(), withUser("agent-other"), agentTE, false)
+	assert.False(t, other.Allowed, "amount 9000 fails the amount set, mismatched agent fails the binding set")
+
+	// No user credential. Asserting !Allowed alone proves nothing here — the
+	// amount set already denies — so assert the binding set reached a clean
+	// guard denial rather than erroring on a missing key.
+	none := cbp.AllowOperation(testContext(), mcpReq(t, body), agentTE, false)
+	assert.False(t, none.Allowed)
+	require.NotNil(t, none.MCPDecision)
+	require.NotNil(t, none.MCPDecision.Condition)
+	assert.Empty(t, none.MCPDecision.Condition.ErrorKind,
+		"user.present false is a policy decision, not an eval error")
+}
+
+// TestMCPCond_UserNamespaceSeeded covers the other arm of mcpConditionFields.
+// TestMCPCond_UserNamespace puts the user-referencing set second so its
+// UsrFields arrive via the union; that leaves the seed arm — where the first
+// condition-carrying set is the one reading user.* — uncovered. A single
+// user-binding rule-set is also the shape an operator writes first, so a
+// seeding regression would deny every request.
+func TestMCPCond_UserNamespaceSeeded(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "user.present && user.metadata.acting_agent == agent.principal"
+}
+`)
+	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"pay","arguments":{"amount":1}},"id":1}`
+	agentTE := &logical.TokenEntry{PrincipalID: "agent-gateway"}
+
+	req := mcpReq(t, body)
+	req.User = &logical.UserPrincipal{
+		TokenEntry: &logical.TokenEntry{Metadata: map[string]string{"acting_agent": "agent-gateway"}},
+	}
+	assert.True(t, cbp.AllowOperation(testContext(), req, agentTE, false).Allowed)
+
+	bad := mcpReq(t, body)
+	bad.User = &logical.UserPrincipal{
+		TokenEntry: &logical.TokenEntry{Metadata: map[string]string{"acting_agent": "agent-other"}},
+	}
+	assert.False(t, cbp.AllowOperation(testContext(), bad, agentTE, false).Allowed)
+}
