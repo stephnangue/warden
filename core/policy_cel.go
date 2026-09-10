@@ -124,11 +124,20 @@ type celRequestInput struct {
 // and `user` namespaces. Decoupled from *logical.TokenEntry so the activation
 // builder stays unit-testable; the wiring layer adapts the token entry into this.
 type celPrincipalInput struct {
-	// Present is false when no principal occupied this leg. It exists so an
-	// operator can write `user.present && …`: a user credential is optional on
-	// a protected-resource mount, and without this field its absence would be a
-	// missing-key deny that reads as a bug rather than a policy decision. On the
-	// agent leg it is always true wherever a condition evaluates, since
+	// Present is false when no principal occupied this leg.
+	//
+	// It is how a condition requires *a* user without depending on any
+	// particular claim — `user.present && agent.principal == "x"` has nothing
+	// else to carry the requirement. The alternative, `user.principal != ""`,
+	// leans on zero-value semantics to mean absence, which is exactly the
+	// implicitness this field removes.
+	//
+	// It also keeps absence a clean deny rather than a no_such_key error, which
+	// matters for how the audit record reads — though both now reach the same
+	// 401 and user challenge, since ConditionResult.UserAbsent is set from the
+	// whole condition list rather than from which branch produced the denial.
+	//
+	// On the agent leg it is always true wherever a condition evaluates, since
 	// CheckToken has a token entry by then.
 	Present       bool
 	Principal     string
@@ -919,10 +928,11 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 		agtF = unionFieldSets(agtF, c.AgtFields)
 		usrF = unionFieldSets(usrF, c.UsrFields)
 	}
+	usr := celUserInputFromRequest(req, now)
 	act := newCELActivation(
 		celRequestInputFromRequest(req, nsPath), reqF,
 		celPrincipalInputFromEntry(te, now), agtF,
-		celUserInputFromRequest(req, now), usrF,
+		usr, usrF,
 		now, nil)
 
 	var deciding *logical.ConditionResult
@@ -943,8 +953,35 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 			deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
 		}
 	}
+	// Set here, at the single deny return, rather than where `deciding` is
+	// built. There are two construction sites — the error branch above and the
+	// false branch — and an unguarded `user.metadata.x == …` takes the ERROR one
+	// when no user is present (metadata binds to emptyStringMap, so the access is
+	// a no_such_key), while the guarded `user.present && …` takes the false one.
+	// Setting the flag in either branch alone would hand one of the two most
+	// common policy shapes a bare 403 while the other got a challenge.
+	//
+	// Sanitize only rewrites strings, so the flag survives it either way.
+	deciding.UserAbsent = !usr.Present && conditionsReferenceUser(conds)
 	deciding.Sanitize()
 	return false, deciding
+}
+
+// conditionsReferenceUser reports whether any condition reads the `user`
+// namespace. Because the gate ORs, a deny means every condition failed — so a
+// user credential can only change the outcome if at least one of them looks at
+// the user at all.
+//
+// This is a compile-time reference check, not a satisfiability one: it answers
+// "might a user matter here", never "would a user pass". See
+// ConditionResult.UserAbsent.
+func conditionsReferenceUser(conds []*compiledCondition) bool {
+	for _, c := range conds {
+		if c.UsrFields.all || len(c.UsrFields.fields) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveConditionInputs snapshots the values of the expression's referenced

@@ -205,6 +205,20 @@ type ConditionResult struct {
 	// clean allow/deny.
 	ErrorKind string `json:"error_kind,omitempty"`
 
+	// UserAbsent marks a deny that occurred with no user principal on the
+	// request while at least one merged condition reads user.* — so acquiring a
+	// user credential MIGHT change the outcome. It is a syntactic
+	// over-approximation, not a satisfiability result: a condition can reference
+	// user.* and still be unsatisfiable no matter what user is presented.
+	//
+	// The handler uses it to answer with a 401 and the user challenge instead of
+	// a bare 403, so a client can discover where to acquire a user identity. That
+	// conversion is gated on the request being able to carry one at all; this
+	// flag is recorded on every matching deny, including paths where no user
+	// could ever be presented, so read it as "a user was absent here", not as
+	// "a user would have helped".
+	UserAbsent bool `json:"user_absent,omitempty"`
+
 	// Inputs maps the expression's referenced variables to their CTL-stripped
 	// values so a denial is self-explanatory. Sensitive keys are
 	// redacted/salted by the audit format layer.

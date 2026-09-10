@@ -663,7 +663,7 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 			retErr = multierror.Append(retErr, errType)
 		}
 
-		// Build the error response for audit logging
+		// Build the error response
 		var resp *logical.Response
 		if ctErr == ErrInternalError {
 			resp = nil
@@ -671,15 +671,23 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 			resp = logical.ErrorResponse(logical.ErrInternal(ctErr.Error()))
 		}
 
-		// Audit the failed response - ensures complete request/response pair in audit log
-		respAuditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, nil, ctErr)
-		if _, auditErr := c.auditManager.LogResponse(ctx, respAuditEntry); auditErr != nil {
-			c.logger.Error("failed to audit login failure response",
-				logger.String("path", req.Path),
-				logger.Err(auditErr),
-			)
-		}
-
+		// No response audit here, for the same reason as the token-check denial
+		// below: handleCancelableRequest audits the response of every request it
+		// handles, so auditing here too would record this one twice.
+		//
+		// The other caller — the transparent-auth internal login — audits no
+		// response at all, so this branch would have been that sub-request's only
+		// response entry. Removing it matches how a *successful* internal login
+		// already behaves (a request entry, no response entry), so the asymmetry
+		// predates this and is not introduced by dropping the call.
+		//
+		// This branch is unreachable today in any case: CheckToken is called here
+		// with unauth=true, which swallows every token/CBP fetch error and skips
+		// the policy gate entirely, and its remaining exits need a backend that
+		// either declares an ExistenceCheck (none does) or lists one path as both
+		// Root and Unauthenticated (none does). It is kept rather than deleted so
+		// that if a future backend makes it live, it fails as one audit entry
+		// rather than silently as two.
 		if ctErr == ErrInternalError {
 			return nil, auth, retErr
 		}
@@ -816,6 +824,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// Help requests are never streaming - they should return help text, not proxy upstream.
 	isStreaming := c.isStreamingRequest(ctx, req.Path) && req.Operation != logical.HelpOperation
 
+	// Whether this mount is a protected resource — i.e. whether a user
+	// credential can be presented at all. Resolved inside the streaming branch
+	// below, but declared here so the policy-denial path can read it: a deny
+	// that a user might remedy is answered with a challenge only when there is
+	// somewhere to send the client.
+	var userLegMount bool
+
 	if !isStreaming {
 		if err := c.parseRequestBody(req); err != nil {
 			return logical.ErrorResponse(err), nil, nil
@@ -930,6 +945,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// rule collapses to the pre-0.20 behaviour and userCred stays empty.
 		userAuthPath, userAuthRole := c.resolveUserAuthConfig(ctx, matchingBackend)
 		userLeg := userAuthPath != ""
+		userLegMount = userLeg
 
 		// Reject the one genuinely ambiguous credential combination rather than
 		// resolving it silently. X-Warden-Token is the operator credential and
@@ -1102,15 +1118,38 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 				resp = logical.ErrorResponse(ctErr)
 			}
 
-			// Audit the failed response
-			respAuditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, te, ctErr)
-			if _, auditErr := c.auditManager.LogResponse(ctx, respAuditEntry); auditErr != nil {
-				c.logger.Error("failed to audit token check failure response",
-					logger.String("path", req.Path),
-					logger.Err(auditErr),
-				)
+			// A policy denied because no user rode a request that could have
+			// carried one. 403 is the wrong answer: nothing in a real client
+			// stack acts on it, so the caller concludes it is forbidden when one
+			// OAuth round trip away it might succeed. Answer 401 and name where
+			// to authenticate, exactly as the credential layer already does when
+			// a spec requires a user (see exchangeInputError).
+			//
+			// Swapping resp here rather than at the return is what keeps the
+			// audit honest: handleCancelableRequest audits whatever this returns,
+			// so the logged status is the 401 the client actually received. The
+			// request entry still records the policy denial and its
+			// ConditionResult, and user_absent on that record is what explains
+			// why a denial went out as an invitation to authenticate.
+			if challenge := c.userChallengeForDeny(ctx, req, auth, userLegMount); challenge != nil {
+				resp = challenge
+				retErr = nil
 			}
 
+			// No response audit here. handleCancelableRequest audits the response
+			// of every request once this returns, so auditing again would record
+			// a denial twice — and anything counting audit events (denial rate
+			// limits, alerting, compliance tallies) would see two rejections
+			// where one occurred.
+			//
+			// The caller's entry carries the same response, auth and token entry
+			// (it re-reads req.TokenEntry(), which was set before any denial can
+			// occur). For a permission denial its error IS this ctErr. For the
+			// default class above — neither internal nor permission-denied —
+			// retErr is a generic invalid-request instead, so that entry's Error
+			// field is less specific than this one was; the exact ctErr is still
+			// recorded on the request entry below and in the audited response
+			// body, so nothing leaves the audit record.
 			if errwrap.Contains(retErr, ErrInternalError.Error()) {
 				return nil, auth, retErr
 			}
