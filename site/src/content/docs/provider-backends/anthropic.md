@@ -83,13 +83,21 @@ warden cred source create anthropic-src \
   -config=auth_header_type=custom_header \
   -config=auth_header_name=x-api-key \
   -config=extra_headers=anthropic-version:2023-06-01 \
-  -config=optional_metadata=organization_id \
+  -config=credential_fields=organization_id \
   -config=display_name=Anthropic
 ```
 
 Verify the source was created:
 
-```bash
+```
+
+:::note[Renamed in v0.20.0]
+This key was `optional_metadata`; the old name is rejected on write. The mechanism also
+works now — the declared fields never reached the provider before, so a source that looked
+correct silently carried nothing. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#6-apikey-sources-rename-optional_metadata-to-credential_fields).
+:::
+bash
 warden cred source read anthropic-src
 ```
 

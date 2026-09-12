@@ -105,25 +105,37 @@ The `api_key` field must be the base64-encoded `username:password` string:
 ENCODED=$(echo -n "admin:your-password" | base64)
 ```
 
-Create a credential source with `optional_metadata=auth_type` to allow the auth mode to be set per-spec:
+`auth_type` is a **mount** setting, not a credential field — set it once on the provider
+config and every spec on that mount uses it:
+
+```bash
+warden write prometheus/config <<EOF
+{
+  "prometheus_url": "https://prometheus.example.com",
+  "auth_type": "basic"
+}
+EOF
+```
+
+The credential then carries only the encoded credentials:
 
 ```bash
 warden cred source create prometheus-src \
   -type=apikey \
   -rotation-period=0 \
   -config=api_url=https://prometheus.example.com \
-  -config=optional_metadata=auth_type \
   -config=display_name=Prometheus
-```
 
-Create a credential spec with the base64-encoded credentials and `auth_type=basic`:
-
-```bash
 warden cred spec create prometheus-ops \
   -source prometheus-src \
-  -config api_key=${ENCODED} \
-  -config auth_type=basic
+  -config api_key=${ENCODED}
 ```
+
+:::note[Changed in v0.20.0]
+`auth_type` used to be declared on the source as `optional_metadata=auth_type` and set
+per spec. It moved to the mount config, which is also what made Basic auth reachable at
+all — the declared field never reached the provider before.
+:::
 
 ### Option C: Vault/OpenBao as Credential Source
 
@@ -156,7 +168,7 @@ warden cred spec create prometheus-ops \
   -config secret_path=prometheus/ops
 ```
 
-The KV v2 secret at `secret/prometheus/ops` must contain at minimum an `api_key` field. For basic auth, also include `auth_type=basic`.
+The KV v2 secret at `secret/prometheus/ops` must contain at minimum an `api_key` field. Basic auth is selected by the mount's `auth_type`, not by a field in the secret.
 
 Verify:
 

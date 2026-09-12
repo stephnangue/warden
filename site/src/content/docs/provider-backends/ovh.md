@@ -91,7 +91,7 @@ warden cred source create ovh-src \
   -config user_id=your-cloud-user-id
 ```
 
-The `project_id` and `user_id` are only needed for S3 credential management (`dynamic_s3` and `oauth2_token_and_s3` mint methods). They can be omitted if you only need API tokens, or overridden per-spec for multi-tenant S3 access.
+S3 access keys are no longer minted by Warden: the `access_keys` mint method serves an existing pair, sourced by [chaining](/federation/credential-chaining/). The `dynamic_s3` and `oauth2_token_and_s3` methods, and the source's `project_id` / `user_id` keys, were removed in v0.20.0.
 
 **API-only mode** (auto-refreshed OAuth2 bearer tokens):
 
@@ -108,7 +108,7 @@ warden cred spec create ovh-api \
 warden cred spec create ovh-s3 \
   -source ovh-src \
   -type=ovh_keys \
-  -config mint_method=dynamic_s3
+  -config mint_method=access_keys
 ```
 
 **Dual mode** (OAuth2 token + S3 credentials):
@@ -117,7 +117,7 @@ warden cred spec create ovh-s3 \
 warden cred spec create ovh-dual \
   -source ovh-src \
   -type=ovh_keys \
-  -config mint_method=oauth2_token_and_s3
+  -config mint_method=access_keys
 ```
 
 **Multi-tenant S3 access** — override `project_id` and `user_id` per-spec to target different S3 users:
@@ -127,7 +127,7 @@ warden cred spec create ovh-dual \
 warden cred spec create ovh-s3-reader \
   -source ovh-src \
   -type=ovh_keys \
-  -config mint_method=dynamic_s3 \
+  -config mint_method=access_keys \
   -config project_id=my-project \
   -config user_id=reader-user-id
 
@@ -135,7 +135,7 @@ warden cred spec create ovh-s3-reader \
 warden cred spec create ovh-s3-writer \
   -source ovh-src \
   -type=ovh_keys \
-  -config mint_method=dynamic_s3 \
+  -config mint_method=access_keys \
   -config project_id=my-project \
   -config user_id=writer-user-id
 ```

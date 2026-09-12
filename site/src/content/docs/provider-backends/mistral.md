@@ -81,13 +81,21 @@ warden cred source create mistral-src \
   -rotation-period=0 \
   -config=api_url=https://api.mistral.ai \
   -config=verify_endpoint=/v1/models \
-  -config=optional_metadata=organization_id \
+  -config=credential_fields=organization_id \
   -config=display_name=Mistral
 ```
 
 Verify the source was created:
 
-```bash
+```
+
+:::note[Renamed in v0.20.0]
+This key was `optional_metadata`; the old name is rejected on write. The mechanism also
+works now — the declared fields never reached the provider before, so a source that looked
+correct silently carried nothing. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#6-apikey-sources-rename-optional_metadata-to-credential_fields).
+:::
+bash
 warden cred source read mistral-src
 ```
 

@@ -93,8 +93,9 @@ warden provider list
 ```
 
 Configure the provider. **`mcp_url` is required — there is no default.** Point it
-at Slack's MCP endpoint. The default `timeout` is 10 minutes — raise it for agent
-sessions that keep an SSE stream open across many tool calls:
+at Slack's MCP endpoint. `timeout` bounds a **single call** and defaults to
+**60 seconds** — raise it when individual tool calls run long. A long-lived SSE session is
+bounded by `listen_timeout` instead, which still defaults to 10 minutes:
 
 ```bash
 warden write slack-mcp/config <<EOF

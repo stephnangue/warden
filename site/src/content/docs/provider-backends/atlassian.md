@@ -67,7 +67,7 @@ warden read jira/config
 
 ### Option A: Static Atlassian API Token (Cloud)
 
-Atlassian Cloud personal API tokens require both an email address and the token itself — sent as HTTP Basic Auth (`base64(email:token)`). The `optional_metadata=email` source config instructs Warden to forward the `email` field from the spec into the credential, enabling this injection.
+Atlassian Cloud personal API tokens require both an email address and the token itself — sent as HTTP Basic Auth (`base64(email:token)`). The `credential_fields=email` source config instructs Warden to forward the `email` field from the spec into the credential, enabling this injection.
 
 Generate an API token at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens).
 
@@ -76,8 +76,16 @@ warden cred source create atlassian-src \
   -type=apikey \
   -rotation-period=0 \
   -config=display_name=Atlassian \
-  -config=optional_metadata=email
+  -config=credential_fields=email
 ```
+
+:::note[Renamed in v0.20.0]
+This key was `optional_metadata`; the old name is rejected on write. The mechanism also
+works now — the declared fields never reached the provider before, so a source that looked
+correct silently carried nothing. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#6-apikey-sources-rename-optional_metadata-to-credential_fields).
+:::
+
 
 Create a credential spec with both `email` and `api_key`:
 
@@ -107,7 +115,7 @@ warden cred spec create atlassian-ops \
   -config api_key=your-personal-access-token
 ```
 
-For older Data Center versions without PAT support, fall back to Basic Auth by adding `optional_metadata=email` to the source and including both `email` and `api_key` (the account password) on the spec.
+For older Data Center versions without PAT support, fall back to Basic Auth by adding `credential_fields=email` to the source and including both `email` and `api_key` (the account password) on the spec.
 
 ### Option C: Vault/OpenBao as Credential Source
 
@@ -148,7 +156,7 @@ warden cred spec create atlassian-ops \
   -config secret_path=atlassian/ops
 ```
 
-Warden reads all keys from the KV secret and populates credential data directly. For Cloud, the `email` key triggers Basic Auth injection automatically — no `optional_metadata` config is needed on the Vault source.
+Warden reads all keys from the KV secret and populates credential data directly. For Cloud, the `email` key triggers Basic Auth injection automatically — no `credential_fields` config is needed on the Vault source.
 
 ## Step 4: Create a Policy
 
@@ -320,7 +328,7 @@ warden cred source create bitbucket-src \
   -type=apikey \
   -rotation-period=0 \
   -config=display_name=Bitbucket \
-  -config=optional_metadata=email
+  -config=credential_fields=email
 
 warden cred spec create bitbucket-ops \
   -source bitbucket-src \
@@ -381,7 +389,7 @@ warden write jira-dc/config <<EOF
 EOF
 ```
 
-For older Data Center versions without PAT support, use Basic Auth the same way as Atlassian Cloud — configure the source with `optional_metadata=email` and include both `email` and `api_key` on the spec.
+For older Data Center versions without PAT support, use Basic Auth the same way as Atlassian Cloud — configure the source with `credential_fields=email` and include both `email` and `api_key` on the spec.
 
 ## TLS Certificate Authentication
 

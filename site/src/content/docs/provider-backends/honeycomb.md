@@ -2,7 +2,7 @@
 title: "Honeycomb"
 ---
 
-The Honeycomb provider enables proxied access to the Honeycomb API through Warden. It forwards requests to Honeycomb endpoints (`/1/events/{dataset}`, `/1/queries/{dataset}`, `/2/teams/{team}/api-keys`, etc.) with automatic credential injection and policy evaluation. Honeycomb uses two authentication modes: the `X-Honeycomb-Team` header for ingest and configuration keys, and `Authorization: Bearer <key_id>:<key_secret>` for management keys. Credentials can be static tokens from an `apikey` source or dynamically minted API keys from the `honeycomb` source driver.
+The Honeycomb provider enables proxied access to the Honeycomb API through Warden. It forwards requests to Honeycomb endpoints (`/1/events/{dataset}`, `/1/queries/{dataset}`, `/2/teams/{team}/api-keys`, etc.) with automatic credential injection and policy evaluation. Honeycomb uses two authentication modes: the `X-Honeycomb-Team` header for ingest and configuration keys, and `Authorization: Bearer <key_id>:<key_secret>` for management keys. Credentials come from an `apikey` source — held inline, or [chained](/federation/credential-chaining/) from a vault so Warden stores nothing.
 
 ## Prerequisites
 
@@ -106,49 +106,42 @@ warden cred spec create honeycomb-ops \
   -config api_key=your-honeycomb-api-key
 ```
 
-### Option B: Dynamic API Keys (Honeycomb Source Driver)
+### Option B: Keyless — the key held in a vault, fetched per request
 
-Use this to have Warden dynamically create and revoke Honeycomb API keys using a management key. This is the recommended approach for production as it provides automatic key rotation and revocation.
+:::caution[The `honeycomb` credential driver was removed in v0.20.0]
+Warden used to mint Honeycomb API keys from a management key. That driver is gone: the
+keys it minted were wrong on the wire, and Honeycomb offers no way to revoke or expire
+them, so a leaked key stayed valid indefinitely and Warden could not clean up after
+itself. Keep the key where it can be rotated — in your vault — and
+[chain](/federation/credential-chaining/) it per request instead. Nothing is stored in
+Warden either way, and this is the recommended production shape.
+:::
 
-**Prerequisites:**
-- A Honeycomb management key (Settings > Team Settings > API Keys > Manage Management Keys)
-- The team slug from your Honeycomb account
-- An environment ID (visible in the URL when you select an environment)
-
-Create a credential source backed by the Honeycomb API:
+Hold the Honeycomb key in a vault and have the `apikey` source fetch it at mint time. The
+source stores no secret, and the producer is itself keyless, so nothing standing sits at
+either hop:
 
 ```bash
+# producer: the Honeycomb key, where it can be rotated
+warden cred spec create honeycomb-key-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=honeycomb/ingest-key \
+  -config=subject_token_source=warden_identity
+
+# consumer: the Honeycomb provider's credential
 warden cred source create honeycomb-src \
-  -type=honeycomb \
-  -rotation-period=24h \
-  -config=management_key_id=hcxmk_01abc123 \
-  -config=management_key_secret=your-management-key-secret \
-  -config=team_slug=my-team \
-  -config=honeycomb_url=https://api.honeycomb.io
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://api.honeycomb.io \
+  -config=secret_spec=honeycomb-key-in-vault \
+  -config=display_name=Honeycomb
 ```
 
-Create a credential spec that mints ingest keys:
-
-```bash
-warden cred spec create honeycomb-ops \
-  -source honeycomb-src \
-  -config environment_id=your-environment-id \
-  -config key_type=ingest \
-  -config key_name_prefix=warden- \
-  -config key_ttl=24h
-```
-
-For configuration keys with specific permissions:
-
-```bash
-warden cred spec create honeycomb-config \
-  -source honeycomb-src \
-  -config environment_id=your-environment-id \
-  -config key_type=configuration \
-  -config key_name_prefix=warden- \
-  -config key_ttl=24h \
-  -config 'permissions={"send_events":true,"create_datasets":true,"run_queries":true}'
-```
+See [credential chaining](/federation/credential-chaining/) for the producer options —
+OpenBao/Vault, AWS Secrets Manager or GCP Secret Manager — and for templating a different
+key per team or per user.
 
 ### Option C: Vault/OpenBao as Credential Source
 
