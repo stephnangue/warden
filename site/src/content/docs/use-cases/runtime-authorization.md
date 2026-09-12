@@ -92,7 +92,7 @@ baked into the rule — one policy stays correct for every identity that shares 
 overlay, many callers, nothing to maintain per person. The attribute that decided
 each call lands in the [audit log](/concepts/audit/), so a grant or a denial is
 explainable down to *why*. (The condition that expresses this reads
-[`token.metadata`](/concepts/policies/#fine-grained-access).)
+[`agent.metadata`](/concepts/policies/#fine-grained-access).)
 
 ## Benefits
 

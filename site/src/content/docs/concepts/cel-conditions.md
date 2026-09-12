@@ -517,9 +517,9 @@ MCP policies only restrict.
   `auth.policy_results.condition.inputs` (see [Audit](/concepts/audit/)), but `now.*` and
   bracket/optional access (`request.data["k"]`, `call.args.?x`) are not captured there —
   dotted field access (`request.data.model`) is.
-- **Audit `salt_fields` selectors use these same names.** A selector still naming
-  `token.metadata.*` does not error after the v0.20.0 rename — it stops matching, and the
-  value it protected begins logging in clear. See
+- **Audit `salt_fields` selectors use these same names.** A selector still written against
+  the old `token` namespace does not error after the v0.20.0 rename — it stops matching,
+  and the value it protected begins logging in clear. See
   [Upgrading from v0.19.0](/upgrade/from-v0-19/).
 
 ## See also

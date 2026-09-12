@@ -45,6 +45,10 @@ jobs:
             site:
               - 'site/**'
               - '.github/workflows/ci.yml'
+              # Agent-facing docs embedded into the binary. The invariant check
+              # scans them, and they match no other filter — without this a
+              # skill.md edit would run no job at all.
+              - 'provider/**/skill.md'
       - id: decide
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
@@ -102,6 +106,13 @@ jobs:
       - name: Install dependencies
         working-directory: site
         run: npm ci
+
+      # Greps the docs for syntax the server no longer accepts, so a rename
+      # cannot quietly drift back. The checks live in the script, not here —
+      # ci.yml is in the helm path filter too, so editing it to add a check
+      # would spin up a kind cluster on a docs-only change.
+      - name: Check documentation invariants
+        run: ./site/scripts/check-invariants.sh
 
       # Catches what would otherwise only surface in the Cloudflare deploy:
       # a page missing its `title` frontmatter, or a sidebar entry in

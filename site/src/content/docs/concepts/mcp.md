@@ -138,9 +138,9 @@ mcp {
 }
 ```
 
-The condition reads a per-call namespace on top of the request/token namespaces
-documented in [Policies → Fine-grained access](/concepts/policies/#fine-grained-access)
-(worked examples in the [CEL Condition Cookbook](/concepts/cel-conditions/)):
+The condition reads a per-call namespace on top of the `request`, `agent` and `user`
+namespaces documented in the
+[CEL Condition Cookbook](/concepts/cel-conditions/#quick-reference):
 
 - `call.method` — the JSON-RPC method (`tools/call`, …)
 - `call.tool` — the name-bearing field (tool/resource/prompt name)
