@@ -79,9 +79,10 @@ convention. A `401` means the JWT expired (typical TTL 5–60 min) — refresh i
   ask the operator to widen it, don't switch Warden roles unless a broader one
   exists.
 - **Warden policy can gate tools too — body-authoritative.** An operator may bind
-  an `mcp { }` block restricting JSON-RPC methods, tool names, and `tools/call`
-  arguments (including `service_name` / `operation_name` / `region_name`). A deny
-  is HTTP 403 with an RFC 6750 `WWW-Authenticate: Bearer
+  an MCP policy restricting JSON-RPC methods, tool names, and `tools/call`
+  arguments (including `service_name` / `operation_name` / `region_name`). Such a
+  policy is required: on an MCP mount with none in scope every call is denied. A
+  deny is HTTP 403 with an RFC 6750 `WWW-Authenticate: Bearer
   error="insufficient_permissions", error_description="..."` header naming the
   offender — **independent** of IAM `AccessDenied` (a native AWS error streamed
   back). Read the `error_description` to tell them apart. Structural problems

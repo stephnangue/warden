@@ -65,6 +65,13 @@ check "CEL namespace: no \`token.<field>\`" \
   '\btoken\.(principal|role|type|namespace|policies|metadata|actors|ttl_seconds|expires_at)\b' \
   "$docs"
 
+# MCP rules moved to their own policy type; a nested mcp block inside a
+# capability policy's path stanza is rejected at parse. Scans the embedded
+# skills too — stale syntax there ships inside the binary.
+check "MCP policy: no nested \`mcp {\` block" \
+  'mcp[[:space:]]*\{' \
+  "$docs" "${skills[@]}"
+
 # --- Pending checks -----------------------------------------------------------
 #
 # A check may only be enabled by the PR that removes the LAST occurrence of its
@@ -74,12 +81,7 @@ check "CEL namespace: no \`token.<field>\`" \
 #
 # Uncomment each block in the PR named beside it.
 
-# Enable with the MCP policy-type sweep, which rewrites the four MCP provider
-# pages, the tutorials and quickstarts, and the two embedded skills.
-#
-# check "MCP policy: no nested \`mcp {\` block" \
-#   'mcp[[:space:]]*\{' \
-#   "$docs" "${skills[@]}"
+# (enabled below — the MCP sweep removed the last occurrence)
 
 # Enable with the credential-drivers refresh, which deletes the honeycomb driver
 # page and its sidebar slug. Scoped to the driver docs because the honeycomb
