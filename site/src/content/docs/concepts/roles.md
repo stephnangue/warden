@@ -375,16 +375,37 @@ or a JWT-SVID (bearer token).
 For an **explicit login**, the caller names the role directly.
 
 For **transparent (implicit) authentication**, where the workload never logs in,
-Warden resolves the role per request from the first of these that is present:
+Warden resolves the role per request. There are **two orders**, and they differ —
+gateway traffic lets the header win, transparent operations let the query parameter win.
 
-1. the `X-Warden-Role` header,
-2. a role encoded in the request path — the canonical
-   `<provider>/role/<role>/gateway/<api>` form — or a `role=` query parameter,
-3. a provider-supplied default,
-4. the auth method's **`default_role`**.
+**Gateway requests** (a proxied call to a provider mount), highest first:
 
-The `default_role` is set on the auth method's *config*, not on a role, and is
-the fallback when a transparent caller supplies no role:
+1. the **`X-Warden-Role` header** — it overrides everything, and Warden rewrites the
+   role segment of the path to match, so the auth resolver and the provider always
+   agree on which role is in force,
+2. a role **encoded in the request** — the canonical `<provider>/role/<role>/gateway/<api>`
+   path segment, or a `role=` query parameter; the provider decides which it accepts,
+3. a **provider extractor** reading the role from the request's own credential — the
+   access-key ID in an AWS SigV4 `Authorization` header, the username in Git
+   smart-HTTP Basic Auth,
+4. the **mount's `default_role`**.
+
+**Transparent operations** (a non-gateway endpoint, with an auth path configured on the
+namespace), highest first:
+
+1. the **`role=` query parameter**,
+2. the **`X-Warden-Role` header**,
+3. the **auth method's `default_role`**.
+
+The two `default_role` settings are different keys on different objects. The mount's is
+set on the provider mount and is the fallback for gateway traffic:
+
+```bash
+warden write github/config default_role=workload
+```
+
+The auth method's is set on the auth mount's *config*, not on a role, and is the fallback
+for transparent operations:
 
 ```bash
 warden write auth/jwt/config default_role=workload

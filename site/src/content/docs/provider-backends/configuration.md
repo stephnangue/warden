@@ -29,9 +29,10 @@ EOF
 |-------|------|---------|-------------|
 | `proxy_domains` | list(string) | `["localhost"]` | Domains Warden listens on for proxied requests. In production, set this to your Warden server's domain. |
 | `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB). |
-| `timeout` | duration | `30s` | Request timeout (e.g., `30s`, `5m`). |
+| `timeout` | duration | per provider | How long a **single** proxied call may take. The `mcp` and `mcp_aws` providers default to `60s`; others carry their own default. |
+| `listen_timeout` | duration | `10m` | **`mcp` / `mcp_aws` only.** Bounds a long-lived stream — `subscriptions/listen` and the legacy SSE GET — instead of `timeout`. |
 | `auto_auth_path` | string | Required | Path to the auth mount used for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`). See [JWT auth](/auth-methods/jwt/) and [Certificate auth](/auth-methods/cert/). |
-| `default_role` | string | — | Default auth role to use when the request doesn't specify one. When set, it takes precedence over any role encoded in the request. |
+| `default_role` | string | — | Auth role used when the request names none. It is the **lowest**-precedence source, not the highest — see [Selecting a role](/concepts/roles/#selecting-a-role). |
 
 ## Secondary user authentication
 
@@ -43,8 +44,15 @@ request header, in addition to the agent's own credential. This is opt-in: with
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `user_auth_path` | string | — | Auth mount that validates the user credential. **Bearer-format mounts only.** Absent ⇒ no user principal. |
-| `user_token_header` | string | `X-Warden-User-Token` | Request header carrying the user credential. `X-Warden-User-Token` is a reserved Warden control header. |
 | `user_auth_role` | string | *(mount default)* | Role the user auth uses. |
+
+:::caution[Changed in v0.20.0]
+`user_token_header` is retired, and `user_auth_path` is read from the **mount only** — no
+longer from namespace metadata, so a deployment that set it at the namespace level must
+re-set it per mount. On a mount with `user_auth_path`, the user's credential now arrives in
+`Authorization` and the agent moves to `X-Warden-Agent-Token` or a client certificate. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#2-dual-token-extraction-user_token_header-retired).
+:::
 
 The user principal is **identity-only** — it never authorizes the request. See
 [Delegation](/concepts/delegation/) for the full model and the fail-closed rules.
@@ -66,6 +74,13 @@ are documented here so the per-provider references don't repeat them.
 and permits plaintext `http://` URLs. Use it only for local development. For a
 private CA in production, supply the CA with `ca_data` instead.
 :::
+
+## Selecting a role
+
+Which role a request runs under is resolved per request, and the order differs between
+gateway traffic and transparent operations — the `X-Warden-Role` header wins on the
+former, the `role=` query parameter on the latter. Both chains are documented once in
+[Roles → Selecting a role](/concepts/roles/#selecting-a-role).
 
 ## See Also
 

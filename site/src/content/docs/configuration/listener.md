@@ -75,6 +75,36 @@ clients must be SPIFFE-aware — they trust the SPIRE bundle and skip hostname
 verification. Plain or browser clients cannot use a SPIFFE listener; run a
 separate file-based listener on another port for those.
 
+## HTTP timeouts
+
+Three keys bound how long the server will wait on a connection:
+
+| Key | Default | Bounds |
+|---|---|---|
+| `http_read_timeout` | `5s` | Reading the request, headers and body. |
+| `http_write_timeout` | `10s` | Writing the response. |
+| `http_idle_timeout` | `1m` | An idle keep-alive connection before it is closed. |
+
+```hcl
+listener "tcp" {
+  address            = ":8400"
+  http_write_timeout = "30s"
+}
+```
+
+**Streaming and gateway traffic sheds these deadlines**, and so does the standby
+forwarder. A proxied provider call is bounded by the mount's own `timeout` instead — see
+[Provider configuration](/provider-backends/configuration/) — because the right budget for
+an LLM completion or a long MCP tool call has nothing to do with the right budget for a
+`sys/` API call.
+
+:::note[New in v0.20.0]
+These were hardcoded before. `http_write_timeout` in particular was fixed at 10 seconds,
+which severed **every** response that took longer — no LLM provider mount could reach its
+120-second budget, and raising the mount `timeout` did nothing because the listener cut the
+connection first. See [Upgrading from v0.19.0](/upgrade/from-v0-19/).
+:::
+
 ## See Also
 
 - [SPIFFE auth method](/auth-methods/spiffe/) — authenticating peers by SVID.
