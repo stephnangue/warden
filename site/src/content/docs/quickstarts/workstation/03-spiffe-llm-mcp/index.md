@@ -189,11 +189,16 @@ warden cred spec create github-ops -source github-src -config mint_method=pat -c
 warden policy write mcp-github-access - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  # Deny-by-default: open every method+tool, then block the state-changing ones.
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-    denied_tools    = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
+}
+EOF
+
+# Deny-by-default: open every method+tool, then block the state-changing ones.
+warden policy write -type mcp mcp-github-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
   }
 }
 EOF
@@ -201,7 +206,7 @@ EOF
 warden write auth/spiffe/role/github \
   trust_domain="example.org" \
   allowed_spiffe_ids="spiffe://example.org/ghostunnel" \
-  token_policies="mcp-github-access" cred_spec_name="github-ops" token_ttl="30m"
+  token_policies="mcp-github-access,mcp-github-calls" cred_spec_name="github-ops" token_ttl="30m"
 ```
 
 ### Step 8 — drive Claude Code (both routed over the SVID)

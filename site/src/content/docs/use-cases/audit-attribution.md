@@ -54,7 +54,7 @@ The record is built to be kept. Secrets are **never written in clear**: sensitiv
 values are replaced with a keyed HMAC, deterministic enough to correlate
 occurrences of a value across the log yet impossible to reverse, so the log is safe
 to ship to a SIEM. For [MCP](/concepts/mcp/) traffic the detail goes per tool
-call: every `mcp { }` decision is recorded on **both allow and deny**, with the tool
+call: every MCP policy decision is recorded on **both allow and deny**, with the tool
 or parameter that decided it — a complete account of what an agent did through a
 server, not just what it was blocked from doing.
 

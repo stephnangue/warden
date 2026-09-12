@@ -190,20 +190,23 @@ the tool listing works with no special-case for the method:
 warden policy write pol-repo-lifecycle - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_repository", "create_or_update_file", "delete_file"]
-    condition = <<-CEL
-      (!has(call.args.name) || call.args.name == "warden-role-assertion") &&
-      (!has(call.args.repo) || call.args.repo == "warden-role-assertion")
-    CEL
-  }
+}
+EOF
+
+warden policy write -type mcp pol-repo-lifecycle-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["create_repository", "create_or_update_file", "delete_file"] }
+  condition = <<-CEL
+    (!has(call.args.name) || call.args.name == "warden-role-assertion") &&
+    (!has(call.args.repo) || call.args.repo == "warden-role-assertion")
+  CEL
 }
 EOF
 
 warden write auth/jwt/role/repo-lifecycle \
   bound_subject=my-agent \
-  token_policies=pol-repo-lifecycle \
+  token_policies=pol-repo-lifecycle,pol-repo-lifecycle-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
   description="create the warden-role-assertion repo and write & delete its files (skill: mcp)" \
@@ -219,19 +222,22 @@ clause scopes it; a `tools/list`, which has no `repo`, passes untouched:
 warden policy write pol-issue-triage - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["issue_write"]
-    condition = <<-CEL
-      !has(call.args.repo) || call.args.repo == "warden-role-assertion"
-    CEL
-  }
+}
+EOF
+
+warden policy write -type mcp pol-issue-triage-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["issue_write"] }
+  condition = <<-CEL
+    !has(call.args.repo) || call.args.repo == "warden-role-assertion"
+  CEL
 }
 EOF
 
 warden write auth/jwt/role/issue-triage \
   bound_subject=my-agent \
-  token_policies=pol-issue-triage \
+  token_policies=pol-issue-triage,pol-issue-triage-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
   description="open & close issues on warden-role-assertion (skill: mcp)" \
@@ -244,19 +250,22 @@ warden write auth/jwt/role/issue-triage \
 warden policy write pol-repo-reader - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["get_file_contents"]
-    condition = <<-CEL
-      !has(call.args.repo) || call.args.repo == "warden-role-assertion"
-    CEL
-  }
+}
+EOF
+
+warden policy write -type mcp pol-repo-reader-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["get_file_contents"] }
+  condition = <<-CEL
+    !has(call.args.repo) || call.args.repo == "warden-role-assertion"
+  CEL
 }
 EOF
 
 warden write auth/jwt/role/repo-reader \
   bound_subject=my-agent \
-  token_policies=pol-repo-reader \
+  token_policies=pol-repo-reader,pol-repo-reader-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
   description="read files in warden-role-assertion (skill: mcp)" \
@@ -271,20 +280,23 @@ identity.** The policy is fully functional; the only difference that matters is
 warden policy write pol-forbidden - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_repository", "create_or_update_file", "delete_file"]
-    condition = <<-CEL
-      (!has(call.args.name) || call.args.name == "warden-forbidden") &&
-      (!has(call.args.repo) || call.args.repo == "warden-forbidden")
-    CEL
-  }
+}
+EOF
+
+warden policy write -type mcp pol-forbidden-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["create_repository", "create_or_update_file", "delete_file"] }
+  condition = <<-CEL
+    (!has(call.args.name) || call.args.name == "warden-forbidden") &&
+    (!has(call.args.repo) || call.args.repo == "warden-forbidden")
+  CEL
 }
 EOF
 
 warden write auth/jwt/role/forbidden-repo-lifecycle \
   bound_subject=admin-agent \
-  token_policies=pol-forbidden \
+  token_policies=pol-forbidden,pol-forbidden-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
   description="create the warden-forbidden repo and write & delete its files (skill: mcp)" \

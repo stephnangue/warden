@@ -120,7 +120,7 @@ with the exact tool that was blocked.
 ## See Also
 
 - [Policies](/concepts/policies/) — capabilities, conditions, parameter
-  constraints, and the `mcp { }` rule grammar.
+  constraints, and the MCP policy grammar.
 - [Roles](/concepts/roles/#roles-are-per-request) — per-request role binding
   and changing role mid-session.
 - [Model Context Protocol](/concepts/mcp/) — authorizing individual tool calls

@@ -59,6 +59,20 @@ The two types compose as an **intersection**: a request must be granted by a
 capability policy **and** permitted by every MCP policy in scope. An MCP policy is
 purely restrictive — it can never grant access a capability policy withholds.
 
+An MCP policy comes into scope exactly the way a capability policy does: by being
+named in the role's `token_policies`. Policy names are unique across both types,
+so one list carries both:
+
+```bash
+warden write auth/jwt/role/mcp-user \
+  token_policies=github-paths,github-tools \
+  user_claim=sub \
+  token_ttl=1h
+```
+
+Forgetting the MCP policy is the common first mistake — the role still grants the
+path, but every call is denied with `no_mcp_policy`.
+
 :::caution[Changed in v0.20.0]
 These rules were previously an `mcp` block nested inside a capability policy's
 `path` stanza. That nested block is now **rejected at parse**, the grammar moved
