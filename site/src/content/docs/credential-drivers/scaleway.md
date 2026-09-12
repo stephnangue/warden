@@ -39,15 +39,16 @@ See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
 
 ### Keyless (via chaining, recommended)
 
-The source stores no management key; it is fetched from a keyless-federated vault per
-request. `management_access_key` must be **omitted** when `secret_spec` is set — the key
-is supplied by the referenced spec, and rotation belongs to whoever owns it, so setting
-both is rejected at write.
+The source stores no secret: the management secret key is fetched from a keyless-federated
+vault per request.
+
+The **consumer** is the same whichever producer you use — only the `secret_spec` name
+changes:
 
 ```bash
 warden cred source create scw-keyless \
   -type=scaleway \
-  -config=secret_spec=scw-secret-in-vault
+  -config=secret_spec=scaleway-secret-in-vault
 
 warden cred spec create scw-app-keys \
   -source=scw-keyless \
@@ -55,6 +56,66 @@ warden cred spec create scw-app-keys \
   -config=application_id=11111111-2222-3333-4444-555555555555 \
   -config=ttl=1h
 ```
+
+The **producer** is the spec that yields that secret. Any of the three below can serve it;
+pick the one where the secret already lives. Each is itself keyless, so nothing is stored
+at either hop.
+
+**OpenBao / Vault — `kv2_read`**
+
+```bash
+warden cred spec create scaleway-secret-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=scaleway/management-key \
+  -config=subject_token_source=warden_identity
+```
+
+**AWS Secrets Manager — `secret_read`**
+
+```bash
+warden cred spec create scaleway-secret-in-asm \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=prod/scaleway/management-key \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity
+```
+
+**GCP Secret Manager — `secret_read`**
+
+```bash
+warden cred spec create scaleway-secret-in-sm \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=scaleway-management-key \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+[keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
+
+**Scoped secrets: A management key per project.** A producer's locator key templates on verified
+claims, so one spec resolves to a different secret per caller. Each Public Cloud project has its own management key, so a workload can only mint API keys inside the project it belongs to.
+
+```bash
+warden cred spec create scaleway-key-per-project \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=scaleway/projects/{{agent.metadata.project}}/management-key \
+  -config=subject_token_source=warden_identity \
+  -config=assertion_metadata_claims=project
+```
+
+An agent claim other than `sub` resolves only if the spec lists it in
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the login does not
+carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
+works the same way via `assertion_user_claims`, and the two can be combined in one path.
+
+See [credential chaining](/federation/credential-chaining/#producers).
 
 ### Inline secret (discouraged)
 

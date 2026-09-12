@@ -34,9 +34,11 @@ Both mint methods issue a `gitlab_access_token`. It is **dynamic** — it carrie
 
 ### Keyless (via chaining, recommended)
 
-The PAT is not stored on the source; it is fetched from a keyless-federated vault per
-request. The reference goes on the **source** — that is where the driver validates it —
-while the spec still picks its `mint_method` and target as usual.
+The source stores no secret: the personal access token is fetched from a keyless-federated
+vault per request.
+
+The **consumer** is the same whichever producer you use — only the `secret_spec` name
+changes:
 
 ```bash
 warden cred source create gitlab-keyless \
@@ -53,6 +55,68 @@ warden cred spec create gitlab-ro \
   -config=scopes=read_repository \
   -config=ttl=24h
 ```
+
+The **producer** is the spec that yields that secret. Any of the three below can serve it;
+pick the one where the secret already lives. Each is itself keyless, so nothing is stored
+at either hop.
+
+**OpenBao / Vault — `kv2_read`**
+
+```bash
+warden cred spec create gitlab-pat-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=gitlab/warden-pat \
+  -config=subject_token_source=warden_identity
+```
+
+**AWS Secrets Manager — `secret_read`**
+
+```bash
+warden cred spec create gitlab-pat-in-asm \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=prod/gitlab/warden-pat \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity
+```
+
+**GCP Secret Manager — `secret_read`**
+
+```bash
+warden cred spec create gitlab-pat-in-sm \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=gitlab-warden-pat \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+[keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
+
+**Scoped secrets: A PAT per engineer, inside their group.** A producer's locator key templates on verified
+claims, so one spec resolves to a different secret per caller. GitLab attributes every push to a token owner, so a shared PAT loses the trail. **Both namespaces template into one path**: the agent's group scopes the tree, the verified user picks the engineer's own PAT.
+
+```bash
+warden cred spec create gitlab-pat-per-engineer \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=gitlab/{{agent.metadata.group}}/engineers/{{user.username}}/pat \
+  -config=subject_token_source=warden_identity \
+  -config=assertion_metadata_claims=group \
+  -config=assertion_user_claims=username
+```
+
+A claim is only resolvable if the spec projects it: `assertion_metadata_claims` for the
+agent, `assertion_user_claims` for the user. Resolution is fail-closed at mint — a missing
+claim fails the request rather than falling back to a shared secret, and a `{{user.…}}`
+template on a request with no user fails too, so a per-user secret cannot be reached
+without a user.
+
+See [credential chaining](/federation/credential-chaining/#producers).
 
 ### Inline secret (discouraged)
 

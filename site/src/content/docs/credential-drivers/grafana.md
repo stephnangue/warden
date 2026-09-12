@@ -35,8 +35,11 @@ Mint and revoke otherwise; no source or spec rotation. Create the source with `-
 
 ### Keyless (via chaining, recommended)
 
-The source stores no admin token; it is fetched from a keyless-federated vault per
-request.
+The source stores no secret: the admin token is fetched from a keyless-federated
+vault per request.
+
+The **consumer** is the same whichever producer you use — only the `secret_spec` name
+changes:
 
 ```bash
 warden cred source create grafana-keyless \
@@ -44,6 +47,66 @@ warden cred source create grafana-keyless \
   -config=grafana_url=https://grafana.example.com \
   -config=secret_spec=grafana-admin-in-vault
 ```
+
+The **producer** is the spec that yields that secret. Any of the three below can serve it;
+pick the one where the secret already lives. Each is itself keyless, so nothing is stored
+at either hop.
+
+**OpenBao / Vault — `kv2_read`**
+
+```bash
+warden cred spec create grafana-admin-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=grafana/admin-token \
+  -config=subject_token_source=warden_identity
+```
+
+**AWS Secrets Manager — `secret_read`**
+
+```bash
+warden cred spec create grafana-admin-in-asm \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=prod/grafana/admin-token \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity
+```
+
+**GCP Secret Manager — `secret_read`**
+
+```bash
+warden cred spec create grafana-admin-in-sm \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=grafana-admin-token \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+[keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
+
+**Scoped secrets: A token per environment.** A producer's locator key templates on verified
+claims, so one spec resolves to a different secret per caller. Staging and production run separate Grafana orgs with separate admin tokens. One spec serves both, and a staging workload can never resolve the production token.
+
+```bash
+warden cred spec create grafana-admin-per-env \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=grafana-admin-{{agent.metadata.env}} \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity \
+  -config=assertion_metadata_claims=env
+```
+
+An agent claim other than `sub` resolves only if the spec lists it in
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the login does not
+carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
+works the same way via `assertion_user_claims`, and the two can be combined in one path.
+
+See [credential chaining](/federation/credential-chaining/#producers).
 
 ### Inline secret (discouraged)
 

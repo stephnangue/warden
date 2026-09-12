@@ -36,8 +36,11 @@ Mint and revoke otherwise — no source or spec rotation.
 
 ### Keyless (via chaining, recommended)
 
-The source stores no OVHcloud credential; it is fetched from a keyless-federated vault
-per request.
+The source stores no secret: the OAuth2 client credential — or, for `access_keys`, an existing S3 pair is fetched from a keyless-federated
+vault per request.
+
+The **consumer** is the same whichever producer you use — only the `secret_spec` name
+changes:
 
 ```bash
 warden cred source create ovh-keyless \
@@ -48,6 +51,66 @@ warden cred spec create ovh-token \
   -source=ovh-keyless \
   -config=mint_method=oauth2_token
 ```
+
+The **producer** is the spec that yields that secret. Any of the three below can serve it;
+pick the one where the secret already lives. Each is itself keyless, so nothing is stored
+at either hop.
+
+**OpenBao / Vault — `kv2_read`**
+
+```bash
+warden cred spec create ovh-client-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=ovh/service-account \
+  -config=subject_token_source=warden_identity
+```
+
+**AWS Secrets Manager — `secret_read`**
+
+```bash
+warden cred spec create ovh-client-in-asm \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=prod/ovh/service-account \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity
+```
+
+**GCP Secret Manager — `secret_read`**
+
+```bash
+warden cred spec create ovh-client-in-sm \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=ovh-service-account \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+[keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
+
+**Scoped secrets: A service account per region.** A producer's locator key templates on verified
+claims, so one spec resolves to a different secret per caller. OVHcloud service accounts are regional. Templating on the agent's region keeps an eu-west workload off the ca-east account.
+
+```bash
+warden cred spec create ovh-account-per-region \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=ovh/{{agent.metadata.region}}/service-account \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity \
+  -config=assertion_metadata_claims=region
+```
+
+An agent claim other than `sub` resolves only if the spec lists it in
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the login does not
+carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
+works the same way via `assertion_user_claims`, and the two can be combined in one path.
+
+See [credential chaining](/federation/credential-chaining/#producers).
 
 ### Inline secret (discouraged)
 

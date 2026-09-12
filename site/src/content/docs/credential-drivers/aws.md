@@ -134,12 +134,14 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 |---------------|--------|---------------------|
 | `sts_assume_role` | `aws_access_keys` | `role_arn` (required), `ttl` (default `1h`), `session_name`, `external_id`, `policy` |
 | `secrets_manager` | `aws_access_keys` | `secret_id` (required), `version_stage`, `version_id`, `json_key_map` |
-| `secret_read` | `key_value` | The same Secrets Manager read, vended **verbatim** for [chaining](/federation/credential-chaining/). Same spec config as `secrets_manager`. |
+| `secret_read` | `key_value` | The same Secrets Manager read, vended **verbatim** for [chaining](/federation/credential-chaining/). Same spec config as `secrets_manager`, plus `role_arn` when keyless. |
 | `rds_iam_token` | `db_auth_token` | `db_endpoint` (required), `db_user` (required), `db_engine` (default `postgres`), `db_port`, `region` |
 | `redshift_iam_token` | `db_auth_token` | `db_endpoint` (required), plus exactly one of `cluster_identifier` or `workgroup_name`, `db_name`, `db_port` (default `5439`), `duration_seconds` (900–3600, default `900`), `region` |
 
 `secret_read` is what makes AWS a chaining **producer**: the payload is preserved as
-stored, so a consuming spec can name its fields directly. `sts_assume_role`,
+stored, so a consuming spec can name its fields directly. A **keyless** `secret_read`
+spec must also set `role_arn` — the federated session assumes that role first, and reads
+the secret as it. `sts_assume_role`,
 `secrets_manager` and `secret_read` all work over `auth_method=oidc_federation`, so
 the producer itself can be keyless.
 

@@ -143,6 +143,68 @@ The check applies only to fields the credential type actually models. A key it h
 heard of is left alone on the spec, since it may belong to a mechanism this type does not
 describe.
 
+The **producer** is the spec that yields that secret. Any of the three below can serve it;
+pick the one where the secret already lives. Each is itself keyless, so nothing is stored
+at either hop.
+
+**OpenBao / Vault — `kv2_read`**
+
+```bash
+warden cred spec create api-key-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=datadog/api-key \
+  -config=subject_token_source=warden_identity
+```
+
+**AWS Secrets Manager — `secret_read`**
+
+```bash
+warden cred spec create api-key-in-asm \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=prod/datadog/api-key \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity
+```
+
+**GCP Secret Manager — `secret_read`**
+
+```bash
+warden cred spec create api-key-in-sm \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=datadog-api-key \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+[keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
+
+**Scoped secrets: A Datadog key per user, within a team account.** A producer's locator key templates on verified
+claims, so one spec resolves to a different secret per caller. Dashboards and monitors are attributed to the key that created them. **Both namespaces template into one name**: the agent's team selects the account, the verified user selects their key within it.
+
+```bash
+warden cred spec create datadog-key-per-user \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=datadog-{{agent.metadata.team}}-{{user.username}} \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity \
+  -config=assertion_metadata_claims=team \
+  -config=assertion_user_claims=username
+```
+
+A claim is only resolvable if the spec projects it: `assertion_metadata_claims` for the
+agent, `assertion_user_claims` for the user. Resolution is fail-closed at mint — a missing
+claim fails the request rather than falling back to a shared secret, and a `{{user.…}}`
+template on a request with no user fails too, so a per-user secret cannot be reached
+without a user.
+
+See [credential chaining](/federation/credential-chaining/#producers).
+
 ### Inline secret (discouraged)
 
 One source describes the API; each spec carries a different key. Here two teams share the same OpenAI source with distinct keys:

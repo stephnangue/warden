@@ -35,8 +35,11 @@ HMAC pair and serves it. Use `secret_field` to disambiguate a multi-key payload.
 
 ### Keyless (via chaining, recommended)
 
-The source stores no IBM Cloud API key; it is fetched from a keyless-federated vault per
-request.
+The source stores no secret: the IBM Cloud API key — or, for `access_keys`, the COS HMAC pair is fetched from a keyless-federated
+vault per request.
+
+The **consumer** is the same whichever producer you use — only the `secret_spec` name
+changes:
 
 ```bash
 warden cred source create ibm-keyless \
@@ -47,6 +50,68 @@ warden cred spec create ibm-bearer \
   -source=ibm-keyless \
   -config=mint_method=iam_token
 ```
+
+The **producer** is the spec that yields that secret. Any of the three below can serve it;
+pick the one where the secret already lives. Each is itself keyless, so nothing is stored
+at either hop.
+
+**OpenBao / Vault — `kv2_read`**
+
+```bash
+warden cred spec create ibm-apikey-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=ibm/api-key \
+  -config=subject_token_source=warden_identity
+```
+
+**AWS Secrets Manager — `secret_read`**
+
+```bash
+warden cred spec create ibm-apikey-in-asm \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=prod/ibm/api-key \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity
+```
+
+**GCP Secret Manager — `secret_read`**
+
+```bash
+warden cred spec create ibm-apikey-in-sm \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=ibm-api-key \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+[keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
+
+**Scoped secrets: A COS credential per analyst, inside their team.** A producer's locator key templates on verified
+claims, so one spec resolves to a different secret per caller. Object-storage access is attributed to the person, not the workload — but the bucket belongs to their team. **Both namespaces template into one path**: the agent supplies the team, the verified user supplies the analyst.
+
+```bash
+warden cred spec create ibm-cos-per-analyst \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=cos/{{agent.metadata.team}}/analysts/{{user.email}}/hmac \
+  -config=subject_token_source=warden_identity \
+  -config=assertion_metadata_claims=team \
+  -config=assertion_user_claims=email
+```
+
+A claim is only resolvable if the spec projects it: `assertion_metadata_claims` for the
+agent, `assertion_user_claims` for the user. Resolution is fail-closed at mint — a missing
+claim fails the request rather than falling back to a shared secret, and a `{{user.…}}`
+template on a request with no user fails too, so a per-user secret cannot be reached
+without a user.
+
+See [credential chaining](/federation/credential-chaining/#producers).
 
 ### Inline secret (discouraged)
 
