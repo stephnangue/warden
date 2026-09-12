@@ -20,7 +20,8 @@ Everything else builds on that:
   how the public keys reach internet-facing upstreams through a publisher.
 - **[Keyless credential sources](/federation/keyless-credentials/)** — set
   `auth_method=oidc_federation` to federate an assertion for a short-lived cloud
-  credential, holding no stored secret (AWS, Azure, GCP, OpenBao/Vault).
+  credential, holding no stored secret (AWS, Azure, GCP, Alibaba Cloud, Kubernetes,
+  and OpenBao/Vault).
 - **[Assertion claims](/federation/assertion-claims/)** — how the assertion is scoped:
   audience, `warden_resource`, login metadata, per-user, and the signing algorithm.
 - **[Credential chaining](/federation/credential-chaining/)** — source a provider's

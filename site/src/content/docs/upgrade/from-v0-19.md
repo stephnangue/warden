@@ -16,10 +16,15 @@ returned as an error rather than skipped — so after the upgrade a policy carry
 it. Export first:
 
 ```bash
-for name in $(warden policy list); do
-  warden policy read "$name" > "policy-backup-$name.hcl"
+for name in $(warden policy list -o text); do
+  warden policy read -o table "$name" > "policy-backup-$name.hcl"
 done
 ```
+
+Both `-o` flags matter. The CLI defaults to `table` on a terminal but **`json` when
+piped or redirected**, so without them `policy list` yields JSON array tokens and
+`policy read` writes an envelope object rather than the policy text. `-o table` is the
+raw HCL.
 
 **2. Snapshot your audit device config.** The `salt_fields` selectors move with the
 rename (§1). A stale selector does not error — it silently stops matching, and the value

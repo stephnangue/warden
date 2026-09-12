@@ -4,9 +4,22 @@ title: "Scaleway"
 
 > Source `type`: `scaleway`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
+:::
+
 The Scaleway driver brokers credentials from **Scaleway IAM**. A **source** holds the connection details for the Scaleway API and, when dynamic minting or rotation is used, a privileged **management key** (an access-key/secret-key pair with IAM permission to create and delete API keys). Each **spec** decides how a credential is produced: either by handing back a pre-existing key pair stored on the spec, or by asking the IAM API to mint a fresh, expiring API key on demand.
 
 Operators reach for this driver to give workloads Scaleway API keys without embedding long-lived secrets in the workload. Static keys are convenient when a key pair already exists; dynamic keys let Warden create short-lived keys per lease and revoke them automatically when the lease ends.
+
+## Keyless (via chaining)
+
+The management secret key does not have to be stored on the source: set `secret_spec` to
+fetch it from another cred spec via [credential chaining](/federation/credential-chaining/)
+at mint time, so nothing is stored at Warden.
+
+The referenced credential's `management_secret_key` field is used by default; name a
+different one with `secret_field`.
 
 ## Credential issued
 
@@ -23,6 +36,27 @@ See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
 - **Source rotation** — **slow**: stages a newly minted management key alongside the old one and waits ~30 seconds (default, tunable via the source's `activation_delay`) so it propagates before the old key is destroyed. Rotates the source's `management_access_key` / `management_secret_key`; requires both to be present.
 
 ## Examples
+
+### Keyless (via chaining, recommended)
+
+The source stores no management key; it is fetched from a keyless-federated vault per
+request. `management_access_key` must be **omitted** when `secret_spec` is set — the key
+is supplied by the referenced spec, and rotation belongs to whoever owns it, so setting
+both is rejected at write.
+
+```bash
+warden cred source create scw-keyless \
+  -type=scaleway \
+  -config=secret_spec=scw-secret-in-vault
+
+warden cred spec create scw-app-keys \
+  -source=scw-keyless \
+  -config=mint_method=dynamic_keys \
+  -config=application_id=11111111-2222-3333-4444-555555555555 \
+  -config=ttl=1h
+```
+
+### Inline secret (discouraged)
 
 The source carries a management key when dynamic minting or rotation is in play. Each spec then picks a `mint_method`.
 

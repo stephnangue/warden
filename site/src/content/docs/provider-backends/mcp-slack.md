@@ -311,14 +311,14 @@ called, and the Slack user it acted as — while the token stays salted:
 MCP traffic passes through two complementary layers of authorization. The minted
 Slack access token is the security boundary — its scopes and the consenting
 user's workspace permissions bound what the agent can actually do in Slack
-regardless of what Warden lets through. On top of that, Warden's CBP policies
+regardless of what Warden lets through. On top of that, Warden's MCP policies
 provide governance-style restrictions enforced at the
 gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs,
 prompt names, and selected tool arguments.
 
 An MCP policy is **body-authoritative** and **deny-by-default** — Warden
 strict-parses the JSON-RPC body and a block grants only what it allow-lists
-(`initialize`, `ping`, and `notifications/*` stay exempt for the handshake). See
+(`initialize`, `ping`, `notifications/*` and `server/discover` stay exempt for the handshake and discovery). See
 [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization)
 for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the
 `rule_type` values recorded on each decision.

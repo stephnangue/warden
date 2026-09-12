@@ -33,7 +33,7 @@ pages link here rather than repeating it.
 | --- | --- |
 | `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
 | `agent` | `principal`, `role`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject}`), `token_type`, `token_ttl_seconds`, `token_expires_at` |
-| `user` | `present`, `principal`, `role`, `namespace`, `metadata.<key>`, `actors`, `token_type`, `token_ttl_seconds`, `token_expires_at`. There is no `user.policies` ([why](#14-what-user-does-not-give-you)) |
+| `user` | `present`, `principal`, `role`, `namespace`, `metadata.<key>`, `actors`, `token_type`, `token_ttl_seconds`, `token_expires_at`. There is no `user.policies` ([why](#13-what-user-does-not-give-you)) |
 | `now` | the request timestamp |
 | `call` | `method`, `tool`, `args.<key>`, `batch_index` — **MCP policies only** |
 
@@ -125,9 +125,11 @@ path "prod/*" {
 Absent keys deny. If the label is optional, guard it:
 `has(agent.metadata.env) && agent.metadata.env == 'prod'`.
 
-### 5. Ephemeral tokens only
+### 5. Require a token that expires soon
 
-Refuse long-lived tokens on a sensitive path:
+`agent.token_ttl_seconds` is the credential's **remaining** lifetime, recomputed at
+evaluation time — not the TTL it was issued with. So this refuses any token with more than
+an hour left on a sensitive path:
 
 ```hcl
 path "prod/break-glass/*" {
@@ -136,22 +138,11 @@ path "prod/break-glass/*" {
 }
 ```
 
-### 6. Require a token that expires soon
+`agent.token_expires_at` expresses the same bound as an absolute epoch second, so
+`agent.token_expires_at - int(now) <= 3600` is equivalent. Prefer `token_ttl_seconds` for
+a rolling window; reach for `token_expires_at` when comparing against a fixed instant.
 
-`agent.token_expires_at` is epoch seconds, and `int(now)` converts the request timestamp
-to the same unit — so you can require a credential near the end of its life rather than
-one merely *issued* short:
-
-```hcl
-path "prod/break-glass/*" {
-  capabilities = ["update"]
-  condition    = "agent.token_expires_at - int(now) <= 900"
-}
-```
-
-Recipe 5 bounds the token's *original* lifetime; this bounds the window still remaining.
-
-### 7. Require an attached policy
+### 6. Require an attached policy
 
 `agent.policies` is the list of policies bound to the token:
 
@@ -162,7 +153,7 @@ path "prod/break-glass/*" {
 }
 ```
 
-### 8. Reject implicit (transparent) tokens
+### 7. Reject implicit (transparent) tokens
 
 `request.transparent` is `true` when the identity was established implicitly from a
 forwarded JWT rather than an explicit login:
@@ -187,7 +178,7 @@ only exists on a mount configured with `user_auth_path`. A `user.*` condition on
 non-gateway path denies every request.
 :::
 
-### 9. Require a user behind the agent
+### 8. Require a user behind the agent
 
 The guard form. `user.present` is `false` when no user credential rode the request:
 
@@ -199,7 +190,7 @@ path "prod/payments/*" {
 ```
 
 A *bare* `user.present` is rejected at write time — see
-[recipe 14](#14-what-user-does-not-give-you). Compare it explicitly as above, or use it as
+[recipe 13](#13-what-user-does-not-give-you). Compare it explicitly as above, or use it as
 a guard (`user.present && …`) as every recipe below does.
 
 When this denies because no user was presented, Warden answers **`401` with a
@@ -207,7 +198,7 @@ When this denies because no user was presented, Warden answers **`401` with a
 should authenticate a user and retry. A retry that presents a user and still fails gets a
 terminal `403` — the exchange cannot loop.
 
-### 10. Bind the user to the agent acting for them
+### 9. Bind the user to the agent acting for them
 
 The canonical binding, and the one that matters most. It is not enough that *a* user and
 *an* agent are both present — the user must be paired with **this** agent. Otherwise any
@@ -252,7 +243,7 @@ instead, comparing some other value carried on the user's token against the agen
 identity. The claim mapping, the condition layer and the per-request evaluation are
 identical; only the provenance of the compared value differs.
 
-### 11. Same-team binding
+### 10. Same-team binding
 
 Require the agent and the user to share an attribute, when a full consent chain is more
 than you need:
@@ -264,7 +255,7 @@ path "prod/deploy/*" {
 }
 ```
 
-### 12. Humans for writes, agents for reads
+### 11. Humans for writes, agents for reads
 
 Step-up authorization: let an agent read unattended, but require a user for anything
 mutating:
@@ -276,7 +267,7 @@ path "prod/config/*" {
 }
 ```
 
-### 13. Scope by a verified user attribute
+### 12. Scope by a verified user attribute
 
 Gate on an attribute of the user rather than the workload:
 
@@ -287,7 +278,7 @@ path "finance/reports/*" {
 }
 ```
 
-### 14. What `user` does not give you
+### 13. What `user` does not give you
 
 Four constraints worth knowing before writing a `user` condition:
 
@@ -309,7 +300,7 @@ Four constraints worth knowing before writing a `user` condition:
 
 ## Request shape, network and time
 
-### 15. Cap a numeric body field
+### 14. Cap a numeric body field
 
 Bound a value in the request body — e.g. an LLM token budget:
 
@@ -320,7 +311,7 @@ path "anthropic/role/+/gateway*" {
 }
 ```
 
-### 16. Pin a field to an allowlist
+### 15. Pin a field to an allowlist
 
 ```hcl
 path "anthropic/role/+/gateway*" {
@@ -329,7 +320,7 @@ path "anthropic/role/+/gateway*" {
 }
 ```
 
-### 17. Require a field to be present
+### 16. Require a field to be present
 
 ```hcl
 path "db/issue-grant" {
@@ -338,7 +329,7 @@ path "db/issue-grant" {
 }
 ```
 
-### 18. Optional field with a safe default
+### 17. Optional field with a safe default
 
 Cap a field *if present*, but allow the request when it is omitted:
 
@@ -349,7 +340,7 @@ path "db/issue-grant" {
 }
 ```
 
-### 19. Closed key set
+### 18. Closed key set
 
 Reject any request carrying a body field outside an allowed set:
 
@@ -360,7 +351,7 @@ path "slack/role/+/gateway/chat.postMessage" {
 }
 ```
 
-### 20. Source-IP allowlist
+### 19. Source-IP allowlist
 
 ```hcl
 path "admin/*" {
@@ -373,7 +364,7 @@ path "admin/*" {
 `X-Real-IP` / `X-Forwarded-For`, which a client can forge if those headers are not
 stripped at the edge.
 
-### 21. Business hours, weekdays only
+### 20. Business hours, weekdays only
 
 `getDayOfWeek` returns `0` for Sunday through `6` for Saturday:
 
@@ -388,7 +379,7 @@ path "aws/role/+/*" {
 }
 ```
 
-### 22. Read-only on a wildcard path
+### 21. Read-only on a wildcard path
 
 The `capabilities` list already selects the rule; a condition narrows which operations
 actually proceed:
@@ -400,7 +391,7 @@ path "secret/data/*" {
 }
 ```
 
-### 23. Confine a token to its own namespace
+### 22. Confine a token to its own namespace
 
 A token minted in a parent namespace can, by default, act in its children. `agent.namespace`
 is where it was minted; `request.namespace` is what it targets:
@@ -430,7 +421,7 @@ Referencing `call.args` in a capability policy's `path` condition is a **compile
 error**, not a silent deny — the two layers use separate CEL environments by design.
 :::
 
-### 24. Gate a single tool
+### 23. Gate a single tool
 
 ```hcl
 path "mcp/gateway/github/*" {
@@ -440,7 +431,7 @@ path "mcp/gateway/github/*" {
 }
 ```
 
-### 25. Constrain tool arguments
+### 24. Constrain tool arguments
 
 This is how argument restrictions are expressed. The former `allowed_params` /
 `denied_params` keys are removed and rejected at write — a CEL condition over `call.args`
@@ -457,7 +448,7 @@ path "mcp/gateway/deploy/*" {
 The optional access matters: a caller who simply omits `env` would otherwise deny on a
 missing key.
 
-### 26. Scope a condition to one method
+### 25. Scope a condition to one method
 
 A condition runs for **every** method its block governs. If the block covers more than
 `tools/call`, an expression reading `call.args` fails closed on the others. Scope it:
@@ -466,7 +457,7 @@ A condition runs for **every** method its block governs. If the block covers mor
 condition = "call.method != 'tools/call' || call.args.amount <= 1500"
 ```
 
-### 27. Per-user tool arguments
+### 26. Per-user tool arguments
 
 Combine the user principal with the call to keep a user inside their own resources:
 
@@ -478,7 +469,7 @@ path "mcp/gateway/github/*" {
 }
 ```
 
-### 28. A full payments contract
+### 27. A full payments contract
 
 The most complex case combines every layer — structural tool gates, per-tool budgets over
 `call.args`, and identity, network and time context, all fail-closed:

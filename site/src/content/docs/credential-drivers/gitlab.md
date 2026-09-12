@@ -4,9 +4,23 @@ title: "GitLab"
 
 > Source `type`: `gitlab`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
+:::
+
 The GitLab driver mints **project access tokens** and **group access tokens** from a GitLab server. Warden calls the GitLab API to create short-lived, scoped tokens on demand and revokes them when their lease ends, so workloads never hold a long-lived credential.
 
 The privileged secret lives in the **source** config. The driver authenticates to GitLab one of two ways, set by `auth_method`: **PAT mode** (default) uses a **personal access token**, and **OAuth2 mode** uses an application ID and secret via the client-credentials flow. Each **spec** then names a project or group and the scopes the minted token should carry. An operator reaches for this driver to broker CI and automation access to specific GitLab projects or groups without distributing standing tokens.
+
+## Keyless (via chaining)
+
+The Personal Access Token does not have to be stored: set `secret_spec` to source it from
+another cred spec via [credential chaining](/federation/credential-chaining/). Warden
+fetches the PAT from a keyless-federated vault at mint time and uses it to mint the
+downstream token, so nothing is stored at Warden.
+
+The referenced credential's `personal_access_token` field is used by default; name a
+different one with `secret_field`.
 
 ## Credential issued
 
@@ -17,6 +31,30 @@ Both mint methods issue a `gitlab_access_token`. It is **dynamic** — it carrie
 - **Source rotation** — **fast**, prepares and activates in one step (immediately-consistent upstream). The driver rotates its own source credential: in PAT mode it calls GitLab's atomic PAT rotate endpoint; in OAuth2 mode it renews the application secret. In both cases GitLab invalidates the old credential as part of the rotate, so the new one is committed inline with no propagation delay.
 
 ## Examples
+
+### Keyless (via chaining, recommended)
+
+The PAT is not stored on the source; it is fetched from a keyless-federated vault per
+request. The reference goes on the **source** — that is where the driver validates it —
+while the spec still picks its `mint_method` and target as usual.
+
+```bash
+warden cred source create gitlab-keyless \
+  -type=gitlab \
+  -config=gitlab_address=https://gitlab.example.com \
+  -config=secret_spec=gitlab-pat-in-vault
+
+warden cred spec create gitlab-ro \
+  -source=gitlab-keyless \
+  -config=mint_method=project_access_token \
+  -config=project_id=42 \
+  -config=token_name=warden-ro \
+  -config=access_level=20 \
+  -config=scopes=read_repository \
+  -config=ttl=24h
+```
+
+### Inline secret (discouraged)
 
 **PAT source, project access token** — authenticate with a personal access token and mint a project-scoped token:
 
@@ -32,6 +70,8 @@ warden cred spec create gitlab-app-deploy \
   -source=gitlab-ci \
   -config=mint_method=project_access_token \
   -config=project_id=42 \
+  -config=token_name=warden-deploy \
+  -config=access_level=30 \
   -config=scopes=api,read_repository \
   -config=ttl=24h
 ```
@@ -51,6 +91,7 @@ warden cred spec create gitlab-group-ci \
   -source=gitlab-oauth \
   -config=mint_method=group_access_token \
   -config=group_id=100 \
+  -config=token_name=warden-group-ro \
   -config=scopes=read_repository \
   -config=access_level=30 \
   -config=ttl=24h

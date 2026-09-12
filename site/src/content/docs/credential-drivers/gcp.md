@@ -104,6 +104,7 @@ Keys for `warden cred source create <name> -type=gcp -config=key=value ...`:
 | `auth_method` | No | `static` | How the source authenticates: `static` (stored SA key) or `oidc_federation` ([keyless](/federation/keyless-credentials/) — Workload Identity Federation). |
 | `service_account_key` | For `static` | — | GCP service-account key in JSON format; must contain `client_email` and `private_key` (masked). Omit for keyless. |
 | `workload_identity_provider` | For keyless | — | Full WIF provider resource name; must start with `//iam.googleapis.com/` (e.g. `//iam.googleapis.com/projects/…/locations/global/workloadIdentityPools/…/providers/…`). |
+| `sts_endpoint` | No | `sts.googleapis.com` | Override the STS host. **Keyless only** — rejected on a `static` source, which exchanges the service-account key's own `token_uri` and never calls STS. |
 | `ca_data` | No | — | Base64-encoded PEM CA certificate for custom/self-signed CAs (secret, masked on read) |
 | `tls_skip_verify` | No | `false` | Skip TLS certificate verification (development only) |
 
@@ -113,6 +114,18 @@ Keys for `warden cred source create <name> -type=gcp -config=key=value ...`:
 |---------------|--------|---------------------|
 | `access_token` (default) | OAuth2 access token for the source SA | `scopes` |
 | `impersonated_access_token` | OAuth2 access token for a target SA via IAM | `target_service_account`, `scopes`, `lifetime` |
+| `secret_read` | Secret Manager payload as `key_value` | `secret_name` (required), `secret_version`, `project`, optional `target_service_account` |
+
+`secret_read` makes GCP a chaining **producer**: the Secret Manager payload is vended
+under its own key names, with no primary field to select — the shape a chained
+consumer reads by name. It is federation-first, so the producer itself can be keyless,
+and it can impersonate a target service account to reach the secret. See
+[credential chaining](/federation/credential-chaining/#producers).
+
+`secret_name` may be a bare secret id — in which case `project` is required — or an
+already-qualified `projects/<project>/secrets/<name>`. It accepts `{{user.<claim>}}` /
+`{{agent.<claim>}}` templating, and a template that cannot be resolved fails closed
+rather than being sent literally.
 
 Spec-config keys set with `warden cred spec create ... -config=key=value`:
 

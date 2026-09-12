@@ -89,14 +89,18 @@ and pass through under the capability policy alone.
 
 ### Name-bearing methods
 
-Three methods carry a name that the policy can gate; others are gated by method
-only:
+Four methods carry a name that the policy can gate; others are gated by method only:
 
-| Method | Gated name | From |
-|--------|-----------|------|
-| `tools/call` | the tool | `params.name` |
-| `resources/read` | the resource | `params.uri` |
-| `prompts/get` | the prompt | `params.name` |
+| Method | Gated name | From | Family |
+|--------|-----------|------|--------|
+| `tools/call` | the tool | `params.name` | `tools` |
+| `resources/read` | the resource | `params.uri` | `resources` |
+| `resources/subscribe` | the resource | `params.uri` | `resources` |
+| `prompts/get` | the prompt | `params.name` | `prompts` |
+
+`subscriptions/listen` is gated too: each URI it subscribes to is checked against the
+`resources` lists, so a caller denied `resources/read` on a URI cannot reach the same
+data through update-timing signals instead.
 
 ### Evaluation order
 
@@ -111,7 +115,7 @@ order, and the first failure denies it:
    `initialize`, `ping`, `notifications/*`, and `server/discover` are exempt from
    the allow-list — they carry no tool/resource/data access and must work for the
    handshake and discovery — but a `denied` entry can still block them explicitly.
-2. **Name** (for the three name-bearing methods) — the matching
+2. **Name** (for the four name-bearing methods) — the matching
    `tools` / `resources` / `prompts` block's `denied` rejects first; then the name
    must appear in its `allowed`. An empty or absent list **denies every name**.
 3. **Condition** (CEL) — the stanza's per-call `condition`, if present, runs last
@@ -232,11 +236,11 @@ denial:
 |---|---|
 | `denied_methods` / `allowed_methods` | JSON-RPC `method` matches a deny pattern, or is absent from a configured allow list |
 | `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
-| `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
+| `denied_resources` / `allowed_resources` | `resources/read` or `resources/subscribe` with a `params.uri` matching a deny pattern, or not in the allow list — also applied per URI when `subscriptions/listen` subscribes |
 | `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
 | `no_mcp_policy` | MCP traffic reached a path with **no MCP policy in scope**. New in v0.20.0 — such traffic previously passed unrestricted |
 | `header_mismatch` | MCP transport headers contradict, or fail to describe, the body Warden parsed. Structural rather than a policy decision — no contract was consulted, and none can permit it |
-| `missing_method_header` | The transport did not declare the method the body carries |
+| `missing_method_header` | A legacy sentinel for a transport that declared no method. Effectively unreachable on the body-authoritative path, where `header_mismatch` covers transport contradictions |
 | `batch_unsupported` | A batch arrived from a client negotiating a modern protocol revision, where batching left the spec |
 | `batch_list_unfilterable` | A batch contains a list method; a batched list response cannot be pruned per element, so Warden fails closed rather than return an unfiltered list |
 | `missing_body` | A `POST`/JSON-RPC body is absent or fails to parse on a path with MCP enforcement. Body-less verbs (`GET` SSE stream, `DELETE` session terminate) skip MCP evaluation entirely |

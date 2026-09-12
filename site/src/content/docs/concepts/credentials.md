@@ -198,7 +198,7 @@ Warden ships drivers for:
 | `kubernetes` | Kubernetes API |
 | `local` | Static secrets stored in the spec itself |
 | `apikey` | Generic static API keys |
-| `ibm`, `elastic`, `grafana`, `honeycomb`, `alicloud`, `scaleway`, `ovh` | The respective SaaS / cloud APIs |
+| `ibm`, `elastic`, `grafana`, `alicloud`, `scaleway`, `ovh` | The respective SaaS / cloud APIs |
 
 Each driver has a reference page under [Credential drivers](/credential-drivers/) covering
 its config keys, mint methods, credential types, and rotation behaviour.

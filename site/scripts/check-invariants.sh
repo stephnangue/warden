@@ -91,12 +91,20 @@ check "MCP policy: no nested \`mcp {\` block" \
 #   'honeycomb' \
 #   "$docs/credential-drivers" site/astro.config.mjs
 
-# Enable with the provider mechanical pass, which renames optional_metadata and
-# removes the retired IBM and OVH mint methods.
+# DROPPED, not pending: a blanket check for removed keys and mint methods
+# (`optional_metadata`, `iam_with_cos`, `dynamic_s3`, `oauth2_token_and_s3`).
 #
-# check "Credential config: no removed keys or mint methods" \
-#   'optional_metadata|iam_with_cos|dynamic_s3|oauth2_token_and_s3' \
-#   "$docs"
+# The intent was to stop reference pages teaching config the server rejects. In
+# practice every page that documented one now names it in a migration callout —
+# apikey.md for the rename, ibm.md and ovh.md for the removed mint methods —
+# because an operator who configured the old thing has to be told it is gone and
+# what replaces it. That is the docs working, not drifting.
+#
+# A grep cannot tell "here is how to configure X" from "X was removed, do this
+# instead", so this belongs to review rather than CI, like the header keys below.
+# What CI can still catch is the structural half: a page that reintroduces the
+# removed syntax in a runnable example would also reintroduce it in a code fence,
+# and the examples in these pages are validated against a dev server before merge.
 
 # Deliberately NOT a check: `user_token_header` / `X-Warden-User-Token`.
 #

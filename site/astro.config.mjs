@@ -227,7 +227,6 @@ export default defineConfig({
             { slug: 'credential-drivers/gitlab' },
             { slug: 'credential-drivers/grafana' },
             { slug: 'credential-drivers/vault' },
-            { slug: 'credential-drivers/honeycomb' },
             { slug: 'credential-drivers/ibm' },
             { slug: 'credential-drivers/kubernetes' },
             { slug: 'credential-drivers/local' },

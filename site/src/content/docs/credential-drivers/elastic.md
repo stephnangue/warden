@@ -4,9 +4,23 @@ title: "Elasticsearch"
 
 > Source `type`: `elastic`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
+:::
+
 The Elasticsearch driver mints short-lived **API keys** from an Elasticsearch cluster's Security API. The privileged secret is a pre-encoded API key held in the **source** config; Warden authenticates to the cluster with it and, for each **credential**, creates a scoped, expiring API key via the cluster's Security API.
 
 Operators reach for this driver when a workload needs to talk to Elasticsearch and should carry its own narrowly-scoped key rather than a shared cluster credential. Per-spec parameters control the key's name, lifetime, and role descriptors, so one source can back many specs with different privilege sets.
+
+## Keyless (via chaining)
+
+The management credential does not have to be stored on the source: set `secret_spec` to
+fetch it from another cred spec via [credential chaining](/federation/credential-chaining/)
+at mint time, so nothing is stored at Warden.
+
+The chained payload may carry either an already-`encoded` API key, or an `id` /
+`api_key_id` plus `api_key` pair that the driver encodes itself. Use `secret_field` when
+the payload holds more than one candidate.
 
 ## Credential issued
 
@@ -18,6 +32,24 @@ Operators reach for this driver when a workload needs to talk to Elasticsearch a
 - **Source rotation** — **slow** — stages a newly minted API key and waits ~10s (default, tunable via the source's `activation_delay`) for in-cluster propagation before invalidating the old key. Rotates the driver's own source API key via the Security API; requires the `manage_api_key` or `manage_own_api_key` cluster privilege.
 
 ## Examples
+
+### Keyless (via chaining, recommended)
+
+The source stores no cluster API key; it is fetched from a keyless-federated vault per
+request.
+
+```bash
+warden cred source create es-keyless \
+  -type=elastic \
+  -config=elastic_url=https://my-cluster.es.us-east-1.aws.cloud.es.io \
+  -config=secret_spec=es-key-in-vault
+
+warden cred spec create es-search-ro \
+  -source=es-keyless \
+  -config=expiration=24h
+```
+
+### Inline secret (discouraged)
 
 One source holds the pre-encoded cluster API key; each spec creates a scoped, expiring key from it.
 
@@ -54,12 +86,16 @@ Keys for `warden cred source create <name> -type=elastic -config=key=value ...`:
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `elastic_url` | Yes | — | Cluster URL; must use `https` (plain `http` allowed only with `tls_skip_verify`). |
-| `api_key` | Yes | — | Pre-encoded API key, base64 of `id:api_key` (secret, masked on read). |
+| `api_key` | Yes* | — | Pre-encoded API key, base64 of `id:api_key` (secret, masked on read). |
 | `api_key_id` | No | derived | API key ID; extracted from `api_key` if omitted. |
 | `activation_delay` | No | `10s` | Wait for key propagation during source rotation. |
 | `key_name_prefix` | No | `warden` | Prefix for generated API key names. |
 | `ca_data` | No | — | Base64-encoded PEM CA bundle for custom/self-signed CAs (secret, masked on read). |
 | `tls_skip_verify` | No | `false` | Skip TLS certificate verification (development only). |
+
+\* Required only when the source is **not** keyless. A source that sets
+`secret_spec` (chaining) or `auth_method=oidc_federation` must **omit** it — setting
+both is rejected at write. See [Keyless](#keyless-via-chaining).
 
 ## Specs and mint methods
 

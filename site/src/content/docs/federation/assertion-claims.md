@@ -118,6 +118,8 @@ touches the network):
 | GCP `impersonated_access_token` | `gcp-iam:<target_service_account>` |
 | GCP `access_token` | `gcp-wif:<workload_identity_provider>` |
 | Vault (`hvault`) | an **unprefixed** value per mint method — the `<kv2_mount>/<secret_path>`, `<aws_mount>/<role_name>`, `jwt_role`, etc. |
+| Alibaba Cloud `assume_role` | `alicloud-ram:<role_arn>` |
+| Kubernetes | an **unprefixed** `<namespace>/<service_account>`; emitted only when the spec sets both |
 | `token_exchange` (single RFC 8707 resource) | `oauth-resource:<uri>` |
 
 Override the derived value with **`assertion_resource=<value>`**, or suppress the claim
