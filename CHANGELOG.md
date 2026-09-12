@@ -4,6 +4,79 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.20.0] — 2026-09-13
+
+### Breaking Changes
+
+- **The CEL `token` namespace is renamed to `agent`.** Policy conditions now describe two principals — `agent` (the workload) and `user` (the person it acts for) — so the namespace is named for the one it means. Six fields carry over unchanged; three take a `token_` prefix because they describe the credential rather than the principal: `token.type` → `agent.token_type`, `token.ttl_seconds` → `agent.token_ttl_seconds`, `token.expires_at` → `agent.token_expires_at`. **There is no alias.** A condition referencing `token` fails to compile with a directed error naming the replacement, both at write and at load — and because a stored policy is re-parsed on every read, a policy carrying `token.*` **cannot be read back after the upgrade**. Export your policy texts first (`warden policy list -o text`, `warden policy read -o table`). Audit `salt_fields` selectors move too, and this one is quiet: a stale selector does not error, it simply stops matching, and the value it was protecting **begins logging in clear**. (#624)
+
+- **Dual-token extraction; `user_token_header` retired.** `Backend.ExtractToken` becomes `ExtractTokens(r, userLeg)`, and a mount with `user_auth_path` now carries two credentials. The legs are the other way round from before: `Authorization` carries the **user**, and the agent presents a client certificate or the new **`X-Warden-Agent-Token`** header. Consequences to check on upgrade: an agent that sent its own token in `Authorization` under an ambient client certificate on such a mount now resolves to the **certificate** identity; `X-Warden-Token` and `Authorization` together on a protected-resource mount is a `400`; and `user_auth_path` is read from the **mount only**, no longer from namespace metadata, so a deployment that set it at namespace level must re-set it per mount. A persisted `user_token_header` loads with a warning and is ignored. (#487)
+
+- **MCP rules move out of capability policies into a first-class policy type.** MCP authorization lives at `sys/policies/mcp/<name>`, written with `warden policy write -type mcp`. An `mcp { }` block nested inside a capability policy's `path` stanza is **rejected at parse**, with an error naming the new location. The grammar moved from `allowed_*` / `denied_*` keys to family blocks (`methods`, `tools`, `resources`, `prompts`), each taking `allowed` / `denied`, and `allowed_params` / `denied_params` are removed — express argument constraints as a CEL `condition` over `call.args`. Effective access is the **intersection**: a request must be granted by a capability policy and permitted by every MCP policy in scope, which an MCP policy can only narrow. Policy names are unique across both types, and an MCP policy comes into scope the same way as any other — by being named in the role's `token_policies`. (#584, #585, #586)
+
+- **MCP traffic with no MCP policy in scope is denied.** Previously it passed unrestricted; it now fails closed with `no_mcp_policy`. Any mount meant to stay open needs an explicit wildcard MCP policy. The session-lifecycle methods `initialize`, `ping`, `notifications/*` and `server/discover` stay exempt so the handshake and the 2026-07-28 revision's discovery RPC work without one. (#587, #590)
+
+- **The `mcp` and `mcp_aws` mount `timeout` default drops from 10 minutes to 60 seconds**, and its meaning tightens: it now caps a **single call** rather than a session. Applies to newly created mounts; existing mounts keep their stored value. Long-lived streams — `subscriptions/listen` and the legacy SSE GET — answer to the new **`listen_timeout`**, which defaults to the previous 10 minutes. Set `timeout` explicitly on any mount whose individual tool calls run long. (#589)
+
+- **IBM `iam_with_cos` is removed.** It bundled two unrelated credentials into one spec. Split it into an `iam_token` spec and an `access_keys` spec that sources the COS HMAC pair through `secret_spec` — `access_keys` **requires** the reference; there is no inline form. (#556)
+
+- **OVH `dynamic_s3` and `oauth2_token_and_s3` are removed**, along with the source's `api_url`, `project_id` and `user_id` keys. Replace them with `access_keys`, which serves a pair held elsewhere rather than minting one, so revocation is a no-op and no leases are issued. **Drain any credentials minted by the removed methods before upgrading** — they keep their lease ids and are not cleaned up afterwards. (#549)
+
+- **The `apikey` source key `optional_metadata` is renamed to `credential_fields`.** The old name is rejected on write with an error naming the new one; there is no alias. The mechanism also **works** now: the declared fields were discarded before reaching the provider, so a source that looked correct silently carried nothing. That is what makes Datadog's `application_key` and Atlassian's `email` reachable, and it means a spec written against the old behaviour may start behaving differently — correctly — once renamed. (#505)
+
+### New Features
+
+**Agent and user in the policy layer**
+
+- **The verified user principal is visible to CEL conditions.** A `user` namespace sits beside `agent`, carrying the same fields minus `policies` — the user never authorizes, so exposing it would read like an authorization check that it is not. The user cannot widen what an agent may do, but it can be made **required**, which is what enables a binding rule: it is not enough that a user and an agent are both present, the user must be paired with *this* agent. The pairing is attested on the user's token by an RFC 8693 claim — `may_act` (§4.4) where the IdP pre-authorizes an agent, `act` (§4.1) where the credential is itself a post-exchange delegation token — and projected into metadata with an RFC 6901 pointer, so either maps the same way. (#625, #626)
+
+- **A policy denial that a user could remedy answers `401`, not `403`.** When a condition references `user.*` and denies because no user was presented, Warden returns `401` with a `WWW-Authenticate: Bearer` challenge carrying a `resource_metadata` parameter, so the client knows to authenticate a user and retry. A retry that presents a user and still fails gets a terminal `403` — the exchange cannot loop. (#627)
+
+- **RFC 9728 protected resource metadata.** Warden publishes a discovery document per user-auth mount at `/.well-known/oauth-protected-resource/v1/<namespace>/<mount>`, so the client receiving that challenge can find the authorization server without out-of-band configuration. Configured deployment-wide with `warden protected-resource configure`. (#488)
+
+**MCP policies and protocol hardening**
+
+- **Per-URI gating for `subscriptions/listen`.** Each URI a caller subscribes to is checked against the `resources` family, so a caller denied `resources/read` on a URI cannot reach the same data through update-timing signals instead. (#591)
+- **MCP transport headers are validated against the body** they describe; a contradiction is denied structurally (`header_mismatch`), since no contract was consulted to reach it and none can permit it. (#592)
+- **Modern-era batches are refused** (`batch_unsupported`) — batching left the MCP spec in 2025-06-18. Legacy-era batches still work, and the client's self-description is recorded. (#594)
+- **Per-principal MCP responses are marked uncacheable** by shared caches. (#593)
+
+**Credentials**
+
+- **AWS Secrets Manager and GCP Secret Manager can produce chained secrets** via `mint_method=secret_read`, joining OpenBao/Vault's `kv2_read`. Both can be federated, which is what makes a chain keyless end to end. A keyless AWS `secret_read` assumes `role_arn` first and reads the secret as that role. (#607, #621)
+- **Keyless federation for Alibaba Cloud and Kubernetes.** Alibaba Cloud exchanges an assertion via STS `AssumeRoleWithOIDC` (`oidc_provider_arn` on the source, `assume_role` only); Kubernetes presents the assertion **directly as the bearer token** to the API server with no exchange hop, so its audience must match one the cluster authenticator accepts. (#538, #530)
+- **Sign a client assertion without holding the key — `client_auth=kms_private_key_jwt`.** The same RFC 7523 assertion goes on the wire as `private_key_jwt`, but the key lives in a KMS and Warden never sees it. The capability arrives by chaining and has no inline form. (#566)
+- **`transit_signer` mints a scoped signing capability** rather than key material: a short-lived token that may do nothing but sign with one named transit key. Its `transit_key` accepts claim templating, so one spec can select a signing key per caller. Exchange-path-only; requires a spec-level `jwt_role`. (#565)
+- **Claim templating reaches more locators.** `{{agent.<claim>}}` joins `{{user.<claim>}}`, and an AWS `secret_id` templates alongside Vault's `secret_path` and GCP's `secret_name`. Values are allow-listed, cannot span a path segment, and a `.`/`..` segment composed after substitution is rejected. (#522, #606)
+- **Endpoint overrides**: AWS `sts_endpoint` / `secretsmanager_endpoint` (mutually exclusive with `rotation_period`, which manages keys those overrides do not redirect) and GCP `sts_endpoint` (keyless only — a static source exchanges the service-account key's own `token_uri` and never calls STS). (#600, #620)
+- **`json_key_map` field selection and a `secret_version` pin** generalized across `static_aws`, `static_apikey` and `kv2_read`; both refused where inert. (#554)
+- **The OAuth2 connect callback validates the RFC 9207 `iss` parameter** byte-exactly. (#595)
+- **Nine more drivers can chain their standing secret** — elastic, gitlab, grafana, ibm, oauth2, ovh, scaleway and apikey join github, with token_exchange chaining its client credential. The `oauth2` driver chains the **whole** client credential on the source (`client_credentials` grant only); chaining a refresh token is no longer supported.
+- **The `honeycomb` credential driver is removed.** The keys it minted were wrong on the wire and Honeycomb offers no way to revoke or expire them, so a leaked key stayed valid indefinitely. Hold the key in a vault and chain it through the `apikey` driver. The honeycomb **provider** is unaffected. (#581)
+
+**Providers**
+
+- **Prometheus `auth_type` moved to mount config**, which is what made Basic auth reachable at all — the per-spec field never reached the provider. (#504)
+- **Datadog carries `DD-APPLICATION-KEY`** and **Atlassian's Basic-auth branch is reachable**, both consequences of adjunct fields now surviving the mint. (#505)
+
+### Fixed
+
+- **`cas_required` is enforced.** The policy write path never applied it, so a policy that set it was unguarded. A check-and-set refusal now answers `4xx` rather than `500` — a failed check-and-set is the caller's race to lose, not a server fault. (#513)
+- **Denied requests are audited once**, not twice. (#627)
+- **Responses longer than 10 seconds survive.** A hardcoded listener write timeout severed every response over ~10s, so no LLM provider mount could reach its 120-second budget and raising the mount `timeout` did nothing. The listener now exposes `http_read_timeout` (5s), `http_write_timeout` (10s) and `http_idle_timeout` (1m), and streaming and gateway traffic sheds them. (#589)
+- **`rotation_period` is rejected wherever the credential holds no secret to rotate.** (#531)
+- **A stale compiled-policy cache entry could outlive its policy.** (#491)
+- **Sealed OAuth spec-config keys are enforced**, and a masked-config resend no longer clobbers the stored secret. (#512, #502)
+- **Non-revocable credentials no longer take lease handles** they cannot honour. (#534)
+- **Git smart-HTTP probe passthrough is restored for certificate agents**, and the AWS provider strips `X-Warden-*` headers upstream. (#490)
+- **Non-object JSON request bodies are carried**, and a refusal answers `4xx` rather than `500`. (#507)
+- Internal login is kept off the caller's body and query. (#506)
+
+### Dependencies
+
+- Go 1.26.0 → 1.26.7, plus grpc and grouped minor/patch bumps.
+
+
 ## [v0.19.0] — 2026-08-15
 
 ### Breaking Changes
