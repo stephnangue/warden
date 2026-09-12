@@ -8,24 +8,13 @@ title: "Static API Key"
 This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
 :::
 
-:::note[The fallback driver — reach for it when nothing else fits]
-Most drivers exist because an upstream offers a **dynamic-credential API** worth speaking
-to: STS, an OAuth token endpoint, a secrets engine. `apikey` is the one that assumes
-none of that. It serves a credential the upstream minted out-of-band, to **any** HTTP API
-that authenticates with a header.
-
-That makes it the driver of last resort **and** the one with the widest reach. Most of the
-world's APIs authenticate with a header token and nothing more, so when no purpose-built
-driver models your upstream, this is the answer — not a gap to be filled later. Paired
-with the generic [`rest`](/provider-backends/rest/) or [`mcp`](/provider-backends/mcp/)
-provider, it brokers an upstream Warden has never heard of without a line of new code.
-
-Being the fallback does not make it second-class. With
-[chaining](#keyless-via-chaining) it is **keyless**, exactly like the cloud drivers, and
-`credential_fields` lets it model multi-part credentials rather than only single tokens.
-:::
-
 The **static API key** driver serves a long-lived **API key** to any HTTP API — OpenAI, Anthropic, Datadog, or any service that authenticates with a header token. Unlike most drivers, the privileged secret does not live on the **source**: the `api_key` is supplied per **credential spec**, so one source can describe the shape of an API (its base URL, how to attach the key, how to verify it) while many specs each carry a different key. This lets a single source back several teams or projects that hit the same API with distinct keys.
+
+Reach for this driver when no purpose-built one models your upstream — see
+[when no driver matches](/credential-drivers/#when-no-driver-matches-your-upstream) for
+why it is the one with the widest reach. Nothing about that makes it a lesser option:
+with [chaining](#keyless-via-chaining) it is keyless like the cloud drivers, and
+`credential_fields` carries credentials that are not a single token.
 
 At mint time the key is returned as-is with **no TTL and no lease** — Warden stores it (or
 fetches it per request when chained), verifies it, and injects it. The source config also
