@@ -15,17 +15,30 @@ or another agent the agent acts for*, not necessarily a person.
 
 Every gateway request resolves up to two principals:
 
-- The **agent** — the caller's own credential. It is authenticated, and **today it is
-  the sole authorizer**: it alone drives the [policy](/concepts/policies/) decision.
-- The **user** — a second, first-class token resolved from a separate request header
-  (`X-Warden-User-Token` by default) through the same [auth methods](/auth-methods/), via
-  **secondary transparent authentication**. The user is **identity-only**: it does not
-  authorize the request and never appears in the policy engine.
+- The **agent** — the caller's own credential. It is authenticated, and it is the **sole
+  authorizer**: it alone carries the policies that drive the
+  [policy](/concepts/policies/) decision.
+- The **user** — a second, first-class token resolved through the same
+  [auth methods](/auth-methods/), via **secondary transparent authentication**. On a mount
+  with `user_auth_path` set, the user's credential arrives in `Authorization` and the agent
+  presents its own out of band, as a client certificate or in `X-Warden-Agent-Token`.
 
-> **Present behavior, not a permanent guarantee.** Today the user principal is used only
-> for *attribution and scoping* — never authorization. The roadmap is for authorization
-> to become the **intersection of the agent's and the user's permissions** (both must
-> permit the request). Read "the user does not authorize" as *today*, not *never*.
+The user is **identity-only**, which is a narrower claim than it sounds: the user grants
+no permissions — `user.policies` does not exist, and no policy is ever evaluated against
+the user's token — but the user *is* visible to the policy engine as a condition input.
+A [CEL condition](/concepts/cel-conditions/#agent-acting-for-a-user) can read `user.*` and
+refuse a request that has no user, or one whose user is not bound to the agent presenting
+it:
+
+```hcl
+condition = "user.present && user.metadata.authorized_agent == agent.principal"
+```
+
+So the user cannot *widen* what an agent may do, but it can be made *required*. When a
+condition like this denies because no user was presented, Warden answers **`401` with a
+`WWW-Authenticate: Bearer` challenge** rather than a bare `403`, so the client knows to
+authenticate a user and retry; a retry that presents a user and still fails gets a
+terminal `403`.
 
 The feature is opt-in and fail-closed: with no `user_auth_path` configured, the user
 principal is absent and the request behaves exactly as before. When configured, a
@@ -151,8 +164,16 @@ Set on the provider mount or namespace:
 | Key | Default | Description |
 |---|---|---|
 | `user_auth_path` | *(off)* | The auth mount that validates the user credential. Bearer-format mounts only. Absent ⇒ no user principal. |
-| `user_token_header` | `X-Warden-User-Token` | Request header carrying the user credential. |
 | `user_auth_role` | *(mount default)* | Role the user auth uses. |
+
+:::caution[Changed in v0.20.0]
+`user_auth_path` is read from the **mount only** — it is no longer picked up from namespace
+metadata, so a deployment that set it at the namespace level must re-set it per mount. The
+`user_token_header` key and its `X-Warden-User-Token` default are **retired**: the user's
+credential now rides in `Authorization` and the agent moves to `X-Warden-Agent-Token`. A
+persisted `user_token_header` loads with a warning and is ignored. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#2-dual-token-extraction-user_token_header-retired).
+:::
 
 On a `warden_identity` spec, `assertion_user_claims` (comma-separated) discloses the user
 under the `warden_user` claim.

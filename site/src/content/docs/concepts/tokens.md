@@ -86,7 +86,7 @@ Each token record carries the context needed to authorize and audit it:
 | `ExpireAt` | When the token stops being valid. |
 | `CredentialSpec` | The credential the token is scoped to issue, if any. |
 | `Actors` | The verified RFC 8693 `act` delegation chain (from the JWT `act` claim), preserved so [delegation](/concepts/delegation/) survives transparent-token caching. |
-| `Metadata` | Verified, login-derived identity attributes (e.g. `env`, `team`) mapped from the caller's JWT claims, certificate fields, or service-account attributes — never caller-supplied. Matched by [`token_metadata` policy conditions](/concepts/policies/#fine-grained-access) as `token.metadata.<key>`. |
+| `Metadata` | Verified, login-derived identity attributes (e.g. `env`, `team`) mapped from the caller's JWT claims, certificate fields, or service-account attributes — never caller-supplied. Matched by [policy conditions](/concepts/policies/#fine-grained-access) as `agent.metadata.<key>` (or `user.metadata.<key>` for the user principal). |
 
 Unlike the other fields, **`Metadata` is how per-identity attributes reach
 policy**. Each auth method maps trusted parts of the verified identity onto
@@ -95,7 +95,7 @@ metadata keys — the [JWT](/auth-methods/jwt/) and SPIFFE JWT-SVID methods via
 [Kubernetes](/auth-methods/kubernetes/), and [SPIFFE](/auth-methods/spiffe/)
 X.509 methods via `metadata_mappings`. Because the values come from the verified
 credential and never from the request, a [CEL `condition`](/concepts/cel-conditions/)
-can trust `token.metadata.<key>` to gate access, and the same attributes are
+can trust `agent.metadata.<key>` to gate access, and the same attributes are
 recorded in the [audit log](/concepts/audit/) in clear by default — so every
 decision stays explainable.
 
