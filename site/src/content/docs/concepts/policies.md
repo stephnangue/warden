@@ -281,8 +281,14 @@ capability policy governs *paths and operations*; an MCP policy governs *calls*:
 ```bash
 warden policy write -type mcp github-tools - <<'EOF'
 path "mcp/gateway/*" {
-  methods { allowed = ["tools/list", "tools/call"] denied = ["tools/dangerous"] }
-  tools   { allowed = ["get_repository", "list_issues"] denied = ["delete_*"] }
+  methods {
+    allowed = ["tools/list", "tools/call"]
+    denied  = ["tools/dangerous"]
+  }
+  tools {
+    allowed = ["get_repository", "list_issues"]
+    denied  = ["delete_*"]
+  }
   condition = "call.args.?env.orValue('') != 'prod'"
 }
 EOF

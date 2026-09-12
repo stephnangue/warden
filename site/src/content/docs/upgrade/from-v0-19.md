@@ -151,7 +151,10 @@ path "mcp/gateway/github/*" {
 warden policy write -type mcp github-tools - <<'EOF'
 path "mcp/gateway/github/*" {
   methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_repository"] denied = ["delete_*"] }
+  tools {
+    allowed = ["get_repository"]
+    denied  = ["delete_*"]
+  }
 }
 EOF
 ```
