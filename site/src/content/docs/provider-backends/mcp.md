@@ -71,7 +71,7 @@ warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.jso
 
 # Create a role that binds the credential spec and policy
 warden write auth/jwt/role/mcp-user \
-    token_policies="mcp-access" \
+    token_policies="mcp-access,mcp-access-calls" \
     user_claim=sub \
     cred_spec_name=mcp-creds
 ```
@@ -87,7 +87,7 @@ warden audit enable -file-path=/tmp/warden-audit.log file
 
 Each gateway request then writes a request/response pair to that file — the agent
 identity, the bound credential (`type`/`source_name`/`spec_name`), the policy
-decision (the `mcp_decision` for `mcp { }` rules), and the upstream URL.
+decision (the `mcp_decision` for MCP policy rules), and the upstream URL.
 
 ## Step 2: Mount and Configure the Provider
 
@@ -106,8 +106,9 @@ warden provider list
 ```
 
 Configure the provider. **`mcp_url` is required — there is no default.** Point it
-at your MCP server's base URL. The default `timeout` is 10 minutes — raise it for
-agent sessions that keep an SSE stream open across many tool calls:
+at your MCP server's base URL. `timeout` bounds a **single call** and defaults to
+**60 seconds** — raise it when individual tool calls run long. A long-lived SSE session is
+bounded by `listen_timeout` instead, which still defaults to 10 minutes:
 
 ```bash
 warden write cloudflare-mcp/config <<EOF
@@ -207,24 +208,26 @@ warden cred spec read mcp-creds
 MCP traffic passes through two complementary layers of authorization. The minted
 bearer token is the security boundary — its scopes bound what the agent can
 actually do at the upstream regardless of what Warden lets through. On top of
-that, Warden's CBP policies support an `mcp { }` block for governance-style
+that, Warden's MCP policies provide governance-style
 restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC
 methods, tool names, resource URIs, prompt names, and selected tool arguments.
 
-The `mcp { }` block is **body-authoritative** and **deny-by-default** — Warden
+An MCP policy is **body-authoritative** and **deny-by-default** — Warden
 strict-parses the JSON-RPC body and a block grants only what it allow-lists
-(`initialize`, `ping`, and `notifications/*` stay exempt for the handshake). See
+(`initialize`, `ping`, `notifications/*` and `server/discover` stay exempt for the handshake and discovery). See
 [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization)
 for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the
 `rule_type` values recorded on each decision.
 
 The examples below use `capabilities = ["create", "read", "delete"]` — the three
 MCP Streamable HTTP verbs on the `/gateway/` URL (POST for JSON-RPC, GET for the
-SSE stream, DELETE for session terminate). The `mcp { }` block only fires on the
+SSE stream, DELETE for session terminate). MCP policy enforcement only fires on the
 POST half.
 
-The simplest policy grants the gateway and leans on the token's scopes for
-everything:
+The simplest setup grants the gateway and leans on the token's scopes for
+everything. It still takes **two** policies: the capability policy granting the
+path, and a wildcard MCP policy — without one, every call is denied
+(`no_mcp_policy`):
 
 ```bash
 warden policy write mcp-access - <<EOF
@@ -232,7 +235,19 @@ path "cloudflare-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
 }
 EOF
+
+warden policy write -type mcp mcp-access-calls - <<EOF
+path "cloudflare-mcp/role/+/gateway*" {
+  methods   { allowed = ["*"] }
+  tools     { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts   { allowed = ["*"] }
+}
+EOF
 ```
+
+Bind **both** names on the role — an MCP policy comes into scope by being listed
+in `token_policies`, exactly like a capability policy.
 
 A policy that restricts the agent to a vetted set of tools:
 
@@ -240,10 +255,13 @@ A policy that restricts the agent to a vetted set of tools:
 warden policy write mcp-readonly - <<EOF
 path "cloudflare-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read"]
-    allowed_tools   = ["search_docs", "list_*", "get_*"]
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-readonly-calls - <<EOF
+path "cloudflare-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call", "resources/list", "resources/read"] }
+  tools { allowed = ["search_docs", "list_*", "get_*"] }
 }
 EOF
 ```
@@ -256,21 +274,27 @@ dangerous ones. Under deny-by-default the `["*"]` allow-lists are required; the
 warden policy write mcp-safe - <<EOF
 path "cloudflare-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-    denied_tools    = ["delete_*", "purge_*", "update_*"]
+}
+EOF
+
+warden policy write -type mcp mcp-safe-calls - <<EOF
+path "cloudflare-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_*", "purge_*", "update_*"]
   }
 }
 EOF
 ```
 
-When a request hits the `mcp { }` gate and is denied, Warden returns HTTP 403
+When a request hits the MCP policy gate and is denied, Warden returns HTTP 403
 with a structured JSON body and an RFC 6750 `WWW-Authenticate` header; MCP client
 SDKs surface this to the agent as a tool-call failure with an actionable message.
 The audit log records the matched rule and the offending tool/parameter.
-Policies that omit the `mcp { }` block keep today's behaviour: Warden passes the
-request through unchanged and the token's scopes alone enforce authorization.
+An MCP mount with **no MCP policy in scope denies every call** (`no_mcp_policy`).
+There is no pass-through default: to leave a mount open, write a wildcard MCP
+policy and let the token's scopes enforce authorization upstream.
 
 ## Step 5: Point an MCP Client at Warden
 
@@ -353,7 +377,7 @@ warden write auth/cert/config \
 ```bash
 warden write auth/cert/role/mcp-user \
     allowed_common_names="agent-*" \
-    token_policies="mcp-access" \
+    token_policies="mcp-access,mcp-access-calls" \
     cred_spec_name=mcp-creds
 ```
 

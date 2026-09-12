@@ -91,20 +91,39 @@ view. **Keyless** columns are best; **Inline: static** is discouraged.
 | `azure` | ✓ | | ✓ | ✓ | |
 | `gcp` | ✓ | | ✓ | | |
 | `hvault` | ✓ | | ✓ | ✓ | |
+| `alicloud` | ✓ | | ✓ | | |
+| `kubernetes` | ✓ | | ✓ | | |
 | `token_exchange` | | ✓ | ✓ | | ✓ |
-| `oauth2` | | | ✓ | | ✓ |
+| `oauth2` | | ✓ | ✓ | | ✓ |
 | `github` | | ✓ | ✓ | ✓ | |
-| `gitlab` | | | ✓ | | |
-| `kubernetes` | | | ✓ | | |
-| `alicloud` | | | ✓ | | |
-| `scaleway` | | | ✓ | ✓ | |
-| `ovh` | | | ✓ | | |
-| `ibm` | | | ✓ | | |
-| `elastic` | | | ✓ | | |
-| `grafana` | | | ✓ | | |
-| `honeycomb` | | | ✓ | | |
+| `gitlab` | | ✓ | ✓ | | |
+| `scaleway` | | ✓ | ✓ | ✓ | |
+| `ovh` | | ✓ | ✓ | | |
+| `ibm` | | ✓ | ✓ | | |
+| `elastic` | | ✓ | ✓ | | |
+| `grafana` | | ✓ | ✓ | | |
+| `apikey` | | ✓ | | ✓ | |
 | `local` | | | | ✓ | |
-| `apikey` | | | | ✓ | |
+
+**Federation** is `auth_method=oidc_federation`: the source stores no secret and
+each request exchanges a Warden-minted assertion for a short-lived credential.
+Six drivers accept it — the four clouds, Kubernetes, and OpenBao/Vault.
+**Chaining** is `secret_spec`: the source stores no secret either, but obtains one
+per request from another spec. Either way nothing standing sits in Warden's
+barrier — they differ in what the upstream trusts, an assertion or a secret.
+
+`token_exchange` is keyless by **chaining only**, which is easy to misread. It
+forwards a caller-derived subject token — often a Warden assertion — to an STS,
+so its *request* is federated; but the source must still authenticate itself to
+the token endpoint, and that client credential is what chaining removes.
+
+A chained secret has to come from somewhere. Four mint methods can serve as the
+**producer** at the far end of a `secret_spec`: `hvault` `kv2_read`, `aws`
+`secret_read` (Secrets Manager), `gcp` `secret_read` (Secret Manager), and
+`hvault` `transit_signer` — which yields not a secret but a scoped *signing
+capability*, so its consumer can sign without the key ever being read. A producer
+can itself be federated, which is what makes a chain keyless end to end. See
+[credential chaining](/federation/credential-chaining/#producers).
 
 Keyless is arriving across more drivers over time — treat this as the current map,
 not a permanent one.
@@ -124,6 +143,21 @@ Two questions, in order:
    [chaining](/federation/credential-chaining/)); fall back to **inline secret** only
    when you must, and there **dynamic** beats **static** (which is not for production).
 
+### When no driver matches your upstream
+
+Use [**`apikey`**](/credential-drivers/apikey/). Every other driver exists because its
+upstream offers a dynamic-credential API worth speaking to; `apikey` assumes none, and
+serves a credential minted out-of-band to any HTTP API that authenticates with a header.
+Since most APIs do exactly that, it has the widest reach of any driver here — pair it with
+the generic [`rest`](/provider-backends/rest/) or [`mcp`](/provider-backends/mcp/) provider
+and Warden brokers an upstream it has never heard of, with no new code.
+
+It is a fallback, not a downgrade: with [chaining](/federation/credential-chaining/) it is
+keyless like the cloud drivers, and `credential_fields` lets it carry multi-part
+credentials rather than only single tokens. Reach for [`local`](/credential-drivers/local/)
+instead only when the value is not an API key at all and needs no verification or header
+shaping.
+
 ## Reference
 
 Every driver has its own page covering config keys, mint methods, credential types,
@@ -140,7 +174,6 @@ and rotation behaviour.
 | [GitLab](/credential-drivers/gitlab/) | `gitlab` | project and group access tokens |
 | [Grafana](/credential-drivers/grafana/) | `grafana` | service-account tokens |
 | [HashiCorp Vault / OpenBao](/credential-drivers/vault/) | `hvault` | KV, AWS/GCP/IBM engines, tokens, OAuth2 |
-| [Honeycomb](/credential-drivers/honeycomb/) | `honeycomb` | V2 API keys |
 | [IBM Cloud](/credential-drivers/ibm/) | `ibm` | IAM bearer tokens, COS keys |
 | [Kubernetes](/credential-drivers/kubernetes/) | `kubernetes` | ServiceAccount tokens via the TokenRequest API |
 | [Local](/credential-drivers/local/) | `local` | static secrets stored directly in the spec |

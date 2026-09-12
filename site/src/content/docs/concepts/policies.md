@@ -121,7 +121,7 @@ arbitrary boolean logic in one place:
 ```hcl
 path "db/issue-grant" {
   capabilities = ["create"]
-  condition    = "request.data.ttl_seconds <= 3600 && token.metadata.env == 'prod'"
+  condition    = "request.data.ttl_seconds <= 3600 && agent.metadata.env == 'prod'"
 }
 ```
 
@@ -129,17 +129,24 @@ A `condition` is evaluated against the request after capability and path
 matching select the rule — it refines a grant, it does not create one.
 
 **What an expression can read.** Conditions evaluate against a fixed set of
-variables built from the request:
-
-| Namespace | Fields |
-| --- | --- |
-| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
-| `token` | `principal`, `role`, `type`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject}`), `ttl_seconds`, `expires_at` |
-| `now` | the request timestamp |
+namespaces built from the request: `request` (path, operation, client IP, mount
+details, body values), `agent` (the authenticating principal), `user` (the
+optional second principal it acts for), and `now`. The
+[CEL Condition Cookbook](/concepts/cel-conditions/#quick-reference) carries the
+full field reference; it is the single source for that table.
 
 Secret material (the token value, accessor) is never exposed. `request.data` is
 the request body for non-MCP providers; MCP tool-call arguments are exposed as
-`call.args` inside an `mcp { }` block (see [MCP](/concepts/mcp/)).
+`call.args` in an [MCP policy](/concepts/mcp/), a separate policy type with its
+own CEL environment — referencing `call` here is a compile-time error.
+
+:::caution[Renamed in v0.20.0]
+The `token` namespace is now **`agent`**; its `type`, `ttl_seconds` and
+`expires_at` fields become `agent.token_type`, `agent.token_ttl_seconds` and
+`agent.token_expires_at`. There is no alias — a stored policy referencing the old
+namespace fails to load. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#1-the-token-cel-namespace-is-now-agent).
+:::
 
 **Helpers beyond the CEL built-ins:**
 
@@ -163,7 +170,9 @@ the request body for non-MCP providers; MCP tool-call arguments are exposed as
   compiled policy stays correct across every token that shares it.
 - **Bounded.** Expressions are type-checked and cost-bounded at policy-write
   time; an invalid, non-boolean, or too-expensive expression is rejected when the
-  policy is written, not at request time.
+  policy is written, not at request time. Note this catches undeclared
+  *namespaces*, not undeclared *fields*: because the namespaces are dynamic maps,
+  a mistyped `agent.metadta.env` compiles and then fails closed at request time.
 
 Examples:
 
@@ -174,18 +183,18 @@ condition = "request.data.ttl_seconds <= 3600"
 # request-body constraints: require a field, restrict a value, forbid a key
 condition = "has(request.data.owner) && request.data.tier in ['gold', 'silver'] && !has(request.data.internal)"
 
-# set membership over token metadata
-condition = "token.metadata.env in ['dev', 'staging']"
+# set membership over agent metadata
+condition = "agent.metadata.env in ['dev', 'staging']"
 
 # require a delegate in the act chain
-condition = "size(token.actors) > 0"
+condition = "size(agent.actors) > 0"
 
-# operation-conditional (capability still selects the rule)
-condition = "request.operation == 'read' ? true : token.metadata.role == 'writer'"
+# require a verified user bound to this agent
+condition = "user.present && user.metadata.authorized_agent == agent.principal"
 ```
 
-For 20 worked examples — source-IP and time gates, auth-method and delegation
-checks, namespace confinement, and a full per-tool MCP budget — see the
+For worked examples in four classes — an agent acting alone, an agent acting for
+a user, request/network/time shaping, and MCP tool calls — see the
 [CEL Condition Cookbook](/concepts/cel-conditions/).
 
 ### Path expiration
@@ -231,8 +240,9 @@ even considered, and any failure denies the request immediately:
 1. **Capability** — does the rule grant the capability for this operation? If
    not, the request is denied and nothing further runs.
 2. **Condition** — does the path-level `condition` (CEL) hold?
-3. **MCP block** — for a gateway request, does the parsed body pass the
-   `mcp { }` rules (including its per-call `condition`)?
+3. **MCP policy** — for MCP traffic, does the parsed body pass the
+   [MCP policies](/concepts/mcp/) in scope (including their per-call
+   `condition`)? With no MCP policy in scope, MCP traffic is denied.
 
 (For `list`/`scan` requests a final step clamps the pagination limit to the
 rule's `pagination_limit` and applies any response key filter — this shapes the
@@ -240,11 +250,10 @@ response, it is not an access gate.)
 
 This ordering is not incidental — it shapes how policies must be written:
 
-- **Path + capability is the outer gate; `condition` and `mcp` only refine it.**
-  An `mcp { }` block never grants access on its own: the rule must already grant
-  the operation's capability, or the block is never reached. Conversely, granting
-  the capability *without* an `mcp` block allows **every** call on that path —
-  the block only ever narrows, never widens.
+- **Path + capability is the outer gate; `condition` and MCP policies only refine
+  it.** An MCP policy never grants access on its own: the capability policy must
+  already grant the operation, or the MCP gate is never reached. It only ever
+  narrows, never widens.
 - **A coarser gate that denies ends the request.** A failed `condition`
   denies *before* Warden parses the request body, so source-IP and time-of-day
   limits hold no matter what the MCP call contains — and they cost nothing on the
@@ -261,54 +270,46 @@ provider [proxies a workload's request to an upstream](/concepts/providers/), a 
 can authorize the *content* of that request — which is essential for governing
 what an AI agent is actually allowed to do at the other end of the gateway.
 
-For **[Model Context Protocol](/concepts/mcp/) (MCP)** traffic, a path block can carry an `mcp { }`
-block. Warden parses the JSON-RPC body of the proxied request and authorizes each
-call by method, by the tool / resource / prompt it names, and by its arguments (a
-per-call CEL `condition` over `call.args`) — before the request ever reaches the
-upstream:
+For **[Model Context Protocol](/concepts/mcp/) (MCP)** traffic, Warden parses the JSON-RPC
+body of the proxied request and authorizes each call by method, by the tool /
+resource / prompt it names, and by its arguments — before the request ever
+reaches the upstream.
 
-```hcl
+Those rules live in a **separate policy type**, not in the capability policy. A
+capability policy governs *paths and operations*; an MCP policy governs *calls*:
+
+```bash
+warden policy write -type mcp github-tools - <<'EOF'
 path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods   = ["tools/list", "tools/call"]
-    denied_methods    = ["tools/dangerous"]
-
-    allowed_tools     = ["get_repository", "list_issues"]
-    denied_tools      = ["delete_*", "force_*"]
-
-    allowed_resources = ["github://repo/*"]
-    denied_resources  = ["github://secrets/*"]
-
-    allowed_prompts   = ["*"]
-    denied_prompts    = ["sudo_*"]
-
-    # Argument-value rules are expressed as a per-call CEL condition over
-    # call.args (see Fine-grained access):
-    condition = "call.args.?path.orValue('docs/').startsWith('docs/') && call.args.?env.orValue('') != 'prod'"
+  methods {
+    allowed = ["tools/list", "tools/call"]
+    denied  = ["tools/dangerous"]
   }
+  tools {
+    allowed = ["get_repository", "list_issues"]
+    denied  = ["delete_*"]
+  }
+  condition = "call.args.?env.orValue('') != 'prod'"
 }
+EOF
 ```
 
-Semantics:
+The two compose as an **intersection**: a request must be granted by a capability
+policy **and** permitted by every MCP policy in scope. An MCP policy is purely
+restrictive — it can never grant access a capability policy withholds.
 
-- **Deny-by-default.** An `mcp { }` block grants nothing until it allow-lists it:
-  an empty or absent `allowed_methods`/`allowed_tools`/`allowed_resources`/`allowed_prompts`
-  denies every method/tool/resource/prompt. Use `["*"]` to open a family fully.
-- **Deny is checked before allow.** A call matching a `denied_*` list is rejected;
-  otherwise it must match the corresponding (mandatory) `allowed_*` list.
-- **Lifecycle methods are exempt.** `initialize`, `ping`, and `notifications/*`
-  bypass the method allow-list so the client handshake always works (a
-  `denied_methods` entry can still block them).
-- **Patterns use trailing `*` only.** `delete_*` and a bare `*` are valid; a `*`
-  in any other position is rejected at parse time.
-- **Argument values are gated by the CEL `condition`** over `call.args`,
-  evaluated per call after the name/method lists.
-- **Multiple `mcp` blocks OR together** — adding blocks can only widen what is
-  allowed. In a batched JSON-RPC request, a single denied call denies the batch.
+:::caution[Changed in v0.20.0]
+MCP rules were previously written as an `mcp` block nested inside a capability
+policy's `path` stanza. That nested block is now **rejected at parse**, and the
+grammar changed from `allowed_*` / `denied_*` keys to `methods` / `tools` /
+`resources` / `prompts` family blocks. MCP traffic with **no MCP policy in scope is now
+denied** where it previously passed unrestricted. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#3-mcp-rules-are-a-first-class-policy-type).
+:::
 
-This is the authorization step a provider performs after authentication and
-before injecting a credential (see [How a request flows](/concepts/providers/#how-a-request-flows));
+See [MCP](/concepts/mcp/) for the full grammar and denial reasons. This is the
+authorization step a provider performs after authentication and before injecting
+a credential (see [How a request flows](/concepts/providers/#how-a-request-flows));
 gating on body content is why a streaming provider may parse the request body.
 
 ## The Root Policy
@@ -347,8 +348,65 @@ warden policy list
 warden policy delete app-ro          # prompts; -f to skip confirmation
 ```
 
-Policies are stored under `sys/policies/cbp/<name>`. Writes support a
-check-and-set (`cas`) version for safe concurrent updates.
+Every subcommand takes a **`-type`** flag selecting which kind of policy it acts
+on — `cbp` (capability-based, the default) or `mcp`:
+
+```bash
+warden policy write -type mcp github-tools ./github-tools.hcl
+warden policy read   -type mcp github-tools
+warden policy list   -type mcp
+warden policy delete -type mcp github-tools
+```
+
+Capability policies are stored under `sys/policies/cbp/<name>` and MCP policies
+under `sys/policies/mcp/<name>`. Names are unique **across** both types, so an
+MCP policy cannot reuse a capability policy's name.
+
+Writes support a **check-and-set** version. It matters more for a policy than for
+ordinary data: when two writers race, the change that gets silently clobbered is
+often a *tightening*, so a lost update quietly restores access somebody
+deliberately removed. Typical uses:
+
+- **Concurrent edits.** Two operators or two pipelines each read version 7 and
+  write back; the second write is refused instead of overwriting the first.
+- **Reconcilers.** A controller reads version N and writes with `cas=N`, so if
+  anything moved underneath it re-reconciles against current state rather than
+  fighting.
+- **Create-only provisioning.** `cas=-1` asserts the policy does *not* yet exist,
+  so a name collision fails loudly instead of silently adopting a policy someone
+  else owns.
+- **A standing guardrail.** `cas_required` makes blind writes impossible on a
+  high-value policy.
+
+It is an API parameter rather than a CLI flag, so a guarded write goes through the
+path directly:
+
+```bash
+warden write sys/policies/cbp/app-ro <<EOF
+{
+  "policy": "path \"secret/data/app/*\" { capabilities = [\"read\"] }",
+  "cas": 7,
+  "cas_required": true
+}
+EOF
+```
+
+A write is refused with `400` in three cases: `cas` omitted where check-and-set is
+required, `cas` not matching the current version, and `cas=-1` against a policy
+that already exists. These are deliberately client errors — a failed
+check-and-set is the caller's race to lose, not a server fault.
+
+`cas_required` is persisted with the policy and OR'd with the flag on **every**
+write, so it cannot be dropped by accident: a policy that demands check-and-set
+can still stop demanding it, but the write that lifts the flag must itself carry
+a matching `cas`.
+
+:::note[Changed in v0.20.0]
+`cas_required` is now actually enforced — the write path never applied it before,
+so a policy that set it was unguarded. A check-and-set refusal now answers `4xx`
+instead of `500`. A deployment that set the flag and relied on writes succeeding
+anyway will start seeing conflicts.
+:::
 
 ## See Also
 

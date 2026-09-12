@@ -62,18 +62,45 @@ per-request assertion.
 
 ## What can be chained
 
-Two consumers use `secret_spec` today:
+### Consumers
 
-- **A secret-backed provider** — a source/spec that needs a standing secret names the
-  spec that produces it, so the provider becomes keyless at Warden.
-- **The token-exchange client secret** — a `token_exchange` source sources its
-  `client_secret` (or `private_key`) this way instead of storing it inline, making the
-  exchange keyless. See [Token Exchange](/credential-drivers/token-exchange/#sourcing-the-client-secret-keylessly).
+Ten drivers can source their standing secret this way, so a secret-backed provider
+becomes keyless at Warden: **`elastic`**, **`github`**, **`gitlab`**, **`grafana`**,
+**`ibm`**, **`oauth2`**, **`ovh`**, **`scaleway`**, **`apikey`**, and
+**`token_exchange`**.
 
-The referenced spec produces the secret. A common producer is the Vault **`kv2_read`**
-mint method with the **`key_value`** credential type: a generic KV v2 read whose payload
-is preserved verbatim (no forced primary field), so the secret rides under its natural
-key names and the referenced spec persists no secret in its own config.
+Two are worth calling out because what they chain is not a generic "the secret":
+
+- **`token_exchange`** chains the **client credential** — its `client_secret`, or the
+  `private_key` for `private_key_jwt` — instead of storing it inline, which makes the
+  exchange itself keyless. See
+  [Token Exchange](/credential-drivers/token-exchange/#sourcing-the-client-secret-keylessly).
+- **`oauth2`** chains the **whole client credential**, both `client_id` and
+  `client_secret`, on the *source*. `client_credentials` grant only; chaining a refresh
+  token is not supported.
+
+### Producers
+
+The referenced spec produces the material. Four mint methods can sit at that end:
+
+| Producer | Mint method | What it yields |
+|---|---|---|
+| OpenBao / Vault KV v2 | `kv2_read` | The secret, with the **`key_value`** credential type — the payload is preserved verbatim (no forced primary field), so it rides under its natural key names. |
+| AWS Secrets Manager | `secret_read` | The stored secret's payload, verbatim. |
+| GCP Secret Manager | `secret_read` | The stored secret's payload. Federation-first, with optional `target_service_account` impersonation. |
+| OpenBao / Vault transit | `transit_signer` | **Not a secret at all** — a scoped signing *capability*. |
+
+`transit_signer` is the one that changes the shape of the guarantee. Instead of moving
+key material, it mints a short-lived token that may do nothing but sign with one named
+transit key, plus the coordinates naming that key. The consumer chains it and asks the
+KMS to sign, so the private key is read by nobody — including Warden. Its consumer is
+`token_exchange` with `client_auth=kms_private_key_jwt`, which signs its RFC 7523 client
+assertion remotely; the method is exchange-path-only and requires a spec-level
+`jwt_role`.
+
+A producer can itself be keyless — an AWS or GCP `secret_read` on an `oidc_federation`
+source, or a Vault source using per-request JWT login — which is what makes a chain
+keyless end to end, with nothing standing stored at either hop.
 
 ## Configuration
 
@@ -84,6 +111,15 @@ Set these on the **consuming** source/spec:
 | `secret_spec` | The cred spec to mint and read the secret from. |
 | `secret_field` | Which field of the referenced spec's credential holds the secret, when its payload has multiple keys. |
 | `secret_cache_ttl` | Opt-in: cache the fetched material for a bounded TTL to avoid re-fetching every request. The cache entry is **per caller** (keyed on the namespace, referenced spec, and the agent identity — plus the user when present), not a single shared entry. Off unless set. |
+
+:::caution[The inline secret must be omitted]
+Setting `secret_spec` **and** the driver's own inline secret is rejected at write — for
+example `api_key` on an `elastic` source, `admin_token` on `grafana`,
+`management_access_key` on `scaleway`, or `client_id`/`client_secret` on `oauth2`. The
+referenced spec supplies the material, and rotation belongs to whoever owns it; keeping a
+stale copy on the consuming source would defeat the point. Each driver names its own key
+in the error.
+:::
 
 ## Guarantees
 

@@ -108,24 +108,31 @@ warden cred source create github-src -type=github -rotation-period=0 \
 warden cred spec create github-ops -source github-src \
   -config mint_method=pat -config token=$GH_PAT
 
-# Policy + cert-auth role — same client cert (allowed_common_names="mcp-agent").
-# The mcp{} block reaches inside each tool call: read/list/search tools pass,
-# state-changing tools are denied at Warden (demonstrated in Step 6).
+# Policies + cert-auth role — same client cert (allowed_common_names="mcp-agent").
+# Two policies: the capability policy grants the path, the MCP policy reaches
+# inside each tool call so read/list/search tools pass while state-changing ones
+# are denied at Warden (demonstrated in Step 6). Access is the intersection of
+# both, and the role must name both or every call is denied.
 # Deny-by-default: allow every method+tool, then block the state-changing ones.
 warden policy write mcp-github-access - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-    denied_tools    = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
+}
+EOF
+
+warden policy write -type mcp mcp-github-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
   }
 }
 EOF
 
 warden write auth/cert/role/github-user \
   allowed_common_names="mcp-agent" \
-  token_policies="mcp-github-access" token_ttl="1h" \
+  token_policies="mcp-github-access,mcp-github-calls" token_ttl="1h" \
   cred_spec_name="github-ops"
 ```
 

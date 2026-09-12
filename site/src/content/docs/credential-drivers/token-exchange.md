@@ -34,6 +34,80 @@ becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`
 **source** (client authentication is a source concern) — not on the spec. See
 [credential chaining](/federation/credential-chaining/).
 
+### Signing the client assertion without holding the key
+
+`client_auth=kms_private_key_jwt` goes one step further. It puts the **same RFC 7523
+client assertion** on the wire as `private_key_jwt` — an authorization server cannot tell
+them apart — but the signing key lives in a KMS and this process never sees it. Warden
+chains a *signing capability* rather than a key, and asks the KMS to sign each assertion.
+
+It is a separate method rather than a modifier on `private_key_jwt` because the two are
+configured from opposite ends: one takes a key, the other a reference to a capability,
+and nothing an operator sets for one is meaningful for the other. There is **no inline
+form** — the capability arrives only through `secret_spec`.
+
+The capability comes from the [`hvault`](/credential-drivers/vault/) driver's
+`transit_signer` mint method:
+
+```bash
+# the producer: a capability to sign with one transit key, and nothing else
+warden cred spec create signer-cap \
+  -source vault-keyless \
+  -config mint_method=transit_signer \
+  -config jwt_role=warden-signer \
+  -config transit_key=oauth-client-key \
+  -config subject_token_source=warden_identity
+
+# the consumer: a token-exchange source that holds no key and no secret
+warden cred source create exchange-src \
+  -type token_exchange \
+  -config token_url=https://idp.example.com/oauth2/token \
+  -config client_auth=kms_private_key_jwt \
+  -config secret_spec=signer-cap
+```
+
+Note there is no `client_id` on the source. When `secret_spec` is set the referenced spec
+supplies the **whole** client credential, and setting `client_id` alongside it is rejected
+at write. The client id travels with the capability instead, as the producer's
+`payload.client_id` above.
+
+#### A signing key per caller
+
+`transit_key` on the producer accepts `{{user.<claim>}}` and `{{agent.<claim>}}`
+templating, so **one spec can select a different signing key per caller** — the
+assertion is then signed by a key belonging to that principal rather than a shared
+broker key, and the KMS audit log attributes each signature to them.
+
+```bash
+warden cred spec create signer-cap \
+  -source vault-keyless \
+  -config mint_method=transit_signer \
+  -config jwt_role=warden-signer \
+  -config transit_key='client-{{user.department}}' \
+  -config subject_token_source=warden_identity \
+  -config assertion_user_claims=department
+```
+
+The claims come from the assertion minted for **this request**, so what a template can
+reach depends on what the spec projects:
+
+| Template | Available when |
+|---|---|
+| `{{agent.sub}}` | Always — the agent's principal is projected unconditionally, given `subject_token_source` is `agent_identity` or `warden_identity`. |
+| `{{agent.<other>}}` | The claim is listed in `assertion_metadata_claims` **and** the agent's login actually carries it. |
+| `{{user.<claim>}}` | The claim is listed in `assertion_user_claims`, which requires `subject_token_source=warden_identity`. |
+
+Resolution happens **at mint time**, not at spec create — a spec whose template can never
+resolve is still accepted at write, and fails on first use. It is **fail-closed**, and the
+errors are directed rather than generic: a claim that was never projected names the key
+you need to add, and pairing `{{user.…}}` with `subject_token_source=user_identity` is
+called out specifically, since that combination cannot populate user claims at all.
+
+Substituted values are constrained — a claim value must match an allow-list, cannot be
+empty, and cannot span a path segment; any `.` or `..` segment it composes is rejected
+after substitution. A caller therefore cannot steer the template at a key it was not
+meant to reach.
+
 ## Grant modes
 
 - **`rfc8693`** — `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` with
@@ -154,8 +228,9 @@ warden cred spec create internal-api-deleg \
 ```
 
 The user is presented via secondary transparent authentication — see
-[Delegation](/concepts/delegation/) for how `user_auth_path` and `X-Warden-User-Token` are
-configured.
+[Delegation](/concepts/delegation/) for how `user_auth_path` is configured. On such a
+mount the user's credential rides in `Authorization` and the agent moves to
+`X-Warden-Agent-Token` or a client certificate.
 
 **Microsoft Entra OBO (`jwt_bearer`)** — the subject is sent as `assertion` with Entra's on-behalf-of flag.
 
@@ -207,7 +282,7 @@ Keys for `warden cred source create <name> -type=token_exchange -config=key=valu
 |-----|----------|---------|-------------|
 | `token_url` | Yes | — | Token endpoint (HTTPS) of the STS/IdP performing the exchange. |
 | `grant` | No | `rfc8693` | Exchange grant: `rfc8693`, `jwt_bearer`, or `id_jag`. |
-| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_basic`, `client_secret_post`, or `private_key_jwt`. |
+| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_basic`, `client_secret_post`, `private_key_jwt`, or `kms_private_key_jwt`. |
 | `client_id` | Yes | — | OAuth2 client ID Warden presents to the token endpoint. |
 | `client_secret` | For secret auth | — | Client secret (masked on read). Omit when sourced via `secret_spec`. |
 | `private_key` | For `private_key_jwt` | — | PEM RSA private key that signs the client assertion (masked). Omit when sourced via `secret_spec`. |

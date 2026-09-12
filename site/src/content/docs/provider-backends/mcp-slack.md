@@ -57,7 +57,7 @@ warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.jso
 
 # Create a role that binds the credential spec and policy
 warden write auth/jwt/role/mcp-user \
-    token_policies="mcp-slack-access" \
+    token_policies="mcp-slack-access,mcp-slack-access-calls" \
     user_claim=sub \
     cred_spec_name=slack-mcp-creds
 ```
@@ -73,7 +73,7 @@ warden audit enable -file-path=/tmp/warden-audit.log file
 
 Each gateway request then writes a request/response pair to that file — the agent
 identity, the bound credential (`type`/`source_name`/`spec_name`), the policy
-decision (the `mcp_decision` for `mcp { }` rules), and the upstream URL.
+decision (the `mcp_decision` for MCP policy rules), and the upstream URL.
 
 ## Step 2: Mount and Configure the Provider
 
@@ -93,8 +93,9 @@ warden provider list
 ```
 
 Configure the provider. **`mcp_url` is required — there is no default.** Point it
-at Slack's MCP endpoint. The default `timeout` is 10 minutes — raise it for agent
-sessions that keep an SSE stream open across many tool calls:
+at Slack's MCP endpoint. `timeout` bounds a **single call** and defaults to
+**60 seconds** — raise it when individual tool calls run long. A long-lived SSE session is
+bounded by `listen_timeout` instead, which still defaults to 10 minutes:
 
 ```bash
 warden write slack-mcp/config <<EOF
@@ -242,7 +243,7 @@ warden cred spec read slack-mcp-creds
 
 The agent's effective access is the intersection of three things: the app's
 configured scopes, what the user granted at consent time, and what the Warden
-policy bound to the role permits (the `mcp { }` block — see [Step 4](#step-4-create-a-policy)).
+policy bound to the role permits (the MCP policy — see [Step 4](#step-4-create-a-policy)).
 The OAuth token bounds what Slack will allow; the Warden policy can only narrow
 it further, never widen it. See
 [Token Scopes and Tool Availability](#token-scopes-and-tool-availability).
@@ -311,24 +312,24 @@ called, and the Slack user it acted as — while the token stays salted:
 MCP traffic passes through two complementary layers of authorization. The minted
 Slack access token is the security boundary — its scopes and the consenting
 user's workspace permissions bound what the agent can actually do in Slack
-regardless of what Warden lets through. On top of that, Warden's CBP policies
-support an `mcp { }` block for governance-style restrictions enforced at the
+regardless of what Warden lets through. On top of that, Warden's MCP policies
+provide governance-style restrictions enforced at the
 gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs,
 prompt names, and selected tool arguments.
 
-The `mcp { }` block is **body-authoritative** and **deny-by-default** — Warden
+An MCP policy is **body-authoritative** and **deny-by-default** — Warden
 strict-parses the JSON-RPC body and a block grants only what it allow-lists
-(`initialize`, `ping`, and `notifications/*` stay exempt for the handshake). See
+(`initialize`, `ping`, `notifications/*` and `server/discover` stay exempt for the handshake and discovery). See
 [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization)
 for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the
 `rule_type` values recorded on each decision.
 
 All examples below use `capabilities = ["create", "read", "delete"]` — the three
 MCP Streamable HTTP verbs on the `/gateway/` URL (POST for JSON-RPC, GET for the
-SSE stream, DELETE for session terminate). The `mcp { }` block only fires on the
+SSE stream, DELETE for session terminate). MCP policy enforcement only fires on the
 POST half.
 
-The simplest policy grants the gateway and leans on the OAuth token's scopes for
+The simplest setup grants the gateway and leans on the OAuth token's scopes for
 everything:
 
 ```bash
@@ -337,7 +338,19 @@ path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
 }
 EOF
+
+warden policy write -type mcp mcp-slack-access-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods   { allowed = ["*"] }
+  tools     { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts   { allowed = ["*"] }
+}
+EOF
 ```
+
+Bind **both** names on the role — an MCP policy comes into scope by being
+listed in `token_policies`, exactly like a capability policy.
 
 A policy that restricts the agent to a vetted set of Slack tools:
 
@@ -345,10 +358,13 @@ A policy that restricts the agent to a vetted set of Slack tools:
 warden policy write mcp-slack-readonly - <<EOF
 path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read"]
-    allowed_tools   = ["list_channels", "get_messages", "get_thread", "search_messages"]
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-slack-readonly-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call", "resources/list", "resources/read"] }
+  tools { allowed = ["list_channels", "get_messages", "get_thread", "search_messages"] }
 }
 EOF
 ```
@@ -361,10 +377,15 @@ dangerous ones. Under deny-by-default the `["*"]` allow-lists are required; the
 warden policy write mcp-slack-safe - <<EOF
 path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-    denied_tools    = ["delete_*", "remove_*", "archive_channel"]
+}
+EOF
+
+warden policy write -type mcp mcp-slack-safe-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_*", "remove_*", "archive_channel"]
   }
 }
 EOF
@@ -380,22 +401,26 @@ set of channels:
 warden policy write mcp-slack-approved-channels - <<EOF
 path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["post_message"]
-    condition = "!has(call.args.channel_id) || call.args.channel_id in ['C0123456789', 'C0987654321']"
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-slack-approved-channels-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["post_message"] }
+  condition = "!has(call.args.channel_id) || call.args.channel_id in ['C0123456789', 'C0987654321']"
 }
 EOF
 ```
 
-When a request hits the `mcp { }` gate and is denied, Warden returns HTTP 403
+When a request hits the MCP policy gate and is denied, Warden returns HTTP 403
 with a structured JSON body and an RFC 6750 `WWW-Authenticate` header; MCP client
 SDKs surface this to the agent as a tool-call failure with an actionable message.
 The audit log records the matched rule and the offending tool/parameter so
-operators can debug policy decisions centrally. Policies that omit the `mcp { }`
-block keep today's behaviour: Warden passes the request through to Slack
-unchanged and the OAuth token's scopes alone enforce authorization.
+operators can debug policy decisions centrally. An MCP mount with **no MCP policy
+in scope denies every call** (`no_mcp_policy`) — there is no pass-through default,
+so to let the OAuth token's scopes alone enforce authorization, write a wildcard
+MCP policy that allows every method and tool.
 
 ## Step 5: Point an MCP Client at Warden
 
@@ -596,7 +621,7 @@ warden write auth/cert/config \
 ```bash
 warden write auth/cert/role/mcp-user \
     allowed_common_names="agent-*" \
-    token_policies="mcp-slack-access" \
+    token_policies="mcp-slack-access,mcp-slack-access-calls" \
     cred_spec_name=slack-mcp-creds
 ```
 
@@ -632,7 +657,7 @@ never widen it. A `tools/call` that fails with a Slack permission error
 (`missing_scope`, `not_in_channel`, …) means the app lacks a required user scope
 or the consenting user can't see that resource; a `tools/call` denied by Warden
 with a `403` + RFC 6750 `WWW-Authenticate` header (and a `rule_type` in the audit
-log) means the [Step 4](#step-4-create-a-policy) `mcp { }` block blocked it. Read
+log) means the [Step 4](#step-4-create-a-policy) MCP policy blocked it. Read
 the error to tell the two layers apart.
 
 Common mappings (Slack **user-token** scopes):

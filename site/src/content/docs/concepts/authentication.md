@@ -23,7 +23,9 @@ A caller authenticates by presenting one of three credentials:
 | **mTLS client certificate** | the TLS handshake | a workload with an X.509 identity, often via a sidecar |
 
 The credential you hold determines which authentication style applies, described
-next.
+next. On a mount that also resolves a user principal, a bearer JWT can arrive on
+`X-Warden-Agent-Token` instead — see
+[Two Credentials on One Request](#two-credentials-on-one-request).
 
 > **mTLS is a property of the connection, not of any one client.** A client
 > certificate authenticates because it is presented during the TLS handshake —
@@ -80,6 +82,45 @@ workloads — see [Channelling Identity with a Sidecar](#channelling-identity-wi
 > attempts implicit auth. A JWT is not a Warden session token — it would fail a
 > token-store lookup — which is exactly why the CLI routes it through the
 > `Authorization` header instead (see [CLI and Client Behavior](#cli-and-client-behavior)).
+
+## Two Credentials on One Request
+
+Everything above describes a request carrying **one** identity. A mount configured with
+`user_auth_path` carries **two**: the agent making the call, and the user it is acting for
+(see [Delegation](/concepts/delegation/)).
+
+The two need separate channels, and on such a mount `Authorization` is given to the
+**user** — because the user's credential is the one an ordinary OAuth client already knows
+how to attach. The agent then presents its own identity out of band:
+
+| Leg | Where it arrives |
+|---|---|
+| **User** | `Authorization: Bearer <jwt>` |
+| **Agent** | a client certificate (mTLS), or `X-Warden-Agent-Token: <jwt>` |
+
+Either agent form works; the certificate is the usual shape for a meshed workload, and the
+header suits a client that cannot present one. The agent remains the **authorizer** — the
+user grants no permissions — so a mount with no agent credential fails closed regardless
+of which user authenticated.
+
+:::caution[Changed in v0.20.0]
+Before v0.20.0 the user rode a dedicated `X-Warden-User-Token` header (configurable as
+`user_token_header`) while the agent kept `Authorization`. Both are **retired**, and the
+legs are the other way round. Two consequences worth checking on upgrade:
+
+- An agent that sent its own token in `Authorization` under an ambient client certificate
+  on a `user_auth_path` mount now resolves to the **certificate** identity. Move such
+  agents to `X-Warden-Agent-Token`.
+- Sending `X-Warden-Token` and `Authorization` together to a protected-resource mount is
+  now a **`400`**.
+
+See [Upgrading from v0.19.0](/upgrade/from-v0-19/#2-dual-token-extraction-user_token_header-retired).
+:::
+
+A missing user credential is not an error — the request proceeds with the agent alone, and
+anything that genuinely needs the user fails closed on its own terms. A policy condition
+that requires one answers `401` with a `WWW-Authenticate` challenge rather than a flat
+denial, so the client can authenticate a user and retry.
 
 ## Channelling Identity with a Sidecar
 

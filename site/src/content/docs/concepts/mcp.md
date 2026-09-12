@@ -37,68 +37,114 @@ either shape; the convention exists to match what each upstream expects.
 
 ## Body-Authoritative Authorization
 
-A policy path that fronts an MCP mount can carry an `mcp { }` block. When it does,
-Warden **strict-parses** the JSON-RPC request body and evaluates each call against
-the rules before the request reaches the upstream. The block's full field grammar
-lives in [Policies → Authorizing Gateway Requests](/concepts/policies/#authorizing-gateway-requests);
-this section explains the *semantics*.
+MCP traffic is governed by its own **policy type**, stored at
+`sys/policies/mcp/<name>` and written with `-type mcp`. Where a
+[capability policy](/concepts/policies/) governs paths and operations, an MCP
+policy governs *calls*: Warden **strict-parses** the JSON-RPC request body and
+evaluates each call against the rules before the request reaches the upstream.
+
+```bash
+warden policy write -type mcp github-tools - <<'EOF'
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools {
+    allowed = ["get_*", "list_*"]
+    denied  = ["delete_*"]
+  }
+}
+EOF
+```
+
+The two types compose as an **intersection**: a request must be granted by a
+capability policy **and** permitted by every MCP policy in scope. An MCP policy is
+purely restrictive — it can never grant access a capability policy withholds.
+
+An MCP policy comes into scope exactly the way a capability policy does: by being
+named in the role's `token_policies`. Policy names are unique across both types,
+so one list carries both:
+
+```bash
+warden write auth/jwt/role/mcp-user \
+  token_policies=github-paths,github-tools \
+  user_claim=sub \
+  token_ttl=1h
+```
+
+Forgetting the MCP policy is the common first mistake — the role still grants the
+path, but every call is denied with `no_mcp_policy`.
+
+:::caution[Changed in v0.20.0]
+These rules were previously an `mcp` block nested inside a capability policy's
+`path` stanza. That nested block is now **rejected at parse**, the grammar moved
+from `allowed_*` / `denied_*` keys to family blocks, and — most consequential for
+an existing deployment — **MCP traffic with no MCP policy in scope is now denied**
+(`no_mcp_policy`) where it previously passed unrestricted. Any mount meant to stay
+open needs an explicit wildcard policy. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#3-mcp-rules-are-a-first-class-policy-type).
+:::
 
 Enforcement applies only to actual JSON-RPC calls — **`POST` with a JSON body**.
 SSE reconnects (`GET`) and session teardown (`DELETE`) carry no call to authorize
-and pass through under the path's capability check alone.
+and pass through under the capability policy alone.
 
 ### Name-bearing methods
 
-Three methods carry a name that the policy can gate; others are gated by method
-only:
+Four methods carry a name that the policy can gate; others are gated by method only:
 
-| Method | Gated name | From |
-|--------|-----------|------|
-| `tools/call` | the tool | `params.name` |
-| `resources/read` | the resource | `params.uri` |
-| `prompts/get` | the prompt | `params.name` |
+| Method | Gated name | From | Family |
+|--------|-----------|------|--------|
+| `tools/call` | the tool | `params.name` | `tools` |
+| `resources/read` | the resource | `params.uri` | `resources` |
+| `resources/subscribe` | the resource | `params.uri` | `resources` |
+| `prompts/get` | the prompt | `params.name` | `prompts` |
+
+`subscriptions/listen` is gated too: each URI it subscribes to is checked against the
+`resources` lists, so a caller denied `resources/read` on a URI cannot reach the same
+data through update-timing signals instead.
 
 ### Evaluation order
 
-Authorization is **deny-by-default**: an `mcp { }` block grants nothing until you
-allow-list it. Each call passes through gates in order; the first failure denies it:
+Authorization is **deny-by-default**, at two levels. A path with no MCP policy in
+scope denies every call (`no_mcp_policy`); within a policy, each family block
+grants nothing until it allow-lists something. Each call passes through gates in
+order, and the first failure denies it:
 
-1. **Method** — `denied_methods` rejects first; then the method must appear in
-   `allowed_methods`. An empty or absent `allowed_methods` matches nothing and so
+1. **Method** — `methods { denied }` rejects first; then the method must appear in
+   `methods { allowed }`. An empty or absent `allowed` matches nothing and so
    **denies every method**. *Exception:* the session-lifecycle methods
-   `initialize`, `ping`, and `notifications/*` are exempt from the allow-list —
-   they carry no tool/resource/data access and must work for the handshake — but
-   `denied_methods` can still block them explicitly.
-2. **Name** (for the three name-bearing methods) — `denied_tools`/`resources`/`prompts`
-   rejects first; then the name must appear in the matching `allowed_*` list. An
-   empty or absent list **denies every name**.
-3. **Condition** (CEL) — the block's per-call `condition`, if present, runs last
+   `initialize`, `ping`, `notifications/*`, and `server/discover` are exempt from
+   the allow-list — they carry no tool/resource/data access and must work for the
+   handshake and discovery — but a `denied` entry can still block them explicitly.
+2. **Name** (for the four name-bearing methods) — the matching
+   `tools` / `resources` / `prompts` block's `denied` rejects first; then the name
+   must appear in its `allowed`. An empty or absent list **denies every name**.
+3. **Condition** (CEL) — the stanza's per-call `condition`, if present, runs last
    and gates on argument values (`call.args`).
 
-Within a name/method gate a `denied_*` match always rejects, and the value must
-then match the corresponding `allowed_*` list — which is **mandatory** under
-deny-by-default. Patterns are matched with a **trailing `*`** wildcard
-(`delete_*`, or a bare `*` for "anything"), case-insensitively. To open a mount
-fully, allow-list `["*"]`:
+Within a gate a `denied` match always rejects, and the value must then match the
+corresponding `allowed` list — which is **mandatory** under deny-by-default.
+Patterns are matched with a **trailing `*`** wildcard (`delete_*`, or a bare `*`
+for "anything"), case-insensitively. To open a mount fully, allow-list `["*"]`:
 
 ```hcl
 # fully open (the explicit form of "no restriction")
-mcp {
-  allowed_methods   = ["*"]
-  allowed_tools     = ["*"]
-  allowed_resources = ["*"]
-  allowed_prompts   = ["*"]
+path "mcp/gateway/*" {
+  methods   { allowed = ["*"] }
+  tools     { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts   { allowed = ["*"] }
 }
 
 # read-only: list and call get_*/list_* only; delete_* is never callable
-mcp {
-  allowed_methods = ["tools/list", "tools/call"]
-  allowed_tools   = ["get_*", "list_*"]
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["get_*", "list_*"] }
 }
 ```
 
 Argument-value constraints are expressed in the per-call `condition` (below), not
-as structured lists.
+as structured lists. The former `allowed_params` / `denied_params` keys are
+removed and rejected at write.
 
 ### Filtering list responses
 
@@ -107,9 +153,9 @@ what an agent can *discover*: when a `tools/list`, `resources/list`, or
 `prompts/list` request is allowed, Warden prunes the response so it lists only
 the items the caller could actually use — an item survives iff a `tools/call`
 (resp. `resources/read`, `prompts/get`) for it would pass the gates. Under
-deny-by-default this means a mount with no `allowed_tools` returns an **empty**
-tools list, and one scoped to `get_*` lists only those. Discovery matches
-enforcement: what the agent sees is what it can call.
+deny-by-default this means a mount whose `tools` block allows nothing returns an
+**empty** tools list, and one scoped to `get_*` lists only those. Discovery
+matches enforcement: what the agent sees is what it can call.
 
 Per-call CEL `condition`s are *not* evaluated during filtering — a list carries
 no arguments — so a condition-gated tool still appears in the list and its
@@ -120,27 +166,27 @@ return an unfiltered list.
 
 ### Per-call CEL conditions
 
-An `mcp { }` block can carry a **`condition`** — a [CEL](https://cel.dev)
-expression evaluated **once per call**, after the structured gates above. The
-call is allowed only if its structured gates *and* its condition pass. It is the
-expressive escape hatch for value logic the lists can't express — per-tool
-budgets, currency sets, cross-argument rules:
+A `path` stanza in an MCP policy can carry a **`condition`** — a
+[CEL](https://cel.dev) expression evaluated **once per call**, after the
+structured gates above. The call is allowed only if its structured gates *and*
+its condition pass. It is the expressive escape hatch for value logic the lists
+can't express — per-tool budgets, currency sets, cross-argument rules:
 
 ```hcl
-mcp {
-  allowed_methods = ["tools/call"]
-  allowed_tools   = ["create_payment", "refund"]
-  condition       = <<-CEL
-    (call.tool == "create_payment" ? call.args.amount <= 1500 :
-     call.tool == "refund"         ? call.args.amount <=  200 : true)
-    && call.args.currency in ["USD", "EUR"]
+path "mcp/payments/*" {
+  methods { allowed = ["tools/call"] }
+  tools   { allowed = ["create_payment", "refund"] }
+  condition = <<-CEL
+    (call.tool == 'create_payment' ? call.args.amount <= 1500 :
+     call.tool == 'refund'         ? call.args.amount <=  200 : true)
+    && call.args.currency in ['USD', 'EUR']
   CEL
 }
 ```
 
-The condition reads a per-call namespace on top of the request/token namespaces
-documented in [Policies → Fine-grained access](/concepts/policies/#fine-grained-access)
-(worked examples in the [CEL Condition Cookbook](/concepts/cel-conditions/)):
+The condition reads a per-call namespace on top of the `request`, `agent` and `user`
+namespaces documented in the
+[CEL Condition Cookbook](/concepts/cel-conditions/#quick-reference):
 
 - `call.method` — the JSON-RPC method (`tools/call`, …)
 - `call.tool` — the name-bearing field (tool/resource/prompt name)
@@ -166,9 +212,10 @@ condition = "call.method != 'tools/call' || call.args.amount <= 1500"
   structural reason (`malformed_jsonrpc`, `duplicate_key`, `oversized_body`, …)
   distinct from a policy denial, so operators can tell bad input from a refused
   call.
-- When more than one `mcp { }` block applies, they combine with **OR** (any block
+- When more than one MCP policy applies, their stanzas combine with **OR** (any
   that allows, allows); on denial the **strongest reason** is surfaced — a
-  structural failure outranks a policy refusal.
+  structural failure outranks a policy refusal. Note this ORs *within* the MCP
+  layer; the MCP layer as a whole still intersects with the capability policy.
 
 ### What the agent sees on a denial
 
@@ -189,18 +236,28 @@ denial:
 |---|---|
 | `denied_methods` / `allowed_methods` | JSON-RPC `method` matches a deny pattern, or is absent from a configured allow list |
 | `denied_tools` / `allowed_tools` | `tools/call` with a `params.name` matching a deny pattern, or not in the allow list |
-| `denied_resources` / `allowed_resources` | `resources/read` with a `params.uri` matching a deny pattern, or not in the allow list |
+| `denied_resources` / `allowed_resources` | `resources/read` or `resources/subscribe` with a `params.uri` matching a deny pattern, or not in the allow list — also applied per URI when `subscriptions/listen` subscribes |
 | `denied_prompts` / `allowed_prompts` | `prompts/get` with a `params.name` matching a deny pattern, or not in the allow list |
-| `missing_body` | A `POST`/JSON-RPC body is absent or fails to parse on a path with MCP enforcement. Body-less verbs (`GET` SSE stream, `DELETE` session terminate) skip `mcp { }` evaluation entirely |
+| `no_mcp_policy` | MCP traffic reached a path with **no MCP policy in scope**. New in v0.20.0 — such traffic previously passed unrestricted |
+| `header_mismatch` | MCP transport headers contradict, or fail to describe, the body Warden parsed. Structural rather than a policy decision — no contract was consulted, and none can permit it |
+| `missing_method_header` | A legacy sentinel for a transport that declared no method. Effectively unreachable on the body-authoritative path, where `header_mismatch` covers transport contradictions |
+| `batch_unsupported` | A batch arrived from a client negotiating a modern protocol revision, where batching left the spec |
+| `batch_list_unfilterable` | A batch contains a list method; a batched list response cannot be pruned per element, so Warden fails closed rather than return an unfiltered list |
+| `missing_body` | A `POST`/JSON-RPC body is absent or fails to parse on a path with MCP enforcement. Body-less verbs (`GET` SSE stream, `DELETE` session terminate) skip MCP evaluation entirely |
 | `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, …) |
 | `duplicate_key` | Duplicate object key anywhere in the body — Warden rejects the ambiguity a last-wins parser would hide |
 | `oversized_body` | Body exceeds the mount's `max_body_size` |
 | `batch_empty` | JSON-RPC batch is `[]` |
 | `malformed_params` | A name-bearing method (`tools/call`, `resources/read`, `prompts/get`) has a missing or wrong-shape `params.name` / `params.uri` |
 
+Two `rule_type` values you may still see in **older audit records** are
+`allowed_params` and `denied_params`. Those keys are removed and rejected at
+write, so no current policy can emit them — express argument constraints as a
+`condition` over `call.args` instead.
+
 ## Auditing MCP Decisions
 
-Every consulted `mcp { }` block records its outcome to the [audit log](/concepts/audit/):
+Every consulted MCP policy stanza records its outcome to the [audit log](/concepts/audit/):
 the `decision` (allow/deny), the `rule_type` that fired (`denied_tools`,
 `allowed_methods`, `duplicate_key`, `condition`, `condition_error`, …), the
 `method` and `name`. When a `condition` decided the call, a `condition` object
@@ -274,7 +331,7 @@ skill that documents its quirks.
 
 ## See Also
 
-- [Policies](/concepts/policies/) — the full `mcp { }` rule grammar.
+- [Policies](/concepts/policies/) — capability policies, and how they intersect with MCP policies.
 - [Providers](/concepts/providers/) — how MCP mounts are enabled and routed.
 - [Credentials](/concepts/credentials/) — the bearer token or AWS credential injected.
 - [Audit](/concepts/audit/) — where each MCP decision is recorded.

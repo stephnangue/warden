@@ -78,6 +78,20 @@ federates Warden's issuer. See [AWS driver](/credential-drivers/aws/).
   `rotation_period`, and a keyless `vault_token` spec needs no `token_role`. See
   [Vault driver](/credential-drivers/vault/).
 
+### Alibaba Cloud
+
+- **`assume_role`** — STS `AssumeRoleWithOIDC`: the assertion is exchanged for a
+  short-lived STS session. Set `oidc_provider_arn` on the source to name the OIDC
+  provider Alibaba Cloud trusts. This is the **only** mint method that federates. See
+  [Alibaba Cloud driver](/credential-drivers/alicloud/).
+
+### Kubernetes
+
+- The assertion is presented **directly as the bearer token** to the API server — there
+  is no exchange hop, because the cluster verifies the issuer itself. The assertion
+  `audience` must match one of the cluster authenticator's accepted audiences, or the
+  API server rejects it. See [Kubernetes driver](/credential-drivers/kubernetes/).
+
 ## Chaining a secret keylessly
 
 Federation mints a credential the cloud issues. When the upstream instead needs a

@@ -148,7 +148,11 @@ namespace needs neither. The CLI sets the header from `WARDEN_NAMESPACE`.
 3. **Authorize.** Warden evaluates the request against the [policies](/concepts/policies/)
    on the caller's token before any credential is minted. Providers that need to
    gate on request content can have the body parsed for this check; a denied
-   request never reaches the upstream.
+   request never reaches the upstream. On a mount configured with `user_auth_path`,
+   a second [user principal](/concepts/delegation/) is resolved first — it grants no
+   permissions of its own, but a policy condition can require it, and a denial for a
+   missing user answers `401` with a `WWW-Authenticate` challenge so the client can
+   authenticate one and retry.
 4. **Inject the credential.** The role's token carries a credential spec; Warden
    mints (or reuses) that [credential](/concepts/credentials/) and injects it into the
    proxied request — a bearer token, an `X-Vault-Token` header, a re-computed

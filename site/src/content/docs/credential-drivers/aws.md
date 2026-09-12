@@ -120,6 +120,8 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 | `access_key_id` | For `static` | — | AWS IAM access key ID for the source. Omit for keyless. |
 | `secret_access_key` | For `static` | — | AWS IAM secret access key (masked). Omit for keyless. |
 | `region` | Yes | — | AWS region for API calls (e.g. `us-east-1`). |
+| `sts_endpoint` | No | *(SDK default)* | Override the STS endpoint. |
+| `secretsmanager_endpoint` | No | *(SDK default)* | Override the Secrets Manager endpoint. |
 | `audience` | For keyless | — | Audience minted into the `warden_identity` assertion for this source (`oidc_federation` only; default `sts.amazonaws.com`). Rejected on a `static` source. |
 | `assume_role_arn` | No | — | Optional IAM role ARN to assume for elevated permissions. **Static sources only** — not supported for `oidc_federation`. |
 | `session_name` | No | `warden-source-session` | Session name for AssumeRole operations (with `assume_role_arn`). |
@@ -132,8 +134,27 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 |---------------|--------|---------------------|
 | `sts_assume_role` | `aws_access_keys` | `role_arn` (required), `ttl` (default `1h`), `session_name`, `external_id`, `policy` |
 | `secrets_manager` | `aws_access_keys` | `secret_id` (required), `version_stage`, `version_id`, `json_key_map` |
+| `secret_read` | `key_value` | The same Secrets Manager read, vended **verbatim** for [chaining](/federation/credential-chaining/). Same spec config as `secrets_manager`, plus `role_arn` when keyless. |
 | `rds_iam_token` | `db_auth_token` | `db_endpoint` (required), `db_user` (required), `db_engine` (default `postgres`), `db_port`, `region` |
 | `redshift_iam_token` | `db_auth_token` | `db_endpoint` (required), plus exactly one of `cluster_identifier` or `workgroup_name`, `db_name`, `db_port` (default `5439`), `duration_seconds` (900–3600, default `900`), `region` |
+
+`secret_read` is what makes AWS a chaining **producer**: the payload is preserved as
+stored, so a consuming spec can name its fields directly. A **keyless** `secret_read`
+spec must also set `role_arn` — the federated session assumes that role first, and reads
+the secret as it. `sts_assume_role`,
+`secrets_manager` and `secret_read` all work over `auth_method=oidc_federation`, so
+the producer itself can be keyless.
+
+`secret_id` accepts `{{user.<claim>}}` and `{{agent.<claim>}}` templating, so one spec
+can resolve to a per-caller secret. The claims come from the exchange on that request,
+which scopes the fetch to the principals actually present.
+
+:::caution[Endpoint overrides and rotation are mutually exclusive]
+A source that sets `sts_endpoint` or `secretsmanager_endpoint` cannot also set
+`rotation_period`, and the combination is rejected. Rotation manages IAM keys in the
+real account, which those overrides do not redirect — so it would rotate keys that
+exist somewhere else and fail on a loop with no indication why.
+:::
 
 Spec-config keys set with `warden cred spec create ... -config=key=value`:
 

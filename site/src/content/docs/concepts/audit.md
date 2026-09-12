@@ -21,7 +21,7 @@ Between them they capture:
   and [role](/concepts/roles/), the granted policies, the [namespace](/concepts/namespaces/), and —
   when the token carries them — its verified, login-derived **metadata** attributes
   (clearance, team, department), so a decision that turned on a
-  [`token.metadata`](/concepts/policies/#fine-grained-access) value is explainable. The
+  [`agent.metadata`](/concepts/policies/#fine-grained-access) value is explainable. The
   human an agent acts for is a separate **user principal**, recorded as `Auth.User` (below),
   not a token-metadata attribute.
 - **Request** — operation, path, HTTP method, client IP, mount point and type,
@@ -51,7 +51,7 @@ sensitive, so they are salt-able per key. You can extend or narrow this per devi
 - **CEL condition inputs** — when a policy `condition` decides a request, the
   values it referenced are recorded under `auth.policy_results.condition.inputs`
   (path-level) so the decision is self-explanatory, keyed by the CEL path that
-  was read (e.g. `token.metadata.env`, `call.args.amount`, `request.data.model`).
+  was read (e.g. `agent.metadata.env`, `call.args.amount`, `request.data.model`).
   These are logged in clear by default and are salt-able: `salt_fields`
   `auth.policy_results.condition.inputs` salts every input value, and
   `auth.policy_results.condition.inputs.request.data.model` salts just that one

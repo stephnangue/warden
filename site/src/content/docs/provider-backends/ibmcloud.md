@@ -128,7 +128,7 @@ warden cred source create ibmcloud-src \
 warden cred spec create ibmcloud-ops \
   -source ibmcloud-src \
   -type=ibmcloud_keys \
-  -config mint_method=iam_with_cos \
+  -config mint_method=access_keys \
   -config access_key_id=your-cos-access-key-id \
   -config secret_access_key=your-cos-secret-access-key
 ```
@@ -139,7 +139,7 @@ warden cred spec create ibmcloud-ops \
 warden cred spec create ibmcloud-api-only \
   -source ibmcloud-src \
   -type=ibmcloud_keys \
-  -config mint_method=iam_with_cos
+  -config mint_method=access_keys
 ```
 
 ### Option B: Vault/OpenBao — Dynamic IBM Secrets Engine
@@ -512,7 +512,7 @@ aws s3 ls s3://my-bucket/ \
 
 ## Token Management
 
-### IBM Source (iam_with_cos)
+### IBM Source (access_keys)
 
 | Aspect | Details |
 |--------|---------|

@@ -172,8 +172,45 @@ Each spec sets a `mint_method` that picks the Vault engine and the credential sh
 | `dynamic_ibm` | IBM Cloud keys | `ibm_mount`, `role_name`, `ttl`, `iam_endpoint`, `access_key_id`, `secret_access_key` |
 | `vault_token` | Vault token | `token_role`, `ttl`, `display_name`, `meta` |
 | `oauth2` | OAuth bearer token | `oauth2_mount`, `credential_name` |
+| `transit_signer` | A scoped **signing capability** (not a secret) | `transit_key` (required), `transit_mount`, `signing_alg`, `payload.*` |
 
 `mint_method` is **required** — there is no default; an unset value is rejected at mint.
+
+### `transit_signer` — signing without the key
+
+Every other mint method yields material. `transit_signer` yields a **capability**: a
+short-lived token that may do nothing but sign with one named transit key, plus the
+coordinates naming that key. A consumer chains it and asks the KMS to sign,
+so the private key is read by nobody — including Warden.
+
+Its consumer is the [`token_exchange`](/credential-drivers/token-exchange/) driver with
+`client_auth=kms_private_key_jwt`, which signs its RFC 7523 client assertion remotely.
+Two constraints follow from that:
+
+- It is **exchange-path-only** — the capability exists to be chained, not injected into
+  a proxied request.
+- A spec-level **`jwt_role`** is required.
+
+`transit_key` accepts `{{user.<claim>}}` / `{{agent.<claim>}}` templating, so one spec
+can select a per-caller key. Keys prefixed `payload.` are copied verbatim into the
+minted payload — they mean something to the consumer (the OAuth client the key is
+registered to, a `kid` an authorization server selects on) and this driver does not
+interpret them.
+
+```bash
+warden cred spec create signer-cap \
+  -source vault-keyless \
+  -config mint_method=transit_signer \
+  -config jwt_role=warden-signer \
+  -config transit_key=oauth-client-key \
+  -config signing_alg=RS256 \
+  -config subject_token_source=warden_identity \
+  -config payload.client_id=my-oauth-client
+```
+
+Because the method is exchange-path-only, the spec must set `subject_token_source`
+(and the source — or the spec, via `assertion_audience` — must carry an audience).
+A spec that omits it is rejected at create.
 
 Spec-config keys set with `warden cred spec create ... -config=key=value`:
 

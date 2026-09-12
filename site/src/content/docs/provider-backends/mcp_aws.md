@@ -43,7 +43,7 @@ warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.jso
 
 # Create a role that binds the credential spec and policy
 warden write auth/jwt/role/s3-reader \
-    token_policies="mcp-aws-s3-readonly" \
+    token_policies="mcp-aws-s3-readonly,mcp-aws-s3-readonly-calls" \
     user_claim=sub \
     cred_spec_name=aws-s3-reader
 ```
@@ -163,13 +163,13 @@ warden cred spec read aws-s3-reader
 
 ## Step 4: Create a Policy
 
-MCP traffic passes through two complementary layers of authorization. The IAM role's permissions are the security boundary — they bound what the agent can actually do at AWS regardless of what Warden lets through. On top of that, Warden's CBP policies support an `mcp { }` block for governance-style restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs, prompt names, and selected tool arguments.
+MCP traffic passes through two complementary layers of authorization. The IAM role's permissions are the security boundary — they bound what the agent can actually do at AWS regardless of what Warden lets through. On top of that, Warden's MCP policies provide governance-style restrictions enforced at the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs, prompt names, and selected tool arguments.
 
-The `mcp { }` block is **body-authoritative** and **deny-by-default** — Warden strict-parses the JSON-RPC body and a block grants only what it allow-lists (`initialize`, `ping`, and `notifications/*` stay exempt for the handshake). See [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization) for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the `rule_type` values recorded on each decision.
+An MCP policy is **body-authoritative** and **deny-by-default** — Warden strict-parses the JSON-RPC body and a block grants only what it allow-lists (`initialize`, `ping`, `notifications/*` and `server/discover` stay exempt for the handshake and discovery). See [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization) for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the `rule_type` values recorded on each decision.
 
-All examples below use `capabilities = ["create", "read", "delete"]` — the three MCP Streamable HTTP verbs on the `/gateway` URL (POST for JSON-RPC, GET for the SSE stream, DELETE for session terminate). The `mcp { }` block only fires on the POST half.
+All examples below use `capabilities = ["create", "read", "delete"]` — the three MCP Streamable HTTP verbs on the `/gateway` URL (POST for JSON-RPC, GET for the SSE stream, DELETE for session terminate). MCP policy enforcement only fires on the POST half.
 
-The simplest policy grants the gateway and leans on IAM for everything:
+The simplest setup grants the gateway and leans on IAM for everything:
 
 ```bash
 warden policy write mcp-aws-access - <<EOF
@@ -177,7 +177,19 @@ path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
 }
 EOF
+
+warden policy write -type mcp mcp-aws-access-calls - <<EOF
+path "mcp_aws/role/+/gateway*" {
+  methods   { allowed = ["*"] }
+  tools     { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts   { allowed = ["*"] }
+}
+EOF
 ```
+
+Bind **both** names on the role — an MCP policy comes into scope by being
+listed in `token_policies`, exactly like a capability policy.
 
 A policy that restricts the agent to the `call_aws` tool but only against a vetted set of AWS services. The AWS MCP Server prefixes every tool name with `aws___` (three underscores) — confirm via `tools/list` on the live server. The tool takes `service_name`, `operation_name`, and `region_name` arguments — a per-call CEL `condition` over `call.args` gates those argument values:
 
@@ -185,11 +197,14 @@ A policy that restricts the agent to the `call_aws` tool but only against a vett
 warden policy write mcp-aws-s3-readonly - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["aws___call_aws"]
-    condition = "!has(call.args.service_name) || call.args.service_name in ['s3', 'dynamodb']"
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-aws-s3-readonly-calls - <<EOF
+path "mcp_aws/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["aws___call_aws"] }
+  condition = "!has(call.args.service_name) || call.args.service_name in ['s3', 'dynamodb']"
 }
 EOF
 ```
@@ -200,17 +215,20 @@ An open-then-subtract shape — allow every method and tool, then block dangerou
 warden policy write mcp-aws-safe - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-    condition = <<-CEL
-      !has(call.args.operation_name) || !(
-        call.args.operation_name.startsWith("delete_") ||
-        call.args.operation_name.startsWith("terminate_") ||
-        call.args.operation_name in ["put_bucket_policy", "put_role_policy", "put_user_policy"]
-      )
-    CEL
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-aws-safe-calls - <<EOF
+path "mcp_aws/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools { allowed = ["*"] }
+  condition = <<-CEL
+    !has(call.args.operation_name) || !(
+      call.args.operation_name.startsWith("delete_") ||
+      call.args.operation_name.startsWith("terminate_") ||
+      call.args.operation_name in ["put_bucket_policy", "put_role_policy", "put_user_policy"]
+    )
+  CEL
 }
 EOF
 ```
@@ -221,19 +239,22 @@ Argument-level gates restrict the *values* passed to `tools/call`. One `conditio
 warden policy write mcp-aws-us-only - <<EOF
 path "mcp_aws/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["aws___call_aws"]
-    condition = <<-CEL
-      (!has(call.args.service_name) || call.args.service_name in ["s3", "dynamodb", "lambda"]) &&
-      (!has(call.args.region_name) || call.args.region_name in ["us-east-1", "us-east-2", "us-west-2"])
-    CEL
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-aws-us-only-calls - <<EOF
+path "mcp_aws/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["aws___call_aws"] }
+  condition = <<-CEL
+    (!has(call.args.service_name) || call.args.service_name in ["s3", "dynamodb", "lambda"]) &&
+    (!has(call.args.region_name) || call.args.region_name in ["us-east-1", "us-east-2", "us-west-2"])
+  CEL
 }
 EOF
 ```
 
-The `mcp { }` block composes with runtime conditions so you can layer environment guards on top of tool-level restrictions:
+An MCP policy composes with runtime conditions so you can layer environment guards on top of tool-level restrictions:
 
 ```bash
 warden policy write mcp-aws-business-hours - <<EOF
@@ -244,19 +265,22 @@ path "mcp_aws/role/+/gateway*" {
     now.getHours("UTC") >= 8 && now.getHours("UTC") < 18 &&
     now.getDayOfWeek("UTC") in [1, 2, 3, 4, 5]
   CEL
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["aws___call_aws"]
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-aws-business-hours-calls - <<EOF
+path "mcp_aws/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["aws___call_aws"] }
 }
 EOF
 ```
 
-When a request hits the `mcp { }` gate and is denied, Warden returns HTTP 403 with a structured JSON body and an RFC 6750 `WWW-Authenticate` header; MCP client SDKs surface this to the agent as a tool-call failure with an actionable message. The audit log records the matched rule and the offending tool/parameter so operators can debug policy decisions centrally.
+When a request hits the MCP policy gate and is denied, Warden returns HTTP 403 with a structured JSON body and an RFC 6750 `WWW-Authenticate` header; MCP client SDKs surface this to the agent as a tool-call failure with an actionable message. The audit log records the matched rule and the offending tool/parameter so operators can debug policy decisions centrally.
 
 These Warden-level denials are **distinct** from AWS-side `AccessDeniedException` errors. The latter come from the upstream MCP server when the IAM role lacks a required permission; they stream back as native AWS error responses inside the tool-call result. Operators debugging permission issues should check `error_description` (or the response body shape) to tell the two layers apart.
 
-Policies that omit the `mcp { }` block keep the simplest behavior: Warden passes the request through to AWS unchanged and the IAM role alone enforces authorization.
+An MCP mount with **no MCP policy in scope denies every call** (`no_mcp_policy`). There is no pass-through default: to let the IAM role alone enforce authorization, write a wildcard MCP policy that allows every method and tool.
 
 ## Step 5: Point an MCP Client at Warden
 
@@ -404,7 +428,7 @@ Create a role that binds allowed certificate identities to a credential spec and
 ```bash
 warden write auth/cert/role/s3-reader \
     allowed_common_names="agent-*" \
-    token_policies="mcp-aws-access" \
+    token_policies="mcp-aws-access,mcp-aws-access-calls" \
     cred_spec_name=aws-s3-reader
 ```
 
@@ -526,5 +550,5 @@ Common patterns:
 | EC2 inventory | `ec2:Describe*` (read-only inventory of regions and instances) |
 | CloudWatch logs read | `logs:DescribeLogGroups`, `logs:GetLogEvents` on the target log groups |
 
-The CloudTrail entry for each AWS API call captures both the assumed-role identity and (via Warden's audit log linkage) the originating Warden session. Treat the IAM role as the security boundary and the `mcp { }` block as governance over which JSON-RPC shapes ever reach AWS.
+The CloudTrail entry for each AWS API call captures both the assumed-role identity and (via Warden's audit log linkage) the originating Warden session. Treat the IAM role as the security boundary and the MCP policy as governance over which JSON-RPC shapes ever reach AWS.
 

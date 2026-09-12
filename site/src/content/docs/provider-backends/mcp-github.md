@@ -46,7 +46,7 @@ warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.jso
 
 # Create a role that binds the credential spec and policy
 warden write auth/jwt/role/mcp-user \
-    token_policies="mcp-github-access" \
+    token_policies="mcp-github-access,mcp-github-access-calls" \
     user_claim=sub \
     cred_spec_name=github-ops
 ```
@@ -62,7 +62,7 @@ warden audit enable -file-path=/tmp/warden-audit.log file
 
 Each gateway request then writes a request/response pair to that file — the agent
 identity, the bound credential (`type`/`source_name`/`spec_name`), the policy
-decision (the `mcp_decision` for `mcp { }` rules), and the upstream URL.
+decision (the `mcp_decision` for MCP policy rules), and the upstream URL.
 
 ## Step 2: Mount and Configure the Provider
 
@@ -221,18 +221,18 @@ If a captured field is sensitive, add its path to the audit device's `salt_field
 ## Step 4: Create a Policy
 
 MCP traffic passes through two layers: the minted GitHub token (its scopes are the
-security boundary) and Warden's CBP `mcp { }` block (governance at the gateway).
+security boundary) and Warden's MCP policy (governance at the gateway).
 
-The `mcp { }` block is **body-authoritative** and **deny-by-default** — Warden
+An MCP policy is **body-authoritative** and **deny-by-default** — Warden
 strict-parses the JSON-RPC body and a block grants only what it allow-lists
-(`initialize`, `ping`, and `notifications/*` stay exempt for the handshake). See
+(`initialize`, `ping`, `notifications/*` and `server/discover` stay exempt for the handshake and discovery). See
 [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization)
 for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the
 `rule_type` values recorded on each decision.
 
 GitHub-flavored examples:
 
-The simplest policy grants the gateway and leans on token scopes:
+The simplest setup grants the gateway and leans on token scopes:
 
 ```bash
 warden policy write mcp-github-access - <<EOF
@@ -240,7 +240,19 @@ path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
 }
 EOF
+
+warden policy write -type mcp mcp-github-access-calls - <<EOF
+path "github-mcp/role/+/gateway*" {
+  methods   { allowed = ["*"] }
+  tools     { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts   { allowed = ["*"] }
+}
+EOF
 ```
+
+Bind **both** names on the role — an MCP policy comes into scope by being
+listed in `token_policies`, exactly like a capability policy.
 
 Restrict to a vetted set of GitHub tools:
 
@@ -248,10 +260,13 @@ Restrict to a vetted set of GitHub tools:
 warden policy write mcp-github-readonly - <<EOF
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list","tools/call","resources/list","resources/read"]
-    allowed_tools   = ["get_repository","get_pull_request","list_issues","search_code"]
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-github-readonly-calls - <<EOF
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list","tools/call","resources/list","resources/read"] }
+  tools { allowed = ["get_repository","get_pull_request","list_issues","search_code"] }
 }
 EOF
 ```
@@ -263,23 +278,26 @@ branches:
 warden policy write mcp-github-no-protected-branches - <<EOF
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["create_or_update_file"]
-    condition = <<-CEL
-      !has(call.args.branch) || !(
-        call.args.branch in ["main", "master", "production"] ||
-        call.args.branch.startsWith("release/")
-      )
-    CEL
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-github-no-protected-branches-calls - <<EOF
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["create_or_update_file"] }
+  condition = <<-CEL
+    !has(call.args.branch) || !(
+      call.args.branch in ["main", "master", "production"] ||
+      call.args.branch.startsWith("release/")
+    )
+  CEL
 }
 EOF
 ```
 
 `capabilities = ["create", "read", "delete"]` covers MCP's three verbs on the
 `/gateway/` URL (POST=create, GET=read for the SSE stream, DELETE=delete for
-session close). The `mcp { }` block fires only on the POST half.
+session close). MCP policy enforcement fires only on the POST half.
 
 ## Step 5: Point an MCP Client at Warden
 
@@ -342,7 +360,7 @@ warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem default_role=mcp-u
 # Bind allowed cert identities to the credential spec and policy
 warden write auth/cert/role/mcp-user \
     allowed_common_names="agent-*" \
-    token_policies="mcp-github-access" \
+    token_policies="mcp-github-access,mcp-github-access-calls" \
     cred_spec_name=github-ops
 
 # Point the mount at the cert auth path

@@ -9,3 +9,9 @@
 # not collide with the /install/ docs section (e.g. /install/kubernetes/); this
 # rewrite (200) serves the script's bytes at /install without changing the URL.
 /install   /install.sh   200
+
+# The honeycomb credential driver was removed in v0.20.0 — its keys were wrong on
+# the wire and could be neither revoked nor expired. Keep the key in a vault and
+# chain it through the apikey driver instead. (The honeycomb *provider* is
+# unaffected and keeps its own page.)
+/credential-drivers/honeycomb   /credential-drivers/apikey   301

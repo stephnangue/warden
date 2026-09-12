@@ -146,25 +146,34 @@ See [GitHub MCP](/provider-backends/mcp-github/) for App-based and OAuth credent
 
 Three small pieces; run them one at a time.
 
-**1. Write a permissive policy** — every method, every tool:
+**1. Write a permissive policy** — every method, every tool. This takes *two*
+documents: a capability policy granting the path, and an MCP policy permitting the
+calls. Access is the intersection of both, and MCP traffic with no MCP policy in
+scope is denied — so the wildcard MCP policy is what keeps this "before" state
+open:
 
 ```bash
 warden policy write mcp-tools - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-tools-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools   { allowed = ["*"] }
 }
 EOF
 ```
 
-**2. Create the role** that carries that policy and the GitHub credential:
+**2. Create the role** that carries *both* policies and the GitHub credential. An
+MCP policy comes into scope the same way a capability policy does — by being named
+in `token_policies` — so leaving it out would deny every call:
 
 ```bash
 warden write auth/jwt/role/mcp-user \
-  token_policies=mcp-tools \
+  token_policies=mcp-tools,mcp-tools-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
   token_ttl=1h
@@ -220,25 +229,25 @@ next.
 
 Claude fetches an MCP server's tool list once, when a session starts, and caches it for the whole
 session — so a running session won't notice a policy change. **Exit your `claude` session first**
-(`/exit`), *then* rewrite the **same** policy as an allow-list, plus an explicit deny-list for good
-measure:
+(`/exit`), *then* rewrite the **same MCP policy** as an allow-list, plus an explicit deny-list for
+good measure. Only the MCP policy changes; the capability policy granting the path stays as it is:
 
 ```bash
-warden policy write mcp-tools - <<'EOF'
+warden policy write -type mcp mcp-tools-calls - <<'EOF'
 path "github-mcp/role/+/gateway*" {
-  capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["get_*", "list_*", "search_*"]
-    denied_tools    = ["delete_*", "create_*", "update_*", "push_*", "merge_*"]
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools {
+    allowed = ["get_*", "list_*", "search_*"]
+    denied  = ["delete_*", "create_*", "update_*", "push_*", "merge_*"]
   }
 }
 EOF
 ```
 
-The block is **deny-by-default**: a tool must match `allowed_tools` and must *not* match `denied_tools`
-(a deny always wins). Patterns are case-insensitive and use a trailing `*`. The MCP handshake methods
-(`initialize`, `ping`, `notifications/*`) are always exempt.
+An MCP policy is **deny-by-default**: a tool must match the `tools` block's `allowed` and must *not*
+match its `denied` (a deny always wins). Patterns are case-insensitive and use a trailing `*`. The
+MCP session-lifecycle methods (`initialize`, `ping`, `notifications/*`, `server/discover`) are always
+exempt.
 
 ### Step 8 — ask the same question again (the "after")
 
