@@ -161,12 +161,17 @@ warden provider list
 
 Configure the provider. For the GA AWS MCP Server, the default URL resolves the signing region automatically; for Bedrock AgentCore or non-standard hosts, you may need to set `region` explicitly.
 
+`timeout` bounds a **single call** and defaults to **60 seconds** — raise it only if
+individual tool calls genuinely run long. A long-lived SSE session is bounded by
+`listen_timeout` instead, which defaults to 10 minutes. Before v0.20.0 `timeout` covered
+the whole session and defaulted to 10 minutes, so a mount carrying `"timeout": "10m"` from
+an older setup is now granting every single call ten minutes.
+
 ```bash
 warden write mcp_aws/config <<EOF
 {
   "mcp_aws_url": "https://aws-mcp.us-east-1.api.aws/mcp",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -179,7 +184,6 @@ warden write mcp_aws/config <<EOF
 {
   "mcp_aws_url": "https://runtime.bedrock-agentcore.us-east-1.amazonaws.com/agents/myMcp/invocations",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -193,7 +197,6 @@ warden write mcp_aws/config <<EOF
   "mcp_aws_url": "https://my-mcp.example.com/mcp",
   "region": "us-west-2",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -638,7 +641,6 @@ warden write mcp_aws/config <<EOF
 {
   "mcp_aws_url": "https://aws-mcp.us-east-1.api.aws/mcp",
   "auto_auth_path": "auth/cert/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF

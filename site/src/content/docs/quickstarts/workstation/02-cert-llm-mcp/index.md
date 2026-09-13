@@ -98,7 +98,7 @@ cert-auth role (same cert, new role) to that credential.
 warden provider enable -path=github-mcp -description="GitHub Copilot MCP" mcp
 
 warden write github-mcp/config <<'EOF'
-{ "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/cert/", "timeout": "10m", "max_body_size": 10485760 }
+{ "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/cert/", "max_body_size": 10485760 }
 EOF
 
 # Credential — GitHub PAT, injected upstream as a bearer token (stays inside Warden)

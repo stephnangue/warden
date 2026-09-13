@@ -120,7 +120,6 @@ warden provider enable -path=github-mcp -description="GitHub Copilot MCP" mcp
 warden write github-mcp/config \
   mcp_url=https://api.githubcopilot.com/mcp \
   auto_auth_path=auth/jwt/ \
-  timeout=10m \
   max_body_size=10485760
 ```
 

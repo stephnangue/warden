@@ -224,7 +224,6 @@ warden write cloudflare-mcp/config <<EOF
 {
   "mcp_url": "https://docs.mcp.cloudflare.com/mcp",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -703,7 +702,6 @@ warden write cloudflare-mcp/config <<EOF
 {
   "mcp_url": "https://docs.mcp.cloudflare.com/mcp",
   "auto_auth_path": "auth/cert/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF

@@ -104,14 +104,14 @@ warden provider enable -path=github-mcp -description="GitHub Copilot MCP" mcp
 ```
 
 Configure it. **`mcp_url` is required** — point it at GitHub's hosted MCP
-endpoint:
+endpoint. `timeout` bounds a **single call** and defaults to **60 seconds**; a long-lived
+SSE session is bounded by `listen_timeout`, which defaults to 10 minutes:
 
 ```bash
 warden write github-mcp/config <<EOF
 {
   "mcp_url": "https://api.githubcopilot.com/mcp",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -529,7 +529,6 @@ warden write github-mcp/config <<EOF
 {
   "mcp_url": "https://api.githubcopilot.com/mcp",
   "auto_auth_path": "auth/cert/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
