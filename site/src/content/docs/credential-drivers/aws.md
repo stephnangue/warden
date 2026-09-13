@@ -160,7 +160,7 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 
 | Key | Required | Default | Meaning |
 |-----|----------|---------|---------|
-| `mint_method` | Yes | — | Which minting path to use — one of the four values above. Must be set explicitly; there is no default. |
+| `mint_method` | Yes | — | Which minting path to use — one of the five values above. Must be set explicitly; there is no default. |
 | `subject_token_source` | For keyless | — | On an `oidc_federation` source: the federated subject — `warden_identity` or `agent_identity`. |
 | `credential_type` | No | `aws_access_keys` | Shape a Secrets Manager read vends: `aws_access_keys` or `api_key`. **Valid only with `mint_method=secrets_manager`** — rejected on any other mint method. |
 | `role_arn` | Yes (`sts_assume_role`) | — | Role the session assumes. |

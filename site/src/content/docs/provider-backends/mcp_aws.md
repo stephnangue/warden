@@ -1,10 +1,87 @@
 ---
 title: "AWS MCP"
+description: "Front an AWS-hosted MCP server with Warden: both the agent and the user it acts for are authenticated, federated into short-lived STS credentials, and the tool call is signed with SigV4."
 ---
 
 The `mcp_aws` provider enables proxied access to AWS-hosted MCP (Model Context Protocol) servers through Warden. MCP clients (Claude Code, Cursor, Continue, Cline, Goose, ...) point at Warden instead of the AWS MCP endpoint; Warden authenticates the caller, mints short-lived STS credentials bound to the chosen role, signs the upstream request with AWS SigV4, and streams JSON or SSE responses back unchanged. Agents never hold an IAM access key.
 
 The same provider fronts both **AWS's hosted MCP Server** (the GA product reached at `aws-mcp.{region}.api.aws/mcp`, which exposes a single `call_aws` tool that gives agents access to every AWS API) and **customer-owned MCP servers hosted on Bedrock AgentCore Runtime or Gateway** (where the tools and their argument shapes are whatever the customer's server exposes). One mount per upstream — describe each mount so operators and agents can pick the right one.
+
+## How a request flows
+
+Unlike the [`aws` provider](/provider-backends/aws/), this mount can carry **two
+principals**: the agent making the call, and the user it is acting for. Both are
+authenticated by Warden, and both can be described to AWS in the same assertion — so the
+role a tool call assumes can depend on who the human behind it is.
+
+The recommended setup stores **no AWS credentials at all**.
+
+<p align="center"><img alt="An agent presents both the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, trades it at AWS STS for temporary credentials, and signs the MCP JSON-RPC call to the AWS MCP server with SigV4" src="/images/warden-prov-mcp-aws-oidc-fed.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting **both** credentials — the user's token and its own
+   identity — and asserts a role. Warden authenticates each against its own auth mount.
+3. The asserted role selects the credential spec. Warden builds the assertion that spec
+   calls for, carrying the agent's claims and, when the spec opts in, the user's under a
+   nested `warden_user` claim. It goes to an **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden presents it to **STS** as `AssumeRoleWithWebIdentity` against the spec's
+   `role_arn`.
+6. STS verifies it against the trusted issuer and returns temporary credentials.
+7. Warden signs the MCP JSON-RPC call with SigV4 and forwards it upstream.
+
+Because the user's claims reach STS inside the assertion, an IAM trust policy can condition
+on them — the same tool call made for two different people can land on two different roles,
+enforced by AWS rather than by Warden alone.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the minted credential, so most tool calls skip straight from step 2 to step
+7. No assertion is built, the KMS is not called, and STS is not called — the assertion is
+materialized only after a miss is confirmed, so a hit costs nothing.
+
+The entry is keyed by namespace, the agent's token id, the spec name **and the user's token
+id**, so one user's STS credentials are never served to another. It lives for the shorter
+of the credential's own lease and the session, and an expired entry counts as a miss and
+re-mints. Concurrent misses for one key are coalesced into a single mint.
+
+Either principal re-authenticating yields a new token id and therefore a fresh mint, which
+is what makes revoking either one take effect.
+:::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all —
+the issuer's private key stays in the KMS and Warden only ever asks it to sign. Omit the
+stanza and the issuer signs with a locally held key instead. The exchange at STS is
+identical either way, so the diagram covers both.
+
+### When you must store IAM keys
+
+Where you cannot create an OIDC trust relationship, Warden holds IAM keys in encrypted
+storage and rotates them.
+
+<p align="center"><img alt="Warden resolves the asserted role to a credential spec, reads that spec's IAM keys from encrypted storage, calls STS AssumeRole for temporary credentials, and signs the MCP JSON-RPC call to the AWS MCP server with SigV4" src="/images/warden-prov-mcp-aws-static-sts.png" width="860"></p>
+
+Steps 3 and 4 become a storage read instead of a signing call, and step 5 is a plain
+`AssumeRole`. The user is still authenticated at step 2 — the mount is still a protected
+resource, and policy can still require a user — but **the user no longer reaches AWS**.
+There is no assertion to carry them, so an IAM trust policy cannot see who the call was
+made for. That distinction is the main reason to prefer federation here.
+
+Caching behaves the same way: steps 3–6 run only on a miss, and the entry is still keyed
+per user, so two people sharing an agent still get separate STS sessions.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`; the only mode that carries the user through to AWS |
+| **Stored root → short-lived mint** | Yes | `auth_method=static`; IAM keys in Warden storage, rotated automatically |
+| **Static inline** | No | Every mode mints through STS |
+| **Chaining** | No | An `aws` source takes no `secret_spec`, so nothing can feed it |
+| **Delegated user token** | No | The upstream is signed with SigV4, not a forwarded bearer token |
+
+See the [AWS credential driver](/credential-drivers/aws/) for every source and spec key,
+and [Delegation](/concepts/delegation/) for how the two principals are established.
 
 ## Why use Warden in front of this?
 
@@ -22,10 +99,19 @@ For a single developer with a laptop and personal AWS creds, `mcp-proxy-for-aws`
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- An AWS account with:
-  - An IAM role the broker can assume on the agent's behalf (with permissions covering the AWS operations the agent will make), and
-  - Permanent IAM credentials (access key + secret) for an identity that has `sts:AssumeRole` on the target role — these stay inside Warden's credential source and never reach the agent
+- An AWS account with an **IAM role** the broker assumes on the agent's behalf, carrying
+  permissions for the AWS operations the agent will make
 - An MCP client that supports remote MCP servers over HTTP (Claude Code, Cursor, Continue, Cline, Goose, ...)
+
+On the keyless path that role's trust policy accepts `sts:AssumeRoleWithWebIdentity` from
+an **IAM OIDC identity provider** pointed at Warden's issuer — see
+[Keyless credentials](/federation/keyless-credentials/). There is **no IAM user and no
+access key** to create.
+
+Falling back to stored keys adds one: permanent IAM credentials for an identity holding
+`sts:AssumeRole` on the target role, which stay inside Warden's credential source and never
+reach the agent. The [`aws` provider's appendix](/provider-backends/aws/#appendix-iam-setup-for-stored-keys)
+covers creating that user and its policies.
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
@@ -35,7 +121,12 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+:::caution[Auth paths are not checked against mounted backends]
+`auto_auth_path` is required to be non-empty, but Warden does **not** verify that the mount
+it names actually exists — nor for `user_auth_path` or `user_auth_role`. A typo is accepted
+at write time and surfaces only when a request arrives and fails to authenticate. Enable
+the auth mounts first, and re-read the config after writing it.
+:::
 
 ```bash
 warden auth enable jwt
@@ -70,12 +161,17 @@ warden provider list
 
 Configure the provider. For the GA AWS MCP Server, the default URL resolves the signing region automatically; for Bedrock AgentCore or non-standard hosts, you may need to set `region` explicitly.
 
+`timeout` bounds a **single call** and defaults to **60 seconds** — raise it only if
+individual tool calls genuinely run long. A long-lived SSE session is bounded by
+`listen_timeout` instead, which defaults to 10 minutes. Before v0.20.0 `timeout` covered
+the whole session and defaulted to 10 minutes, so a mount carrying `"timeout": "10m"` from
+an older setup is now granting every single call ten minutes.
+
 ```bash
 warden write mcp_aws/config <<EOF
 {
   "mcp_aws_url": "https://aws-mcp.us-east-1.api.aws/mcp",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -88,7 +184,6 @@ warden write mcp_aws/config <<EOF
 {
   "mcp_aws_url": "https://runtime.bedrock-agentcore.us-east-1.amazonaws.com/agents/myMcp/invocations",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -102,11 +197,45 @@ warden write mcp_aws/config <<EOF
   "mcp_aws_url": "https://my-mcp.example.com/mcp",
   "region": "us-west-2",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
 ```
+
+### Carrying the user as well as the agent
+
+Everything above authenticates the **agent** only. To make the mount carry a user too — the
+two-principal flow the diagrams show — add `user_auth_path`, naming the auth mount that
+authenticates them:
+
+```bash
+warden write mcp_aws/config <<EOF
+{
+  "user_auth_path": "auth/user-oidc/",
+  "user_auth_role": "mcp-user"
+}
+EOF
+```
+
+That single key makes the mount a **protected resource**, which changes how credentials
+arrive on the wire:
+
+| | Agent-only mount | With `user_auth_path` |
+|---|---|---|
+| `Authorization` | the agent | **the user** |
+| The agent presents | — | `X-Warden-Agent-Token`, or a client certificate |
+
+An agent that used to send its own token in `Authorization` must move to
+`X-Warden-Agent-Token` when you set this, or its request resolves to the wrong principal.
+Sending both `X-Warden-Token` and `Authorization` to a protected-resource mount is a `400`.
+
+`user_auth_role` is optional and defaults to the user auth mount's own `default_role`, but
+it **requires `user_auth_path`** — setting the role alone is rejected with *"user_auth_role
+requires user_auth_path"*. A config write is a partial update, so the keys you omit keep
+their values. See
+[Delegation](/concepts/delegation/) for the full model, and
+[Protected resource metadata](/cli/protected-resource/) for the `401` challenge that tells
+a client where to authenticate.
 
 See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
@@ -118,42 +247,111 @@ warden read mcp_aws/config
 
 ## Step 3: Create a Credential Source and Spec
 
-If you already configured an `aws` credential source for another provider (the [`aws` REST provider's README](/provider-backends/aws/) walks through the IAM-user setup in full), you can reuse it here unchanged — `mcp_aws` consumes the same source-and-spec shape. Skip to Step 4 if so.
+An `aws` credential source configured for another provider can be reused here unchanged —
+`mcp_aws` consumes the same source-and-spec shape. Skip to Step 4 if you have one. Every
+source and spec key is documented on the
+[AWS credential driver page](/credential-drivers/aws/).
 
-The credential source holds the permanent IAM access key Warden uses to call STS; credential specs on top of it define which role each Warden role assumes. The agent never sees either the source's permanent keys or the minted STS credentials.
+### 3a. Keyless federation (recommended)
 
-```bash
-warden cred source create aws-src \
-  -type aws \
-  -rotation-period 24h \
-  -config access_key_id=<AccessKeyId> \
-  -config secret_access_key=<SecretAccessKey> \
-  -config region=us-east-1
-```
-
-`-rotation-period` is how often Warden rotates the source's IAM access keys. Longer periods are acceptable when the IAM user only has `sts:AssumeRole` (no direct resource access); shorter periods (`12h`-`24h`) suit stricter environments. See the [`aws` provider README](/provider-backends/aws/) for a full discussion of the IAM-user policy shape required here.
-
-Verify:
+A federated source stores nothing and takes **no `rotation_period`** — there is no secret
+to rotate:
 
 ```bash
-warden cred source read aws-src
+warden cred source create aws-src -json '{
+  "type": "aws",
+  "config": {
+    "auth_method": "oidc_federation",
+    "region": "us-east-1",
+    "audience": "sts.amazonaws.com"
+  }
+}'
 ```
 
-Create a credential spec that assumes a target IAM role via STS. The role's permissions are what gate which AWS calls the agent can actually make:
+The spec is where the two principals are decided. `subject_token_source=warden_identity`
+makes Warden mint the assertion, and **`assertion_user_claims` is what puts the user in
+it**:
 
 ```bash
-warden cred spec create aws-s3-reader \
-  -source aws-src \
-  -config mint_method=sts_assume_role \
-  -config role_arn=arn:aws:iam::<ACCOUNT_ID>:role/s3-reader-role \
-  -config ttl=1h \
-  -min-ttl 600s \
-  -max-ttl 2h
+warden cred spec create aws-s3-reader -json '{
+  "source": "aws-src",
+  "min_ttl": 600,
+  "max_ttl": 7200,
+  "config": {
+    "mint_method": "sts_assume_role",
+    "subject_token_source": "warden_identity",
+    "role_arn": "arn:aws:iam::<ACCOUNT_ID>:role/s3-reader-role",
+    "ttl": "1h",
+    "assertion_user_claims": "sub,email,groups"
+  }
+}'
 ```
 
-Each request mints a fresh STS session bound to the target role. The session lives `ttl` (clamped by `-min-ttl` / `-max-ttl`); subsequent requests mint new sessions. SigV4 imposes a separate 15-minute clock on the signed request itself — see the "Quirks" section of the skill for what that means for long-running tool calls.
+`assertion_user_claims` is **opt-in and fails closed**, which is the opposite of how the
+agent's own `assertion_metadata_claims` behaves:
 
-The source's IAM user must have `sts:AssumeRole` permission on every `role_arn` any spec built on top of the source references. Multiple specs over the same source give different Warden roles different reach — e.g. one spec per assumed-role ARN, one Warden role bound to each spec.
+- Omit it and the assertion carries **no `warden_user` claim at all** — a spec that does
+  not ask never discloses the user. The mount still authenticates them; AWS just never
+  hears about it.
+- Set it and `warden_user` always carries the user's `sub`, plus whichever login-derived
+  metadata keys you name. List `sub` alone for an identity-only disclosure.
+- Name a claim the user's login does not provide and the **mint fails** rather than
+  silently omitting it — because these values scope a security decision at AWS.
+- It is valid only when the subject (or actor) is `warden_identity`. Pairing it with
+  `agent_identity` is rejected at write: *"field 'assertion_user_claims': is valid only
+  when the subject or actor is 'warden_identity'"*.
+
+An IAM trust policy can then condition on those claims, so the same tool call made by two
+different people can be granted different reach — decided by AWS, not by Warden alone. See
+[Assertion claims](/federation/assertion-claims/) for the claim shapes.
+
+### 3b. Stored IAM keys
+
+The source holds a permanent IAM access key Warden uses to call STS. It needs an IAM user
+and its keys — the [`aws` provider's appendix](/provider-backends/aws/#appendix-iam-setup-for-stored-keys)
+has that setup, including the `sts:AssumeRole` policy the user requires.
+
+```bash
+warden cred source create aws-src -json '{
+  "type": "aws",
+  "rotation_period": 86400,
+  "config": {
+    "auth_method": "static",
+    "access_key_id": "<AccessKeyId>",
+    "secret_access_key": "<SecretAccessKey>",
+    "region": "us-east-1"
+  }
+}'
+
+warden cred spec create aws-s3-reader -json '{
+  "source": "aws-src",
+  "min_ttl": 600,
+  "max_ttl": 7200,
+  "config": {
+    "mint_method": "sts_assume_role",
+    "role_arn": "arn:aws:iam::<ACCOUNT_ID>:role/s3-reader-role",
+    "ttl": "1h"
+  }
+}'
+```
+
+Note the absence of `assertion_user_claims`: there is no assertion on this path, so the
+user cannot be carried to AWS however the mount is configured.
+
+`rotation_period` is how often Warden rotates the source's IAM access keys — integer
+seconds in JSON. Longer periods are acceptable when the IAM user only holds
+`sts:AssumeRole`; `43200`–`86400` (12–24h) suits stricter environments.
+
+### Either way
+
+Each request mints a fresh STS session bound to the target role. The session lives `ttl`
+(clamped by `min_ttl`/`max_ttl`); subsequent requests mint new sessions. SigV4 imposes a
+separate 15-minute clock on the signed request itself — see the "Quirks" section of the
+skill for what that means for long-running tool calls.
+
+Multiple specs over one source give different Warden roles different reach — one spec per
+assumed-role ARN, one Warden role bound to each spec. The role the agent asserts on a
+request is what picks between them.
 
 Verify:
 
@@ -443,7 +641,6 @@ warden write mcp_aws/config <<EOF
 {
   "mcp_aws_url": "https://aws-mcp.us-east-1.api.aws/mcp",
   "auto_auth_path": "auth/cert/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF

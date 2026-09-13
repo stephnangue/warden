@@ -178,7 +178,7 @@ warden write auth/spiffe/role/anthropic \
 warden provider enable -path=github-mcp -description="GitHub Copilot MCP" mcp
 
 warden write github-mcp/config <<'EOF'
-{ "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/spiffe/", "timeout": "10m", "max_body_size": 10485760 }
+{ "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/spiffe/", "max_body_size": 10485760 }
 EOF
 
 warden cred source create github-src -type=github -rotation-period=0 \

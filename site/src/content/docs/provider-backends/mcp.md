@@ -1,5 +1,6 @@
 ---
 title: "Generic MCP"
+description: "Front any bearer-authenticated MCP server with Warden: the agent and the user it acts for are authenticated, and the upstream token is minted, federated, chained or exchanged per request."
 ---
 
 The `mcp` provider enables proxied access to **any bearer-authenticated MCP
@@ -13,19 +14,14 @@ This is the MCP provider for any server that takes a bearer token in the
 `Authorization` header — Cloudflare, Slack, Linear, Sentry, Notion, GitHub,
 Google Cloud, and more. (The one MCP upstream it doesn't cover is AWS, which
 signs requests with SigV4 rather than a bearer; that keeps its own `mcp_aws`
-provider.) It accepts every bearer-shaped credential a role may bind:
+provider.)
 
-- **`oauth_bearer_token`** — an OAuth2 token, including the browser-consent
-  authorization-code flow (the agent acts as a consenting user, the grant is
-  refreshed automatically). What most remote MCP servers require — Cloudflare,
-  **Slack** (`https://mcp.slack.com/mcp`), Linear, Sentry, Notion.
-- **`api_key`** — a static, long-lived personal or service token, for a server
-  that authenticates a fixed bearer rather than running an OAuth flow. Common
-  with self-hosted and enterprise MCP servers.
-- **`github_token`** — a GitHub App installation token or PAT, the same credspec
-  that backs the `github` REST provider. See [`mcp-github.md`](/provider-backends/mcp-github/).
-- **`gcp_access_token`** — a short-lived Google Cloud access token, the same
-  credspec that backs the `gcp` REST provider.
+It accepts every bearer-shaped credential type a role may bind —
+`oauth_bearer_token`, `api_key`, `github_token` (the same credspec that backs the
+`github` REST provider, see [`mcp-github.md`](/provider-backends/mcp-github/)) and
+`gcp_access_token`. The type is a consequence of how you obtain the token, which is
+the real decision: [How a request flows](#how-a-request-flows) sets out the options and
+ranks them.
 
 > **A REST credential is usually not the MCP credential.** Even when an upstream
 > has a `<name>` REST provider, its **MCP** server often authenticates
@@ -44,6 +40,116 @@ operator-set description, not by reading the URL.
 > This page is the general operator guide; the per-upstream pages layer
 > upstream-specific credential, URL, and quirk notes on top.
 
+## How a request flows
+
+Every request through this mount has the same shape. The agent presents its identity and,
+on a mount configured for it, the user's; Warden authorizes the JSON-RPC call against
+policy; then it puts a bearer token in `Authorization` and forwards.
+
+What differs — and what the rest of this section is about — is **where that bearer token
+comes from**. Warden supports several answers, and they are not equally good: they differ
+in whether the upstream can tell *who* the call was for.
+
+| Mode | The upstream receives | Represents |
+|---|---|---|
+| **Delegated exchange** ✅ *best when the upstream supports it* | A token minted for **this user**, with the agent recorded as the actor | The user, and the agent acting for them |
+| **Chaining** ✅ *best fallback when the upstream has a plain OAuth token endpoint* | A fresh access token minted per request from **this user's** consented grant, held in OpenBao/Vault | The user |
+| **Keyless federation** ✅ *when the upstream federates Warden's issuer* | A token minted for an assertion describing the agent, and optionally the user | The agent |
+| **Static inline** ⚠️ *discouraged* | One long-lived key, the same for everybody | Nobody in particular |
+| **OAuth2 browser consent** ⛔ *development only* | A token from one human's consent, shared by every caller of the spec | The person who happened to consent |
+
+The first three are all production-grade — pick whichever the upstream supports, in that
+order. Fall to **static inline** only when the upstream offers nothing better, such as a
+self-hosted server that authenticates one fixed bearer; even then the key at least stays
+inside Warden rather than on an agent host.
+
+**OAuth2 browser consent is not a production option at all.** It needs someone at a browser
+to provision, and the grant it captures belongs to one person while serving everyone. Use
+it to try an upstream out, then move up the table.
+
+Each mode is worked through below, and the
+[credential driver pages](/credential-drivers/) hold the full key reference.
+
+### Delegated exchange
+
+The upstream trusts your identity provider, so Warden trades the tokens it already holds
+for one the upstream mints. Three grants do this, and which you use depends on what the
+upstream's authorization server implements. All three are the
+[`token_exchange` driver](/credential-drivers/token-exchange/) with a different `grant`.
+
+**RFC 8693 token exchange** (`grant=rfc8693`) — the user is the *subject*, the agent is the
+*actor*. This is the shape that says "this agent, acting for this user", and the issued
+token carries both.
+
+<p align="center"><img alt="Warden sends the user's ID token as the subject and the agent's identity as the actor to the OAuth token endpoint, which returns an access token representing the user with the agent recorded as actor, injected as a bearer token to the MCP server" src="/images/warden-prov-mcp-token-exchange-rfc-8693.png" width="860"></p>
+
+**JWT bearer assertion** (`grant=jwt_bearer`, RFC 7523) — the user's token alone is
+presented as an assertion grant. Entra's on-behalf-of flow is this shape. No actor is
+carried, so the upstream sees the user but not which agent acted.
+
+<p align="center"><img alt="Warden presents the user's ID token alone to the OAuth token endpoint as a JWT bearer assertion grant, receiving an access token that it injects as a bearer token to the MCP server" src="/images/warden-prov-mcp-token-exchange-rfc-7523.png" width="860"></p>
+
+**ID-JAG cross-app access** (`grant=id_jag`) — for an upstream in a *different*
+application domain than your IdP. It runs two legs inside one mint: the home IdP issues a
+single-use ID-JAG assertion bound to the resource's authorization server, and that server
+redeems it for an access token. Only the final token is returned. It needs
+`resource_token_url` for leg 2.
+
+<p align="center"><img alt="Warden sends the user's ID token and the agent's identity to the home user identity provider, which returns a single-use ID-JAG assertion bound to the resource authorization server; Warden redeems that at the resource token endpoint for an access token and injects it to the MCP server" src="/images/warden-prov-mcp-token-exchange-idjag.png" width="860"></p>
+
+Carrying an actor requires the delegation shape: `actor_token_source` may be set only when
+`subject_token_source=user_identity`, which is enforced at write.
+
+### Chaining — from OpenBao/Vault
+
+**Use this when the upstream has an ordinary OAuth token endpoint but does not yet support
+delegated exchange.** It gets you a genuine per-user access token anyway, which is why it
+is the strongest fallback available.
+
+An OpenBao/Vault **OAuth secrets engine** holds each user's *refresh token*, captured once
+when they consented. On every read it **mints a fresh access token** from that grant — the
+access token is not sitting in storage waiting to be fetched, it is minted on demand and
+short-lived. Warden reads the calling user's own credential because the spec's
+`credential_name` is templated.
+
+<p align="center"><img alt="Warden authenticates to an external OpenBao or Vault with a KMS-signed assertion carrying user and agent claims, reads the path mcp/creds templated by the user's subject where the OAuth secrets engine mints a fresh access token from that user's stored refresh token, and injects it as a bearer token to the MCP server" src="/images/warden-prov-mcp-vault-minted-access-token.png" width="860"></p>
+
+Two things are worth noticing. Warden reaches the store **keylessly** — it logs in with the
+same kind of signed assertion, so there is no store token in Warden's storage either. And
+the read is scoped by `{{user.sub}}`, so one user's token can never be served to another:
+the isolation is enforced by the path, not merely by policy.
+
+### Keyless federation
+
+The upstream trusts **Warden's** issuer rather than your IdP. Warden mints a short-lived
+assertion describing the agent — and, when the spec sets `assertion_user_claims`, the user
+too — and trades it at the upstream's token endpoint for an access token.
+
+<p align="center"><img alt="Warden builds an assertion carrying user claims and agent claims, has an external KMS sign it, presents it to the OAuth token endpoint for an access token, and injects that as a bearer token to the MCP server" src="/images/warden-prov-mcp-oidc-federation.png" width="860"></p>
+
+Nothing is stored. As with the AWS providers, the KMS leg is optional and **recommended in
+production**: with a [`signer` stanza](/configuration/signer/) configured, the issuer's
+private key never lives in Warden.
+
+### Static inline ⚠️
+
+One long-lived API key, stored encrypted in Warden and injected for every caller.
+
+<p align="center"><img alt="Warden reads a static API key from its encrypted storage and injects it as a bearer token to the MCP server for every caller" src="/images/warden-prov-mcp-inline-static-key.png" width="860"></p>
+
+The upstream cannot distinguish callers, the key does not expire, and revoking it affects
+everyone at once. Use it when the upstream offers nothing better — a self-hosted server
+that authenticates a fixed bearer — and prefer any row above it. Even then, the key lives
+only in Warden and never on an agent host, which is the one thing this mode still buys you.
+
+:::note[Credentials are cached]
+Whichever mode you choose, the minted credential is cached, so the fetch, exchange or
+signing round-trip does not happen on every call. The entry is keyed by namespace, the
+agent's token id and the spec name — plus the **user's** token id when the mount carries a
+user, so one user's token is never served to another. It lives for the shorter of the
+credential's lease and the session.
+:::
+
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
@@ -61,9 +167,12 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at
-> configuration time that the auth backend referenced by `auto_auth_path` is
-> already mounted.
+:::caution[Auth paths are not checked against mounted backends]
+`auto_auth_path` is required to be non-empty, but Warden does **not** verify that the mount
+it names actually exists — nor for `user_auth_path` or `user_auth_role`. A typo is accepted
+at write time and surfaces only when a request arrives and fails to authenticate. Enable
+the auth mounts first, and re-read the config after writing it.
+:::
 
 ```bash
 warden auth enable jwt
@@ -115,7 +224,6 @@ warden write cloudflare-mcp/config <<EOF
 {
   "mcp_url": "https://docs.mcp.cloudflare.com/mcp",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -131,35 +239,259 @@ warden read cloudflare-mcp/config
 
 ## Step 3: Create a Credential Source and Spec
 
-The provider accepts two credential shapes. Pick the one your upstream uses.
+Configure whichever mode you picked in [How a request flows](#how-a-request-flows). They
+appear here in the same order — best first.
 
-### Option A: OAuth2 (authorization-code flow) — e.g. Cloudflare, Slack
+### Option A: Delegated exchange
 
-Most remote MCP servers use this. The upstream authenticates a browser-consented
-OAuth2 grant. Warden stores the refresh token and mints a fresh access token per
-request. Create an `oauth2` source and an `authorization_code` spec, then run the
-connect flow once to record the user's consent. For the **Slack MCP server**
-(`https://mcp.slack.com/mcp`), see [`mcp-slack.md`](/provider-backends/mcp-slack/) for the exact
-endpoints and scopes — the Cloudflare example below shows the general shape:
+The upstream's authorization server mints a token for the user. The source points at its
+token endpoint; the spec says which of your tokens fill the subject and actor slots.
 
-The source holds the upstream's OAuth endpoints; the app's client credentials,
-the pinned callback, and the requested scopes live on the spec (the
-`client_secret` is read from a file so it never lands in shell history):
+Warden authenticates to that endpoint as an OAuth client, and **that client credential
+should not live in Warden either**. `client_auth=kms_private_key_jwt` signs the client
+assertion with a key held in a KMS, reached through `secret_spec` — so the source stores
+no secret at all:
 
 ```bash
-warden cred source create cf-oauth-src \
-  -type=oauth2 \
-  -rotation-period=0 \
-  -config=auth_url=https://oauth.cloudflare.com/authorize \
-  -config=token_url=https://oauth.cloudflare.com/token
+warden cred source create mcp-exchange-src -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/v1/token",
+    "grant": "rfc8693",
+    "client_auth": "kms_private_key_jwt",
+    "secret_spec": "idp-client-signer"
+  }
+}'
+```
 
-warden cred spec create mcp-creds \
-  -source cf-oauth-src \
-  -config auth_method=authorization_code \
-  -config client_id=<client-id> \
-  -config client_secret=@/path/to/client-secret \
-  -config redirect_uri=http://127.0.0.1:8765/callback \
-  -config scopes="<space-separated scopes>"
+`secret_spec` names a spec that mints a **signing capability** rather than key material —
+a Vault [`transit_signer`](/credential-drivers/vault/) spec, say. This method has no inline
+form: without `secret_spec` there is nothing to sign with, and it is rejected. Everything
+identifying the client travels with the key in the referenced payload, so `client_id`,
+`private_key`, `client_assertion_kid`, `client_assertion_alg` and `secret_field` must all
+be omitted here.
+
+:::note[Create the referenced spec first]
+`secret_spec` is resolved when the source is written, so a name that does not exist yet is
+rejected with *"create the secret-yielding spec first"*. A `transit_signer` spec also needs
+its **own** `jwt_role` — it is deliberately not inherited from the source, because that
+role's policy should grant signing with the one key and nothing more.
+:::
+
+Then the spec. **RFC 8693** — the user is the subject, the agent the actor:
+
+```bash
+warden cred spec create mcp-creds -json '{
+  "source": "mcp-exchange-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "subject_token_source": "user_identity",
+    "actor_token_source": "agent_identity",
+    "audience": "https://mcp.example.com",
+    "scope": "mcp.read mcp.write"
+  }
+}'
+```
+
+#### Which actor source?
+
+`agent_identity` forwards the agent's own inbound JWT, so it exists **only for an agent
+that authenticated with one**. An agent authenticated by client certificate or SPIFFE
+X509-SVID has no bearer to forward — there set `actor_token_source=warden_identity` and
+Warden mints an assertion describing the agent for the actor slot instead:
+
+```bash
+warden cred spec create mcp-creds -json '{
+  "source": "mcp-exchange-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "subject_token_source": "user_identity",
+    "actor_token_source": "warden_identity",
+    "assertion_audience": "https://idp.example.com",
+    "audience": "https://mcp.example.com"
+  }
+}'
+```
+
+| `actor_token_source` | Use when | The upstream trusts |
+|---|---|---|
+| `agent_identity` | The agent authenticates with a JWT | The agent's own IdP |
+| `warden_identity` | The agent authenticates any other way — cert, SPIFFE — or you would rather federate one issuer | Warden's issuer |
+
+Either way `actor_token_source` is accepted only alongside
+`subject_token_source=user_identity`: an actor is meaningful only in the delegation shape,
+and any other pairing is rejected at write. At most one slot is ever `warden_identity`, so
+the `assertion_*` keys apply unambiguously to whichever it is.
+
+**JWT bearer (RFC 7523)** — set the source's `grant` to `jwt_bearer` and drop the actor:
+
+```bash
+warden cred spec create mcp-creds -json '{
+  "source": "mcp-exchange-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "subject_token_source": "user_identity",
+    "audience": "https://mcp.example.com"
+  }
+}'
+```
+
+**ID-JAG** — set `grant=id_jag` and add `resource_token_url`, the resource authorization
+server's endpoint for leg 2. Both legs authenticate as the same client, so one keyless
+client credential covers both:
+
+```bash
+warden cred source create mcp-idjag-src -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/v1/token",
+    "resource_token_url": "https://auth.resourceapp.example.com/oauth2/token",
+    "grant": "id_jag",
+    "client_auth": "kms_private_key_jwt",
+    "secret_spec": "idp-client-signer"
+  }
+}'
+```
+
+Where a KMS is not available, `client_secret_post` with an inline `client_id` and
+`client_secret` works — see [Token exchange](/credential-drivers/token-exchange/) for every
+`client_auth` option and the chaining alternative.
+
+### Option B: Chaining — a per-user token from OpenBao/Vault
+
+**The fallback to reach for when the upstream has an ordinary OAuth token endpoint but no
+delegated exchange.** An OpenBao/Vault OAuth secrets engine holds the user's refresh token
+from their one-time consent and mints a fresh access token on every read, so the upstream
+still receives a token that represents the actual user.
+
+The source is keyless: Warden logs in to the store with a signed assertion rather than a
+stored token.
+
+```bash
+warden cred source create mcp-vault-src -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create mcp-creds -json '{
+  "source": "mcp-vault-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "oauth2",
+    "subject_token_source": "warden_identity",
+    "assertion_user_claims": "sub",
+    "oauth2_mount": "mcp",
+    "credential_name": "{{user.sub}}"
+  }
+}'
+```
+
+Warden reads `mcp/creds/<resolved name>`, and the engine mints against that user's stored
+grant. The `{{user.sub}}` template is what makes it per-user, and it **works only on the
+federation path** — the claims it resolves from come from the exchange, so a templated
+`credential_name` on a non-federated source fails closed. Pair it with a templated policy
+on the store side, so the store enforces the same scoping rather than trusting Warden's
+path construction.
+
+`jwt_role` is required on a federated source and names the JWT-auth role the assertion logs
+in as; `jwt_mount` defaults to `jwt`. The credential's TTL follows the minted token's own
+`expire_time`, so Warden re-mints as it approaches expiry rather than serving a stale one.
+
+### Option C: Keyless federation
+
+The upstream trusts Warden's issuer instead of your IdP. The subject becomes a
+Warden-minted assertion:
+
+```bash
+warden cred spec create mcp-creds -json '{
+  "source": "mcp-exchange-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "subject_token_source": "warden_identity",
+    "assertion_audience": "https://mcp.example.com",
+    "assertion_user_claims": "sub,email"
+  }
+}'
+```
+
+A Warden-minted subject **must** declare its audience — an assertion with no `aud` is
+replayable at any upstream that does not pin one, so omitting it is rejected with *"field
+'assertion_audience': is required when the subject or actor is 'warden_identity'"*. The
+exception is a source that derives the audience from its own config, like the `hvault`
+source in Option B. `assertion_user_claims` is opt-in and fails closed on a claim the
+user's login does not carry; omit it and the assertion describes the agent only.
+
+### Option D: Static inline ⚠️
+
+A single long-lived bearer, injected for every caller. Prefer any option above.
+
+```bash
+warden cred source create svc-mcp-src -json '{
+  "type": "api_key"
+}'
+
+warden cred spec create mcp-creds -json '{
+  "source": "svc-mcp-src",
+  "min_ttl": 3600,
+  "max_ttl": 86400,
+  "config": {
+    "api_key": "<static-token>"
+  }
+}'
+```
+
+The minted credential is an `api_key`. This fits servers documenting a fixed
+`Authorization: Bearer <token>`; a server expecting the token in a non-`Authorization`
+header (e.g. `x-api-key`) needs a dedicated provider, not this one.
+
+### Option E: OAuth2 authorization-code — development only
+
+:::danger[Not for production]
+This flow binds a **single human's browser consent** to a spec that every caller then
+shares, and it cannot be provisioned without someone sitting at a browser. Use it to try an
+upstream out locally. In production use Option A, or Option B where the upstream has only
+a plain OAuth token endpoint — both give the upstream a token that represents the actual
+calling user.
+:::
+
+Warden stores the refresh token on the spec and mints a fresh access token per request.
+Create an `oauth2` source and an `authorization_code` spec, then run the connect flow once
+to record consent. For the **Slack MCP server** (`https://mcp.slack.com/mcp`), see
+[`mcp-slack.md`](/provider-backends/mcp-slack/) for the exact endpoints and scopes — the
+Cloudflare example below shows the general shape.
+
+```bash
+warden cred source create cf-oauth-src -json '{
+  "type": "oauth2",
+  "config": {
+    "auth_url": "https://oauth.cloudflare.com/authorize",
+    "token_url": "https://oauth.cloudflare.com/token"
+  }
+}'
+
+warden cred spec create mcp-creds -json '{
+  "source": "cf-oauth-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "auth_method": "authorization_code",
+    "client_id": "<client-id>",
+    "client_secret": "<client-secret>",
+    "redirect_uri": "http://127.0.0.1:8765/callback",
+    "scopes": "<space-separated scopes>"
+  }
+}'
 
 # One-time browser consent; Warden binds the pinned loopback callback, opens the
 # browser, captures the code, and stores the refresh token on the spec
@@ -174,28 +506,6 @@ warden cred spec connect mcp-creds
 
 The minted credential is an `oauth_bearer_token` — Warden injects its token as
 `Authorization: Bearer <token>` and refreshes before expiry.
-
-### Option B: Static API key
-
-For an MCP server that authenticates a fixed, long-lived bearer token — a
-personal access token or a service token, common with self-hosted and enterprise
-servers — rather than running an OAuth flow. Warden injects the token as
-`Authorization: Bearer <token>`.
-
-```bash
-warden cred source create svc-mcp-src \
-  -type=api_key \
-  -rotation-period=0
-
-warden cred spec create mcp-creds \
-  -source svc-mcp-src \
-  -config api_key=@/path/to/static-token
-```
-
-The minted credential is an `api_key`. This path fits servers that document a
-fixed `Authorization: Bearer <token>`; if the server instead expects a token in a
-non-`Authorization` header (e.g. `x-api-key`), it needs a dedicated provider, not
-this one.
 
 Verify the spec:
 
@@ -392,7 +702,6 @@ warden write cloudflare-mcp/config <<EOF
 {
   "mcp_url": "https://docs.mcp.cloudflare.com/mcp",
   "auto_auth_path": "auth/cert/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
