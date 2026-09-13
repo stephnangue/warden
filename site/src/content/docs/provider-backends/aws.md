@@ -71,11 +71,11 @@ that *does* carry both principals, see [MCP AWS](/provider-backends/mcp_aws/).
 
 | Mode | Supported | How |
 |---|---|---|
-| **C — keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`, as above. **Nothing stored.** |
-| **B — stored root → short-lived mint** | Yes | `auth_method=static`; IAM keys in Warden storage, rotated automatically |
-| **A — static inline** | No | AWS has no long-lived credential worth serving directly; every mode mints |
-| **D — chaining** | Not as a consumer | An `aws` source cannot be fed by `secret_spec` — it takes no such key. It is a chaining **producer**: `mint_method=secret_read` serves a Secrets Manager secret to other specs |
-| **E — delegated user token** | No | No user leg on this provider |
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`, as above. **Nothing stored.** |
+| **Stored root → short-lived mint** | Yes | `auth_method=static`; IAM keys in Warden storage, rotated automatically |
+| **Static inline** | No | AWS has no long-lived credential worth serving directly; every mode mints |
+| **Chaining** | Not as a consumer | An `aws` source cannot be fed by `secret_spec` — it takes no such key. It is a chaining **producer**: `mint_method=secret_read` serves a Secrets Manager secret to other specs |
+| **Delegated user token** | No | No user leg on this provider |
 
 See the [AWS credential driver](/credential-drivers/aws/) for every source and spec key,
 [Credential concepts](/concepts/credentials/) for the full taxonomy, and

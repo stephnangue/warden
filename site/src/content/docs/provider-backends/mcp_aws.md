@@ -74,11 +74,11 @@ per user, so two people sharing an agent still get separate STS sessions.
 
 | Mode | Supported | How |
 |---|---|---|
-| **C — keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`; the only mode that carries the user through to AWS |
-| **B — stored root → short-lived mint** | Yes | `auth_method=static`; IAM keys in Warden storage, rotated automatically |
-| **A — static inline** | No | Every mode mints through STS |
-| **D — chaining** | No | An `aws` source takes no `secret_spec`, so nothing can feed it |
-| **E — delegated user token** | No | The upstream is signed with SigV4, not a forwarded bearer token |
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`; the only mode that carries the user through to AWS |
+| **Stored root → short-lived mint** | Yes | `auth_method=static`; IAM keys in Warden storage, rotated automatically |
+| **Static inline** | No | Every mode mints through STS |
+| **Chaining** | No | An `aws` source takes no `secret_spec`, so nothing can feed it |
+| **Delegated user token** | No | The upstream is signed with SigV4, not a forwarded bearer token |
 
 See the [AWS credential driver](/credential-drivers/aws/) for every source and spec key,
 and [Delegation](/concepts/delegation/) for how the two principals are established.
