@@ -1,5 +1,9 @@
 ---
 title: "Deploying Warden on Kubernetes"
+description: "End-to-end Kubernetes deployment: PostgreSQL, TLS, Vault Transit auto-unseal, first-time initialization, and day-2 operations."
+sidebar:
+  label: Kubernetes
+  order: 5
 ---
 
 This guide walks through installing Warden on a Kubernetes cluster using the
@@ -11,9 +15,12 @@ the API listener and auto-unseal via HashiCorp Vault Transit. A dev profile
 (`values-dev.yaml`) shrinks the install to a single replica using a static
 seal key for quick local testing on kind or minikube.
 
+The chart itself — how to install it, every value it exposes, and what
+`upgrade`, `rollback`, and `uninstall` do — is documented separately on
+[The Warden Helm Chart](/install/helm/).
+
 - [Architecture overview](#architecture-overview)
 - [Prerequisites](#prerequisites)
-- [Installing the chart](#installing-the-chart)
 - [Dev quickstart on kind](#dev-quickstart-on-kind)
 - [Production install](#production-install)
 - [PostgreSQL options](#postgresql-options)
@@ -61,72 +68,17 @@ On leader failure, a standby acquires the lock within ~10s. See the
 - **Seal infrastructure** — for production, a Vault server with a Transit
   key configured for auto-unseal. For dev, a single shared static seal
   key carried in a Secret.
-- **`helm` 3.16+** and **`kubectl`** locally.
+- **`helm` 3.16+** and **`kubectl`** locally. See
+  [Installing the chart](/install/helm/#installing-the-chart) for the OCI,
+  air-gapped, and from-source paths.
 - **cert-manager (optional)** — required only when `tls.certManager.enabled=true`.
   Any v1.x install works; the chart references whatever `Issuer` or
   `ClusterIssuer` you point it at.
 
----
-
-## Installing the chart
-
-The chart is published to the GitHub Container Registry on every release
-tag, as an OCI artifact alongside the Warden Docker image. Pick the
-method that matches your environment.
-
-### From the OCI registry (recommended)
-
-Helm 3.8+ pulls OCI charts natively — no `helm repo add` needed:
-
-```bash
-helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
-  -n warden --create-namespace \
-  -f your-values.yaml
-```
-
-`--version` refers to the *chart* version (currently `0.1.0`), which is
-independent of the Warden binary version. The chart pins the matching
-Warden image automatically via the release pipeline.
-
-To pin to a specific Warden binary version against the same chart:
-
-```bash
-helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
-  --set image.tag=v0.17.0 \
-  -n warden --create-namespace \
-  -f your-values.yaml
-```
-
-### From a release tarball (air-gapped)
-
-For clusters that cannot reach OCI registries — for example, those
-restricted to an internal mirror — every release also attaches the chart
-tarball to the GitHub Release page:
-
-```bash
-curl -L -o warden-chart.tgz \
-  https://github.com/stephnangue/warden/releases/download/v0.17.0/warden-0.3.3.tgz
-
-helm install warden ./warden-chart.tgz \
-  -n warden --create-namespace \
-  -f your-values.yaml
-```
-
-### From the source repo (development)
-
-For chart development or to install an unreleased version:
-
-```bash
-git clone https://github.com/stephnangue/warden
-helm install warden ./warden/deploy/helm/warden \
-  -n warden --create-namespace \
-  -f your-values.yaml
-```
-
-The commands in the rest of this guide use the OCI form. Substitute the
-local-path form (`./deploy/helm/warden`) if you are working from a clone.
+The commands below install from the OCI registry. Substitute the local-path
+form (`./deploy/helm/warden`) if you are working from a clone, and add
+`--version` to pin the chart — see
+[Chart version vs Warden version](/install/helm/#chart-version-vs-warden-version).
 
 ---
 
@@ -220,16 +172,11 @@ kubectl -n warden create secret generic warden-seal \
 
 ### 5. Install the chart
 
-The dev values file lives inside the chart, so for the OCI install path
-download it first with `helm show values`:
+The dev profile lives inside the chart, so on the OCI path the equivalent is a
+handful of `--set` flags:
 
 ```bash
-helm show values oci://ghcr.io/stephnangue/charts/warden --version 0.3.3 \
-  > /tmp/warden-values.yaml
-# Edit /tmp/warden-values.yaml — or skip this step and use --set flags only.
-
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
   -n warden \
   --set replicaCount=1 \
   --set seal.type=static \
@@ -314,7 +261,6 @@ reference your synced Secret names via `--set` instead.
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
   -n warden --create-namespace \
   --set tls.existingSecret=warden-tls \
   --set storage.existingSecret=warden-db \
@@ -327,18 +273,13 @@ helm install warden oci://ghcr.io/stephnangue/charts/warden \
 Pods will start uninitialized — proceed to
 [First-time initialization](#first-time-initialization).
 
-### 4. Notable defaults that you may want to override
+### 4. Tune the values
 
-- `image.tag` — defaults to the chart's `appVersion`. Override to pin a
-  specific Warden release independently of the chart version.
-- `resources` — 100m CPU / 256Mi memory request, 512Mi memory limit. Bump
-  for high-throughput deployments.
-- `topologySpreadConstraints` — defaults to one entry spreading pods
-  across `topology.kubernetes.io/zone` with `whenUnsatisfiable:
-  ScheduleAnyway`. Tighten to `DoNotSchedule` if your cluster has
-  guaranteed multi-zone capacity.
-- `tls.requireClientCert` — set to `true` for mTLS on the API listener.
-  Clients must present a certificate signed by the CA in `ca.crt`.
+The install above takes the chart's defaults for everything except storage,
+seal, and TLS. The values most deployments also change — `replicaCount`,
+`image.tag`, `resources`, `topologySpreadConstraints`, `tls.requireClientCert`,
+and the audit destination — are documented in
+[Values reference](/install/helm/#values-reference).
 
 ---
 
@@ -406,25 +347,16 @@ Secret the StatefulSet mounts, and renews automatically before expiry.
 `tls.existingSecret` and `tls.certManager.enabled` are mutually
 exclusive — preflight rejects both.
 
-### Defaults you get out of the box
-
-| Field | Default |
-|---|---|
-| `secretName` | `{fullname}-tls` (override with `tls.certManager.secretName`) |
-| `dnsNames` | `{fullname}`, `{fullname}.{ns}.svc`, `{fullname}.{ns}.svc.cluster.local`, `*.{fullname}-headless.{ns}.svc.cluster.local` |
-| `duration` / `renewBefore` | `2160h` (90d) / `360h` (15d) |
-| `privateKey` | ECDSA P-256, `rotationPolicy: Always` |
-| `usages` | `[server auth]`, plus `client auth` when `tls.requireClientCert=true` |
-
-Required input: `tls.certManager.issuerRef.name`. The chart does **not**
-create the Issuer — that is environment policy and typically lives in a
-different namespace.
+The only required input is `tls.certManager.issuerRef.name` — the chart does
+**not** create the Issuer, since that is environment policy and typically lives
+in a different namespace. The rendered `Certificate`'s DNS names, duration,
+renewal window, and key algorithm are covered in
+[TLS values](/install/helm/#tls-tls).
 
 ### Production: Vault PKI or internal CA
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
   -n warden --create-namespace \
   --set tls.certManager.enabled=true \
   --set tls.certManager.issuerRef.name=warden-pki \
@@ -570,9 +502,11 @@ done
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
   -n warden -f your-values.yaml
 ```
+
+See [Upgrading the release](/install/helm/#upgrading-the-release) for pinning
+and for the `--reuse-values` form.
 
 The StatefulSet has `checksum/config` and (when present) `checksum/credentials`
 pod annotations. Any change that affects the rendered ConfigMap or
@@ -587,13 +521,14 @@ Bump `image.tag` (or upgrade the chart whose `appVersion` advances):
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
   -n warden --reuse-values \
-  --set image.tag=v0.17.0
+  --set image.tag=v0.20.0     # the leading "v" is part of the image tag
 ```
 
-Same rolling-restart mechanics. Check release notes for any
-configuration changes that require an HCL update first.
+Same rolling-restart mechanics. Check the
+[upgrade guides](/upgrade/from-v0-19/) first — some releases change
+configuration or policy syntax and need an HCL update before the new binary
+starts.
 
 ### Rotating the seal token (Transit auto-unseal)
 
@@ -640,7 +575,6 @@ A standby is promoted within ~10s.
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
   -n warden --reuse-values \
   --set replicaCount=5
 ```
@@ -661,11 +595,9 @@ recoverable — especially the Postgres data and the seal token.
 
 ### Uninstalling the release
 
-`helm uninstall` removes only the chart-rendered objects (StatefulSet,
-Services, ConfigMap, ServiceAccount, PDB, and — when literal credentials
-were passed via values — the chart-managed credentials Secret). The
-namespace, operator-managed Secrets, and PostgreSQL are intentionally
-left alone:
+`helm uninstall` removes only the chart-rendered objects. The namespace,
+operator-managed Secrets, and PostgreSQL are intentionally left alone — see
+[Uninstalling](/install/helm/#uninstalling) for the exact inventory.
 
 ```bash
 helm uninstall warden -n warden
@@ -725,16 +657,8 @@ If you want to redeploy later against the same data, stop after
 
 ### Rolling back without uninstalling
 
-To undo a chart upgrade without losing any state, use `helm rollback`:
-
-```bash
-helm history warden -n warden
-helm rollback warden <revision> -n warden
-```
-
-This re-renders the previous chart values and triggers a rolling
-restart bounded by the PDB. The cluster does not need to be sealed,
-re-initialized, or re-keyed.
+To undo a chart upgrade without losing any state, use `helm rollback` — see
+[Rolling back](/install/helm/#rolling-back).
 
 ---
 
@@ -757,17 +681,6 @@ Common causes:
   consistent across all pods.
 - **Not initialized** — pods stay NotReady until `/v1/sys/init` runs. See
   [First-time initialization](#first-time-initialization).
-
-### `helm install` fails immediately with a value error
-
-The chart's preflight validator emits clear messages:
-
-- `tls.existingSecret is required` — create a `kubernetes.io/tls` Secret.
-- `Either storage.existingSecret or storage.connectionUrl must be set` —
-  provide the postgres connection URL.
-- `seal.transit.address is required when seal.type=transit` — Transit
-  auto-unseal needs a Vault endpoint.
-- `seal.type must be 'transit' or 'static'` — typo in `--set seal.type=`.
 
 ### TLS verification errors on `/v1/sys/init`
 
@@ -804,21 +717,19 @@ no other values to adjust:
 
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.3 \
   -n warden --reuse-values \
-  --set image.tag=v0.17.0-debug
+  --set image.tag=debug        # moving tag; or v<version>-debug to pin
 
 kubectl -n warden exec warden-0 -- sh -c 'ls /config && id'
 ```
 
-Roll back to the production tag (`--set image.tag=v0.17.0`, or
-`--set image.tag=""` to fall back to the chart's `appVersion`)
-once the investigation is done. The debug variant is meant for short-lived
-diagnostic windows, not steady-state operation — it carries a
-larger attack surface than the production image by design.
+Roll back to the production tag once the investigation is done —
+`--set image.tag=v<version>`, or `--set image.tag=""` to fall back to the
+chart's `appVersion`. The debug variant is meant for short-lived diagnostic
+windows, not steady-state operation: it carries a larger attack surface than
+the production image by design.
 
-### `helm test` fails with connection_refused
+### Chart and `helm` command failures
 
-The test pod hits the `warden` API Service. If no pods are Ready (e.g.
-because init has not run yet), the Service has no endpoints and the curl
-fails. Run `helm test` after the init flow completes.
+Preflight value errors and `helm test` failures are covered in
+[Troubleshooting the chart](/install/helm/#troubleshooting-the-chart).

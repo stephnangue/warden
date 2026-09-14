@@ -5,10 +5,10 @@
 /docs      /concepts/  301
 /docs/*    /concepts/  301
 
-# Serve the install script at a clean /install. The file is /install.sh so it does
-# not collide with the /install/ docs section (e.g. /install/kubernetes/); this
-# rewrite (200) serves the script's bytes at /install without changing the URL.
-/install   /install.sh   200
+# No rule for /install. It is the install docs overview (/install/index.html),
+# which is what someone typing that URL into a browser expects — and a static
+# asset shadows a redirect on Pages anyway, so a rewrite here would be silently
+# inert. The installer is served from its real path: /install.sh.
 
 # The honeycomb credential driver was removed in v0.20.0 — its keys were wrong on
 # the wire and could be neither revoked nor expired. Keep the key in a vault and
