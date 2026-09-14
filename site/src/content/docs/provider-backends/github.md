@@ -1,8 +1,86 @@
 ---
 title: "GitHub"
+description: "Proxy the GitHub API and Git over HTTPS through Warden: mint short-lived App installation tokens, or serve each user their own PAT from a vault."
 ---
 
 The GitHub provider enables proxied access to both the GitHub REST API and Git smart-HTTP (clone, fetch, push) through Warden. It supports both **GitHub App** and **Personal Access Token (PAT)** authentication, and works with GitHub.com and GitHub Enterprise Server.
+
+## How a request flows
+
+Two decisions shape this mount, and they are independent:
+
+- **Whose identity the call runs as.** A **GitHub App** acts as the app — permissions belong
+  to the installation, not to a person. A **PAT** acts as the person who owns it, so branch
+  protection, `CODEOWNERS` and audit attribution all land on them.
+- **Where the credential lives.** In Warden's encrypted storage, or in a vault Warden reads
+  per request.
+
+That gives four combinations. The vertical axis is what GitHub sees; the horizontal is what
+Warden stores.
+
+|  | Credential in Warden | Credential chained from a vault |
+|---|---|---|
+| **App** → short-lived installation token | [stored App credential](#option-b-app-credential-stored-in-warden) | [chained App credential](#option-a-chained-app-credential-recommended) ✅ |
+| **PAT** → the person's own token | [inline PAT](#option-d-inline-pat) ⚠️ | [per-user PAT from a vault](#option-c-per-user-pat-from-a-vault) ✅ |
+
+### Chained App credential
+
+The App's private key stays in the vault; Warden reads it per request and exchanges it for
+a short-lived installation token.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the GitHub App credential from an external vault at a path templated by the agent's team and environment, exchanges it at the GitHub token endpoint for an app token, and injects that token to the GitHub API or Git host" src="/images/warden-prov-github-cred-chain.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to an **external
+   KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden authenticates to the **external vault** and reads
+   `secret/github/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the App credential for that team and environment.
+7. Warden presents it to the **GitHub token endpoint**…
+8. …receiving a short-lived installation token.
+9. Warden injects that token and forwards.
+
+The App private key is the crown jewel — anything holding it can mint installation tokens
+— so keeping it in the vault is the point of this arrangement.
+
+### Per-user PAT from a vault
+
+Same machinery, different scoping. The path is templated by the **user**, so each person's
+own PAT is what reaches GitHub.
+
+<p align="center"><img alt="Warden authenticates to an external vault with a KMS-signed assertion carrying user and agent claims, reads the personal access token from a path templated by the user's subject and the agent's environment, and injects that token to the GitHub API or Git host" src="/images/warden-prov-github-vault-pat.png" width="860"></p>
+
+The read is `secret/github/{{user.sub}}/{{agent.env}}`, so one spec serves everyone and each
+caller reaches only their own token — enforced by the path, not by policy alone. There is no
+token endpoint step: a PAT is served as it is, not exchanged.
+
+This is the mode to reach for when the agent acts **for a person** and you need GitHub to
+see that person.
+
+### The stored variants
+
+<p align="center"><img alt="Warden reads the GitHub App credential from its encrypted storage, exchanges it at the GitHub token endpoint for an app token, and injects that token to the GitHub API or Git host" src="/images/warden-prov-github-static-sts.png" width="860"></p>
+
+With the App credential in Warden's storage, steps 3 to 6 collapse into a storage read; the
+exchange and injection are unchanged.
+
+<p align="center"><img alt="Warden reads a personal access token from its encrypted storage and injects it to the GitHub API or Git host for every caller" src="/images/warden-prov-github-inline-pat.png" width="860"></p>
+
+An inline PAT is the shortest path and the weakest: one person's long-lived token, shared by
+every caller of the spec, with no expiry and revocation a manual step at GitHub. It still
+keeps the token off agent hosts, but prefer any row above it.
+
+:::note[Steps 3–8 run only on a cache miss]
+Warden caches the minted credential, so most requests skip straight to the injection. The
+entry is keyed by namespace, the agent's token id, the spec name and the user's token id —
+so a per-user PAT is never served to another user.
+:::
+
+See the [GitHub credential driver](/credential-drivers/github/) for every source and spec
+key, and [MCP GitHub](/provider-backends/mcp-github/) for the same credentials behind
+GitHub's MCP server.
 
 ## Prerequisites
 
@@ -19,7 +97,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -75,47 +157,140 @@ warden read github/config
 
 ## Step 3: Create a Credential Source and Spec
 
-The credential source holds only connection info. Auth credentials (PAT, App private key) are stored on the credential spec below.
+The credential source holds only connection info; the credential itself lives on the spec,
+or in a vault the spec chains from.
 
 ```bash
-warden cred source create github-src \
-  -type=github \
-  -rotation-period=0 \
-  -config=github_url=https://api.github.com
+warden cred source create github-src -json '{
+  "type": "github",
+  "config": {
+    "github_url": "https://api.github.com"
+  }
+}'
 ```
 
-Verify the source was created:
+Four options, best first. A–B act as the **App**; C–D act as a **person**.
 
-```bash
-warden cred source read github-src
-```
-
-Create a credential spec that references the credential source. The spec carries the auth credentials and gets associated with tokens at login time.
-
-### Option A: GitHub App (Recommended)
+### Option A: Chained App credential (recommended)
 
 1. Go to **Settings > Developer settings > GitHub Apps** and create a new app.
-2. Note the **App ID** from the app settings page.
-3. Generate a **private key** (RSA, PEM format) and download it.
-4. Install the app on your organization or account and note the **Installation ID** from the URL.
+2. Note the **App ID**, generate an RSA **private key**, install the app and note the
+   **Installation ID**.
+3. Put the private key in your vault rather than in Warden.
 
 ```bash
-warden cred spec create github-ops \
-  -source github-src \
-  -config mint_method=app \
-  -config app_id=<your-app-id> \
-  -config private_key=@/path/to/private-key.pem \
-  -config installation_id=<your-installation-id>
+# Producer: the App key, read from KV v2 through a keyless Vault source
+warden cred spec create github-app-key -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "github/{{agent.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: the App spec, with the key sourced rather than stored
+warden cred spec create github-ops -json '{
+  "source": "github-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "app",
+    "app_id": "<your-app-id>",
+    "installation_id": "<your-installation-id>",
+    "secret_spec": "github-app-key",
+    "secret_field": "private_key"
+  }
+}'
 ```
 
-### Option B: Personal Access Token
+`private_key` is absent from the consumer entirely. `secret_field` names which field of the
+fetched payload holds the key; store it under `private_key` and you can omit it. A
+`secret_field` that resolves to an empty or absent field **fails loudly** rather than
+quietly substituting a different key.
+
+`mint_method=app` requires both `app_id` and `installation_id` — omitting either is rejected
+naming it.
+
+### Option B: App credential stored in Warden
 
 ```bash
-warden cred spec create github-ops \
-  -source github-src \
-  -config mint_method=pat \
-  -config token=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+cat > github-app-spec.json <<EOF
+{
+  "source": "github-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "app",
+    "app_id": "<your-app-id>",
+    "installation_id": "<your-installation-id>",
+    "private_key": $(jq -Rs . < /path/to/private-key.pem)
+  }
+}
+EOF
+
+warden cred spec create github-ops -json @github-app-spec.json
+rm github-app-spec.json
 ```
+
+`jq -Rs .` embeds the PEM as a correctly escaped JSON string so the newlines survive, and
+the payload goes through a file so the key never lands in shell history.
+
+### Option C: Per-user PAT from a vault
+
+Each person's own PAT, resolved by the templated path. Use this when GitHub should see the
+individual rather than an app.
+
+```bash
+warden cred spec create github-user-pat -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "env",
+    "assertion_user_claims": "sub",
+    "kv2_mount": "secret",
+    "secret_path": "github/{{user.sub}}/{{agent.env}}"
+  }
+}'
+
+warden cred spec create github-ops -json '{
+  "source": "github-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "pat",
+    "secret_spec": "github-user-pat"
+  }
+}'
+```
+
+The referenced payload supplies the token under `token`. Because `{{user.sub}}` is in the
+path, the mount **must** carry a user (`user_auth_path`) — with no user on the request there
+is nothing to resolve and the mint fails closed, which is the behaviour you want.
+
+Which claims resolve depends on what the producer projects: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims`. Templates resolve at **mint, not at write**, so a path naming an
+unprojected claim is accepted by `spec create` and fails on the first request.
+
+### Option D: Inline PAT
+
+⚠️ One person's long-lived token, shared by every caller. Prefer any option above.
+
+```bash
+printf '{"source":"github-src","min_ttl":3600,"max_ttl":86400,"config":{"mint_method":"pat","token":"%s"}}' \
+  "$(cat /path/to/pat)" | warden cred spec create github-ops -json -
+```
+
+Warden verifies the PAT against GitHub before storing the spec and rejects an invalid one
+with a `401`, so this needs a real token.
 
 Verify:
 
