@@ -1,11 +1,65 @@
 ---
 title: "Scaleway"
+description: "Proxy Scaleway APIs through Warden: chain the management key from a vault per request, mint a short-lived API key with it, and inject that upstream."
 ---
 
 The Scaleway provider enables proxied access to Scaleway APIs through Warden. It supports two authentication modes, auto-detected per request:
 
 - **Standard API** — Injects `X-Auth-Token` header with the Scaleway secret key. Covers Instances, Kubernetes, Databases, IAM, Load Balancers, Registries, and all other Scaleway products.
 - **S3 Object Storage** — Verifies the client's SigV4 signature, re-signs with real Scaleway credentials, and forwards to `s3.{region}.scw.cloud`. Compatible with any S3 client (AWS CLI, boto3, s3cmd, MinIO).
+
+## How a request flows
+
+Scaleway has no workload-identity federation, so minting short-lived API keys needs a
+**management key** with IAM permissions. The question is whether that key sits in Warden's
+storage or stays in the vault that owns it.
+
+The recommended setup stores no Scaleway credential in Warden.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the management key from an external vault at a path templated by the agent's team and environment, uses it to mint a short-lived API key at the Scaleway token endpoint, and injects that key to the Scaleway service API" src="/images/warden-prov-scaleway-cred-chain.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion that the referenced spec calls for and sends it to an
+   **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden authenticates to the **external vault** with that assertion and reads
+   `secret/scaleway/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the management key for that team and environment.
+7. Warden presents it to **Scaleway IAM**…
+8. …which mints a fresh, short-lived API key.
+9. Warden injects that key as `X-Auth-Token` and forwards.
+
+The minted key is revoked when its lease expires, so the credential reaching Scaleway is
+short-lived even though the management key behind it is not — and that management key never
+enters Warden's storage.
+
+:::note[Steps 3–8 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 9 — no
+assertion, no vault read, no key minting. The entry is keyed by namespace, the agent's
+token id, the spec name and the user's token id.
+:::
+
+### When you must store the management key
+
+Where there is no vault to chain from, the key lives in the source and Warden can rotate it.
+
+<p align="center"><img alt="Warden reads the Scaleway management key from its encrypted storage, uses it to mint a short-lived API key at the Scaleway token endpoint, and injects that key to the Scaleway service API" src="/images/warden-prov-scaleway-static-sts.png" width="860"></p>
+
+Steps 3 to 6 collapse into a single storage read. The minting and injection are unchanged.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Chaining** ✅ *recommended* | Yes | `secret_spec` on the source; the management key is read per request from a vault Warden reaches keylessly |
+| **Stored root → short-lived mint** | Yes | `management_access_key` + `management_secret_key` on the source, rotated on a schedule |
+| **Static inline** | Yes, discouraged | `mint_method=static_keys` serves a fixed pair — no minting, no expiry, revocation a no-op |
+| **Keyless federation** | No | Scaleway exposes no workload-identity federation |
+| **Delegated user token** | No | The upstream receives a key minted for an IAM application |
+
+See the [Scaleway credential driver](/credential-drivers/scaleway/) for every source and
+spec key.
 
 ## Prerequisites
 
@@ -20,7 +74,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -76,23 +134,62 @@ warden read scaleway/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Keys
+### Option A: Chained management key (recommended)
 
-Create a Scaleway credential source and spec with your API key pair. The spec is validated at creation time by calling `GET /iam/v1alpha1/api-keys/{access_key}` to verify the key exists.
+The flow in the diagram above. The **source** names a `secret_spec` and holds no key of its
+own; Warden reads the management key per mint and uses it to create a short-lived API key.
 
 ```bash
-warden cred source create scaleway-src \
-  -type=scaleway \
-  -config=scaleway_url=https://api.scaleway.com
+# Producer: the management key, read from KV v2 through a keyless Vault source
+warden cred spec create scaleway-mgmt-key -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "scaleway/{{agent.team}}/{{agent.env}}"
+  }
+}'
 
-warden cred spec create scaleway-ops \
-  -source scaleway-src \
-  -config mint_method=static_keys \
-  -config access_key=SCWXXXXXXXXXXXXXXXXX \
-  -config secret_key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+# Consumer: a scaleway source holding no key of its own
+warden cred source create scaleway-src -json '{
+  "type": "scaleway",
+  "config": {
+    "scaleway_url": "https://api.scaleway.com",
+    "secret_spec": "scaleway-mgmt-key"
+  }
+}'
+
+warden cred spec create scaleway-ops -json '{
+  "source": "scaleway-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "dynamic_keys",
+    "application_id": "<your-iam-application-id>",
+    "default_project_id": "<your-project-id>",
+    "ttl": "1h",
+    "description": "warden-managed"
+  }
+}'
 ```
 
-### Option B: Dynamic API Keys (Recommended)
+`management_secret_key`, `management_access_key` and `activation_delay` must **all** be
+omitted when `secret_spec` is set, and each is rejected by name if left behind. The secret
+comes from the referenced spec, and rotation belongs to whoever owns that spec rather than
+to this source. The referenced payload supplies the key under `management_secret_key` (or
+`secret_key`).
+
+Both principals are available to the path template. `{{agent.sub}}` needs nothing;
+`{{agent.<claim>}}` needs the claim in `assertion_metadata_claims`; `{{user.<claim>}}`
+needs it in `assertion_user_claims` **and** a user on the request. Templates resolve at
+**mint, not at write**, so a path naming an unprojected claim is accepted by `spec create`
+and fails on the first request.
+
+### Option B: Management key stored on the source
 
 Have Warden create short-lived API keys on demand via the Scaleway IAM API. Keys are automatically revoked when they expire. No long-lived secrets are stored in credential specs.
 
@@ -103,52 +200,61 @@ Have Warden create short-lived API keys on demand via the Scaleway IAM API. Keys
 - A **Scaleway IAM application** that the dynamic keys will be attached to
 
 ```bash
-warden cred source create scaleway-dynamic-src \
-  -type=scaleway \
-  -rotation-period=24h \
-  -config=scaleway_url=https://api.scaleway.com \
-  -config=management_secret_key=your-management-secret-key \
-  -config=management_access_key=SCWXXXXXXXXXXXXXXXXX
+warden cred source create scaleway-src -json '{
+  "type": "scaleway",
+  "rotation_period": 86400,
+  "config": {
+    "scaleway_url": "https://api.scaleway.com",
+    "management_access_key": "SCWXXXXXXXXXXXXXXXXX",
+    "management_secret_key": "<your-management-secret-key>"
+  }
+}'
 
-warden cred spec create scaleway-ops \
-  -source scaleway-dynamic-src \
-  -config mint_method=dynamic_keys \
-  -config application_id=your-iam-application-id \
-  -config default_project_id=your-project-id \
-  -config ttl=1h \
-  -config description=warden-managed
+warden cred spec create scaleway-ops -json '{
+  "source": "scaleway-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "dynamic_keys",
+    "application_id": "<your-iam-application-id>",
+    "default_project_id": "<your-project-id>",
+    "ttl": "1h",
+    "description": "warden-managed"
+  }
+}'
 ```
+
+`management_access_key` must start with `SCW` — the driver rejects a value that does not,
+on the assumption the access key and secret key were swapped.
 
 Each credential request creates a fresh API key via `POST /iam/v1alpha1/api-keys` with the configured TTL. When the lease expires, Warden revokes the key via `DELETE /iam/v1alpha1/api-keys/{access_key}`.
 
-### Option C: Vault/OpenBao as Credential Source
+### Serving a fixed key pair
 
-Store your Scaleway keys in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Scaleway keys (e.g., at `secret/scaleway/prod` with `access_key` and `secret_key` fields)
-- An AppRole configured for Warden access
+`mint_method=static_keys` serves an existing pair instead of minting one. It needs either
+`access_key` and `secret_key` inline, or a `secret_spec` naming a spec that yields them:
 
 ```bash
-warden cred source create scaleway-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
-
-warden cred spec create scaleway-ops \
-  -source scaleway-vault-src \
-  -type=scaleway_keys \
-  -config mint_method=static_scaleway \
-  -config kv2_mount=secret \
-  -config secret_path=scaleway/prod
+warden cred spec create scaleway-static -json '{
+  "source": "scaleway-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_keys",
+    "secret_spec": "scaleway-api-pair"
+  }
+}'
 ```
 
-The KV v2 secret at `secret/scaleway/prod` should contain `access_key` and `secret_key` fields.
+Because the pair is served rather than minted, it carries no lease, does not expire, and
+revocation is a no-op. Prefer `dynamic_keys` wherever the IAM permissions allow it.
+
+:::caution[An `hvault` source cannot serve Scaleway keys directly]
+`scaleway_keys` credentials require a `local` or `scaleway` source — pointing a spec at an
+`hvault` source is rejected. To hold the keys in Vault/OpenBao, use the chaining route in
+Option A: a `scaleway` source with `secret_spec`, and a `kv2_read` producer that does the
+vault read.
+:::
 
 Verify:
 
