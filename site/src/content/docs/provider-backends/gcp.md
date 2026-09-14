@@ -4,6 +4,70 @@ title: "GCP"
 
 The GCP provider enables proxied access to Google Cloud Platform APIs through Warden. It authenticates using service account keys, supports OAuth2 token minting and service account impersonation, and handles automated key rotation.
 
+## How a request flows
+
+This mount can carry **two principals** — the agent, and the user it is acting for — and
+both can be described to Google in the same assertion.
+
+The recommended setup stores **no GCP credentials at all**.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, exchanges it at GCP STS through Workload Identity Federation, and injects the returned access token as a bearer token to the GCP service API" src="/images/warden-prov-gcp-oidc-fed.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting **both** credentials and asserting a role. Warden
+   authenticates each against its own auth mount.
+3. The asserted role selects the credential spec. Warden builds the assertion that spec
+   calls for — agent claims, plus the user's under a nested `warden_user` claim when the
+   spec opts in — and sends it to an **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden exchanges it at **GCP STS** through Workload Identity Federation.
+6. STS verifies it against the trusted provider and returns an access token, optionally
+   impersonating a service account.
+7. Warden injects that token as `Authorization: Bearer <token>` and forwards.
+
+Because the user's claims reach Google inside the assertion, a WIF attribute condition or
+an IAM binding can be written against them.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 7. The
+entry is keyed by namespace, the agent's token id, the spec name **and the user's token
+id**, so one user's access token is never served to another, and it lives for the shorter
+of the token's own lifetime and the session.
+:::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all.
+Omit the stanza and the issuer signs with a locally held key instead. The exchange at STS
+is identical either way.
+
+### When you must store a service account key
+
+Where you cannot configure Workload Identity Federation, Warden holds a service account
+key in encrypted storage and rotates it.
+
+<p align="center"><img alt="Warden resolves the asserted role to a credential spec, reads that spec's service account key from encrypted storage, exchanges it at GCP STS for an access token, and injects it as a bearer token to the GCP service API" src="/images/warden-prov-gcp-static-sts.png" width="860"></p>
+
+Steps 3 and 4 become a storage read instead of a signing call, and step 5 signs a JWT with
+the stored key rather than presenting a federated assertion. The user is still
+authenticated at step 2 and policy can still require them, but **the user no longer reaches
+Google** — there is no assertion to carry them.
+
+A service account key is the credential Google most warns about holding: it is long-lived,
+and possession is authority. Federating removes it entirely, which is why it is the
+recommended path here rather than merely the tidier one.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation` via Workload Identity Federation; the only mode that carries the user through to Google |
+| **Stored root → short-lived mint** | Yes | `auth_method=static`; a service account key in Warden storage, rotated on a schedule |
+| **Static inline** | No | Every mode mints a fresh token |
+| **Chaining** | Not as a consumer | A `gcp` source takes no `secret_spec`. It is a chaining **producer** via `mint_method=secret_read` — see [the driver page](/credential-drivers/gcp/) |
+| **Delegated user token** | No | The upstream receives a minted token, not a forwarded user token |
+
+See the [GCP credential driver](/credential-drivers/gcp/) for every source and spec key.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
@@ -85,17 +149,77 @@ warden read gcp/config
 
 ## Step 3: Create a Credential Source and Spec
 
-The credential source holds the service account key used to authenticate with GCP.
+Start with the keyless source — it stores nothing. Every source and spec key is documented
+on the [GCP credential driver page](/credential-drivers/gcp/).
+
+### 3a. Keyless federation (recommended)
+
+A federated source holds no key, so it takes **no `rotation_period`**. It names the
+Workload Identity Federation provider Google should trust, as a **full resource name
+beginning `//iam.googleapis.com/`** — a bare `projects/...` path is rejected.
 
 ```bash
-warden cred source create gcp-sa \
-  -type=gcp_access_token \
-  -rotation-period=720h \
-  -config=source=gcp \
-  -config=service_account_key=@/path/to/service-account-key.json
+warden cred source create gcp-src -json '{
+  "type": "gcp",
+  "config": {
+    "auth_method": "oidc_federation",
+    "workload_identity_provider": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/warden-pool/providers/warden-oidc"
+  }
+}'
 ```
 
-The `@` prefix reads the file contents into the config value.
+Configure that provider to trust Warden's issuer — see
+[Keyless credentials](/federation/keyless-credentials/).
+
+A spec on a keyless source **must** set `subject_token_source`, and
+`assertion_user_claims` is what carries the user into the assertion:
+
+```bash
+warden cred spec create gcp-cloud-platform -json '{
+  "source": "gcp-src",
+  "min_ttl": 300,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "impersonated_access_token",
+    "subject_token_source": "warden_identity",
+    "target_service_account": "target@my-project.iam.gserviceaccount.com",
+    "scopes": "https://www.googleapis.com/auth/cloud-platform"
+  }
+}'
+```
+
+Three mint methods work over federation — `impersonated_access_token`, `access_token` and
+`secret_read`. Impersonation is the usual choice: the federated identity is granted only
+`roles/iam.serviceAccountTokenCreator` on the target, and the target carries the actual
+permissions.
+
+`assertion_user_claims` is opt-in and **fails closed** on a claim the user's login does not
+carry; omit it and the assertion describes the agent only.
+
+### 3b. Stored service account key
+
+The source holds the JSON key. Here `rotation_period` is meaningful — integer seconds in
+JSON (`2592000` = 30 days).
+
+```bash
+warden cred source create gcp-sa -json "{
+  \"type\": \"gcp\",
+  \"rotation_period\": 2592000,
+  \"config\": {
+    \"auth_method\": \"static\",
+    \"service_account_key\": $(jq -Rs . < /path/to/service-account-key.json)
+  }
+}"
+```
+
+`jq -Rs .` embeds the key file as a correctly escaped JSON string. Warden authenticates
+with it before storing the source, so it must be a real key.
+
+:::caution[The source type is `gcp`]
+Not `gcp_access_token` — that is a *credential* type, not a source type, and a source
+created with it is rejected: *"unknown source type"*. The available source types are listed
+in the error if you get it wrong.
+:::
 
 Verify the source was created:
 
@@ -103,34 +227,36 @@ Verify the source was created:
 warden cred source read gcp-sa
 ```
 
-Create a credential spec that references the credential source. The spec defines how Warden mints OAuth2 tokens and gets associated with tokens at login time.
+### Spec mint methods
 
-### Option A: Direct Access Token (Recommended)
-
-Mint OAuth2 access tokens using the source service account directly:
+**`access_token`** — mint for the source service account directly:
 
 ```bash
-warden cred spec create gcp-cloud-platform \
-  -source=gcp-sa \
-  -min-ttl=5m \
-  -max-ttl=1h \
-  -config=mint_method=access_token \
-  -config=scopes=https://www.googleapis.com/auth/cloud-platform
+warden cred spec create gcp-direct -json '{
+  "source": "gcp-sa",
+  "min_ttl": 300,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "access_token",
+    "scopes": "https://www.googleapis.com/auth/cloud-platform"
+  }
+}'
 ```
 
-### Option B: Impersonated Access Token
-
-Mint tokens on behalf of another service account:
+**`impersonated_access_token`** — mint on behalf of another service account:
 
 ```bash
-warden cred spec create gcp-impersonated \
-  -source=gcp-sa \
-  -min-ttl=5m \
-  -max-ttl=1h \
-  -config=mint_method=impersonated_access_token \
-  -config=target_service_account=target@my-project.iam.gserviceaccount.com \
-  -config=scopes=https://www.googleapis.com/auth/cloud-platform \
-  -config=lifetime=3600s
+warden cred spec create gcp-impersonated -json '{
+  "source": "gcp-sa",
+  "min_ttl": 300,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "impersonated_access_token",
+    "target_service_account": "target@my-project.iam.gserviceaccount.com",
+    "scopes": "https://www.googleapis.com/auth/cloud-platform",
+    "lifetime": "3600s"
+  }
+}'
 ```
 
 ### Option C: Vault/OpenBao GCP Secret Engine
