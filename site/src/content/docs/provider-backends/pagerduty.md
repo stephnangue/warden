@@ -1,8 +1,66 @@
 ---
 title: "PagerDuty"
+description: "Proxy the PagerDuty API through Warden: mint an access token per request from OAuth2 client credentials held in a vault."
 ---
 
 The PagerDuty provider enables proxied access to the PagerDuty REST API v2 through Warden. It forwards requests to PagerDuty endpoints (incidents, services, users, schedules, etc.) with automatic credential injection and policy evaluation. Two credential modes are supported: static API tokens (`apikey` source type) and OAuth2 client credentials (`oauth2` source type).
+
+## How a request flows
+
+This mount injects `Authorization: Bearer <token>` from an **`api_key`** credential. The
+question is where that token lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the PagerDuty API token from an external vault at a path templated by the agent's team and environment, and injects it to the PagerDuty API" src="/images/warden-prov-pagerduty-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/pagerduty/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the token for that team and environment.
+7. Warden injects it and forwards.
+
+The token is served **verbatim** — nothing is minted. What chaining buys is custody: the
+token stays in the store that manages it, and the read path decides who reaches which
+token.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static PagerDuty API token from its encrypted storage and injects it to the PagerDuty API for every caller" src="/images/warden-prov-pagerduty-inline-apikey.png" width="860"></p>
+
+**Inline static token.** The token sits in Warden's storage. Shortest to set up, weakest
+custody: one long-lived token for every caller.
+
+## Credential modes
+
+| Mode | What PagerDuty sees | Where the token lives |
+|---|---|---|
+| **Chained static token** ✅ *recommended* | One long-lived token, scoped by path | The vault; nothing in Warden |
+| **Inline static token** ⚠️ | One long-lived token, shared | Warden's storage |
+
+:::caution[This provider accepts only `api_key` credentials]
+The gateway injects from a `TypeAPIKey` credential and rejects anything else with
+`unsupported credential type`. An `oauth2` credential source yields `oauth_bearer_token`,
+so **an OAuth2 client-credentials source cannot be used with this mount today** — the spec
+and source create cleanly and every proxied call then fails. Use an `apikey` source, as
+below.
+:::
+
+PagerDuty exposes no workload-identity federation, so a long-lived token exists in both rows;
+what changes is whether Warden holds it.
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
 
 ## Prerequisites
 
@@ -17,7 +75,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -73,81 +135,63 @@ warden read pagerduty/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Token
+### Option A: Chained static token (recommended)
 
-The credential source holds only connection info (`api_url`). The API token is stored on the credential spec below, allowing multiple specs with different tokens to share one source.
-
-```bash
-warden cred source create pagerduty-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://api.pagerduty.com \
-  -config=verify_endpoint=/users/me \
-  -config=display_name=PagerDuty
-```
-
-Create a credential spec that references the credential source. The spec carries the API token and gets associated with tokens at login time.
+The flow in the first diagram. The vault holds the token; Warden reads it per request and
+injects it.
 
 ```bash
-warden cred spec create pagerduty-ops \
-  -source pagerduty-src \
-  -config api_key=your-pagerduty-api-token
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create pagerduty-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "pagerduty/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-The API token is validated at creation time via a `GET /users/me` call to the PagerDuty API (SpecVerifier). If the token is invalid, spec creation will fail.
+The KV secret must carry the token under **`api_key`**.
 
-### Option B: OAuth2 Client Credentials
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Swap `{{agent.team}}` for
+`{{user.sub}}` to give each person their own token. Templates resolve at **mint, not at
+write**, so a path naming an unprojected claim is accepted by `spec create` and fails on the
+first request.
 
-See [OAuth2 Client Credentials Mode](#oauth2-client-credentials-mode) below for setup with `client_id` and `client_secret`.
-
-### Option C: Vault/OpenBao as Credential Source
-
-Instead of storing the API token directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your PagerDuty API token (e.g., at `secret/pagerduty/ops` with an `api_key` field)
-- An AppRole configured for Warden access
+### Option B: Inline static token ⚠️
 
 ```bash
-# Create a Vault credential source
-warden cred source create pagerduty-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
+warden cred source create pagerduty-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://api.pagerduty.com",
+    "display_name": "PagerDuty"
+  }
+}'
+
+printf '{"source":"pagerduty-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/pagerduty-token)" | warden cred spec create pagerduty-ops -json -
 ```
 
-Create a credential spec using the `static_apikey` mint method:
-
-```bash
-warden cred spec create pagerduty-ops \
-  -source pagerduty-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=pagerduty/ops
-```
-
-The KV v2 secret at `secret/pagerduty/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
-
-You can also use the `oauth2` mint method if you have an OAuth2 plugin (openbao-plugin-secrets-oauthapp) configured in Vault:
-
-```bash
-warden cred spec create pagerduty-ops \
-  -source pagerduty-vault-src \
-  -config mint_method=oauth2 \
-  -config oauth2_mount=oauth2 \
-  -config credential_name=pagerduty
-```
-
-Verify:
-
-```bash
-warden cred spec read pagerduty-ops
-```
+One long-lived token for every caller. Prefer Option A.
 
 ## Step 4: Create a Policy
 
@@ -292,49 +336,16 @@ docker compose -f docker-compose.quickstart.yml down -v
 
 Since Warden dev mode uses in-memory storage, all configuration is lost when the server stops.
 
-## OAuth2 Client Credentials Mode
+## OAuth2 client credentials
 
-Instead of a static API token, you can use OAuth2 client credentials to have Warden mint short-lived bearer tokens automatically. This is recommended for production deployments.
+PagerDuty supports OAuth2 client-credentials, but **this mount cannot use it today**. The
+gateway injects from a `TypeAPIKey` credential and rejects anything else; an `oauth2`
+credential source yields `oauth_bearer_token`, so the source and spec create cleanly and
+every proxied call then fails with `unsupported credential type: oauth_bearer_token`.
 
-### Create an OAuth2 Credential Source
-
-The source holds the OAuth2 app credentials (`client_id`, `client_secret`). Tokens are minted dynamically on each credential request.
-
-```bash
-warden cred source create pagerduty-oauth-src \
-  -type=oauth2 \
-  -rotation-period=0 \
-  -config=client_id=your-client-id \
-  -config=client_secret=your-client-secret \
-  -config=token_url=https://identity.pagerduty.com/oauth/token \
-  -config=verify_url=https://api.pagerduty.com/users/me \
-  -config=display_name=PagerDuty
-```
-
-### Create an OAuth2 Credential Spec
-
-The spec optionally specifies the OAuth2 scope. If omitted, the default scope from the provider configuration is used.
-
-```bash
-warden cred spec create pagerduty-ops \
-  -source pagerduty-oauth-src \
-  -config scope="read write"
-```
-
-The spec is validated at creation time: Warden mints a test token and verifies it by calling `GET /users/me` on the PagerDuty API. If the credentials are invalid, spec creation will fail.
-
-### Update the JWT Role
-
-Make sure the JWT role references the OAuth2 spec:
-
-```bash
-warden write auth/jwt/role/pagerduty-user \
-    token_policies="pagerduty-access" \
-    user_claim=sub \
-    cred_spec_name=pagerduty-ops
-```
-
-All gateway requests work identically — Warden transparently injects the minted bearer token.
+Use an `apikey` source — see [Step 3](#step-3-create-a-credential-source-and-spec). Where
+you need OAuth2 against PagerDuty, the generic [`rest` provider](/provider-backends/rest/)
+accepts both credential shapes and can front the same API.
 
 ## TLS Certificate Authentication
 
