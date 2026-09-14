@@ -1,8 +1,65 @@
 ---
 title: "Vault"
+description: "Proxy HashiCorp Vault or OpenBao through Warden: federate the caller's identity into a short-lived Vault token, so no AppRole secret lives in Warden."
 ---
 
 The Vault provider enables proxied access to HashiCorp Vault (or OpenBao) through Warden. It intercepts client requests, injects a short-lived Vault token minted from a credential spec, and forwards the request to the target Vault instance. This allows Warden to broker Vault access without distributing long-lived credentials to clients.
+
+## How a request flows
+
+The credential reaching Vault is always a **short-lived Vault token**. The question is what
+Warden authenticates with to get one.
+
+The recommended setup stores nothing: Warden logs in to Vault with a signed assertion
+describing the caller.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, logs in at the OpenBao or Vault token endpoint to obtain a short-lived vault token, and injects that token to the OpenBao or Vault API" src="/images/warden-prov-vault-fed.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the spec calls for and sends it to an **external KMS**
+   unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden logs in at Vault's **JWT auth** endpoint with that assertion…
+6. …receiving a short-lived Vault token whose policies come from the JWT role.
+7. Warden injects it as `X-Vault-Token` and forwards.
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured Warden holds no key material at all;
+omit it and the issuer signs with a locally held key instead. The login at Vault is
+identical either way.
+
+Because the assertion carries the caller's claims, a **templated Vault policy** can scope
+what the token may do per user or per team — one role serving everyone without a per-user
+role explosion. That is the same mechanism the
+[credential-chaining](/federation/credential-chaining/) flows rely on, here applied to the
+proxied API itself.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the minted token, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user — and lives for the shorter of the token's own TTL and the session.
+:::
+
+### When you must store an AppRole
+
+<p align="center"><img alt="Warden reads the AppRole credentials from its encrypted storage, logs in at the OpenBao or Vault token endpoint for a short-lived vault token, and injects that token to the OpenBao or Vault API" src="/images/warden-prov-vault-static-sts.png" width="860"></p>
+
+Steps 3 and 4 become a storage read of the AppRole `role_id` and `secret_id`, and step 5 is
+an AppRole login rather than a JWT one. The token Warden injects is short-lived either way
+— what differs is whether a long-lived `secret_id` sits in Warden's storage.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation` with `jwt_role`; nothing stored, and the assertion can scope a templated policy |
+| **Stored root → short-lived mint** | Yes | `auth_method=approle`; `role_id` and `secret_id` in Warden storage |
+| **Static inline** | No | The Vault token is always minted |
+| **Delegated user token** | No | The token is minted for the JWT role, not forwarded from the user |
+
+See the [Vault credential driver](/credential-drivers/vault/) for every source and spec key
+— including `transit_signer`, which serves a signing capability rather than a secret.
 
 ## Prerequisites
 
@@ -117,7 +174,11 @@ Save the `role_id`, `secret_id`, and `secret_id_accessor` from the output.
 
 Set up a TLS certificate auth method and create a role that binds the credential spec and policy. This uses the same CA that signed the client certificate generated in the Prerequisites.
 
-> Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 # Enable cert auth
@@ -179,6 +240,52 @@ warden read vault/config
 ```
 
 ## Step 4: Create a Credential Source and Specs
+
+### Option A: Keyless federation (recommended)
+
+The flow in the first diagram. Warden holds no Vault credential: it logs in at Vault's JWT
+auth mount with a signed assertion describing the caller, so there is no `secret_id` to
+store or rotate. A federated source takes **no `rotation_period`** — there is nothing to
+rotate.
+
+On the Vault side, enable JWT auth, point it at Warden's issuer, and create a role whose
+policy may be templated on the assertion's claims. See
+[Keyless credentials](/federation/keyless-credentials/).
+
+```bash
+warden cred source create vault-prod -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com:8200",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create vault-reader -json '{
+  "source": "vault-prod",
+  "min_ttl": 3600,
+  "max_ttl": 14400,
+  "config": {
+    "mint_method": "vault_token",
+    "subject_token_source": "warden_identity",
+    "ttl": "1h"
+  }
+}'
+```
+
+`jwt_role` names the Vault JWT-auth role the assertion logs in as, and `jwt_mount` defaults
+to `jwt`. A spec on a federated source **must** set `subject_token_source`.
+
+Note there is **no `token_role`** here. On the AppRole path Warden logs in as itself and
+then creates a *child* token through a token role; on the federation path the token the JWT
+login returns **is** the credential, so naming a role is rejected: *"'token_role' is not
+used when 'subject_token_source' is set"*. What the token may do comes from the Vault JWT
+role named by `jwt_role` instead — which is where a templated policy would live.
+
+### Option B: AppRole stored in Warden
 
 The credential source tells Warden how to authenticate to Vault using the AppRole created in Step 1.
 
@@ -393,8 +500,11 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 | `static_apikey` | `api_key` | Fetch static API keys from Vault KV v2 |
 | `dynamic_aws` | `aws_access_keys` | Generate temporary AWS credentials via Vault AWS engine |
 | `dynamic_gcp` | `gcp_access_token` | Generate GCP access tokens via Vault GCP engine |
+| `dynamic_ibm` | `ibmcloud_keys` | Generate IBM Cloud credentials via Vault IBM engine |
+| `kv2_read` | `key_value` | Read a KV v2 secret and serve its payload verbatim — the usual [chaining](/federation/credential-chaining/) producer |
 | `vault_token` | `vault_token` | Create a child Vault token via token roles |
 | `oauth2` | `oauth_bearer_token` | Fetch OAuth2 tokens via Vault OAuth2 plugin (openbao-plugin-secrets-oauthapp) |
+| `transit_signer` | `key_value` | A scoped **signing capability** rather than a secret — see [the driver page](/credential-drivers/vault/#transit_signer--signing-without-the-key) |
 
 ## JWT Authentication
 
