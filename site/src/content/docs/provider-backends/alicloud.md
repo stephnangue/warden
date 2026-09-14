@@ -1,5 +1,6 @@
 ---
 title: "Alibaba Cloud (Alicloud)"
+description: "Proxy Alibaba Cloud APIs through Warden: the agent signs with its own identity, Warden federates it into short-lived STS credentials, and re-signs the request."
 ---
 
 The Alicloud provider enables proxied access to Alibaba Cloud APIs through Warden with automatic credential management and request signing. It supports two authentication modes, auto-detected per request:
@@ -8,6 +9,66 @@ The Alicloud provider enables proxied access to Alibaba Cloud APIs through Warde
 - **OSS Object Storage (S3-compatible)** — Verifies the client's `AWS4-HMAC-SHA256` signature, re-signs with real Alicloud OSS credentials, and forwards to `oss-{region}.aliyuncs.com`. Compatible with any S3 client running in Alicloud OSS S3-compatible mode (AWS CLI, boto3, s3cmd, MinIO, ossutil with `--s3`).
 
 Warden is transparent to clients: they use standard Alicloud SDKs pointed at the Warden mount, and Warden injects real Alicloud credentials into every proxied request.
+
+## How a request flows
+
+The recommended setup stores **no Alicloud credentials at all**. Warden mints a short-lived
+identity assertion describing the agent and trades it at STS for temporary credentials.
+
+<p align="center"><img alt="An agent signs an Alicloud SDK request with its own identity, Warden builds an assertion carrying the agent's claims, has an external KMS sign it, exchanges it at Alicloud STS for temporary credentials, and re-signs the request before forwarding it to the Alicloud service API" src="/images/warden-prov-alicloud-oidc-fed.png" width="860"></p>
+
+1. The user authenticates to the agent and the agent holds an ID token.
+2. The agent signs an ordinary Alicloud SDK request carrying **its own** identity, and
+   asserts a role. Warden authenticates it and verifies the signature.
+3. The asserted role selects the credential spec. Warden builds the assertion that spec
+   calls for — agent claims, scoped to one audience — and sends it to an **external KMS**
+   unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden presents it to **Alicloud STS** as `AssumeRoleWithOIDC`, against the spec's
+   `role_arn` and the source's OIDC provider.
+6. STS returns a temporary access key, secret and security token.
+7. Warden re-signs the request with those credentials and forwards it.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 7. The entry
+is keyed by namespace, the agent's token id and the spec name, and lives for the shorter of
+the credential's lease and the agent's session.
+:::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all.
+Omit the stanza and the issuer signs with a locally held key instead.
+
+:::note[The agent is the only principal here]
+Like the [`aws` provider](/provider-backends/aws/), this mount has no user leg — it accepts
+no `user_auth_path`, because a signed SDK request has nowhere to carry a second credential.
+The agent's identity is what reaches Warden and what the assertion describes, which is why
+the assertion above carries agent claims only.
+:::
+
+### When you must store a management key
+
+Where you cannot register an OIDC provider in RAM, Warden holds a management access key in
+encrypted storage and can rotate it.
+
+<p align="center"><img alt="Warden resolves the asserted role to a credential spec, reads that spec's management access key from encrypted storage, calls Alicloud STS AssumeRole for temporary credentials, and re-signs the request before forwarding it to the Alicloud service API" src="/images/warden-prov-alicloud-static-sts.png" width="860"></p>
+
+Steps 3 and 4 become a storage read instead of a signing call, and step 5 is a plain
+`AssumeRole` using the management key rather than `AssumeRoleWithOIDC`. Steps 1, 2, 6 and 7
+are unchanged, and the agent still never sees a key.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`; **nothing stored**, and no RAM user to rotate |
+| **Stored root → short-lived mint** | Yes | `auth_method=static`; a management key in Warden storage, optionally rotated |
+| **Static inline** | No | Every mode mints through STS |
+| **Chaining** | Via an `hvault` source | Keys held in Vault/OpenBao and read per request — see Option B below |
+| **Delegated user token** | No | No user leg on this provider |
+
+See the [Alicloud credential driver](/credential-drivers/alicloud/) for every source and
+spec key.
 
 ## Prerequisites
 
@@ -85,28 +146,81 @@ The `alicloud` source requires a *management* access key that Warden uses to cal
 
 > **Why no `dynamic_keys`?** Alicloud RAM access keys created via `CreateAccessKey` can take seconds to minutes to propagate across regions. Minting a fresh RAM key per request would produce spurious `InvalidAccessKeyId` errors on the first use. `assume_role` issues STS session tokens that avoid that propagation window, so it's the only dynamic mint method the driver exposes.
 
-### Option A: Alicloud source with STS `AssumeRole`
+### Option A: Keyless federation (recommended)
 
-Create an `alicloud` source holding a *management* access key with permissions to call `sts:AssumeRole`. Warden calls Alicloud's STS API per request and hands clients short-lived credentials, so even a compromised session window is bounded.
-
-The example below also enables [management key rotation](#management-key-rotation) via `-rotation-period=720h` (30 days). The `management_user_name` config key is the RAM user that owns the management key — required for rotation to work.
+A federated source holds no key. It names the RAM **OIDC provider** Alicloud should trust,
+and nothing else — `access_key_id`, `access_key_secret`, `management_user_name`,
+`activation_delay` and `ram_endpoint` are all **rejected**, because there is no key of its
+own and no RAM user to rotate as. `rotation_period` is rejected for the same reason.
 
 ```bash
-warden cred source create alicloud-src \
-  -type=alicloud \
-  -rotation-period=720h \
-  -config access_key_id=LTAI-mgmt-key \
-  -config access_key_secret=mgmt-secret \
-  -config management_user_name=warden-management
+warden cred source create alicloud-src -json '{
+  "type": "alicloud",
+  "config": {
+    "auth_method": "oidc_federation",
+    "oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+    "audience": "sts.aliyuncs.com"
+  }
+}'
 
-warden cred spec create alicloud-ops \
-  -source alicloud-src \
-  -type=alicloud_keys \
-  -config mint_method=assume_role \
-  -config role_arn=acs:ram::123456789012:role/warden-ops \
-  -config role_session_name=warden-session \
-  -config duration_seconds=1h
+warden cred spec create alicloud-ops -json '{
+  "source": "alicloud-src",
+  "type": "alicloud_keys",
+  "min_ttl": 900,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "assume_role",
+    "subject_token_source": "warden_identity",
+    "role_arn": "acs:ram::123456789012:role/warden-ops",
+    "role_session_name": "warden-session",
+    "duration_seconds": "1h"
+  }
+}'
 ```
+
+`assume_role` is the **only** mint method supported over federation. The target RAM role's
+trust policy must accept `AssumeRoleWithOIDC` from that provider rather than trusting a
+management user — see [Keyless credentials](/federation/keyless-credentials/).
+
+### Option B: Alicloud source with a stored management key
+
+Where you cannot register an OIDC provider. Create an `alicloud` source holding a
+*management* access key with permissions to call `sts:AssumeRole`. Warden calls STS per
+request and hands clients short-lived credentials, so even a compromised session window is
+bounded.
+
+The example below also enables [management key rotation](#management-key-rotation) via
+`rotation_period` — `2592000` seconds (30 days). The `management_user_name` key is the RAM
+user that owns the management key, required for rotation to work.
+
+```bash
+warden cred source create alicloud-static -json '{
+  "type": "alicloud",
+  "rotation_period": 2592000,
+  "config": {
+    "auth_method": "static",
+    "access_key_id": "LTAI-mgmt-key",
+    "access_key_secret": "<mgmt-secret>",
+    "management_user_name": "warden-management"
+  }
+}'
+
+warden cred spec create alicloud-ops -json '{
+  "source": "alicloud-static",
+  "type": "alicloud_keys",
+  "min_ttl": 900,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "assume_role",
+    "role_arn": "acs:ram::123456789012:role/warden-ops",
+    "role_session_name": "warden-session",
+    "duration_seconds": "1h"
+  }
+}'
+```
+
+`oidc_provider_arn` and `audience` are rejected on a static source — they seed only the
+federation exchange, so accepting them would mislead.
 
 The RAM role's trust policy must allow the management user to assume it, and the source's management key needs `AliyunSTSAssumeRoleAccess` (or an equivalent custom policy). See [Alicloud: Use STS to grant an access to a RAM role](https://www.alibabacloud.com/help/en/ram/user-guide/use-sts-tokens-to-access-resources) for setup.
 
