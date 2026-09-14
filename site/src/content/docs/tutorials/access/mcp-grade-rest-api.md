@@ -92,7 +92,7 @@ identity binding, checked on every request.
   agent you launch from this shell (Claude included) ever sees it.
 - The **Warden CLI + server** binary. This installs the latest release for your platform:
   ```bash
-  curl -sL https://wardengateway.com/install | bash
+  curl -sL https://wardengateway.com/install.sh | bash
   warden --version      # confirm it's on your PATH
   ```
 

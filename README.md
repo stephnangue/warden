@@ -122,15 +122,26 @@ them, not just asserts them: the secret leaves the workstation, and
 each rung turns on the audit log and watches a request get denied by
 policy. See [the series](https://wardengateway.com/quickstarts/workstation/).
 
+## Install
+
+Warden is a single static binary — the same one is both the command-line client and the server.
+
+```bash
+curl -sL https://wardengateway.com/install.sh | bash
+warden --version
+```
+
+That covers macOS and Linux. Windows archives, container images, and the Helm chart are all published on every release; see [the install guide](https://wardengateway.com/install/) for those, and for the difference between a one-command dev server and a real deployment.
+
 ## Architecture
 
-See [docs/architecture.md](https://wardengateway.com/architecture/) for Warden's design decisions, high availability model, and deployment configuration.
+See [the architecture overview](https://wardengateway.com/architecture/) for Warden's design decisions, high availability model, and deployment configuration.
 
 ## Kubernetes
 
 A first-party Helm chart deploys Warden as a 3-replica HA cluster on any Kubernetes 1.27+ cluster — bring your own Postgres, your own TLS certificate, and either a Vault Transit endpoint for auto-unseal or a static seal key for development. The chart ships production-leaning defaults; a quickstart values file shrinks the install to a single replica for kind or minikube.
 
-See [docs/install/kubernetes.md](https://wardengateway.com/install/kubernetes/) for the full guide.
+See [the chart reference](https://wardengateway.com/install/helm/) for the values it exposes, and [the Kubernetes guide](https://wardengateway.com/install/kubernetes/) for the full deployment walkthrough.
 
 ## Contributing
 

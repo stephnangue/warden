@@ -236,6 +236,7 @@ behavior you might otherwise find surprising:
   no Shamir ceremony, KMS, or recovery process to exercise.
 
 When you are ready to move beyond experimentation, see the
-[Architecture](/architecture/) overview and the
-[Kubernetes install guide](/install/kubernetes/) for storage, seal, high
-availability, and audit configuration.
+[Architecture](/architecture/) overview, the [install guide](/install/) for
+whichever way you want to run the server, and the
+[Kubernetes guide](/install/kubernetes/) for storage, seal, high availability,
+and audit configuration.

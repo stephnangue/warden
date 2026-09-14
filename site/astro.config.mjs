@@ -57,6 +57,7 @@ export default defineConfig({
             { slug: 'architecture' },
           ],
         },
+        { label: 'Install', autogenerate: { directory: 'install' } },
         { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
         {
           // Concepts follow the curated reading order from concepts/index.md,
@@ -279,7 +280,6 @@ export default defineConfig({
         { label: 'Audit devices', autogenerate: { directory: 'audit-devices' } },
         { label: 'Quickstarts', autogenerate: { directory: 'quickstarts' } },
         { label: 'Tutorials', autogenerate: { directory: 'tutorials' } },
-        { label: 'Install', autogenerate: { directory: 'install' } },
         { label: 'Upgrade', autogenerate: { directory: 'upgrade' } },
       ],
     }),
