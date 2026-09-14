@@ -29,8 +29,8 @@ How a caller proves who it is and what that lets it do.
   resolved per request.
 - [Policies](/concepts/policies/) — capability-based authorization, path matching, and
   request-content rules.
-- [CEL Condition Cookbook](/concepts/cel-conditions/) — 20 worked examples for the
-  `condition` expression, from a numeric cap to a full payments stanza.
+- [CEL Condition Cookbook](/concepts/cel-conditions/) — worked recipes for the `condition`
+  expression, grouped by whether they gate on the agent alone or on the user it acts for.
 
 ## Brokering access
 

@@ -14,7 +14,8 @@ How Warden obtains that credential is a spectrum, best to worst by *what Warden 
 - **Keyless** — Warden stores nothing. It federates a short-lived
   [identity assertion](/federation/oidc-issuer/) for a credential the upstream issues, or
   [chains](/federation/credential-chaining/) the needed secret from a keyless-federated
-  vault per request. **Recommended**, and coming to every driver.
+  vault per request. **Recommended** wherever the driver supports it — the
+  [capability matrix](/credential-drivers/#capability-matrix) says which do.
 - **Inline secret** — Warden holds a stored secret and either mints a short-lived
   credential with it (*dynamic*) or injects it directly (*static*). A stored secret is
   attack surface, so this is a fallback.

@@ -8,6 +8,20 @@ The **local** driver serves **static credentials** that live directly in the **s
 
 Reach for `local` when you already hold a fixed secret — a pre-issued token, a shared password, a static connection string — and simply want Warden to broker it to a workload. Because a local source can serve many different credential shapes, the credential `type` cannot be inferred and must be stated explicitly on the spec with `-type=`.
 
+:::caution[This is the far end of the gradient]
+[How Warden obtains a credential](/concepts/credentials/) runs from **keyless** — Warden
+stores nothing, and the upstream issues against a short-lived assertion — down to a
+**stored secret**. `local` is the furthest point from keyless: the secret sits in the spec,
+it is long-lived, it does not rotate, and revoking it is a no-op.
+
+It still buys you something real — the secret lives in Warden rather than on every agent
+host, and every use is policy-checked and audited. But where the upstream supports
+federation or chaining, prefer those; the
+[capability matrix](/credential-drivers/#capability-matrix) says which drivers do. Use
+`local` for an upstream that offers nothing better, or to get moving before wiring up
+federation.
+:::
+
 ## Credential issued
 
 The credential `type` is whatever you pass to `-type=` on the spec (the driver serves many types). Local credentials are **static**: they carry no lease and no TTL, and they are **not revocable** — revocation is a no-op. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).

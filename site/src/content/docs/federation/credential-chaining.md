@@ -90,13 +90,11 @@ The referenced spec produces the material. Four mint methods can sit at that end
 | GCP Secret Manager | `secret_read` | The stored secret's payload. Federation-first, with optional `target_service_account` impersonation. |
 | OpenBao / Vault transit | `transit_signer` | **Not a secret at all** — a scoped signing *capability*. |
 
-`transit_signer` is the one that changes the shape of the guarantee. Instead of moving
-key material, it mints a short-lived token that may do nothing but sign with one named
-transit key, plus the coordinates naming that key. The consumer chains it and asks the
-KMS to sign, so the private key is read by nobody — including Warden. Its consumer is
-`token_exchange` with `client_auth=kms_private_key_jwt`, which signs its RFC 7523 client
-assertion remotely; the method is exchange-path-only and requires a spec-level
-`jwt_role`.
+`transit_signer` is the one that changes the shape of the guarantee: it moves no key
+material at all. Instead of fetching a secret, the consumer chains a capability and asks
+the KMS to sign, so the private key is read by nobody — including Warden. See
+[`transit_signer`](/credential-drivers/vault/#transit_signer--signing-without-the-key) for
+what it mints and the constraints that follow.
 
 A producer can itself be keyless — an AWS or GCP `secret_read` on an `oidc_federation`
 source, or a Vault source using per-request JWT login — which is what makes a chain

@@ -32,7 +32,7 @@ Warden stores **nothing**. Either the source federates an
 [identity assertion](/federation/oidc-issuer/) for a credential the upstream issues
 ([`oidc_federation`](/federation/keyless-credentials/)), or it
 [chains](/federation/credential-chaining/) the secret from a keyless-federated vault
-per request. This is the recommended mode, and it is coming to every driver.
+per request. This is the recommended mode wherever a driver supports it.
 
 The upstream verifies a short-lived assertion and issues a credential directly — no stored secret.
 

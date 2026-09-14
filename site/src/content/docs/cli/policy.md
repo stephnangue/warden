@@ -153,7 +153,7 @@ EOF
 # Error: ... condition must evaluate to bool
 ```
 
-For the full variable namespaces, functions, and 20 worked examples, see
+For the full variable namespaces, functions, and the worked recipes, see
 [Fine-grained access](/concepts/policies/#fine-grained-access) and the
 [CEL Condition Cookbook](/concepts/cel-conditions/).
 
