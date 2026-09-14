@@ -4,6 +4,64 @@ title: "Datadog"
 
 The Datadog provider enables proxied access to the Datadog REST API through Warden. It forwards requests to Datadog endpoints (Metrics, Monitors, Dashboards, Logs, Events, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `DD-API-KEY` and `DD-APPLICATION-KEY` headers. One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
 
+## How a request flows
+
+This mount injects an **`api_key`** credential into the `DD-API-KEY` header, plus
+`DD-APPLICATION-KEY` when that credential carries an application key. The question is where that
+API key lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Datadog API key from an external vault at a path templated by the agent's team and environment, and injects it to the Datadog API" src="/images/warden-prov-datadog-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/datadog/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the API key for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static Datadog API key from its encrypted storage and injects it to the Datadog API for every caller" src="/images/warden-prov-datadog-inline-apikey.png" width="860"></p>
+
+**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller.
+
+## Credential modes
+
+| Mode | What Datadog sees | Where the credential lives |
+|---|---|---|
+| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+
+Datadog exposes no workload-identity federation and mints nothing per request, so the
+credential is long-lived in both rows; what changes is whether Warden holds it.
+
+:::note[Most Datadog endpoints need an application key too]
+`DD-API-KEY` alone covers submission endpoints; the read APIs also want
+`DD-APPLICATION-KEY`. Warden injects it **only when the credential carries an
+`application_key` field**, so declare it on the source with
+`credential_fields=application_key`. Warden also strips any inbound
+`DD-APPLICATION-KEY` when the credential has none, so a caller's own value cannot be
+paired with the mount's API key.
+:::
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
@@ -17,7 +75,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -85,72 +147,99 @@ warden read datadog/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Keys
+### Option A: Chained (recommended)
 
-The credential source holds only connection info (`api_url`). The API key and application key are stored on the credential spec below, allowing multiple specs with different keys to share one source.
+The flow in the first diagram. The vault holds the credential; Warden reads it per request
+and injects it.
 
-```bash
-warden cred source create datadog-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://api.datadoghq.com \
-  -config=verify_endpoint=/api/v1/validate \
-  -config=auth_header_type=custom_header \
-  -config=auth_header_name=DD-API-KEY \
-  -config=display_name=Datadog
-```
-
-Create a credential spec that references the credential source. The spec carries the API key (and optionally an application key) and gets associated with tokens at login time.
+This provider needs a second field — **`application_key`** — beside the key, and that changes the
+shape. An adjunct field survives **only** through an `apikey` source that declares it, so
+the vault read goes through a *producer* spec and the `apikey` source chains it:
 
 ```bash
-warden cred spec create datadog-ops \
-  -source datadog-src \
-  -config api_key=your-datadog-api-key \
-  -config application_key=your-datadog-application-key
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+# Producer: the whole secret, read from KV v2 — api_key and application_key together
+warden cred spec create datadog-secret -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "datadog/{{agent.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: an apikey source that declares the adjunct field, chaining the secret
+warden cred source create datadog-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://api.datadoghq.com",
+    "credential_fields": "application_key",
+    "display_name": "Datadog"
+  }
+}'
+
+warden cred spec create datadog-ops -json '{
+  "source": "datadog-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "secret_spec": "datadog-secret"
+  }
+}'
 ```
 
-The API key is validated at creation time via a `GET /api/v1/validate` call to the Datadog API (SpecVerifier). If the key is invalid, spec creation will fail.
+The KV secret must hold **both** `api_key` and `application_key`.
 
-> **Note:** The `application_key` is optional. If you only need to submit metrics and events (which require only an API key), you can omit it. Most management and read endpoints require both keys.
+:::caution[Do not point a `static_apikey` spec straight at the vault]
+`mint_method=static_apikey` on the `hvault` source yields an `api_key` credential carrying
+**the key alone** — adjunct fields are dropped for any non-`apikey` driver. The mount then
+takes its fallback branch, which looks identical to a working one from the outside.
+Without an `application_key` Warden injects only `DD-API-KEY`, which the read APIs reject. Route the read through the producer above instead.
+:::
 
-### Option B: Vault/OpenBao as Credential Source
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Swap `{{agent.team}}` for
+`{{user.sub}}` to give each person their own credential. Templates resolve at **mint,
+not at write**, so a path naming an unprojected claim is accepted by `spec create` and
+fails on the first request.
 
-Instead of storing API keys directly in Warden, you can store them in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime. This centralizes secret management in Vault.
+### Option B: Inline
 
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Datadog keys (e.g., at `secret/datadog/ops` with `api_key` and optionally `application_key` fields)
-- An AppRole configured for Warden access
-
+⚠️ 
 ```bash
-# Create a Vault credential source
-warden cred source create datadog-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
+warden cred source create datadog-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://api.datadoghq.com",
+    "verify_endpoint": "/api/v1/validate",
+    "auth_header_type": "custom_header",
+    "auth_header_name": "DD-API-KEY",
+    "credential_fields": "application_key",
+    "display_name": "Datadog"
+  }
+}'
+
+printf '{"source":"datadog-src","min_ttl":3600,"max_ttl":86400,"config":{"application_key":"<app-key>","api_key":"%s"}}' \
+  "$(cat /path/to/datadog-token)" | warden cred spec create datadog-ops -json -
 ```
 
-Create a credential spec using the `static_apikey` mint method:
-
-```bash
-warden cred spec create datadog-ops \
-  -source datadog-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=datadog/ops
-```
-
-The KV v2 secret at `secret/datadog/ops` should contain an `api_key` field and optionally an `application_key` field. Warden fetches the secret from Vault on each credential request.
-
-Verify:
-
-```bash
-warden cred spec read datadog-ops
-```
+One long-lived credential for every caller. Prefer Option A.
 
 ## Step 4: Create a Policy
 
