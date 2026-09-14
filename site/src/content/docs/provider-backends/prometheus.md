@@ -4,6 +4,55 @@ title: "Prometheus"
 
 The Prometheus provider enables proxied access to the Prometheus HTTP API through Warden. It forwards requests to Prometheus endpoints (`/api/v1/query`, `/api/v1/targets`, etc.) with automatic credential injection and policy evaluation. It supports both bearer token authentication (for managed services like Grafana Mimir, Amazon Managed Prometheus, and Thanos) and HTTP basic auth (for self-hosted Prometheus instances configured with `--web.config.file`). Credentials are static tokens stored in an `apikey` credential source.
 
+## How a request flows
+
+This mount injects an **`api_key`** credential as `Authorization: Bearer <token>`, or as
+Basic auth when the mount sets `auth_type=basic`. The question is where that
+auth token lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Prometheus auth token from an external vault at a path templated by the agent's team and environment, and injects it to the Prometheus API" src="/images/warden-prov-prometheus-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/prometheus/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the auth token for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static Prometheus auth token from its encrypted storage and injects it to the Prometheus API for every caller" src="/images/warden-prov-prometheus-inline-apikey.png" width="860"></p>
+
+**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller.
+
+## Credential modes
+
+| Mode | What Prometheus sees | Where the credential lives |
+|---|---|---|
+| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+
+Prometheus exposes no workload-identity federation and mints nothing per request, so the
+credential is long-lived in both rows; what changes is whether Warden holds it.
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
@@ -18,7 +67,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -74,107 +127,80 @@ warden read prometheus/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Bearer Token (Managed Prometheus)
+### Option A: Chained (recommended)
 
-Use this for Grafana Mimir, Amazon Managed Prometheus, Thanos, Cortex, or VictoriaMetrics instances that accept bearer tokens.
-
-```bash
-warden cred source create prometheus-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://prometheus.example.com \
-  -config=display_name=Prometheus
-```
-
-Create a credential spec with your bearer token:
+The flow in the first diagram. The vault holds the credential; Warden reads it per request
+and injects it.
 
 ```bash
-warden cred spec create prometheus-ops \
-  -source prometheus-src \
-  -config api_key=your-bearer-token
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create prometheus-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "prometheus/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-### Option B: Basic Auth (Self-hosted Prometheus)
+The KV secret must carry the credential under **`api_key`**.
 
-Use this for Prometheus instances configured with `--web.config.file` and bcrypt-hashed passwords.
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Swap `{{agent.team}}` for
+`{{user.sub}}` to give each person their own credential. Templates resolve at **mint,
+not at write**, so a path naming an unprojected claim is accepted by `spec create` and
+fails on the first request.
 
-The `api_key` field must be the base64-encoded `username:password` string:
+### Enabling Basic auth
 
-```bash
-# Encode your credentials
-ENCODED=$(echo -n "admin:your-password" | base64)
-```
-
-`auth_type` is a **mount** setting, not a credential field — set it once on the provider
-config and every spec on that mount uses it:
+The mount decides the scheme. With `auth_type=basic` the credential's `api_key` must be the
+**base64 of `username:password`** rather than a bearer token:
 
 ```bash
 warden write prometheus/config <<EOF
 {
-  "prometheus_url": "https://prometheus.example.com",
   "auth_type": "basic"
 }
 EOF
 ```
 
-The credential then carries only the encoded credentials:
+`auth_type` accepts `bearer` (the default) or `basic`. It is **mount config, not spec
+config** — it moved to the mount in v0.20.0.
 
+### Option B: Inline
+
+⚠️ 
 ```bash
-warden cred source create prometheus-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://prometheus.example.com \
-  -config=display_name=Prometheus
+warden cred source create prometheus-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://prometheus.example.com",
+    "display_name": "Prometheus"
+  }
+}'
 
-warden cred spec create prometheus-ops \
-  -source prometheus-src \
-  -config api_key=${ENCODED}
+printf '{"source":"prometheus-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/prometheus-token)" | warden cred spec create prometheus-ops -json -
 ```
 
-:::note[Changed in v0.20.0]
-`auth_type` used to be declared on the source as `optional_metadata=auth_type` and set
-per spec. It moved to the mount config, which is also what made Basic auth reachable at
-all — the declared field never reached the provider before.
-:::
-
-### Option C: Vault/OpenBao as Credential Source
-
-Instead of storing the token directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Prometheus token (e.g., at `secret/prometheus/ops` with an `api_key` field)
-- An AppRole configured for Warden access
-
-```bash
-# Create a Vault credential source
-warden cred source create prometheus-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
-```
-
-Create a credential spec using the `static_apikey` mint method:
-
-```bash
-warden cred spec create prometheus-ops \
-  -source prometheus-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=prometheus/ops
-```
-
-The KV v2 secret at `secret/prometheus/ops` must contain at minimum an `api_key` field. Basic auth is selected by the mount's `auth_type`, not by a field in the secret.
-
-Verify:
-
-```bash
-warden cred spec read prometheus-ops
-```
+One long-lived credential for every caller. Prefer Option A.
 
 ## Step 4: Create a Policy
 
