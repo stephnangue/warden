@@ -225,7 +225,7 @@ short `error_description` naming the offending method, tool, or parameter
 generic — it never reveals the shape of the policy or echoes raw body bytes — but
 it tells the agent enough to correct course rather than guess at an opaque 403.
 
-### Denial reasons
+## Denial reasons
 
 Every decision records a `rule_type` in the [audit log](/concepts/audit/). Policy
 `rule_type`s name which gate fired; structural ones name a strict-parse failure,

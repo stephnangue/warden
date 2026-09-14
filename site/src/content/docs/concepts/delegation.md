@@ -116,15 +116,15 @@ forwards the user's token so the downstream token carries `sub`=user / `act`=age
 
 ### Per-user OAuth token from OpenBao / Vault
 
-Many upstreams — GitHub, Slack, and more — do not (yet) support ID-JAG. For those, lean
-on **OpenBao/Vault's OAuth-app secrets engine + templated policies** to mint a genuine
+Most upstreams — GitHub and Slack among them — do not support ID-JAG. For those, lean on
+**OpenBao/Vault's OAuth-app secrets engine + templated policies** to mint a genuine
 **per-user** OAuth access token: Warden authenticates to the vault keylessly with a
 per-user identity assertion, the vault's templated policy scopes the read to that user,
 and Warden injects the returned token — so the agent acts on behalf of the user against
 an upstream with no native on-behalf-of flow.
 
-**OpenBao/Vault are uniquely suited to do this at scale**: a single **templated policy**
-scopes every user, so there is no per-user role explosion.
+This scales because a single **templated policy** covers every user, so there is no
+per-user role explosion.
 
 **Per-user OAuth from a vault.** A per-user identity assertion unlocks that user's OAuth token through a templated policy, which Warden injects into the non-ID-JAG upstream.
 
