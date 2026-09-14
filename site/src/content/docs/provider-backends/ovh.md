@@ -1,11 +1,64 @@
 ---
 title: "OVH"
+description: "Proxy OVHcloud APIs through Warden: chain the OAuth2 service account from a vault per request, exchange it for a bearer token, and inject that upstream."
 ---
 
 The OVH provider enables proxied access to OVHcloud APIs through Warden. It supports two authentication modes, auto-detected per request:
 
 - **Standard API** — Injects `Authorization: Bearer` header with the API token. Covers account info, cloud projects, domains, IPs, and all other OVHcloud products.
 - **S3 Object Storage** — Verifies the client's SigV4 signature, re-signs with real OVH S3 credentials, and forwards to `s3.{region}.io.cloud.ovh.net`. Compatible with any S3 client (AWS CLI, boto3, s3cmd, MinIO).
+
+## How a request flows
+
+OVH authenticates with an **OAuth2 service account** — a `client_id` and `client_secret`
+pair. There is no workload-identity federation to replace it, so the question is whether
+that pair sits in Warden's storage or stays in the vault that owns it.
+
+The recommended setup stores no OVH credential in Warden.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the OVH service account from an external vault at a path templated by the agent's team and environment, exchanges it at the OVH token endpoint for an access token, and injects the token to the OVH service API" src="/images/warden-prov-ovh-cred-chain.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion that the referenced spec calls for and sends it to an
+   **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden authenticates to the **external vault** with that assertion and reads
+   `secret/ovh/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the service account for that team and environment.
+7. Warden exchanges it at the **OVH token endpoint**…
+8. …receiving a short-lived access token.
+9. Warden injects that token as `Authorization: Bearer <token>` and forwards.
+
+Warden reaches the vault **keylessly**, so no vault token sits in its storage either, and
+the read path is templated by the caller's claims — one spec serves every team and
+environment while each reaches only its own credential.
+
+:::note[Steps 3–8 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 9 — no
+assertion, no vault read, no token exchange. The entry is keyed by namespace, the agent's
+token id, the spec name and the user's token id.
+:::
+
+### When you must store the service account
+
+Where there is no vault to chain from, the pair lives in the source.
+
+<p align="center"><img alt="Warden reads the OVH service account from its encrypted storage, exchanges it at the OVH token endpoint for an access token, and injects that token to the OVH service API" src="/images/warden-prov-ovh-static-sts.png" width="860"></p>
+
+Steps 3 to 6 collapse into a single storage read. The exchange and injection are unchanged.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Chaining** ✅ *recommended* | Yes | `secret_spec` on the source; the service account is read per request from a vault Warden reaches keylessly |
+| **Stored root → short-lived mint** | Yes | `client_id` + `client_secret` on the source, exchanged for a bearer token per request |
+| **Keyless federation** | No | OVH exposes no workload-identity federation for this exchange |
+| **Static inline** | No | The bearer token is always minted; only the credential it is minted from varies |
+| **Delegated user token** | No | The upstream receives a token minted for the service account |
+
+See the [OVH credential driver](/credential-drivers/ovh/) for every source and spec key.
 
 ## Prerequisites
 
@@ -21,7 +74,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -77,68 +134,109 @@ warden read ovh/config
 
 ## Step 3: Create a Credential Source and Spec
 
-Create an OVH credential source using an OAuth2 service account. Warden automatically mints bearer tokens (~1h TTL, auto-refreshed) and/or creates S3 credentials on demand.
-
 **Prerequisites:** An OVH OAuth2 service account — create one via `POST /me/api/oauth2/client` with `flow: "CLIENT_CREDENTIALS"`. See the [e2e test README](https://github.com/stephnangue/warden/tree/main/e2e) for step-by-step instructions.
 
-```bash
-warden cred source create ovh-src \
-  -type=ovh \
-  -config client_id=your-client-id \
-  -config client_secret=your-client-secret \
-  -config ovh_endpoint=ovh-eu \
-  -config project_id=your-cloud-project-id \
-  -config user_id=your-cloud-user-id
-```
+### Option A: Chained service account (recommended)
 
-S3 access keys are no longer minted by Warden: the `access_keys` mint method serves an existing pair, sourced by [chaining](/federation/credential-chaining/). The `dynamic_s3` and `oauth2_token_and_s3` methods, and the source's `project_id` / `user_id` keys, were removed in v0.20.0.
-
-**API-only mode** (auto-refreshed OAuth2 bearer tokens):
+The flow in the diagram above. The **source** names a `secret_spec` and holds neither half
+of the client credential.
 
 ```bash
-warden cred spec create ovh-api \
-  -source ovh-src \
-  -type=ovh_keys \
-  -config mint_method=oauth2_token
+# Producer: the service account, read from KV v2 through a keyless Vault source
+warden cred spec create ovh-service-account -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "ovh/{{agent.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: an ovh source holding no credential of its own
+warden cred source create ovh-src -json '{
+  "type": "ovh",
+  "config": {
+    "ovh_endpoint": "ovh-eu",
+    "secret_spec": "ovh-service-account"
+  }
+}'
+
+warden cred spec create ovh-api -json '{
+  "source": "ovh-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "oauth2_token"
+  }
+}'
 ```
 
-**S3-only mode** (dynamic S3 credentials, ~1h TTL, revoked and re-created on expiry):
+`client_id` **and** `client_secret` must both be omitted when `secret_spec` is set —
+keeping either is rejected, because the pair authenticates together and a source that reads
+as chained while storing half the credential is the thing chaining exists to prevent. The
+referenced payload supplies both, under `client_id` and `client_secret`.
+
+Both principals are available to the path template. `{{agent.sub}}` needs nothing;
+`{{agent.<claim>}}` needs the claim in `assertion_metadata_claims`; `{{user.<claim>}}`
+needs it in `assertion_user_claims` **and** a user on the request. Templates resolve at
+**mint, not at write**, so a path naming an unprojected claim is accepted by `spec create`
+and fails on the first request.
+
+### Option B: Service account stored on the source
 
 ```bash
-warden cred spec create ovh-s3 \
-  -source ovh-src \
-  -type=ovh_keys \
-  -config mint_method=access_keys
+warden cred source create ovh-src -json '{
+  "type": "ovh",
+  "config": {
+    "client_id": "<your-client-id>",
+    "client_secret": "<your-client-secret>",
+    "ovh_endpoint": "ovh-eu"
+  }
+}'
+
+warden cred spec create ovh-api -json '{
+  "source": "ovh-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "oauth2_token"
+  }
+}'
 ```
 
-**Dual mode** (OAuth2 token + S3 credentials):
+### Serving S3 credentials
+
+`mint_method=access_keys` serves an **existing** S3 pair — Warden does not mint one. It
+**requires** its own `secret_spec` naming a spec that yields the pair:
 
 ```bash
-warden cred spec create ovh-dual \
-  -source ovh-src \
-  -type=ovh_keys \
-  -config mint_method=access_keys
+warden cred spec create ovh-s3 -json '{
+  "source": "ovh-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "access_keys",
+    "secret_spec": "ovh-s3-keys"
+  }
+}'
 ```
 
-**Multi-tenant S3 access** — override `project_id` and `user_id` per-spec to target different S3 users:
+The referenced payload supplies `access_key` and `secret_key`. Because the pair is served
+rather than minted, it carries no lease and revocation is a no-op.
 
-```bash
-# Read-only S3 user
-warden cred spec create ovh-s3-reader \
-  -source ovh-src \
-  -type=ovh_keys \
-  -config mint_method=access_keys \
-  -config project_id=my-project \
-  -config user_id=reader-user-id
+:::caution[Removed in v0.20.0]
+The `dynamic_s3` and `oauth2_token_and_s3` mint methods are gone, along with the source's
+`api_url` key and the regional S3 API base URLs — see
+[Upgrading from v0.19.0](/upgrade/from-v0-19/).
 
-# Read-write S3 user
-warden cred spec create ovh-s3-writer \
-  -source ovh-src \
-  -type=ovh_keys \
-  -config mint_method=access_keys \
-  -config project_id=my-project \
-  -config user_id=writer-user-id
-```
+The source's `project_id` and `user_id` keys went with them. They are **not rejected**:
+unknown source keys are accepted and ignored, so an older config carrying them writes
+cleanly and simply has no effect. Remove them so the config says what it does.
+:::
 
 Verify:
 
