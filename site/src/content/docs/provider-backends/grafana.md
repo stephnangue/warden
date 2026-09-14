@@ -1,10 +1,75 @@
 ---
 title: "Grafana"
+description: "Proxy Grafana, Loki, Mimir, Tempo and Pyroscope through Warden: mint a short-lived service-account token per request from an admin token held in a vault."
 ---
 
 The Grafana provider enables proxied access to the entire Grafana ecosystem through Warden: the dashboard/admin HTTP API, Loki (logs), Mimir (metrics), Tempo (traces), and Pyroscope (profiling). It forwards requests with automatic credential injection and policy evaluation.
 
 A single provider type supports all Grafana services. Mount multiple instances with different `grafana_url` values and use the optional `tenant_id` config to inject the `X-Scope-OrgID` header required by Loki, Mimir, Tempo, and Pyroscope.
+
+## How a request flows
+
+Two things vary independently: whether the token Grafana sees is **minted per request** or a
+fixed one, and whether the credential behind it lives **in Warden** or in a vault.
+
+The best combination does both — a vaulted admin token, used to mint a short-lived service
+account token for each request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Grafana admin token from an external vault at a path templated by the agent's team and environment, mints a token on a provisioned service account through the Grafana service-accounts API, and injects it to the Grafana API" src="/images/warden-prov-grafana-cred-chain.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to an **external
+   KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden authenticates to the **external vault** and reads
+   `secret/grafana/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the admin token for that team and environment.
+7. Warden calls `POST /api/serviceaccounts/{id}/tokens` with it, on the service account
+   the spec names…
+8. …and receives a short-lived token for that account.
+9. Warden injects that token and forwards.
+
+The admin token is the privileged one — it can mint tokens on any service account — so
+keeping it in the vault and never in Warden is the point. What Grafana sees on the request
+is a short-lived token on one account instead. Warden does **not** create service accounts;
+you provision them in Grafana and name one per spec.
+
+:::note[Steps 3–8 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 9. The entry
+is keyed by namespace, the agent's token id and the spec name — plus the user's token id
+when the mount carries a user.
+:::
+
+### Simpler variants
+
+<p align="center"><img alt="Warden authenticates to an external vault with a KMS-signed assertion carrying user and agent claims, reads a static Grafana API key from a templated path, and injects it to the Grafana API" src="/images/warden-prov-grafana-vault-apikey.png" width="860"></p>
+
+**Vaulted static token.** The vault holds a service-account token directly, served verbatim
+— no minting, no token endpoint. The token stays out of Warden and the path scopes who
+reaches which token, but it is long-lived and shared by everyone the path resolves for.
+
+<p align="center"><img alt="Warden reads a static Grafana API key from its encrypted storage and injects it to the Grafana API for every caller" src="/images/warden-prov-grafana-inline-apikey.png" width="860"></p>
+
+**Inline static token.** The token sits in Warden's storage. Shortest to set up, weakest
+custody: one long-lived token for every caller.
+
+## Credential modes
+
+| Mode | What Grafana sees | Where the credential lives |
+|---|---|---|
+| **Chained admin token → minted token** ✅ *recommended* | A short-lived token on a provisioned service account | The vault; nothing in Warden |
+| **Stored admin token → minted token** | The same short-lived token | The admin token is in Warden |
+| **Chained static token** | One long-lived token, per path | The vault |
+| **Inline static token** ⚠️ | One long-lived token, shared | Warden's storage |
+
+Grafana exposes no workload-identity federation, so a privileged credential exists
+somewhere in every row; what changes is whether it is Warden holding it, and whether the
+upstream sees it directly.
+
+See the [Grafana credential driver](/credential-drivers/grafana/) for every source and spec
+key.
+
 
 ## Prerequisites
 
@@ -19,7 +84,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -75,78 +144,144 @@ warden read grafana/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static Service Account Token
+### Option A: Chained admin token (recommended)
 
-Create a service account in Grafana:
-1. Go to **Administration > Users and Access > Service Accounts**
-2. Click **Add service account**
-3. Assign a role (Viewer, Editor, or Admin) and create a token
-4. Copy the generated token (it is only displayed once)
+The flow in the first diagram. The `grafana` source names a `secret_spec` and holds no
+token of its own; Warden reads the admin token per mint and uses it to create a short-lived
+service account.
 
 ```bash
-warden cred source create grafana-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://mystack.grafana.net/api \
-  -config=verify_endpoint=/org \
-  -config=display_name=Grafana
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+# Producer: the admin token, read from KV v2 through that source
+warden cred spec create grafana-admin-token -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "grafana/{{agent.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: a grafana source holding no token of its own
+warden cred source create grafana-src -json '{
+  "type": "grafana",
+  "config": {
+    "grafana_url": "https://mystack.grafana.net",
+    "secret_spec": "grafana-admin-token"
+  }
+}'
+
+warden cred spec create grafana-ops -json '{
+  "source": "grafana-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "service_account_id": "42",
+    "token_expiry": "1h",
+    "name_prefix": "warden-"
+  }
+}'
 ```
 
-Create a credential spec that references the credential source:
+`service_account_id` names a service account **you provision in Grafana** — Warden mints
+tokens on it, it does not create one. Set it on the spec, or on the source as a default;
+a spec with neither is rejected. There is no `role` key: a minted token carries the role of
+the account it is issued on, so choose the account whose role you want rather than asking
+for one.
+
+`admin_token` must be **omitted** when `secret_spec` is set — leaving it is rejected with
+*"admin_token must be omitted when secret_spec is set; the referenced spec supplies the
+privileged token"*.
+
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Templates resolve at **mint, not at
+write**, so a path naming an unprojected claim is accepted by `spec create` and fails on the
+first request.
+
+### Option B: Admin token stored in Warden
+
+Same minting, but the admin token lives in Warden's storage.
 
 ```bash
-warden cred spec create grafana-ops \
-  -source grafana-src \
-  -config api_key=glsa_your-service-account-token
+warden cred source create grafana-src -json '{
+  "type": "grafana",
+  "config": {
+    "grafana_url": "https://mystack.grafana.net",
+    "admin_token": "<glsa_your-admin-token>"
+  }
+}'
+
+warden cred spec create grafana-ops -json '{
+  "source": "grafana-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "service_account_id": "42",
+    "token_expiry": "1h",
+    "name_prefix": "warden-"
+  }
+}'
 ```
 
-### Option B: Dynamic Tokens via Grafana Source Driver
+### Option C: Chained static token
 
-The Grafana source driver uses an admin service account token to programmatically create short-lived service accounts and tokens via the Grafana HTTP API.
+No minting — the vault holds a service-account token and Warden serves it verbatim. Use
+this where the admin token cannot be shared with Warden at all, or where Grafana's
+service-account API is unavailable.
+
+Reusing the `vault-keyless` source from Option A:
 
 ```bash
-# Create a Grafana credential source with admin token
-warden cred source create grafana-dynamic-src \
-  -type=grafana \
-  -config=grafana_url=https://mystack.grafana.net \
-  -config=admin_token=glsa_your-admin-token
+warden cred spec create grafana-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "grafana/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-Create a credential spec for dynamic token minting:
+### Option D: Inline static token ⚠️
+
+Create a service account in Grafana (**Administration > Users and Access > Service
+Accounts**), assign a role, and create a token — it is shown only once.
 
 ```bash
-warden cred spec create grafana-ops \
-  -source grafana-dynamic-src \
-  -config role=Viewer \
-  -config token_expiry=1h \
-  -config name_prefix=warden-
+warden cred source create grafana-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://mystack.grafana.net/api",
+    "verify_endpoint": "/org",
+    "display_name": "Grafana"
+  }
+}'
+
+printf '{"source":"grafana-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/grafana-token)" | warden cred spec create grafana-ops -json -
 ```
 
-### Option C: Vault/OpenBao as Credential Source
-
-Store the Grafana token in Vault/OpenBao KV v2 and have Warden fetch it at runtime:
-
-```bash
-warden cred source create grafana-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
-```
-
-Create a credential spec using the `static_apikey` mint method:
-
-```bash
-warden cred spec create grafana-ops \
-  -source grafana-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=grafana/ops
-```
+One long-lived token for every caller. Prefer any option above.
 
 ## Step 4: Create a Policy
 
@@ -392,10 +527,10 @@ curl --cert client.pem --key client-key.pem \
 
 | Aspect | Details |
 |--------|---------|
-| **Storage** | Admin token on the source; minted tokens are ephemeral |
-| **Minting** | Creates a temporary service account + token via the Grafana HTTP API |
+| **Storage** | Admin token on the source, or chained from a vault; minted tokens are ephemeral |
+| **Minting** | One token on the service account the spec names, via `POST /api/serviceaccounts/{id}/tokens`. Warden does **not** create service accounts — you provision them in Grafana |
 | **TTL** | Configurable via `token_expiry` (default: 1h) |
-| **Cleanup** | Service account is deleted on revoke, which revokes all its tokens |
+| **Cleanup** | Revoke deletes that one token, leaving the service account and its other tokens intact. Expired leftovers are swept on later mints |
 
 **To rotate a static token:**
 

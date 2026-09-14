@@ -1,8 +1,70 @@
 ---
 title: "Elastic"
+description: "Proxy Elasticsearch through Warden: mint a scoped API key per request from a cluster key held in a vault, so no long-lived key sits in Warden."
 ---
 
-The Elastic provider enables proxied access to Elasticsearch REST APIs through Warden. It forwards requests to Elasticsearch cluster endpoints (Search, Index, Cluster, Security, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: ApiKey` header. Three credential modes are supported: static API keys (`apikey` source type), Elasticsearch driver with programmatic key rotation (`elastic` source type), and Vault/OpenBao as a credential source (`hvault` source type).
+The Elastic provider enables proxied access to Elasticsearch REST APIs through Warden. It forwards requests to Elasticsearch cluster endpoints (Search, Index, Cluster, Security, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: ApiKey` header.
+
+## How a request flows
+
+Two things vary independently: whether the key Elasticsearch sees is **minted per request**
+or a fixed one, and whether the credential behind it lives **in Warden** or in a vault.
+
+The best combination does both — a vaulted cluster key, used to mint a scoped API key for
+each request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Elasticsearch cluster key from an external vault at a path templated by the agent's team and environment, mints a scoped API key at the Elasticsearch security endpoint, and injects it to the Elasticsearch API" src="/images/warden-prov-elasticsearch-cred-chain.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to an **external
+   KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden authenticates to the **external vault** and reads
+   `secret/elastic/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the cluster key for that team and environment.
+7. Warden calls `POST /_security/api_key` with it…
+8. …and receives a freshly minted, optionally scoped key.
+9. Warden injects it as `Authorization: ApiKey` and forwards.
+
+The cluster key is the privileged one — it holds `manage_api_key` — so keeping it in the
+vault and out of Warden is the point. What Elasticsearch sees is a narrower key that can
+carry its own `role_descriptors` and expiry.
+
+:::note[Steps 3–8 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 9. The entry
+is keyed by namespace, the agent's token id and the spec name — plus the user's token id
+when the mount carries a user.
+:::
+
+### Simpler variants
+
+<p align="center"><img alt="Warden authenticates to an external vault with a KMS-signed assertion carrying user and agent claims, reads a static Elasticsearch API key from a templated path, and injects it to the Elasticsearch API" src="/images/warden-prov-elasticsearch-vault-apikey.png" width="860"></p>
+
+**Vaulted static key.** The vault holds a pre-encoded API key, served verbatim — no minting.
+It stays out of Warden and the path scopes who reaches which key, but it is long-lived and
+shared by everyone the path resolves for.
+
+<p align="center"><img alt="Warden reads a static Elasticsearch API key from its encrypted storage and injects it to the Elasticsearch API for every caller" src="/images/warden-prov-elasticsearch-inline-apikey.png" width="860"></p>
+
+**Inline static key.** The key sits in Warden's storage. Shortest to set up, weakest
+custody.
+
+## Credential modes
+
+| Mode | What Elasticsearch sees | Where the credential lives |
+|---|---|---|
+| **Chained cluster key → minted key** ✅ *recommended* | A freshly minted, scopable key | The vault; nothing in Warden |
+| **Stored cluster key → minted key** | The same minted key | The cluster key is in Warden, and is rotated |
+| **Chained static key** | One long-lived key, per path | The vault |
+| **Inline static key** ⚠️ | One long-lived key, shared | Warden's storage |
+
+Elasticsearch exposes no workload-identity federation, so a privileged key exists somewhere
+in every row; what changes is whether Warden holds it, and whether the cluster sees it
+directly.
+
+See the [Elastic credential driver](/credential-drivers/elastic/) for every source and spec
+key.
 
 ## Prerequisites
 
@@ -17,7 +79,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -75,52 +141,12 @@ warden read elastic/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Keys
+### Option A: Chained cluster key (recommended)
 
-The simplest setup. The credential source holds only connection info. The API key is stored on the credential spec.
+The flow in the first diagram. The `elastic` source names a `secret_spec` and holds no key
+of its own; Warden reads the cluster key per mint and uses it to create a scoped API key.
 
-Elasticsearch API keys use the format `base64(id:api_key)`. When you create an API key via the Elasticsearch API or Kibana, use the `encoded` value from the response.
-
-```bash
-warden cred source create elastic-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://my-cluster.es.us-east-1.aws.cloud.es.io \
-  -config=verify_endpoint=/ \
-  -config=auth_header_type=custom_header \
-  -config=auth_header_name=Authorization \
-  -config=display_name=Elastic
-```
-
-Create a credential spec that references the credential source. The spec carries the pre-encoded API key.
-
-```bash
-warden cred spec create elastic-ops \
-  -source elastic-src \
-  -config api_key=your-base64-encoded-api-key
-```
-
-> **Tip:** To get the encoded API key from Elasticsearch:
-> ```bash
-> curl -s -X POST "https://your-cluster/_security/api_key" \
->   -H "Content-Type: application/json" \
->   -u "elastic:your-password" \
->   -d '{"name": "warden-key"}' | jq -r '.encoded'
-> ```
-
-### Option B: Elasticsearch Driver (with API Key Rotation)
-
-The Elasticsearch driver creates API keys programmatically via `POST /_security/api_key` and supports automatic rotation of the source API key. This requires the source API key to have the `manage_api_key` or `manage_own_api_key` cluster privilege.
-
-```bash
-warden cred source create elastic-src \
-  -type=elastic \
-  -config=elastic_url=https://my-cluster.es.us-east-1.aws.cloud.es.io \
-  -config=api_key=your-base64-encoded-source-api-key \
-  -rotation-period=72h
-```
-
-The source API key must have sufficient privileges to create and invalidate API keys. To create such a key:
+The cluster key needs the `manage_api_key` (or `manage_own_api_key`) cluster privilege:
 
 ```bash
 curl -s -X POST "https://your-cluster/_security/api_key" \
@@ -128,73 +154,156 @@ curl -s -X POST "https://your-cluster/_security/api_key" \
   -u "elastic:your-password" \
   -d '{
     "name": "warden-source",
-    "role_descriptors": {
-      "warden-manager": {
-        "cluster": ["manage_api_key"]
-      }
-    }
-  }'
+    "role_descriptors": {"warden-manager": {"cluster": ["manage_api_key"]}}
+  }' | jq -r '.encoded'
 ```
 
-Create a credential spec. The driver mints a new API key for each spec:
+Put that `encoded` value in your vault, then:
 
 ```bash
-warden cred spec create elastic-ops \
-  -source elastic-src
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+# Producer: the cluster key, read from KV v2 through that source
+warden cred spec create elastic-cluster-key -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "elastic/{{agent.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: an elastic source holding no key of its own
+warden cred source create elastic-src -json '{
+  "type": "elastic",
+  "config": {
+    "elastic_url": "https://my-cluster.es.us-east-1.aws.cloud.es.io",
+    "secret_spec": "elastic-cluster-key"
+  }
+}'
+
+warden cred spec create elastic-ops -json '{
+  "source": "elastic-src",
+  "min_ttl": 600,
+  "max_ttl": 3600
+}'
 ```
 
-Optionally restrict the minted key's permissions via `role_descriptors`:
+`api_key` must be **omitted** when `secret_spec` is set — leaving it is rejected with
+*"api_key must be omitted when secret_spec is set; the referenced spec supplies the cluster
+key"*.
+
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Templates resolve at **mint, not at
+write**.
+
+**Scope the minted key.** A bare spec mints a key with the source key's permissions;
+`role_descriptors` narrows it, and `expiration` bounds it:
 
 ```bash
-warden cred spec create elastic-readonly \
-  -source elastic-src \
-  -config 'role_descriptors={"reader":{"indices":[{"names":["my-index-*"],"privileges":["read"]}]}}'
+warden cred spec create elastic-readonly -json '{
+  "source": "elastic-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "role_descriptors": "{\"reader\":{\"indices\":[{\"names\":[\"my-index-*\"],\"privileges\":[\"read\"]}]}}",
+    "expiration": "1h"
+  }
+}'
 ```
 
-Set an expiration on minted keys:
+### Option B: Cluster key stored in Warden
+
+Same minting, but the cluster key lives in Warden's storage, where it is rotated on the
+source's `rotation_period` (integer seconds in JSON — `259200` is 72h).
 
 ```bash
-warden cred spec create elastic-temp \
-  -source elastic-src \
-  -config expiration=1h
+warden cred source create elastic-src -json '{
+  "type": "elastic",
+  "rotation_period": 259200,
+  "config": {
+    "elastic_url": "https://my-cluster.es.us-east-1.aws.cloud.es.io",
+    "api_key": "<your-base64-encoded-source-api-key>"
+  }
+}'
+
+warden cred spec create elastic-ops -json '{
+  "source": "elastic-src",
+  "min_ttl": 600,
+  "max_ttl": 3600
+}'
 ```
 
-### Option C: Vault/OpenBao as Credential Source
+### Option C: Chained static key
 
-Store the Elasticsearch API key in a Vault/OpenBao KV v2 secret and have Warden fetch it at runtime.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Elasticsearch key (e.g., at `secret/elastic/ops` with an `api_key` field containing the pre-encoded value)
-- An AppRole configured for Warden access
+No minting — the vault holds a pre-encoded API key and Warden serves it verbatim. Reusing
+the `vault-keyless` source from Option A:
 
 ```bash
-# Create a Vault credential source
-warden cred source create elastic-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
+warden cred spec create elastic-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "elastic/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-Create a credential spec using the `static_apikey` mint method:
+The KV secret must carry the key under `api_key`, holding the **pre-encoded** value.
+
+### Option D: Inline static key ⚠️
+
+Elasticsearch API keys are `base64(id:api_key)` — use the `encoded` value from the
+creation response:
 
 ```bash
-warden cred spec create elastic-ops \
-  -source elastic-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=elastic/ops
+curl -s -X POST "https://your-cluster/_security/api_key" \
+  -H "Content-Type: application/json" \
+  -u "elastic:your-password" \
+  -d '{"name": "warden-key"}' | jq -r '.encoded'
 ```
-
-Verify:
 
 ```bash
-warden cred spec read elastic-ops
+warden cred source create elastic-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://my-cluster.es.us-east-1.aws.cloud.es.io",
+    "display_name": "Elastic"
+  }
+}'
+
+printf '{"source":"elastic-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/encoded-key)" | warden cred spec create elastic-ops -json -
 ```
+
+**No `verify_endpoint` here, deliberately.** The apikey driver can send `Bearer `, `Token `
+or a bare custom header — never Elasticsearch's required `ApiKey ` scheme — so a
+verification call would be rejected even with a valid key and block spec creation. Leaving
+`verify_endpoint` unset skips verification; the gateway still injects `Authorization:
+ApiKey <key>` correctly, because that is the *provider's* extractor rather than the
+driver's.
+
+One long-lived key for every caller. Prefer any option above.
 
 ## Step 4: Create a Policy
 

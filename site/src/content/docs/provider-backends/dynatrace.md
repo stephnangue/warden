@@ -1,8 +1,85 @@
 ---
 title: "Dynatrace"
+description: "Proxy the Dynatrace API through Warden: mint an access token per request from OAuth2 client credentials held in a vault."
 ---
 
 The Dynatrace provider enables proxied access to the Dynatrace REST API through Warden. It forwards requests to Dynatrace endpoints (Entities, Metrics, Logs, Problems, Settings, Tokens, etc.) with automatic credential injection and policy evaluation. Two authentication modes are supported: static API tokens (`apikey` source type) using the `Api-Token` authorization scheme, and OAuth2 client credentials (`oauth2` source type) using the `Bearer` authorization scheme. Vault/OpenBao can also be used as a credential source (`hvault` source type).
+
+## How a request flows
+
+Two things vary independently: whether the token Dynatrace sees is **minted per request** or a
+fixed one, and whether the credential behind it lives **in Warden** or in a vault.
+
+The best combination does both — vaulted OAuth2 client credentials, exchanged for a short-lived
+access token on each request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Dynatrace OAuth2 client credentials from an external vault at a path templated by the agent's team and environment, exchanges them at the Dynatrace token endpoint for an access token, and injects that token to the Dynatrace API" src="/images/warden-prov-dynatrace-cred-chain.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to an **external
+   KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden authenticates to the **external vault** and reads
+   `secret/dynatrace/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the client credentials for that team and environment.
+7. Warden exchanges them at the **Dynatrace token endpoint**…
+8. …receiving a short-lived access token.
+9. Warden injects that token and forwards.
+
+The client secret is the long-lived credential, so keeping it in the vault and out of
+Warden is the point. What Dynatrace sees on each request is a short-lived token instead.
+
+:::note[Steps 3–8 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 9. The entry
+is keyed by namespace, the agent's token id and the spec name — plus the user's token id
+when the mount carries a user.
+:::
+
+### Simpler variants
+
+<p align="center"><img alt="Warden authenticates to an external vault with a KMS-signed assertion carrying user and agent claims, reads a static Dynatrace API token from a templated path, and injects it to the Dynatrace API" src="/images/warden-prov-dynatrace-vault-apikey.png" width="860"></p>
+
+**Vaulted static token.** The vault holds an API token directly, served verbatim — no token
+endpoint, nothing minted. It stays out of Warden and the path scopes who reaches which
+token, but it is long-lived.
+
+<p align="center"><img alt="Warden reads a static Dynatrace API token from its encrypted storage and injects it to the Dynatrace API for every caller" src="/images/warden-prov-dynatrace-inline-apikey.png" width="860"></p>
+
+**Inline static token.** The token sits in Warden's storage. Shortest to set up, weakest
+custody.
+
+## Credential modes
+
+| Mode | What Dynatrace sees | Where the credential lives |
+|---|---|---|
+| **Chained client credentials → minted token** ✅ *recommended* | A short-lived access token | The vault; nothing in Warden |
+| **Stored client credentials → minted token** | The same short-lived token | The client secret is in Warden |
+| **Chained static token** | One long-lived token, per path | The vault |
+| **Inline static token** ⚠️ | One long-lived token, shared | Warden's storage |
+
+:::caution[OAuth2 and API tokens reach different Dynatrace APIs]
+The provider injects `Api-Token` for an `api_key` credential and `Bearer` for an
+`oauth_bearer_token` one, because Dynatrace splits its surface:
+
+| Credential | Header | API | `dynatrace_url` |
+|---|---|---|---|
+| `api_key` (Options C, D) | `Api-Token` | Environment API v2 | `https://{env}.live.dynatrace.com` |
+| OAuth2 (Options A, B) | `Bearer` | Platform API | `https://{env}.apps.dynatrace.com` |
+
+The Step 2 config and the Step 5 examples on this page target the **Environment API**, so
+they pair with Options C and D. To use OAuth2, point `dynatrace_url` at the platform host
+and call platform paths — an OAuth2 token is rejected by the Environment API and vice
+versa. Scope your OAuth2 client for the platform capabilities you need; the
+`storage:*`/`app-engine:*` scopes shown are platform scopes and do not grant entity or
+metric queries.
+:::
+
+Dynatrace exposes no workload-identity federation, so a long-lived credential exists somewhere
+in every row; what changes is whether Warden holds it, and whether Dynatrace sees it directly.
+
+See the [OAuth2 credential driver](/credential-drivers/oauth2/) and the
+[apikey driver](/credential-drivers/apikey/) for every source and spec key.
 
 ## Prerequisites
 
@@ -19,7 +96,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 
 Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
@@ -77,109 +158,145 @@ warden read dynatrace/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Token
+### Option A: Chained client credentials (recommended)
 
-The credential source holds only connection info. The API token is stored on the credential spec below, allowing multiple specs with different tokens and scopes to share one source.
-
-```bash
-warden cred source create dynatrace-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://abc12345.live.dynatrace.com \
-  -config=verify_endpoint=/api/v2/tokens/lookup \
-  -config=verify_method=POST \
-  -config=auth_header_type=custom_header \
-  -config=auth_header_name=Authorization \
-  -config=extra_headers=Authorization:Api-Token \
-  -config=display_name=Dynatrace
-```
-
-Create a credential spec that references the credential source. The spec carries the API token and gets associated with tokens at login time.
+The flow in the first diagram. The `oauth2` source names a `secret_spec` and holds neither
+half of the client credential; Warden reads the pair per mint and exchanges it for an
+access token.
 
 ```bash
-warden cred spec create dynatrace-env \
-  -source dynatrace-src \
-  -config api_key=dt0c01.XXXXXXXX.YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+# Producer: the client credentials, read from KV v2 through that source
+warden cred spec create dynatrace-client -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "dynatrace/{{agent.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: an oauth2 source holding no client credential of its own
+warden cred source create dynatrace-src -json '{
+  "type": "oauth2",
+  "config": {
+    "token_url": "https://sso.dynatrace.com/sso/oauth2/token",
+    "default_scopes": "storage:buckets:read app-engine:apps:run",
+    "token_param.resource": "urn:dtaccount:your-account-uuid",
+    "secret_spec": "dynatrace-client"
+  }
+}'
+
+warden cred spec create dynatrace-ops -json '{
+  "source": "dynatrace-src",
+  "min_ttl": 600,
+  "max_ttl": 3600
+}'
 ```
 
-> **Note:** Dynatrace API tokens follow the format `dt0c01.{token-id}.{secret}`. You can create tokens in Dynatrace under Access tokens with specific scopes.
+`client_id` **and** `client_secret` must both be omitted when `secret_spec` is set — keeping
+either is rejected, because the pair authenticates together. The referenced payload supplies
+both, under `client_id` and `client_secret`.
 
-### Option B: OAuth2 Client Credentials
-
-For Dynatrace Platform API access, use OAuth2 client credentials. This is recommended for applications and automation.
+`default_scopes` is the **source** key; a spec may narrow it with `scope`:
 
 ```bash
-warden cred source create dynatrace-oauth-src \
-  -type=oauth2 \
-  -rotation-period=0 \
-  -config=client_id=dt0s02.XXXXXXXX \
-  -config=client_secret=dt0s02.XXXXXXXX.YYYYYYYYYYYYYYYYYYYY \
-  -config=token_url=https://sso.dynatrace.com/sso/oauth2/token \
-  -config=default_scopes="storage:buckets:read app-engine:apps:run" \
-  -config=token_param.resource=urn:dtaccount:your-account-uuid \
-  -config=display_name=Dynatrace
+warden cred spec create dynatrace-readonly -json '{
+  "source": "dynatrace-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "scope": "storage:buckets:read storage:logs:read"
+  }
+}'
 ```
 
-Create a credential spec (scope can be overridden per spec):
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Templates resolve at **mint, not at
+write**.
+
+### Option B: Client credentials stored in Warden
 
 ```bash
-warden cred spec create dynatrace-platform \
-  -source dynatrace-oauth-src \
-  -config scope="storage:buckets:read storage:logs:read"
+warden cred source create dynatrace-src -json '{
+  "type": "oauth2",
+  "config": {
+    "token_url": "https://sso.dynatrace.com/sso/oauth2/token",
+    "client_id": "<your-client-id>",
+    "client_secret": "<your-client-secret>",
+    "default_scopes": "storage:buckets:read app-engine:apps:run",
+    "token_param.resource": "urn:dtaccount:your-account-uuid",
+    "display_name": "Dynatrace"
+  }
+}'
+
+warden cred spec create dynatrace-ops -json '{
+  "source": "dynatrace-src",
+  "min_ttl": 600,
+  "max_ttl": 3600
+}'
 ```
 
-> **Note:** The `token_param.resource` on the source config injects the `resource` form parameter into the OAuth2 token exchange, as required by Dynatrace SSO. OAuth2 tokens are valid for 5 minutes; when a token expires, Warden transparently re-mints a fresh one on the next request.
+### Option C: Chained static token
 
-When using OAuth2, configure the provider URL to point to the Platform API:
+No token endpoint — the vault holds an API token and Warden serves it verbatim. Reusing the
+`vault-keyless` source from Option A:
 
 ```bash
-warden write dynatrace/config <<EOF
-{
-  "dynatrace_url": "https://abc12345.apps.dynatrace.com",
-  "auto_auth_path": "auth/jwt/",
-  "timeout": "30s"
-}
-EOF
+warden cred spec create dynatrace-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "dynatrace/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-### Option C: Vault/OpenBao as Credential Source
+The KV secret must carry the token under `api_key`.
 
-Instead of storing API tokens directly in Warden, you can store them in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime. This centralizes secret management in Vault.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Dynatrace API token (e.g., at `secret/dynatrace/env` with an `api_key` field)
-- An AppRole configured for Warden access
+### Option D: Inline static token ⚠️
 
 ```bash
-# Create a Vault credential source
-warden cred source create dynatrace-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
+warden cred source create dynatrace-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://mytenant.live.dynatrace.com",
+    "display_name": "Dynatrace"
+  }
+}'
+
+printf '{"source":"dynatrace-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/dynatrace-token)" | warden cred spec create dynatrace-ops -json -
 ```
 
-Create a credential spec using the `static_apikey` mint method:
+**No `verify_endpoint` here, deliberately.** The apikey driver can send `Bearer `, `Token `
+or a bare custom header — never Dynatrace's required `Api-Token ` scheme — so a
+verification call would 401 even with a valid token and block spec creation. Leaving
+`verify_endpoint` unset skips verification; the gateway still injects the correct
+`Api-Token` header, because that is the *provider's* extractor rather than the driver's.
 
-```bash
-warden cred spec create dynatrace-env \
-  -source dynatrace-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=dynatrace/env
-```
-
-The KV v2 secret at `secret/dynatrace/env` should contain an `api_key` field with the Dynatrace API token.
-
-Verify:
-
-```bash
-warden cred spec read dynatrace-env
-```
+One long-lived token for every caller; prefer any option above.
 
 ## Step 4: Create a Policy
 
