@@ -4,6 +4,62 @@ title: "Cohere"
 
 The Cohere provider enables proxied access to the Cohere API through Warden. It forwards requests to Cohere endpoints (Chat, Embed, Rerank, Generate, Models, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer` header. One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
 
+## How a request flows
+
+This mount injects an **`api_key`** credential into the `Authorization` header as a bearer
+token. The question is where that API key lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Cohere API key from an external vault at a path templated by the user's team and the agent's environment, and injects it to the Cohere API" src="/images/warden-prov-cohere-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/cohere/{{user.team}}/{{agent.env}}`.
+6. The vault returns the API key for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static Cohere API key from its encrypted storage and injects it to the Cohere API for every caller" src="/images/warden-prov-cohere-inline-apikey.png" width="860"></p>
+
+**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller.
+
+## Credential modes
+
+| Mode | What Cohere sees | Where the credential lives |
+|---|---|---|
+| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+
+Cohere exposes no workload-identity federation and mints nothing per request, so the
+credential is long-lived in both rows; what changes is whether Warden holds it.
+
+:::note[Cohere authenticates with the key alone]
+There is no second header to pair with it, so a chained spec can read the vault directly
+with `mint_method=static_apikey`. A provider that needs another field beside the key cannot
+— adjunct fields are dropped for any non-`apikey` driver, and the read has to go through a
+producer spec.
+[OpenAI](/provider-backends/openai/#carrying-an-organization-or-project-id) shows that shape.
+:::
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
@@ -77,67 +133,88 @@ warden read cohere/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Keys
+### Option A: Chained (recommended)
 
-The credential source holds only connection info (`api_url`). The API key is stored on the credential spec below, allowing multiple specs with different keys to share one source.
+The flow in the first diagram. The vault holds the API key; Warden reads it per request and
+injects it.
+
+The key never enters Warden's storage. Warden reads it from a path built out of the agent's
+and user's claims, so a request made for the `platform-eng` team against `prod` reads
+`secret/cohere/platform-eng/prod` and can reach nothing else.
+
+**Prerequisites:** a Vault/OpenBao instance with a KV v2 mount holding an `api_key` field,
+and a JWT auth role bound to Warden's issuer.
 
 ```bash
-warden cred source create cohere-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://api.cohere.com \
-  -config=verify_endpoint=/v1/check-api-key \
-  -config=verify_method=POST \
-  -config=auth_header_type=bearer \
-  -config=display_name=Cohere
+warden cred source create cohere-vault-src -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-cohere",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
 ```
 
-Create a credential spec that references the credential source. The spec carries the API key and gets associated with tokens at login time.
+`auth_method=oidc_federation` is keyless — the source stores no `secret_id` and no token, and setting one is rejected on write. It also needs no rotation period, because there is nothing to rotate.
 
 ```bash
-warden cred spec create cohere-prod \
-  -source cohere-src \
-  -config api_key=your-cohere-api-key
+warden cred spec create cohere-prod -json '{
+  "source": "cohere-vault-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_user_claims": "team",
+    "assertion_metadata_claims": "env",
+    "kv2_mount": "secret",
+    "secret_path": "cohere/{{user.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-The API key is validated at creation time via a `POST /v1/check-api-key` call to the Cohere API (SpecVerifier). If the key is invalid, spec creation will fail.
+:::note[Templated paths resolve at mint time, not at write time]
+`warden cred spec create` accepts `{{user.team}}` and `{{agent.env}}` without checking that either claim can ever be produced — the substitution happens on each credential request. A claim resolves only if the spec projects it: `{{user.*}}` requires the claim in `assertion_user_claims` **and** `subject_token_source=warden_identity`; `{{agent.*}}` requires it in `assertion_metadata_claims`, except `{{agent.sub}}`, which is always available. An unprojected claim fails the request closed rather than reading some other path.
+:::
 
-### Option B: Vault/OpenBao as Credential Source
+### Option B: Inline
 
-Instead of storing API keys directly in Warden, you can store them in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime. This centralizes secret management in Vault.
+The second diagram. The key sits in Warden's encrypted storage rather than a vault — no
+assertion, no outbound hop to fetch it. Quickest to a working mount, and the reason it
+belongs in dev and test rather than production.
 
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Cohere key (e.g., at `secret/cohere/prod` with an `api_key` field)
-- An AppRole configured for Warden access
+The source holds only connection details; the key rides on the spec, so several specs with
+different keys can share one source.
 
 ```bash
-# Create a Vault credential source
-warden cred source create cohere-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
+warden cred source create cohere-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://api.cohere.com",
+    "verify_endpoint": "/v1/check-api-key",
+    "verify_method": "POST",
+    "auth_header_type": "bearer",
+    "display_name": "Cohere"
+  }
+}'
+
+warden cred spec create cohere-prod -json '{
+  "source": "cohere-src",
+  "config": {
+    "api_key": "<your-cohere-api-key>"
+  }
+}'
 ```
 
-Create a credential spec using the `static_apikey` mint method:
+`verify_endpoint`, `verify_method` and `auth_header_type` describe how to *verify* a key, not how to inject one: together they build the `POST /v1/check-api-key` call that validates a key when a spec is created, so an invalid key fails here rather than on the first gateway request. Gateway injection is the provider's own job and is not configurable here.
+
+Verify either setup:
 
 ```bash
-warden cred spec create cohere-prod \
-  -source cohere-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=cohere/prod
-```
-
-The KV v2 secret at `secret/cohere/prod` should contain an `api_key` field. Warden fetches the secret from Vault on each credential request.
-
-Verify:
-
-```bash
+warden cred source read cohere-src
 warden cred spec read cohere-prod
 ```
 
