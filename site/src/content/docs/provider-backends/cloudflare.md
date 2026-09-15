@@ -1,5 +1,6 @@
 ---
 title: "Cloudflare"
+description: "Proxy the Cloudflare API and R2 through Warden: the API token and R2 keys stay in Warden rather than on agent hosts."
 ---
 
 The Cloudflare provider enables proxied access to Cloudflare APIs through Warden. It supports two authentication modes, auto-detected per request:
@@ -97,7 +98,21 @@ warden read cloudflare/config
 
 ### Option A: Static Keys
 
+<p align="center"><img alt="Warden reads the Cloudflare API token from its encrypted storage and injects it to the Cloudflare API for every caller" src="/images/warden-prov-cloudflare-inline-apikey.png" width="860"></p>
+
 Create a Cloudflare credential source and spec. You can configure both modes or just the one you need:
+
+:::caution[This provider cannot chain its credential from a vault]
+Unlike most providers, Cloudflare's credential cannot be
+[chained](/federation/credential-chaining/). It consumes a `cloudflare_keys` credential,
+which **requires a `local` source** — a `secret_spec` is not honored, and the spec still
+demands `api_token` (or the R2 pair) inline. Chaining it would need a `static_cloudflare`
+mint method that the Vault driver has never implemented.
+
+So the token does live in Warden's encrypted storage on this mount. What you still get is
+that it never sits on an agent host, every use is policy-checked, and revocation is
+central — delete the spec.
+:::
 
 **Dual-mode (API + R2):**
 

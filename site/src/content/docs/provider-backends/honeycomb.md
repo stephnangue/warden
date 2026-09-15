@@ -1,5 +1,6 @@
 ---
 title: "Honeycomb"
+description: "Proxy the Honeycomb API through Warden: chain the key from a vault per request so Warden stores nothing, or hold it inline."
 ---
 
 The Honeycomb provider enables proxied access to the Honeycomb API through Warden. It forwards requests to Honeycomb endpoints (`/1/events/{dataset}`, `/1/queries/{dataset}`, `/2/teams/{team}/api-keys`, etc.) with automatic credential injection and policy evaluation. Honeycomb uses two authentication modes: the `X-Honeycomb-Team` header for ingest and configuration keys, and `Authorization: Bearer <key_id>:<key_secret>` for management keys. Credentials come from an `apikey` source — held inline, or [chained](/federation/credential-chaining/) from a vault so Warden stores nothing.
@@ -94,6 +95,11 @@ warden read honeycomb/config
 
 Use this when you already have a Honeycomb ingest or configuration key and want Warden to proxy requests with it.
 
+<p align="center"><img alt="Warden reads a static Honeycomb key from its encrypted storage and injects it to the Honeycomb API for every caller" src="/images/warden-prov-honeycomb-inline-apikey.png" width="860"></p>
+
+The key sits in Warden's encrypted storage and is injected for every caller — shortest to
+set up, weakest custody. Option B keeps it in the store that can rotate it.
+
 ```bash
 warden cred source create honeycomb-src \
   -type=apikey \
@@ -121,9 +127,15 @@ itself. Keep the key where it can be rotated — in your vault — and
 Warden either way, and this is the recommended production shape.
 :::
 
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which authenticates to an external vault with a KMS-signed assertion carrying user and agent claims, reads the Honeycomb key from a templated path, and injects it to the Honeycomb API" src="/images/warden-prov-honeycomb-vault-apikey.png" width="860"></p>
+
 Hold the Honeycomb key in a vault and have the `apikey` source fetch it at mint time. The
 source stores no secret, and the producer is itself keyless, so nothing standing sits at
 either hop:
+
+Steps 3 and 4 are the keyless login to the store; 5 and 6 the read; 7 the injection. They
+run only on a **cache miss** — the entry is keyed by namespace, the agent's token id and
+the spec name, plus the user's token id when the mount carries a user.
 
 ```bash
 # producer: the Honeycomb key, where it can be rotated
