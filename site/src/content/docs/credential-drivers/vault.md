@@ -137,6 +137,10 @@ warden cred spec create oauth-bearer \
   -config=credential_name=github-app
 ```
 
+`credential_name` must match the name the credential was enrolled under on that mount. For
+the store-side setup — enrolling users, templating `credential_name` per user, and gating it
+with a templated policy — see [OAuth 3LO credential store](/federation/oauth-3lo-store/).
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
@@ -226,7 +230,7 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `oauth2_mount` | For `oauth2` | — | Mount of the OAuth2 (oauthapp) engine. |
 | `role_name` | For dynamic aws/gcp/ibm | — | Engine role to generate credentials from. |
 | `role_type` | No | `roleset` | GCP role kind: `roleset` or `static-account`. |
-| `credential_name` | For `oauth2` | — | Named credential on the OAuth2 mount. Supports `{{user.<claim>}}` [per-user templating](/concepts/delegation/). |
+| `credential_name` | For `oauth2` | — | Named credential on the OAuth2 mount; must match the name it was enrolled under. Supports `{{user.<claim>}}` [per-user templating](/concepts/delegation/) and `{{agent.<claim>}}` per-agent templating. See [OAuth 3LO credential store](/federation/oauth-3lo-store/). |
 | `token_role` | For `vault_token` | — | Token role for `auth/token/create/<role>`. |
 | `ttl` | No | — | Requested lease TTL; validated against the spec's min/max bounds. |
 | `iam_endpoint` | No | IBM IAM default | Endpoint used to exchange the IBM API key for a bearer token. |

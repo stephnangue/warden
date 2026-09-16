@@ -27,6 +27,10 @@ Everything else builds on that:
 - **[Credential chaining](/federation/credential-chaining/)** — source a provider's
   standing secret from a keyless-federated vault per request (`secret_spec`), so a
   secret-backed provider stores nothing at Warden.
+- **[OAuth 3LO credential store](/federation/oauth-3lo-store/)** — keep a user's OAuth
+  refresh token in an OpenBao/Vault OAuth app engine and read a freshly minted access token
+  per caller, with a templated policy on the store gating which credential each login may
+  read.
 - **[Signer](/configuration/signer/)** — hold the issuer's signing key in an external KMS
   (transit today), so the private key never enters Warden.
 - **[Publishers](/federation/publishers/)** — push the public keys to a bucket/CDN

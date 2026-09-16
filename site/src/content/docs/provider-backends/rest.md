@@ -273,6 +273,10 @@ Warden reads `rest/creds/<resolved name>`. The `{{user.sub}}` template works **o
 federation path** — the claims it resolves from come from the exchange, so a templated
 `credential_name` on a non-federated source fails closed.
 
+Setting the engine up, enrolling users under the name `credential_name` resolves to, and
+gating it with a templated policy on the store are covered in
+[OAuth 3LO credential store](/federation/oauth-3lo-store/).
+
 ### Option C: Keyless federation
 
 The subject becomes a Warden-minted assertion, traded at the upstream's token endpoint:

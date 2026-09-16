@@ -93,6 +93,7 @@ export default defineConfig({
             { slug: 'federation/keyless-credentials' },
             { slug: 'federation/assertion-claims' },
             { slug: 'federation/credential-chaining' },
+            { slug: 'federation/oauth-3lo-store' },
             {
               // The signing key lives in an external KMS (also listed under
               // Configuration, since it is a server-config stanza).
