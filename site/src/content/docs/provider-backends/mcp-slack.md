@@ -200,8 +200,10 @@ no `{{user.sub}}` to resolve and the mint fails closed, which is the behaviour y
 better a clear failure than quietly falling back to someone else's token.
 
 Registering the Slack app with the engine and capturing each user's consent is
-OpenBao/Vault-side setup; see its OAuth secrets engine documentation. The app registration
-above is the same either way.
+OpenBao/Vault-side setup — see [OAuth 3LO credential store](/federation/oauth-3lo-store/),
+which also covers the enrollment contract (each user must be enrolled under the name
+`credential_name` resolves to) and how a templated policy on the store gates it a second
+time. The app registration above is the same either way.
 
 #### Option B: A single consent held in Warden — development only
 

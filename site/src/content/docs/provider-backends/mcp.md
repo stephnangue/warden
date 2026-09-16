@@ -403,6 +403,11 @@ federation path** — the claims it resolves from come from the exchange, so a t
 on the store side, so the store enforces the same scoping rather than trusting Warden's
 path construction.
 
+Configuring the engine — registering the upstream, enrolling each user, and writing that
+policy — is covered in [OAuth 3LO credential store](/federation/oauth-3lo-store/). Note the
+naming contract: a user must be enrolled under exactly the name `credential_name` resolves
+to for them, and nothing validates that until the first request.
+
 `jwt_role` is required on a federated source and names the JWT-auth role the assertion logs
 in as; `jwt_mount` defaults to `jwt`. The credential's TTL follows the minted token's own
 `expire_time`, so Warden re-mints as it approaches expiry rather than serving a stale one.

@@ -166,7 +166,9 @@ and the mint fails closed. Pair it with a templated policy on the store side so 
 enforces the same scoping.
 
 Populating the engine — registering the GitHub App and capturing each user's consent — is
-OpenBao/Vault-side setup; see its OAuth secrets engine documentation.
+OpenBao/Vault-side setup. See [OAuth 3LO credential store](/federation/oauth-3lo-store/) for
+the enrollment steps, the naming contract each user must be enrolled under, and
+[how to write that templated policy](/federation/oauth-3lo-store/#step-4-the-second-gate--a-templated-policy).
 
 ### Option B: GitHub App installation token (acting as the app)
 
