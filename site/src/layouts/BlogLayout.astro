@@ -1,0 +1,126 @@
+---
+import '../styles/marketing.css';
+import '../styles/blog.css';
+
+const github = 'https://github.com/stephnangue/warden';
+const nav = [
+  { label: 'Use cases', href: '/use-cases/' },
+  { label: 'Docs', href: '/concepts/' },
+  { label: 'Blog', href: '/blog/' },
+  { label: 'Install', href: '/install/' },
+  { label: 'GitHub', href: github },
+];
+
+interface Props {
+  title: string;
+  description: string;
+  /** Set only when the post first appeared elsewhere; otherwise self-canonical. */
+  canonicalUrl?: string;
+  /** Path under /images/blog/. Falls back to the shared social card. */
+  heroImage?: string;
+  /** Emits article:* tags and og:type=article when present. */
+  publishDate?: Date;
+  updatedDate?: Date;
+}
+
+const { title, description, canonicalUrl, heroImage, publishDate, updatedDate } =
+  Astro.props;
+
+// Astro.site is set in astro.config.mjs, so these resolve to absolute URLs.
+const canonical = canonicalUrl ?? new URL(Astro.url.pathname, Astro.site).href;
+const ogImage = new URL(heroImage ?? '/og.png', Astro.site).href;
+const isArticle = Boolean(publishDate);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} — Warden</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="canonical" href={canonical} />
+    <link
+      rel="alternate"
+      type="application/rss+xml"
+      title="Warden blog"
+      href="/blog/rss.xml"
+    />
+
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content={isArticle ? 'article' : 'website'} />
+    <meta property="og:site_name" content="Warden" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    {
+      publishDate && (
+        <meta
+          property="article:published_time"
+          content={publishDate.toISOString()}
+        />
+      )
+    }
+    {
+      updatedDate && (
+        <meta property="article:modified_time" content={updatedDate.toISOString()} />
+      )
+    }
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="nav-logo" href="/"><img src="/logo-light.svg" alt="Warden" /></a>
+        <nav class="nav-links">
+          {nav.map((l) => <a href={l.href}>{l.label}</a>)}
+        </nav>
+        <div class="nav-spacer"></div>
+        <div class="nav-cta">
+          <a class="btn btn-primary" href="/concepts/">Get started</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="blog-main">
+      <slot />
+    </main>
+
+    <footer class="footer">
+      <div class="wrap footer-inner">
+        <div>
+          <img src="/logo-dark.svg" alt="Warden" />
+          <p class="blurb">
+            The secure gateway connecting AI agents to the enterprise systems they need to
+            do real work.
+          </p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/use-cases/">Use cases</a></li>
+            <li><a href="/provider-backends/">Providers</a></li>
+            <li><a href="/auth-methods/">Authentication</a></li>
+            <li><a href="/architecture/">Architecture</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Docs</h4>
+          <ul>
+            <li><a href="/concepts/">Concepts</a></li>
+            <li><a href="/install/">Install</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href={github}>GitHub</a></li>
+          </ul>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>
