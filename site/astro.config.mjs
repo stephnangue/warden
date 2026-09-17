@@ -17,6 +17,12 @@ export default defineConfig({
       },
       favicon: '/favicon.svg',
       customCss: ['./src/styles/custom.css'],
+      // Starlight 0.36 offers no config for arbitrary top-nav links; overriding
+      // this leaf component is the supported way to add one. See the component
+      // for why SocialIcons and not Header.
+      components: {
+        SocialIcons: './src/components/HeaderLinks.astro',
+      },
       // Starlight emits og:title/type/url per page; add the shared social card.
       head: [
         {

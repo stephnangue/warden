@@ -1,0 +1,333 @@
+/* ==========================================================================
+   Blog — extends the marketing system (marketing.css owns the tokens and the
+   nav/footer chrome). Light-only, matching the landing page; the docs keep
+   their own theme switcher.
+   ========================================================================== */
+
+/* Body text wants a narrower measure than the marketing grid. */
+:root {
+  --prose: 46rem;
+}
+
+.blog-main {
+  padding: 56px 0 96px;
+}
+
+.prose-wrap {
+  max-width: var(--prose);
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+/* --- Post header ---------------------------------------------------------- */
+
+.post-head {
+  margin-bottom: 40px;
+}
+
+.post-head h1 {
+  font-size: clamp(2rem, 4.5vw, 2.75rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin: 0 0 16px;
+  color: var(--ink);
+}
+
+/* The deck: the post's `description`, rendered under the title. One field feeds
+   this, the meta description, the listing blurb and the RSS item, so the summary
+   a reader sees on the page cannot drift from the one search and feeds get. */
+.post-deck {
+  font-size: clamp(1.05rem, 2vw, 1.25rem);
+  font-weight: 300;
+  line-height: 1.55;
+  color: var(--muted);
+  margin: 0 0 24px;
+  max-width: 34em;
+}
+
+.post-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.925rem;
+}
+
+.post-meta .dot::before {
+  content: '·';
+  margin: 0 2px;
+}
+
+.post-meta a {
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.post-meta a:hover {
+  color: var(--red);
+}
+
+.post-updated {
+  margin-top: 8px;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+/* --- Tag chips (not links until tag routes exist) ------------------------- */
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 0;
+  list-style: none;
+}
+
+.tags li {
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: var(--muted);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+/* --- Prose ---------------------------------------------------------------- */
+
+.prose {
+  color: var(--text);
+  font-size: 1.0625rem;
+  line-height: 1.72;
+}
+
+.prose > * + * {
+  margin-top: 1.25em;
+}
+
+.prose h2 {
+  font-size: 1.55rem;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  margin-top: 2.2em;
+  margin-bottom: 0;
+  padding-top: 0.6em;
+  border-top: 1px solid var(--border);
+}
+
+.prose h3 {
+  font-size: 1.2rem;
+  color: var(--ink);
+  margin-top: 1.9em;
+  margin-bottom: 0;
+}
+
+.prose a {
+  color: var(--red);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose a:hover {
+  color: var(--red-dark);
+}
+
+.prose strong {
+  color: var(--ink);
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.35em;
+}
+
+.prose li + li {
+  margin-top: 0.4em;
+}
+
+.prose blockquote {
+  margin-left: 0;
+  margin-right: 0;
+  padding: 2px 0 2px 18px;
+  border-left: 3px solid var(--red);
+  color: var(--muted);
+}
+
+.prose blockquote > * + * {
+  margin-top: 0.8em;
+}
+
+/* Inline code only — fenced blocks are owned by expressiveCode. */
+.prose :not(pre) > code {
+  font-size: 0.9em;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.prose img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+/* Images are embedded as <p align="center"><img ...></p>, per the docs convention.
+   Let those breathe past the prose measure without touching the page gutter. */
+.prose p[align='center'] {
+  margin-top: 2em;
+  margin-bottom: 2em;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  background: var(--bg-soft);
+  color: var(--ink);
+}
+
+/* Wide tables and code scroll inside themselves, never the page. */
+.prose table,
+.prose pre {
+  display: block;
+  overflow-x: auto;
+}
+
+/* --- Prev / next ---------------------------------------------------------- */
+
+.post-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 64px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.post-nav a {
+  display: block;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--ink);
+  transition: border-color 0.15s ease;
+}
+
+.post-nav a:hover {
+  border-color: var(--red);
+}
+
+.post-nav .dir {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.post-nav .next {
+  grid-column: 2;
+  text-align: right;
+}
+
+/* --- Listing -------------------------------------------------------------- */
+
+.blog-header {
+  max-width: var(--prose);
+  margin: 0 auto 48px;
+  padding: 0 20px;
+}
+
+.blog-header h1 {
+  font-size: clamp(2rem, 4.5vw, 2.6rem);
+  letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  color: var(--ink);
+}
+
+.blog-header p {
+  color: var(--muted);
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.post-list {
+  max-width: var(--prose);
+  margin: 0 auto;
+  padding: 0 20px;
+  list-style: none;
+}
+
+.post-list > li + li {
+  margin-top: 8px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+
+.post-card h2 {
+  font-size: 1.4rem;
+  line-height: 1.3;
+  margin: 0 0 8px;
+}
+
+.post-card h2 a {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.post-card h2 a:hover {
+  color: var(--red);
+}
+
+.post-card .summary {
+  color: var(--text);
+  margin: 10px 0 0;
+  line-height: 1.65;
+}
+
+.post-card .draft-flag {
+  display: inline-block;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.blog-empty {
+  max-width: var(--prose);
+  margin: 0 auto;
+  padding: 0 20px;
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .post-nav {
+    grid-template-columns: 1fr;
+  }
+  .post-nav .next {
+    grid-column: 1;
+    text-align: left;
+  }
+}

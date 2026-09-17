@@ -13,6 +13,10 @@
 #   - provider/*/skill.md is INCLUDED. Those files are go:embed'd into the
 #     binary and served to agents at runtime, so stale syntax there ships
 #     inside the release rather than merely on the website.
+#   - site/src/content/blog is INCLUDED. A post that shows a policy is
+#     copy-paste surface exactly like a reference page. Posts are dated and a
+#     reader may forgive an old one, but the fix is an `updatedDate` note on the
+#     post, not an exclusion here.
 #
 # Run from anywhere:  ./site/scripts/check-invariants.sh
 # A non-zero exit lists every offending line.
@@ -24,6 +28,14 @@ cd "$repo_root"
 
 docs="site/src/content/docs"
 skills=(provider/*/skill.md)
+
+# The blog collection may legitimately be empty (the section can ship before the
+# first post). grep exits 2 on a missing path, which `check` correctly treats as
+# a failure, so add the directory only once it exists. Expanded as
+# ${blog[@]+"${blog[@]}"} at each use: under `set -u`, bash 3.2 (still the
+# system bash on macOS) treats "${empty[@]}" as an unbound variable.
+blog=()
+[ -d "site/src/content/blog" ] && blog=("site/src/content/blog")
 
 status=0
 
@@ -63,14 +75,14 @@ check() {
 # `token.` keeps prose like "the token's metadata" out of the results.
 check "CEL namespace: no \`token.<field>\`" \
   '\btoken\.(principal|role|type|namespace|policies|metadata|actors|ttl_seconds|expires_at)\b' \
-  "$docs"
+  "$docs" ${blog[@]+"${blog[@]}"}
 
 # MCP rules moved to their own policy type; a nested mcp block inside a
 # capability policy's path stanza is rejected at parse. Scans the embedded
 # skills too — stale syntax there ships inside the binary.
 check "MCP policy: no nested \`mcp {\` block" \
   'mcp[[:space:]]*\{' \
-  "$docs" "${skills[@]}"
+  "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}"
 
 # --- Pending checks -----------------------------------------------------------
 #
