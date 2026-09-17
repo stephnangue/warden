@@ -33,6 +33,18 @@
   color: var(--ink);
 }
 
+/* The deck: the post's `description`, rendered under the title. One field feeds
+   this, the meta description, the listing blurb and the RSS item, so the summary
+   a reader sees on the page cannot drift from the one search and feeds get. */
+.post-deck {
+  font-size: clamp(1.05rem, 2vw, 1.25rem);
+  font-weight: 300;
+  line-height: 1.55;
+  color: var(--muted);
+  margin: 0 0 24px;
+  max-width: 34em;
+}
+
 .post-meta {
   display: flex;
   flex-wrap: wrap;

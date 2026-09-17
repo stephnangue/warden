@@ -40,6 +40,7 @@ const minutes = readingTime(post.body);
   <article class="prose-wrap">
     <header class="post-head">
       <h1>{title}{draft && <span class="draft-flag">draft</span>}</h1>
+      <p class="post-deck">{description}</p>
       <div class="post-meta">
         <time datetime={publishDate.toISOString()}>{formatDate(publishDate)}</time>
         <span class="dot"></span>
