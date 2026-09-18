@@ -134,15 +134,29 @@ func TestAnthropicCredentialExtractor_BearerMissingToken(t *testing.T) {
 
 // The extractor injecting a header is only half the guarantee: a name it sets
 // conditionally must also be stripped, or the branch that does not set it leaves
-// a client's own value in place. anthropic-version is here because it is replaced
-// unconditionally; the other two because a client could otherwise choose the
-// workspace that our credential spends against.
+// a client's own value in place. anthropic-version is here so a client cannot
+// pin its own; the workspace so a client cannot choose where our credential
+// spends; anthropic-beta so the mount's policy, not the client, decides.
 func TestSpec(t *testing.T) {
 	assert.Equal(t, "anthropic", Spec.Name)
 	assert.Equal(t, "anthropic_url", Spec.URLConfigKey)
 	assert.NotNil(t, Spec.ExtractCredentials)
 	assert.NotNil(t, Factory)
 	assert.ElementsMatch(t,
-		[]string{"x-api-key", "anthropic-version", "anthropic-workspace-id"},
+		[]string{"x-api-key", "anthropic-version", "anthropic-workspace-id", "anthropic-beta"},
 		Spec.ExtraHeadersToRemove)
+
+	// The version now comes from DynamicHeaders. A static header applied after
+	// the credential headers is what could silently overwrite one of them, so it
+	// must not come back.
+	assert.Empty(t, Spec.DefaultHeaders)
+	assert.NotNil(t, Spec.DynamicHeaders)
+	assert.NotNil(t, Spec.ResolveUpstream)
+	assert.NotNil(t, Spec.OnConfigWrite)
+	assert.NotNil(t, Spec.OnConfigRead)
+	assert.NotNil(t, Spec.OnInitialize)
+	assert.NotNil(t, Spec.ValidateExtraConfig)
+	for _, f := range []string{"anthropic_version", "beta_allowlist", "beta_required"} {
+		assert.Contains(t, Spec.ExtraConfigFields, f)
+	}
 }
