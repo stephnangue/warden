@@ -10,6 +10,7 @@ import (
 
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -1910,6 +1911,7 @@ func TestCredentialConfigStore_FederationSourceRejectsRotationPeriod(t *testing.
 		credential.SourceTypeVault,
 		credential.SourceTypeKubernetes,
 		credential.SourceTypeAlicloud,
+		credential.SourceTypeAnthropic,
 	}
 
 	for _, sourceType := range federationTypes {
@@ -3191,4 +3193,161 @@ func TestCredentialConfigStore_ValidateSpec_AWSKeyValueChainingSource(t *testing
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "'kv2_mount' does not apply to mint_method=secret_read")
 	})
+}
+
+// newAnthropicTestStore is a config store with the real anthropic factory and the
+// real credential types wired in. Both registries matter: without the type
+// registry the store skips type validation entirely, and every spec rule below
+// would pass for want of being checked.
+func newAnthropicTestStore(t *testing.T) (*CredentialConfigStore, context.Context) {
+	t.Helper()
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+	require.NoError(t, store.core.credentialDriverRegistry.RegisterFactory(&drivers.AnthropicDriverFactory{}))
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	return store, ctx
+}
+
+// anthropicStoreSource is a valid anthropic source with overrides applied; an
+// override set to "" removes the key.
+func anthropicStoreSource(name string, overrides map[string]string) *credential.CredSource {
+	cfg := map[string]string{
+		"auth_method":     "oidc_federation",
+		"organization_id": "00000000-0000-0000-0000-000000000000",
+	}
+	applyConfigOverrides(cfg, overrides)
+	return &credential.CredSource{Name: name, Type: credential.SourceTypeAnthropic, Config: credential.NewConfig(cfg)}
+}
+
+// anthropicStoreSpec is a valid anthropic spec with overrides applied; an override
+// set to "" removes the key.
+func anthropicStoreSpec(name, source string, overrides map[string]string) *credential.CredSpec {
+	cfg := map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		"federation_rule_id":                "fdrl_01ExampleRule",
+		"service_account_id":                "svac_01ExampleAccount",
+	}
+	applyConfigOverrides(cfg, overrides)
+	return &credential.CredSpec{Name: name, Type: credential.TypeOAuthBearerToken, Source: source, Config: credential.NewConfig(cfg)}
+}
+
+// applyConfigOverrides sets each override on cfg, deleting a key whose override is "".
+func applyConfigOverrides(cfg, overrides map[string]string) {
+	for k, v := range overrides {
+		if v == "" {
+			delete(cfg, k)
+			continue
+		}
+		cfg[k] = v
+	}
+}
+
+// TestCredentialConfigStore_AnthropicSource drives the real anthropic factory
+// through source creation.
+func TestCredentialConfigStore_AnthropicSource(t *testing.T) {
+	t.Run("a federated source is accepted", func(t *testing.T) {
+		store, ctx := newAnthropicTestStore(t)
+		require.NoError(t, store.CreateSource(ctx, anthropicStoreSource("anthropic-wif",
+			map[string]string{"audience": "https://warden.example.com/anthropic"})))
+	})
+
+	t.Run("a rotation_period is refused", func(t *testing.T) {
+		store, ctx := newAnthropicTestStore(t)
+		source := anthropicStoreSource("anthropic-wif", nil)
+		source.RotationPeriod = 24 * time.Hour
+
+		err := store.CreateSource(ctx, source)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period does not apply to a federated credential source")
+	})
+
+	t.Run("omitting auth_method cannot slip a rotation_period through", func(t *testing.T) {
+		// The store recognises a federated source by auth_method being written out.
+		// Had the driver defaulted the key, this source would pass as unfederated and
+		// be enrolled for a rotation its driver can never complete.
+		store, ctx := newAnthropicTestStore(t)
+		source := anthropicStoreSource("anthropic-wif", map[string]string{"auth_method": ""})
+		source.RotationPeriod = 24 * time.Hour
+
+		err := store.CreateSource(ctx, source)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field 'auth_method' is required")
+	})
+}
+
+// TestCredentialConfigStore_AnthropicSpec drives spec creation, where every rule an
+// anthropic spec carries is enforced. An anthropic spec is always an exchange spec,
+// which the store neither test-mints nor hands to a SpecVerifier, so these writes
+// are the only point its target is checked before a live request.
+func TestCredentialConfigStore_AnthropicSpec(t *testing.T) {
+	store, ctx := newAnthropicTestStore(t)
+	require.NoError(t, store.CreateSource(ctx, anthropicStoreSource("with-aud",
+		map[string]string{"audience": "https://warden.example.com/anthropic"})))
+	require.NoError(t, store.CreateSource(ctx, anthropicStoreSource("no-aud", nil)))
+
+	tests := []struct {
+		name     string
+		spec     *credential.CredSpec
+		errorMsg string // empty => expect success
+	}{
+		{
+			name: "audience is derived from the source",
+			spec: anthropicStoreSpec("derived", "with-aud", nil),
+		},
+		{
+			name: "a spec audience stands in for the source's",
+			spec: anthropicStoreSpec("explicit", "no-aud",
+				map[string]string{credential.ConfigAssertionAudience: "https://warden.example.com/anthropic"}),
+		},
+		{
+			name: "a workspace may be named",
+			spec: anthropicStoreSpec("workspace", "with-aud",
+				map[string]string{"workspace_id": "wrkspc_01ExampleWorkspace"}),
+		},
+		{
+			name:     "no audience anywhere is refused",
+			spec:     anthropicStoreSpec("no-aud-spec", "no-aud", nil),
+			errorMsg: "is required when the subject or actor is",
+		},
+		{
+			name:     "subject_token_source is required",
+			spec:     anthropicStoreSpec("no-subject", "with-aud", map[string]string{credential.ConfigSubjectTokenSource: ""}),
+			errorMsg: "is required for an anthropic source",
+		},
+		{
+			name: "another identity is refused",
+			spec: anthropicStoreSpec("agent-subject", "with-aud",
+				map[string]string{credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity}),
+			errorMsg: "must be 'warden_identity' for an anthropic source",
+		},
+		{
+			name:     "the federation rule is required",
+			spec:     anthropicStoreSpec("no-rule", "with-aud", map[string]string{"federation_rule_id": ""}),
+			errorMsg: "'federation_rule_id' is required for an anthropic source",
+		},
+		{
+			name:     "an id in the wrong field is refused",
+			spec:     anthropicStoreSpec("swapped", "with-aud", map[string]string{"service_account_id": "fdrl_01ExampleRule"}),
+			errorMsg: `must be an Anthropic id starting with "svac_"`,
+		},
+		{
+			name: "the organization belongs on the source",
+			spec: anthropicStoreSpec("org-on-spec", "with-aud",
+				map[string]string{"organization_id": "00000000-0000-0000-0000-000000000000"}),
+			errorMsg: "'organization_id' belongs on the anthropic source",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.CreateSpec(ctx, tt.spec)
+			if tt.errorMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errorMsg)
+		})
+	}
 }

@@ -89,5 +89,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Anthropic driver factory (workload identity federation)
+	if err := registry.RegisterFactory(&AnthropicDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }
