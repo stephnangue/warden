@@ -3,6 +3,7 @@ package anthropic
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -20,7 +21,7 @@ const DefaultAnthropicVersion = "2023-06-01"
 // the field existed.
 const betaAllowAll = "*"
 
-// State keys. The first three hold the operator's values exactly as written, and
+// State keys. The first four hold the operator's values exactly as written, and
 // are what OnConfigRead reports and so what is persisted. The last two are built
 // from them on every write and every load, and never persisted: a function value
 // cannot be stored, and a derived value that was stored could disagree with the
@@ -33,9 +34,26 @@ const (
 	stateVersion        = "anthropic_version"
 	stateBetaAllowlist  = "beta_allowlist"
 	stateBetaRequired   = "beta_required"
+	stateProfileKey     = "user_profile_metadata_key"
 	stateExtractor      = "credential_extractor"
 	stateVersionHeaders = "version_headers"
 )
+
+// profileIDPrefix begins every upstream user profile id. A profile is an object
+// the upstream issues, so an id can only be looked up, never derived; checking the
+// prefix is what keeps an unrelated metadata value from being sent as one.
+const profileIDPrefix = "uprof_"
+
+// profileBetaPrefix begins every beta that enables anthropic-user-profile-id. The
+// upstream requires one alongside the header, and has published several dated
+// versions, so the mount checks for the family rather than one name.
+const profileBetaPrefix = "user-profiles-"
+
+// profileBetaName matches a member of that family. The upstream names its betas
+// feature-YYYY-MM-DD, so the date is checked as well as the prefix: a bare
+// "user-profiles-", or one with a mistyped suffix, would pass a prefix check and
+// then be refused upstream on every request.
+var profileBetaName = regexp.MustCompile(`^` + profileBetaPrefix + `\d{4}-\d{2}-\d{2}$`)
 
 // betaHeaderKey is the canonical form of anthropic-beta. Inbound header names are
 // canonicalised by the server, so indexing the map with it directly reads the
@@ -147,13 +165,14 @@ func (n *betaNames) add(name string) {
 	}
 }
 
-// newExtractor wraps the credential extractor with the mount's beta policy.
+// newExtractor wraps the credential extractor with the mount's beta policy and,
+// when profileKey is set, the requesting user's profile.
 //
 // anthropic-beta is on the strip list, so the client's value is gone by the time
 // the credential headers are applied. Whatever the policy lets through has to be
 // put back from here — including, under the default policy, all of it. The
 // extractor runs before the strip, which is why it can still read the value.
-func newExtractor(policy *betaPolicy) httpproxy.CredentialExtractor {
+func newExtractor(policy *betaPolicy, profileKey string) httpproxy.CredentialExtractor {
 	return func(req *logical.Request) (map[string]string, error) {
 		headers, err := anthropicCredentialExtractor(req)
 		if err != nil {
@@ -166,8 +185,58 @@ func newExtractor(policy *betaPolicy) httpproxy.CredentialExtractor {
 		if betas := policy.merge(client); betas != "" {
 			headers["anthropic-beta"] = betas
 		}
+		if id := userProfileID(req, profileKey); id != "" {
+			headers["anthropic-user-profile-id"] = id
+		}
 		return headers, nil
 	}
+}
+
+// userProfileID returns the upstream profile the request is made on behalf of, or
+// "" when there is none to send.
+//
+// It is read from the user principal's verified metadata and from nowhere else.
+// The agent's metadata is the tempting fallback and the wrong one: it would
+// attribute an agent's own traffic to an end user whenever the agent's role
+// happened to map the same key. A profile can carry grants that change what the
+// upstream will do, so that is not a billing slip but a request acting under
+// someone else's standing. No user, no header.
+//
+// A value that is not a profile id is dropped rather than failing the request.
+// Metadata keys are named by the operator and filled from identity-provider
+// claims, so a missing or unrelated value is ordinary, and sending it would only
+// be refused upstream. The token check also keeps a claim carrying a line break
+// from reaching a header.
+//
+// The metadata is read without the token entry's lock. A cached entry is shared
+// by concurrent requests, which is safe only because its metadata is set when the
+// token is issued and never changed afterwards.
+func userProfileID(req *logical.Request, key string) string {
+	if key == "" || req.User == nil || req.User.TokenEntry == nil {
+		return ""
+	}
+	id := req.User.TokenEntry.Metadata[key]
+	if len(id) <= len(profileIDPrefix) || !strings.HasPrefix(id, profileIDPrefix) || !isToken(id) {
+		return ""
+	}
+	return id
+}
+
+// checkProfilePairing refuses a profile key with no beta that enables the header.
+// The upstream requires a user-profiles beta alongside anthropic-user-profile-id,
+// so a mount mapping one without the other would attribute nothing while reading
+// as configured.
+func checkProfilePairing(profileKey string, required []string) error {
+	if profileKey == "" {
+		return nil
+	}
+	for _, name := range required {
+		if profileBetaName.MatchString(name) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: beta_required must name a %sYYYY-MM-DD beta, which the upstream requires alongside anthropic-user-profile-id",
+		stateProfileKey, profileBetaPrefix)
 }
 
 // parseBetaNames splits a comma-separated beta list. Each name must be an HTTP
@@ -267,12 +336,16 @@ func rebuild(state map[string]any) (map[string]any, error) {
 
 	allowlist, allowlistSet := state[stateBetaAllowlist].(string)
 	required, _ := state[stateBetaRequired].(string)
+	profileKey, _ := state[stateProfileKey].(string)
 
 	policy, err := buildBetaPolicy(allowlist, allowlistSet, required)
 	if err != nil {
 		return state, err
 	}
-	state[stateExtractor] = newExtractor(policy)
+	if err := checkProfilePairing(profileKey, policy.required); err != nil {
+		return state, err
+	}
+	state[stateExtractor] = newExtractor(policy, profileKey)
 	return state, nil
 }
 
@@ -292,6 +365,11 @@ var extraConfigFields = map[string]*framework.FieldSchema{
 	stateBetaRequired: {
 		Type:        framework.TypeString,
 		Description: "Comma-separated anthropic-beta values added to every request, whatever the allowlist says",
+	},
+	stateProfileKey: {
+		Type: framework.TypeString,
+		Description: "Key in the user's verified token metadata holding their upstream profile id (uprof_...), " +
+			"sent as anthropic-user-profile-id. Requires a user-profiles-* beta in beta_required. Empty disables it",
 	},
 }
 
@@ -370,6 +448,14 @@ func onConfigWrite(d *framework.FieldData, state map[string]any) (map[string]any
 			state[k] = v.(string)
 		}
 	}
+
+	if v, ok := d.GetOk(stateProfileKey); ok {
+		if profileKey := strings.TrimSpace(v.(string)); profileKey == "" {
+			delete(state, stateProfileKey)
+		} else {
+			state[stateProfileKey] = profileKey
+		}
+	}
 	return rebuild(state)
 }
 
@@ -386,10 +472,12 @@ func onConfigRead(state map[string]any) map[string]any {
 		allowlist = betaAllowAll
 	}
 	required, _ := state[stateBetaRequired].(string)
+	profileKey, _ := state[stateProfileKey].(string)
 	return map[string]any{
 		stateVersion:       version,
 		stateBetaAllowlist: allowlist,
 		stateBetaRequired:  required,
+		stateProfileKey:    profileKey,
 	}
 }
 
@@ -418,10 +506,16 @@ func onInitialize(config map[string]any, state map[string]any) map[string]any {
 	if required != "" {
 		state[stateBetaRequired] = required
 	}
+	profileKey, _, profileErr := configString(config, stateProfileKey)
+	if profileKey = strings.TrimSpace(profileKey); profileKey != "" {
+		state[stateProfileKey] = profileKey
+	}
 
+	// Failing closed also means attributing no one: a profile is sent only from a
+	// config known to be sound.
 	rebuilt, err := rebuild(state)
-	if err != nil || allowlistErr != nil || requiredErr != nil {
-		state[stateExtractor] = newExtractor(failClosedPolicy(state))
+	if err != nil || allowlistErr != nil || requiredErr != nil || profileErr != nil {
+		state[stateExtractor] = newExtractor(failClosedPolicy(state), "")
 		return state
 	}
 	return rebuilt
@@ -459,6 +553,13 @@ func validateExtraConfig(conf map[string]any) error {
 	if err != nil {
 		return err
 	}
-	_, err = buildBetaPolicy(allowlist, allowlistSet, required)
-	return err
+	policy, err := buildBetaPolicy(allowlist, allowlistSet, required)
+	if err != nil {
+		return err
+	}
+	profileKey, _, err := configString(conf, stateProfileKey)
+	if err != nil {
+		return err
+	}
+	return checkProfilePairing(strings.TrimSpace(profileKey), policy.required)
 }

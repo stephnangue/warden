@@ -136,14 +136,18 @@ func TestAnthropicCredentialExtractor_BearerMissingToken(t *testing.T) {
 // conditionally must also be stripped, or the branch that does not set it leaves
 // a client's own value in place. anthropic-version is here so a client cannot
 // pin its own; the workspace so a client cannot choose where our credential
-// spends; anthropic-beta so the mount's policy, not the client, decides.
+// spends; anthropic-beta so the mount's policy, not the client, decides; the
+// profile so a client cannot claim another party's standing.
 func TestSpec(t *testing.T) {
 	assert.Equal(t, "anthropic", Spec.Name)
 	assert.Equal(t, "anthropic_url", Spec.URLConfigKey)
 	assert.NotNil(t, Spec.ExtractCredentials)
 	assert.NotNil(t, Factory)
 	assert.ElementsMatch(t,
-		[]string{"x-api-key", "anthropic-version", "anthropic-workspace-id", "anthropic-beta"},
+		[]string{
+			"x-api-key", "anthropic-version", "anthropic-workspace-id", "anthropic-beta",
+			"anthropic-user-profile-id",
+		},
 		Spec.ExtraHeadersToRemove)
 
 	// The version now comes from DynamicHeaders. A static header applied after
@@ -156,7 +160,7 @@ func TestSpec(t *testing.T) {
 	assert.NotNil(t, Spec.OnConfigRead)
 	assert.NotNil(t, Spec.OnInitialize)
 	assert.NotNil(t, Spec.ValidateExtraConfig)
-	for _, f := range []string{"anthropic_version", "beta_allowlist", "beta_required"} {
+	for _, f := range []string{"anthropic_version", "beta_allowlist", "beta_required", "user_profile_metadata_key"} {
 		assert.Contains(t, Spec.ExtraConfigFields, f)
 	}
 }

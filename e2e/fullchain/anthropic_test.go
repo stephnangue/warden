@@ -11,8 +11,8 @@ import (
 
 // anthropic stands for the channels token extractor in its ordinary order:
 // X-Warden-Token first, then the native x-api-key header. Outbound it is the
-// case where the credential lands in a custom header while a static default
-// header is applied as well.
+// case where the credential lands in a custom header beside headers the mount
+// governs itself — the version, the betas and the requesting user's profile.
 
 // No vendor prefix — see the note in openai_test.go.
 const (
@@ -67,8 +67,10 @@ func TestAnthropic_MountVersionReplacesClients(t *testing.T) {
 }
 
 // writeAnthropicConfig applies a partial config write to the shared mount and
-// restores the beta settings afterwards, so no other test in the package sees
-// them.
+// restores the provider's own settings afterwards, so no other test in the
+// package sees them. The profile key is cleared in the same write as the betas:
+// clearing the betas alone would leave a key without its beta, which the mount
+// rightly refuses.
 func writeAnthropicConfig(t *testing.T, body string) {
 	t.Helper()
 	status, resp := h.APIRequest(t, "POST", anthropicEnv.Mount+"/config", leaderPort, body)
@@ -77,7 +79,7 @@ func writeAnthropicConfig(t *testing.T, body string) {
 	}
 	t.Cleanup(func() {
 		status, resp := h.APIRequest(t, "POST", anthropicEnv.Mount+"/config", leaderPort,
-			`{"anthropic_version": "", "beta_allowlist": "*", "beta_required": ""}`)
+			`{"anthropic_version": "", "beta_allowlist": "*", "beta_required": "", "user_profile_metadata_key": ""}`)
 		if status < 200 || status >= 300 {
 			t.Errorf("restore %s/config: status %d: %s", anthropicEnv.Mount, status, resp)
 		}
@@ -264,6 +266,118 @@ func TestAnthropic_ClientSuppliedWorkspaceIsStripped(t *testing.T) {
 			UpstreamCalls: 1,
 		})
 	})
+}
+
+// The Hydra client whose subject is shaped like an upstream profile id — see
+// its entry in e2e/setup.sh.
+const (
+	anthropicProfiledUser       = "uprof_e2e-anthropic-user"
+	anthropicProfiledUserSecret = "anthropic-user-secret"
+	anthropicProfileMetadataKey = "anthropic_user_profile_id"
+	anthropicProfileBeta        = "user-profiles-2026-09-04"
+)
+
+// mapUserSubjectToProfile has the shared user auth role copy each user's sub
+// into verified token metadata under the key the mount reads, and restores the
+// role afterwards so no other test's users gain metadata.
+func mapUserSubjectToProfile(t *testing.T) {
+	t.Helper()
+	path := "auth/fullchain-user-jwt/role/" + h.FullChainUserAuthRole
+	status, resp := h.APIRequest(t, "PUT", path, leaderPort,
+		`{"metadata_claims": {"sub": "`+anthropicProfileMetadataKey+`"}}`)
+	if status < 200 || status >= 300 {
+		t.Fatalf("map sub on %s: status %d: %s", path, status, resp)
+	}
+	t.Cleanup(func() {
+		status, resp := h.APIRequest(t, "PUT", path, leaderPort, `{"metadata_claims": {}}`)
+		if status < 200 || status >= 300 {
+			t.Errorf("restore %s: status %d: %s", path, status, resp)
+		}
+	})
+}
+
+// TestAnthropic_ProfileFromUserMetadata drives attribution through the whole
+// chain: a claim on the user's token, mapped into verified metadata at login,
+// read by the mount and sent upstream.
+//
+// Every row sends its own anthropic-user-profile-id as well. Only the verified
+// user identity may name a profile, so the client's value must never reach the
+// upstream — whether the mount then sends the user's, or sends none at all.
+func TestAnthropic_ProfileFromUserMetadata(t *testing.T) {
+	ensureEnv(t)
+	mapUserSubjectToProfile(t)
+	writeAnthropicConfig(t, `{
+		"beta_required": "`+anthropicProfileBeta+`",
+		"user_profile_metadata_key": "`+anthropicProfileMetadataKey+`"
+	}`)
+
+	claimed := map[string]string{"anthropic-user-profile-id": "uprof_claimed-by-client"}
+
+	t.Run("profiled user", func(t *testing.T) {
+		upstream.Reset()
+		status, body, _ := h.ChainRequest(t, leaderPort, anthropicEnv, h.ChainOpts{
+			AgentCertPEM: agentCert(t),
+			Bearer:       h.GetJWT(t, anthropicProfiledUser, anthropicProfiledUserSecret),
+			Role:         anthropicEnv.CertRole(),
+			Headers:      claimed,
+		})
+		h.AssertChain(t, upstream, status, body, h.ChainWant{
+			Status: 200,
+			Injected: map[string]string{
+				"x-api-key":                 anthropicKey,
+				"anthropic-user-profile-id": anthropicProfiledUser,
+				"anthropic-beta":            anthropicProfileBeta,
+			},
+			Absent:        h.AlwaysAbsent(),
+			UpstreamCalls: 1,
+		})
+	})
+
+	// This user's subject is mapped too, but is not a profile id. It is dropped
+	// rather than sent to be refused, and the request goes ahead unattributed.
+	t.Run("user whose subject is not a profile", func(t *testing.T) {
+		upstream.Reset()
+		status, body, _ := h.ChainRequest(t, leaderPort, anthropicEnv, h.ChainOpts{
+			AgentCertPEM: agentCert(t),
+			Bearer:       h.FullChainUserJWT(t),
+			Role:         anthropicEnv.CertRole(),
+			Headers:      claimed,
+		})
+		h.AssertChain(t, upstream, status, body, h.ChainWant{
+			Status:        200,
+			Injected:      map[string]string{"x-api-key": anthropicKey},
+			Absent:        h.AlwaysAbsent("anthropic-user-profile-id"),
+			UpstreamCalls: 1,
+		})
+	})
+
+	// No user, so no one to attribute: the agent is never a source.
+	t.Run("no user", func(t *testing.T) {
+		upstream.Reset()
+		status, body, _ := h.ChainRequest(t, leaderPort, anthropicEnv, h.ChainOpts{
+			AgentCertPEM: agentCert(t),
+			Role:         anthropicEnv.CertRole(),
+			Headers:      claimed,
+		})
+		h.AssertChain(t, upstream, status, body, h.ChainWant{
+			Status:        200,
+			Injected:      map[string]string{"x-api-key": anthropicKey},
+			Absent:        h.AlwaysAbsent("anthropic-user-profile-id"),
+			UpstreamCalls: 1,
+		})
+	})
+}
+
+// TestAnthropic_UnpairedProfileConfigRefused checks the mount will not take a
+// profile key without the beta the upstream requires beside the header.
+func TestAnthropic_UnpairedProfileConfigRefused(t *testing.T) {
+	ensureEnv(t)
+
+	status, resp := h.APIRequest(t, "POST", anthropicEnv.Mount+"/config", leaderPort,
+		`{"user_profile_metadata_key": "`+anthropicProfileMetadataKey+`"}`)
+	if status != 400 {
+		t.Fatalf("want 400 for a profile key with no user-profiles beta, got %d: %s", status, resp)
+	}
 }
 
 // TestAnthropic_OperatorTokenOutranksNativeChannel is the mirror of

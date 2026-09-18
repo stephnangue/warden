@@ -381,17 +381,19 @@ func TestConfigRead_IsPersistable(t *testing.T) {
 	_, err := json.Marshal(read)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]any{
-		"anthropic_version": "2024-01-01",
-		"beta_allowlist":    "a-2026-01-01",
-		"beta_required":     "r-2026-01-01",
+		"anthropic_version":         "2024-01-01",
+		"beta_allowlist":            "a-2026-01-01",
+		"beta_required":             "r-2026-01-01",
+		"user_profile_metadata_key": "",
 	}, read)
 }
 
 func TestConfigRead_Defaults(t *testing.T) {
 	assert.Equal(t, map[string]any{
-		"anthropic_version": DefaultAnthropicVersion,
-		"beta_allowlist":    "*",
-		"beta_required":     "",
+		"anthropic_version":         DefaultAnthropicVersion,
+		"beta_allowlist":            "*",
+		"beta_required":             "",
+		"user_profile_metadata_key": "",
 	}, onConfigRead(map[string]any{}))
 }
 

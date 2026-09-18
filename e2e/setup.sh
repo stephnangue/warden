@@ -541,6 +541,17 @@ curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -d '{"client_id":"e2e-ovh-chain","client_name":"E2E OVH Chained Service Account","client_secret":"ovh-chain-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-ovh-chain" || echo "  [SKIP] e2e-ovh-chain (already exists?)"
 
+# A user whose subject is an upstream profile id, for the anthropic attribution
+# rows. A client_credentials token's sub is its client_id, so naming the client
+# uprof_... gives the user leg a claim shaped like a real profile id, which the
+# user auth role can then map into verified token metadata. No other client's
+# subject has that shape, which is what lets a row prove the value came from
+# this user and not from somewhere else.
+curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"uprof_e2e-anthropic-user","client_name":"E2E Anthropic Profiled User","client_secret":"anthropic-user-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  >/dev/null 2>&1 && echo "  [OK] uprof_e2e-anthropic-user" || echo "  [SKIP] uprof_e2e-anthropic-user (already exists?)"
+
 # Verify JWT issuance works
 echo "  Verifying JWT issuance..."
 JWT_RESPONSE=$(curl -s -X POST "$HYDRA_PUBLIC/oauth2/token" \
