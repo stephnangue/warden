@@ -476,7 +476,10 @@ const (
 	// The lifetime the stub gives a short-lived token. The driver ends its lease at
 	// half of it — the minute's margin would leave nothing of a token this short — so
 	// a row can wait out the lease while the token it was served is still good.
-	anthropicWIFShortLifetime = 4 * time.Second
+	//
+	// Long enough that both windows the row depends on have room on a slow runner:
+	// two requests inside the 5s lease, and the re-mint inside the 10s token.
+	anthropicWIFShortLifetime = 10 * time.Second
 
 	anthropicJWTBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 )
@@ -506,6 +509,7 @@ var (
 	anthropicOAuthOnce   sync.Once
 	anthropicOAuthMu     sync.Mutex
 	anthropicOAuthGrants []map[string]string // grants received, in order
+	anthropicOAuthAt     []time.Time         // when each grant arrived, in the same order
 )
 
 // anthropicOAuthToken is the bearer the stub issues for the nth grant naming rule,
@@ -535,6 +539,7 @@ func startAnthropicOAuth() *httptest.Server {
 
 		anthropicOAuthMu.Lock()
 		anthropicOAuthGrants = append(anthropicOAuthGrants, grant)
+		anthropicOAuthAt = append(anthropicOAuthAt, time.Now())
 		n := 0
 		for _, g := range anthropicOAuthGrants {
 			if g["federation_rule_id"] == grant["federation_rule_id"] {
@@ -574,13 +579,21 @@ func ensureAnthropicOAuth(t *testing.T) {
 	anthropicOAuthOnce.Do(func() { anthropicOAuth = startAnthropicOAuth() })
 	anthropicOAuthMu.Lock()
 	defer anthropicOAuthMu.Unlock()
-	anthropicOAuthGrants = nil
+	anthropicOAuthGrants, anthropicOAuthAt = nil, nil
 }
 
 func anthropicOAuthSeen() []map[string]string {
 	anthropicOAuthMu.Lock()
 	defer anthropicOAuthMu.Unlock()
 	return append([]map[string]string(nil), anthropicOAuthGrants...)
+}
+
+// anthropicOAuthSeenAt is when each grant arrived — the instant a mint happened, which
+// the caller's own clock cannot see: its request returns only after the whole chain.
+func anthropicOAuthSeenAt() []time.Time {
+	anthropicOAuthMu.Lock()
+	defer anthropicOAuthMu.Unlock()
+	return append([]time.Time(nil), anthropicOAuthAt...)
 }
 
 // anthropicMustWrite POSTs v as JSON and fails the test on anything but success.
@@ -798,7 +811,8 @@ func TestAnthropic_WIFSessionReusesItsTokenThenRemintsEarly(t *testing.T) {
 		})
 	}
 
-	// The token is issued between these two instants, which bound when it expires.
+	// The first token is issued after sentAt, so it is good until at least
+	// sentAt + its lifetime — a lower bound that needs no clock on the Warden side.
 	sentAt := time.Now()
 	first := anthropicOAuthToken(anthropicWIFShortRule, 1)
 	send(first)
@@ -812,13 +826,17 @@ func TestAnthropic_WIFSessionReusesItsTokenThenRemintsEarly(t *testing.T) {
 	// Past the lease, which ends at half the token's life, but not past the token.
 	time.Sleep(time.Until(servedAt.Add(anthropicWIFShortLifetime/2 + 500*time.Millisecond)))
 	send(anthropicOAuthToken(anthropicWIFShortRule, 2))
-	if n := len(anthropicOAuthSeen()); n != 2 {
-		t.Fatalf("token exchanges after the lease ended = %d, want 2", n)
+	at := anthropicOAuthSeenAt()
+	if len(at) != 2 {
+		t.Fatalf("token exchanges after the lease ended = %d, want 2", len(at))
 	}
-	// Without this the row could pass on a slow machine for the wrong reason: a
-	// re-mint that came after the first token expired proves only that expiry works.
-	if elapsed := time.Since(sentAt); elapsed >= anthropicWIFShortLifetime {
-		t.Fatalf("the re-mint came %s after the first request, by which time the first token had expired; it must come while that token is still good", elapsed)
+	// Without this the row could pass for the wrong reason: a re-mint that came after
+	// the first token expired proves only that expiry works. It is judged by when the
+	// second exchange arrived, not by when the request that caused it returned —
+	// that includes the whole round trip after the mint, which a slow runner would
+	// count against a re-mint that was on time.
+	if remint := at[1].Sub(sentAt); remint >= anthropicWIFShortLifetime {
+		t.Fatalf("the re-mint came %s after the first request, by which time the first token had expired; it must come while that token is still good", remint)
 	}
 }
 
