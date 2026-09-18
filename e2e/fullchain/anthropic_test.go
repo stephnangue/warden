@@ -37,18 +37,22 @@ var anthropicEnv = h.ProviderEnv{
 	},
 }
 
-// TestAnthropic_DefaultHeaderCoexistsWithCredential guards an ordering hazard:
-// the provider's static headers are applied after the credential headers, so a
-// static header whose name collided with a credential header would silently
-// overwrite the credential. Nothing collides today; this is what would notice if
-// something started to.
-func TestAnthropic_DefaultHeaderCoexistsWithCredential(t *testing.T) {
+// TestAnthropic_MountVersionReplacesClients checks the version the upstream sees
+// is the mount's, whatever the client sent.
+//
+// The version is supplied as a fallback — set only where the request carries no
+// such header. That amounts to an override only because the client's copy is
+// stripped first. A client sending its own is what would expose the two coming
+// apart: without the strip, its version would win and the mount's would never be
+// sent.
+func TestAnthropic_MountVersionReplacesClients(t *testing.T) {
 	ensureEnv(t)
 
 	status, body, _ := h.ChainRequest(t, leaderPort, anthropicEnv, h.ChainOpts{
 		AgentCertPEM: agentCert(t),
 		Bearer:       h.FullChainUserJWT(t),
 		Role:         anthropicEnv.CertRole(),
+		Headers:      map[string]string{"anthropic-version": "1999-01-01"},
 	})
 
 	h.AssertChain(t, upstream, status, body, h.ChainWant{
@@ -60,6 +64,103 @@ func TestAnthropic_DefaultHeaderCoexistsWithCredential(t *testing.T) {
 		Absent:        h.AlwaysAbsent(),
 		UpstreamCalls: 1,
 	})
+}
+
+// writeAnthropicConfig applies a partial config write to the shared mount and
+// restores the beta settings afterwards, so no other test in the package sees
+// them.
+func writeAnthropicConfig(t *testing.T, body string) {
+	t.Helper()
+	status, resp := h.APIRequest(t, "POST", anthropicEnv.Mount+"/config", leaderPort, body)
+	if status < 200 || status >= 300 {
+		t.Fatalf("write %s/config: status %d: %s", anthropicEnv.Mount, status, resp)
+	}
+	t.Cleanup(func() {
+		status, resp := h.APIRequest(t, "POST", anthropicEnv.Mount+"/config", leaderPort,
+			`{"anthropic_version": "", "beta_allowlist": "*", "beta_required": ""}`)
+		if status < 200 || status >= 300 {
+			t.Errorf("restore %s/config: status %d: %s", anthropicEnv.Mount, status, resp)
+		}
+	})
+}
+
+// TestAnthropic_ClientBetasPassThroughByDefault covers a mount nobody has
+// configured. anthropic-beta is now stripped and put back by the extractor, so
+// this is what would notice if putting it back stopped happening.
+func TestAnthropic_ClientBetasPassThroughByDefault(t *testing.T) {
+	ensureEnv(t)
+
+	status, body, _ := h.ChainRequest(t, leaderPort, anthropicEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         anthropicEnv.CertRole(),
+		Headers:      map[string]string{"anthropic-beta": "a-2026-01-01, b-2026-01-01"},
+	})
+
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"anthropic-beta": "a-2026-01-01, b-2026-01-01"},
+		Absent:        h.AlwaysAbsent(),
+		UpstreamCalls: 1,
+	})
+}
+
+// TestAnthropic_BetaPolicyAndVersionFromConfig drives the mount's settings
+// through a real config write: the allowlist drops what it does not name, the
+// required beta is added, and the configured version replaces the default.
+func TestAnthropic_BetaPolicyAndVersionFromConfig(t *testing.T) {
+	ensureEnv(t)
+
+	writeAnthropicConfig(t, `{
+		"anthropic_version": "2024-01-01",
+		"beta_allowlist": "a-2026-01-01",
+		"beta_required": "r-2026-01-01"
+	}`)
+
+	status, body, _ := h.ChainRequest(t, leaderPort, anthropicEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         anthropicEnv.CertRole(),
+		Headers:      map[string]string{"anthropic-beta": "a-2026-01-01,x-2026-01-01"},
+	})
+
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status: 200,
+		Injected: map[string]string{
+			"x-api-key":         anthropicKey,
+			"anthropic-version": "2024-01-01",
+			"anthropic-beta":    "a-2026-01-01,r-2026-01-01",
+		},
+		Absent:        h.AlwaysAbsent(),
+		UpstreamCalls: 1,
+	})
+}
+
+// TestAnthropic_InvalidBetaConfigRefused checks a bad value is refused by the
+// config write itself. Validation that ran only when a mount is enabled would
+// accept it here, and every request would then fail upstream instead.
+//
+// The two rows are refused by different layers, and each asserts which. A bad
+// beta name is the provider's own check. An array given for a comma-separated
+// list — the natural mistake — never reaches the provider: the framework checks
+// the field's type first. That row pins the guarantee the provider relies on,
+// since its handler reads the fields assuming they are strings.
+func TestAnthropic_InvalidBetaConfigRefused(t *testing.T) {
+	ensureEnv(t)
+
+	for name, tc := range map[string]struct{ body, layer string }{
+		"invalid name": {`{"beta_required": "not a beta"}`, "is not a valid beta name"},
+		"array value":  {`{"beta_allowlist": ["a-2026-01-01"]}`, "field validation failed"},
+	} {
+		status, resp := h.APIRequest(t, "POST", anthropicEnv.Mount+"/config", leaderPort, tc.body)
+		if status != 400 {
+			t.Errorf("%s: want 400, got %d: %s", name, status, resp)
+			continue
+		}
+		if !strings.Contains(string(resp), tc.layer) {
+			t.Errorf("%s: want the refusal to say %q, got: %s", name, tc.layer, resp)
+		}
+	}
 }
 
 // TestAnthropic_WorkspaceFollowsTheCredential covers both branches of the

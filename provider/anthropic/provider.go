@@ -94,15 +94,20 @@ func anthropicCredentialExtractor(req *logical.Request) (map[string]string, erro
 
 // Spec defines the Anthropic provider configuration for the httpproxy framework.
 var Spec = &httpproxy.ProviderSpec{
-	Name:               "anthropic",
-	DefaultURL:         DefaultAnthropicURL,
-	URLConfigKey:       "anthropic_url",
-	DefaultTimeout:     DefaultAnthropicTimeout,
-	ParseStreamBody:    true,
-	UserAgent:          "warden-anthropic-proxy",
-	HelpText:           anthropicBackendHelp,
-	ExtractCredentials: anthropicCredentialExtractor,
-	ExtractToken:       extractTokens,
+	Name:            "anthropic",
+	DefaultURL:      DefaultAnthropicURL,
+	URLConfigKey:    "anthropic_url",
+	DefaultTimeout:  DefaultAnthropicTimeout,
+	ParseStreamBody: true,
+	UserAgent:       "warden-anthropic-proxy",
+	HelpText:        anthropicBackendHelp,
+	ExtractToken:    extractTokens,
+
+	// The pass-through policy, for a mount whose config has never been written
+	// and so has no extractor in state. Every other mount gets its own from
+	// ResolveUpstream.
+	ExtractCredentials: newExtractor(passThroughBetas),
+
 	// Every header the extractor may set conditionally has to be stripped here.
 	// Injection only overwrites on the branch that sets it, so a name missing from
 	// this list would let a client's own value ride through beside the credential —
@@ -111,8 +116,21 @@ var Spec = &httpproxy.ProviderSpec{
 	// second reason: the bearer branch injects nothing over it, and inbound it is
 	// this provider's agent-token channel, so without the strip an agent's own token
 	// would reach the upstream.
-	ExtraHeadersToRemove: []string{"x-api-key", "anthropic-version", "anthropic-workspace-id"},
-	DefaultHeaders:       map[string]string{"anthropic-version": "2023-06-01"},
+	//
+	// anthropic-beta is stripped so the policy decides what reaches the upstream;
+	// the extractor puts back whatever it allows. anthropic-version is stripped so
+	// a client cannot pin its own, and DynamicHeaders supplies the mount's.
+	ExtraHeadersToRemove: []string{
+		"x-api-key", "anthropic-version", "anthropic-workspace-id", "anthropic-beta",
+	},
+
+	DynamicHeaders:      dynamicHeaders,
+	ExtraConfigFields:   extraConfigFields,
+	ResolveUpstream:     resolveUpstream,
+	OnConfigWrite:       onConfigWrite,
+	OnConfigRead:        onConfigRead,
+	OnInitialize:        onInitialize,
+	ValidateExtraConfig: validateExtraConfig,
 }
 
 // Factory creates a new Anthropic provider backend.
@@ -166,10 +184,34 @@ Request body parsing is enabled, allowing policies to evaluate AI request
 fields such as model, max_tokens, temperature, and stream. This enables
 fine-grained cost control and usage policies.
 
+The mount sends its own anthropic-version, and decides which anthropic-beta
+values reach the upstream. A client's own anthropic-version is replaced. Its
+anthropic-beta values all pass through unless beta_allowlist is set, in which
+case only the listed ones do; beta_required values are added to every request
+whatever the client sent. With neither set, the client's header is forwarded
+exactly as sent; otherwise the names are rejoined, each sent once:
+
+  warden write anthropic/config <<EOF
+  {
+    "anthropic_version": "2023-06-01",
+    "beta_allowlist": "context-management-2025-06-27",
+    "beta_required": "user-profiles-2026-09-04"
+  }
+  EOF
+
+beta_allowlist is "*" by default, which passes every client beta. An empty
+value passes none, leaving only beta_required. Warden cannot check that the
+organization has access to a beta, and the upstream refuses a request carrying
+one it does not, so a beta_required value the organization lacks fails every
+request through the mount.
+
 Configuration:
 - anthropic_url: Anthropic API base URL (default: https://api.anthropic.com)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout duration (default: 120s for AI inference)
 - auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
 - default_role: Fallback role when not specified in the URL path
+- anthropic_version: API version sent as anthropic-version (default: 2023-06-01)
+- beta_allowlist: Comma-separated client betas allowed through (default: "*", all)
+- beta_required: Comma-separated betas added to every request (default: none)
 `

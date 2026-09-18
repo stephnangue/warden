@@ -99,7 +99,7 @@ type ProviderSpec struct {
 	// ExtraHeadersToRemove are provider-specific headers to strip beyond the base set.
 	ExtraHeadersToRemove []string
 
-	// DefaultHeaders are static headers always set on proxied requests (e.g., "anthropic-version").
+	// DefaultHeaders are static headers always set on proxied requests (e.g., tfe's "Content-Type").
 	DefaultHeaders map[string]string
 
 	// DynamicHeaders returns headers to set based on current config state.
