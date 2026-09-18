@@ -629,6 +629,7 @@ func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 		"api_key":         "sk-xxxx",
 		"application_key": "app-xxxx",
 		"organization_id": "org-1",
+		"workspace_id":    "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
 		"mint_method":     "static_apikey",
 		"secret_path":     "apikeys/thing",
 		"totally_unknown": "could be anything",
@@ -638,8 +639,11 @@ func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 	assert.Contains(t, fields, "api_key")
 	assert.Contains(t, fields, "application_key")
 
-	// Declared adjunct: readable, because the type knows what it is.
+	// Declared adjuncts: readable, because the type knows what they are. The
+	// workspace is the one an operator most needs to read back, since it decides
+	// where a spec's spend lands.
 	assert.NotContains(t, fields, "organization_id")
+	assert.NotContains(t, fields, "workspace_id")
 
 	// Mint locators: readable, because masking where a credential comes from
 	// hides useful information and protects nothing.

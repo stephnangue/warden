@@ -88,6 +88,10 @@ func (t *APIKeyCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("Project ID (optional)").
 			Example("proj-xxxxxxxxxxxx"),
 
+		credential.StringField("workspace_id").
+			Describe("Workspace the key acts in (optional; the anthropic mount injects it as anthropic-workspace-id)").
+			Example("wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ"),
+
 		credential.StringField("key_id").
 			Describe("Key identifier travelling beside the key (optional; the honeycomb mount reads its presence as the selector for management-key mode)").
 			Example("hcaik_xxxxxxxxxxxx"),
@@ -448,6 +452,7 @@ func (t *APIKeyCredType) RequiresSpecRotation() bool {
 // names Warden can give a helpful error about.
 var apiKeyAdjunctFields = []string{
 	"organization_id", "project_id", "key_id", "key_name", "email", "application_key",
+	"workspace_id",
 }
 
 // KnownAdjunctFields implements credential.AdjunctCarrier.

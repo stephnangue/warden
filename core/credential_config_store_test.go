@@ -2844,6 +2844,63 @@ func TestCredentialConfigStore_ValidateSpec_ElasticKeyNameIsAMintParameter(t *te
 	assert.Contains(t, err.Error(), "credential_fields")
 }
 
+// A workspace the source will not carry must be refused when the spec is
+// written. Left to mint, the credential arrives without it, the anthropic mount
+// injects no workspace header, and the request runs in the key's default
+// workspace — billed there, and sharing that workspace's prompt cache — while the
+// mount reads back as healthy. Both refusals have to name the field and say what
+// to change, since the two failures have different fixes.
+func TestCredentialConfigStore_ValidateSpec_WorkspaceIDMustBeCarried(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	store.core.credentialDriverRegistry = nil
+
+	spec := func(name, source string) *credential.CredSpec {
+		return &credential.CredSpec{
+			Name:   name,
+			Type:   credential.TypeAPIKey,
+			Source: source,
+			MinTTL: 5 * time.Minute,
+			MaxTTL: 1 * time.Hour,
+			Config: credential.NewConfig(map[string]string{
+				"api_key":      "sk-ant-api03-test",
+				"workspace_id": "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
+			}),
+		}
+	}
+
+	// An apikey source that has not declared the field: fixable where it stands,
+	// by naming it.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "undeclared", Type: credential.SourceTypeAPIKey,
+	}))
+	err := store.CreateSpec(ctx, spec("undeclared-spec", "undeclared"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workspace_id")
+	assert.Contains(t, err.Error(), "credential_fields")
+
+	// Declared: carried, so accepted.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name:   "declared",
+		Type:   credential.SourceTypeAPIKey,
+		Config: credential.NewConfig(map[string]string{"credential_fields": "workspace_id"}),
+	}))
+	require.NoError(t, store.CreateSpec(ctx, spec("declared-spec", "declared")))
+
+	// A source with no declaration mechanism cannot carry it however it is
+	// configured, so the guidance must point at a different source type rather
+	// than at a key that would change nothing.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "local-src", Type: credential.SourceTypeLocal,
+	}))
+	err = store.CreateSpec(ctx, spec("local-spec", "local-src"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workspace_id")
+	assert.Contains(t, err.Error(), "use an apikey source")
+}
+
 // An elastic source chains the cluster key that authenticates its own Security
 // API calls, so the reference belongs on the source. A spec-level one would
 // leave the source's own setting unused at mint, so it is refused with guidance
