@@ -106,7 +106,7 @@ var Spec = &httpproxy.ProviderSpec{
 	// The pass-through policy, for a mount whose config has never been written
 	// and so has no extractor in state. Every other mount gets its own from
 	// ResolveUpstream.
-	ExtractCredentials: newExtractor(passThroughBetas),
+	ExtractCredentials: newExtractor(passThroughBetas, ""),
 
 	// Every header the extractor may set conditionally has to be stripped here.
 	// Injection only overwrites on the branch that sets it, so a name missing from
@@ -120,8 +120,12 @@ var Spec = &httpproxy.ProviderSpec{
 	// anthropic-beta is stripped so the policy decides what reaches the upstream;
 	// the extractor puts back whatever it allows. anthropic-version is stripped so
 	// a client cannot pin its own, and DynamicHeaders supplies the mount's.
+	// anthropic-user-profile-id is stripped so the only profile a request is
+	// attributed to is one read from the user's verified identity — a client
+	// naming its own would be claiming another party's standing.
 	ExtraHeadersToRemove: []string{
 		"x-api-key", "anthropic-version", "anthropic-workspace-id", "anthropic-beta",
+		"anthropic-user-profile-id",
 	},
 
 	DynamicHeaders:      dynamicHeaders,
@@ -205,6 +209,32 @@ organization has access to a beta, and the upstream refuses a request carrying
 one it does not, so a beta_required value the organization lacks fails every
 request through the mount.
 
+A request can be attributed to the end user it is made for, sent as
+anthropic-user-profile-id. The id is an upstream profile (uprof_...), created
+with the upstream's user profile API; Warden forwards one, it never creates one.
+It is read from the requesting user's verified token metadata, so map the claim
+holding it on the user auth role, then name that metadata key on the mount
+together with the beta the upstream requires for it:
+
+  warden write auth/jwt/role/end-users <<EOF
+  {
+    "metadata_claims": {
+      "anthropic_profile": "anthropic_user_profile_id"
+    }
+  }
+  EOF
+
+  warden write anthropic/config <<EOF
+  {
+    "beta_required": "user-profiles-2026-09-04",
+    "user_profile_metadata_key": "anthropic_user_profile_id"
+  }
+  EOF
+
+Only the user's own metadata is read, never the agent's, so a request with no
+user attributes no one. A value that is not a profile id is not sent. A client's
+own anthropic-user-profile-id is always removed.
+
 Configuration:
 - anthropic_url: Anthropic API base URL (default: https://api.anthropic.com)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
@@ -214,4 +244,5 @@ Configuration:
 - anthropic_version: API version sent as anthropic-version (default: 2023-06-01)
 - beta_allowlist: Comma-separated client betas allowed through (default: "*", all)
 - beta_required: Comma-separated betas added to every request (default: none)
+- user_profile_metadata_key: User metadata key holding the profile id (default: none)
 `
