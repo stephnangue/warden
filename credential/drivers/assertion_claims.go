@@ -37,6 +37,8 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg credential.Co
 		return kubernetesAssertionResource(specCfg)
 	case credential.SourceTypeAlicloud:
 		return alicloudAssertionResource(specCfg)
+	case credential.SourceTypeAnthropic:
+		return anthropicAssertionResource(specCfg)
 	default:
 		return "", false
 	}
@@ -67,9 +69,46 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg credential.Co
 		return kubernetesAssertionAudience(sourceCfg)
 	case credential.SourceTypeAlicloud:
 		return alicloudAssertionAudience(sourceCfg)
+	case credential.SourceTypeAnthropic:
+		return anthropicAssertionAudience(sourceCfg)
 	default:
 		return "", false
 	}
+}
+
+// anthropicAssertionAudience derives the warden_identity assertion audience for an
+// anthropic source: the source's explicit `audience`, or ("", false) when unset.
+// There is no conventional default — the federation rule matches whatever audience
+// the operator registered — so an unset audience forces the spec to set
+// assertion_audience (the spec-create gate enforces this, and mint fails closed
+// otherwise).
+//
+// Gated on auth_method=oidc_federation like the other keyless sources, even though
+// it is the anthropic source's only mode: ValidateConfig requires the key, so a
+// record without it did not pass validation and derives nothing.
+func anthropicAssertionAudience(sourceCfg credential.Config) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", "") != anthropicAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// anthropicAssertionResource reports the service account a federation spec acts as,
+// for the warden_resource claim — which a federation rule can then match on, pinning
+// the rule to one service account. Pure: reads spec config only, no network or
+// driver state. The driver has a single mint path, so there is no mint_method to
+// dispatch on.
+//
+// The provider prefix is human-readable sugar on an opaque value — never parse it
+// back.
+func anthropicAssertionResource(specCfg credential.Config) (string, bool) {
+	if sa := credential.GetString(specCfg, "service_account_id", ""); sa != "" {
+		return "anthropic:" + sa, true
+	}
+	return "", false
 }
 
 // alicloudAssertionAudience derives the warden_identity assertion audience for a

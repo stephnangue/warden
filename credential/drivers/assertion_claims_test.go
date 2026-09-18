@@ -110,6 +110,33 @@ func TestDeriveAssertionAudience(t *testing.T) {
 			wantOK:     false,
 		},
 		{
+			name:       "anthropic federation derives explicit audience",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "https://warden.example.com/anthropic"},
+			wantAud:    "https://warden.example.com/anthropic",
+			wantOK:     true,
+		},
+		{
+			// ValidateConfig requires auth_method, so a record without it never
+			// passed validation and must not be treated as federated.
+			name:       "anthropic absent auth_method derives nothing",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"audience": "https://warden.example.com/anthropic"},
+			wantOK:     false,
+		},
+		{
+			name:       "anthropic without audience derives nothing (no default)",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation"},
+			wantOK:     false,
+		},
+		{
+			name:       "anthropic other auth_method derives nothing",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"auth_method": "static", "audience": "https://warden.example.com/anthropic"},
+			wantOK:     false,
+		},
+		{
 			name:       "unknown source type derives nothing",
 			sourceType: credential.SourceTypeGitHub,
 			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "x"},
@@ -309,6 +336,19 @@ func TestDeriveAssertionResource(t *testing.T) {
 			name:       "vault vault_token without any role omits",
 			sourceType: credential.SourceTypeVault,
 			specCfg:    map[string]string{"mint_method": "vault_token"},
+			wantOK:     false,
+		},
+		{
+			name:       "anthropic names the service account",
+			sourceType: credential.SourceTypeAnthropic,
+			specCfg:    map[string]string{"federation_rule_id": "fdrl_01ExampleRule", "service_account_id": "svac_01ExampleAccount"},
+			want:       "anthropic:svac_01ExampleAccount",
+			wantOK:     true,
+		},
+		{
+			name:       "anthropic without service account omits",
+			sourceType: credential.SourceTypeAnthropic,
+			specCfg:    map[string]string{"federation_rule_id": "fdrl_01ExampleRule"},
 			wantOK:     false,
 		},
 		{

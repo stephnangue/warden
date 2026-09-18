@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -112,16 +113,87 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("resources").
 			Describe("RFC 8707 resource indicator(s) for the exchanged token — space-separated absolute URIs (token_exchange source)").
 			Example("https://api.internal.example.com https://api2.internal.example.com"),
+
+		// anthropic source - the workload identity federation target. Validated
+		// per-source in ValidateConfig below.
+		credential.StringField("federation_rule_id").
+			Describe("Federation rule the Warden assertion must satisfy (anthropic source)").
+			Example("fdrl_01AbCdEfGhIjKlMnOpQrStUv"),
+		credential.StringField("service_account_id").
+			Describe("Service account the minted token acts as (anthropic source)").
+			Example("svac_01AbCdEfGhIjKlMnOpQrStUv"),
+		credential.StringField("workspace_id").
+			Describe("Workspace the token acts in — needed only when the federation rule covers more than one (anthropic source)").
+			Example("wrkspc_01AbCdEfGhIjKlMnOpQrStUv"),
 	}
+}
+
+// anthropicIDPrefixes are the type prefixes Anthropic puts on the resource ids an
+// anthropic spec names. Checking them catches an id pasted into the wrong field —
+// a service account into federation_rule_id — at the write that makes the mistake,
+// rather than as a rejected exchange on every request after it.
+//
+// A slice, not a map, so the first malformed id reported is the same on every run.
+var anthropicIDPrefixes = []struct{ key, prefix string }{
+	{"federation_rule_id", "fdrl_"},
+	{"service_account_id", "svac_"},
+	{"workspace_id", "wrkspc_"},
+}
+
+// validateAnthropicSpec checks an anthropic spec's exchange target. The source
+// holds the organization and the audience; the spec names what one exchange asks
+// for, so the two required ids must be here, and a key belonging to the source is
+// refused rather than silently ignored.
+func validateAnthropicSpec(config credential.Config) error {
+	// The source is keyless: it mints only by exchanging a Warden-signed assertion,
+	// which is the issuer the federation rules trust. A spec that opts out of
+	// exchange has nothing to mint with, and one presenting another identity would
+	// be refused by every rule registered for Warden's issuer.
+	switch src := config.Get(credential.ConfigSubjectTokenSource); src {
+	case credential.SourceWardenIdentity:
+	case "", credential.SourceNone:
+		return fmt.Errorf("'%s' is required for an anthropic source: set it to '%s'",
+			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
+	default:
+		return fmt.Errorf("'%s' must be '%s' for an anthropic source, got %q: the exchange presents a Warden-signed assertion, which is what the federation rules trust",
+			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, src)
+	}
+
+	for _, key := range []string{"federation_rule_id", "service_account_id"} {
+		if config.Get(key) == "" {
+			return fmt.Errorf("'%s' is required for an anthropic source", key)
+		}
+	}
+	for _, id := range anthropicIDPrefixes {
+		v := config.Get(id.key)
+		if v == "" {
+			continue
+		}
+		if !strings.HasPrefix(v, id.prefix) || len(v) == len(id.prefix) {
+			return fmt.Errorf("'%s' must be an Anthropic id starting with %q, got %q", id.key, id.prefix, v)
+		}
+	}
+
+	if config.Get("organization_id") != "" {
+		return fmt.Errorf("'organization_id' belongs on the anthropic source, not the spec: a source holds one organization's trust relationship")
+	}
+	// audience is the source's key, and on a spec it is a token_exchange parameter
+	// this source never reads. Set here it would look like it chose the assertion's
+	// audience while the source's went out instead.
+	if config.Get("audience") != "" {
+		return fmt.Errorf("'audience' is not read on an anthropic spec: the assertion's audience is the source's 'audience', which a spec overrides with '%s'",
+			credential.ConfigAssertionAudience)
+	}
+	return nil
 }
 
 // ValidateConfig validates the Config for an OAuth bearer token credential spec.
 func (t *OAuthBearerTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	switch sourceType {
-	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM, credential.SourceTypeTokenExchange:
+	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM, credential.SourceTypeTokenExchange, credential.SourceTypeAnthropic:
 		// Supported
 	default:
-		return fmt.Errorf("oauth_bearer_token credentials require an oauth2, vault, ibm, or token_exchange source, got: %s", sourceType)
+		return fmt.Errorf("oauth_bearer_token credentials require an oauth2, vault, ibm, token_exchange, or anthropic source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -160,6 +232,10 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config credential.Config, sour
 		if src := config.Get(credential.ConfigSubjectTokenSource); src == "" || src == credential.SourceNone {
 			return fmt.Errorf("'%s' is required for a token_exchange source (set '%s', '%s', or '%s')",
 				credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity)
+		}
+	case credential.SourceTypeAnthropic:
+		if err := validateAnthropicSpec(config); err != nil {
+			return err
 		}
 	}
 

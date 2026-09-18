@@ -1635,8 +1635,8 @@ const authMethodOIDCFederation = "oidc_federation"
 
 // isFederationSource reports whether a source authenticates by presenting a
 // caller's identity assertion. Every such driver — aws, azure, gcp, hvault,
-// kubernetes, alicloud — spells it the same way, so one predicate covers them all
-// and covers a new one the day it lands.
+// kubernetes, alicloud, anthropic — spells it the same way, so one predicate covers
+// them all and covers a new one the day it lands.
 //
 // Not every keyless source federates: ibm, ovh and scaleway have no assertion grant
 // to exchange against, so they remove their stored secret by chaining instead and

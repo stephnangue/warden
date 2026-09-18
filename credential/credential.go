@@ -43,6 +43,7 @@ const (
 	SourceTypeGrafana       = "grafana"
 	SourceTypeAlicloud      = "alicloud"
 	SourceTypeTokenExchange = "token_exchange"
+	SourceTypeAnthropic     = "anthropic"
 )
 
 // Category constants for credential categorization

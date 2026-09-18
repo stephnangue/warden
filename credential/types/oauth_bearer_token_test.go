@@ -47,21 +47,21 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeLocal,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, or token_exchange source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, or anthropic source",
 		},
 		{
 			name:       "unsupported source type - aws",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAWS,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, or token_exchange source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, or anthropic source",
 		},
 		{
 			name:       "unsupported source type - static apikey",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, or token_exchange source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, or anthropic source",
 		},
 		{
 			name:       "token_exchange source - agent_identity subject",
@@ -88,6 +88,155 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			sourceType: credential.SourceTypeTokenExchange,
 			wantErr:    true,
 			errMsg:     "is required for a token_exchange source",
+		},
+		{
+			name: "anthropic source - full target",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"workspace_id":                      "wrkspc_01ExampleWorkspace",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    false,
+		},
+		{
+			name: "anthropic source - workspace is optional",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    false,
+		},
+		{
+			name: "anthropic source - missing subject source",
+			config: map[string]string{
+				"federation_rule_id": "fdrl_01ExampleRule",
+				"service_account_id": "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "is required for an anthropic source: set it to 'warden_identity'",
+		},
+		{
+			name: "anthropic source - subject source none",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceNone,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "is required for an anthropic source",
+		},
+		{
+			// The federation rules trust Warden's issuer; forwarding the agent's own
+			// token would present an identity no such rule accepts.
+			name: "anthropic source - agent_identity subject refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "must be 'warden_identity' for an anthropic source",
+		},
+		{
+			name: "anthropic source - missing federation rule",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "'federation_rule_id' is required for an anthropic source",
+		},
+		{
+			name: "anthropic source - missing service account",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "'service_account_id' is required for an anthropic source",
+		},
+		{
+			// An id pasted into the wrong field is the mistake the prefix check exists for.
+			name: "anthropic source - service account id in the rule field",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "svac_01ExampleAccount",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     `'federation_rule_id' must be an Anthropic id starting with "fdrl_"`,
+		},
+		{
+			name: "anthropic source - bare prefix is not an id",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     `'service_account_id' must be an Anthropic id starting with "svac_"`,
+		},
+		{
+			name: "anthropic source - malformed workspace",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"workspace_id":                      "default",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     `'workspace_id' must be an Anthropic id starting with "wrkspc_"`,
+		},
+		{
+			// The driver reads the organization from the source only, so a spec
+			// value would be silently ignored.
+			name: "anthropic source - organization on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"organization_id":                   "00000000-0000-0000-0000-000000000000",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "'organization_id' belongs on the anthropic source",
+		},
+		{
+			// The source's key, which reads as though it set the assertion audience.
+			name: "anthropic source - audience on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"audience":                          "https://warden.example.com/anthropic",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "overrides with 'assertion_audience'",
+		},
+		{
+			// The key that does override it is accepted.
+			name: "anthropic source - assertion_audience on the spec accepted",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				credential.ConfigAssertionAudience:  "https://warden.example.com/anthropic",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    false,
 		},
 	}
 
