@@ -213,6 +213,31 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "'organization_id' belongs on the anthropic source",
 		},
+		{
+			// The source's key, which reads as though it set the assertion audience.
+			name: "anthropic source - audience on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"audience":                          "https://warden.example.com/anthropic",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "overrides with 'assertion_audience'",
+		},
+		{
+			// The key that does override it is accepted.
+			name: "anthropic source - assertion_audience on the spec accepted",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				credential.ConfigAssertionAudience:  "https://warden.example.com/anthropic",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    false,
+		},
 	}
 
 	for _, tt := range tests {

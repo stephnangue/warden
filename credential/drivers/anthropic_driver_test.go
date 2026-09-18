@@ -465,6 +465,45 @@ func TestAnthropicLeaseTTL(t *testing.T) {
 	}
 }
 
+func TestAnthropicLifetime(t *testing.T) {
+	tests := []struct {
+		name      string
+		expiresIn int
+		want      time.Duration
+	}{
+		{name: "an hour", expiresIn: 3600, want: time.Hour},
+		{name: "the longest a rule issues", expiresIn: 86400, want: 24 * time.Hour},
+		{name: "missing takes the fallback", expiresIn: 0, want: anthropicFallbackLifetime},
+		{name: "negative takes the fallback", expiresIn: -1, want: anthropicFallbackLifetime},
+		{name: "past a day is capped", expiresIn: 86401, want: 24 * time.Hour},
+		{
+			// Multiplied out uncapped, this wraps time.Duration to +290ms — a lease of
+			// 145ms that would pass for a real one.
+			name: "a value that would overflow is capped", expiresIn: 18446744074, want: 24 * time.Hour,
+		},
+		{name: "the largest int is capped", expiresIn: int(^uint(0) >> 1), want: 24 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, anthropicLifetime(tt.expiresIn))
+		})
+	}
+}
+
+func TestAnthropicDriver_MintCredentialWithExchange_CapsAnOverflowingLifetime(t *testing.T) {
+	stub := newAnthropicTokenStub(t, anthropicTokenResponse(18446744074))
+	d := newTestAnthropicDriver(t, stub.server.URL, nil)
+
+	_, metadata, ttl, _, err := d.MintCredentialWithExchange(context.Background(), anthropicTestSpec(nil), anthropicTestInputs())
+	require.NoError(t, err)
+	assert.Equal(t, 24*time.Hour-anthropicRefreshBuffer, ttl)
+
+	// The expiry recorded for audit is the capped day, not a wrapped instant.
+	expiration, err := time.Parse(time.RFC3339, metadata["expiration"].(string))
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now().Add(24*time.Hour), expiration, time.Minute)
+}
+
 func TestAnthropicDriver_MintCredential_RequiresExchange(t *testing.T) {
 	d := newTestAnthropicDriver(t, "https://api.anthropic.com", nil)
 	_, _, _, _, err := d.MintCredential(context.Background(), anthropicTestSpec(nil))

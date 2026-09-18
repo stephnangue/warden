@@ -3337,6 +3337,14 @@ func TestCredentialConfigStore_AnthropicSpec(t *testing.T) {
 				map[string]string{"organization_id": "00000000-0000-0000-0000-000000000000"}),
 			errorMsg: "'organization_id' belongs on the anthropic source",
 		},
+		{
+			// Without the refusal this spec is accepted and mints for the source's
+			// audience, not the one it appears to set.
+			name: "the source's audience key is refused on a spec",
+			spec: anthropicStoreSpec("aud-on-spec", "with-aud",
+				map[string]string{"audience": "https://other.example.com"}),
+			errorMsg: "overrides with 'assertion_audience'",
+		},
 	}
 
 	for _, tt := range tests {

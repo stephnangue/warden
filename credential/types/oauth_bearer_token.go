@@ -177,6 +177,13 @@ func validateAnthropicSpec(config credential.Config) error {
 	if config.Get("organization_id") != "" {
 		return fmt.Errorf("'organization_id' belongs on the anthropic source, not the spec: a source holds one organization's trust relationship")
 	}
+	// audience is the source's key, and on a spec it is a token_exchange parameter
+	// this source never reads. Set here it would look like it chose the assertion's
+	// audience while the source's went out instead.
+	if config.Get("audience") != "" {
+		return fmt.Errorf("'audience' is not read on an anthropic spec: the assertion's audience is the source's 'audience', which a spec overrides with '%s'",
+			credential.ConfigAssertionAudience)
+	}
 	return nil
 }
 

@@ -44,10 +44,16 @@ const anthropicJWTBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 const anthropicRefreshBuffer = 60 * time.Second
 
 // anthropicFallbackLifetime is the lifetime assumed when a token response omits
-// expires_in, which RFC 6749 leaves optional. It is the shortest lifetime Anthropic
+// expires_in, which RFC 6749 leaves optional, or sends a non-positive one. It is the shortest lifetime Anthropic
 // issues, so assuming it can only make the cache re-mint early — never serve a
 // token past its real expiry, which is what guessing a longer life would risk.
 const anthropicFallbackLifetime = 60 * time.Second
+
+// anthropicMaxLifetime is the longest a federation rule can make a token live:
+// token_lifetime_seconds tops out at a day. A longer expires_in is capped to it
+// before conversion. Taken as-is, a value past ~292 years overflows time.Duration
+// and can wrap to a small positive lifetime, which would pass as a real one.
+const anthropicMaxLifetime = 24 * time.Hour
 
 // anthropicOrganizationIDPattern matches an organization id, which Anthropic
 // issues as a UUID.
@@ -209,10 +215,7 @@ func (d *AnthropicDriver) MintCredentialWithExchange(ctx context.Context, spec *
 		return nil, nil, 0, "", fmt.Errorf("anthropic token exchange: response missing access_token")
 	}
 
-	lifetime := time.Duration(resp.ExpiresIn) * time.Second
-	if lifetime <= 0 {
-		lifetime = anthropicFallbackLifetime
-	}
+	lifetime := anthropicLifetime(resp.ExpiresIn)
 	ttl := anthropicLeaseTTL(lifetime, spec.MaxTTL)
 
 	// The token's real expiry, not the lease's: the lease ends early by design, and
@@ -307,6 +310,21 @@ func anthropicLeaseTTL(lifetime, maxTTL time.Duration) time.Duration {
 		ttl = maxTTL
 	}
 	return ttl
+}
+
+// anthropicLifetime converts a response's expires_in to how long its token lives.
+// Missing or non-positive takes the fallback, and anything past the longest a rule
+// can issue is capped to that before the multiply, which is what keeps an absurd
+// value from overflowing into a plausible-looking one.
+func anthropicLifetime(expiresIn int) time.Duration {
+	switch {
+	case expiresIn <= 0:
+		return anthropicFallbackLifetime
+	case expiresIn > int(anthropicMaxLifetime/time.Second):
+		return anthropicMaxLifetime
+	default:
+		return time.Duration(expiresIn) * time.Second
+	}
 }
 
 // Revoke is a no-op: Anthropic has no endpoint to revoke a federated token, and
