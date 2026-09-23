@@ -1148,6 +1148,29 @@ var assertionRosters = map[string]profileRoster{
 				"deliberately not in cacheIdentity (see buildAssertionSetup)",
 		},
 	},
+	profiles.AWSProfileName: {
+		// No warden_resource: the mint below populates a Resource, and aws must
+		// still not emit it.
+		claims: []string{
+			"aud", "exp", "https://aws.amazon.com/tags", "iat", "iss", "jti", "nbf", "sub",
+		},
+		coverage: map[string]string{
+			"iss": "volatile/constant by design",
+			"iat": "volatile/constant by design",
+			"nbf": "volatile/constant by design",
+			"exp": "volatile/constant by design",
+			"jti": "volatile/constant by design",
+
+			// The same composite as default, so the same fragment covers it.
+			"sub": "cacheIdentity's first fragment (wardenSubject)",
+			"aud": "cacheIdentity's second fragment",
+			// The session tags carry the role and the projected metadata. Both are
+			// already dimensions; the fact that they are rendered as AWS tags at all
+			// is what the "prof=aws" fragment keys.
+			"https://aws.amazon.com/tags": "the role via cacheIdentity's \"role=\" fragment, the metadata " +
+				"via its metadata fingerprint, and the tag shape itself via \"prof=aws\"",
+		},
+	},
 }
 
 func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {

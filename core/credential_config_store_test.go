@@ -3518,6 +3518,228 @@ func TestCredentialConfigStore_ValidateSpec_AssertionProfileOnUpdate(t *testing.
 
 // The key is gated on warden_identity by the structural validator, so a spec that
 // mints no assertion cannot carry it at all — the same rule as its four siblings.
+// createSpecAsLegacy stores spec exactly as a build predating the create-time
+// assertion-profile default would have: with no assertion_profile written into its
+// config. It hides the registry for the duration of the create, which skips the
+// default (and the registry-backed profile check, which a nil registry passes).
+func createSpecAsLegacy(t *testing.T, store *CredentialConfigStore, ctx context.Context, spec *credential.CredSpec) {
+	t.Helper()
+	reg := store.core.assertionProfileRegistry
+	store.core.assertionProfileRegistry = nil
+	defer func() { store.core.assertionProfileRegistry = reg }()
+	require.NoError(t, store.CreateSpec(ctx, spec))
+	require.Empty(t, spec.Config.Get(credential.ConfigAssertionProfile), "a legacy spec carries no assertion_profile")
+}
+
+// TestCredentialConfigStore_CreateSpec_DefaultsAWSProfile pins the create-time
+// default: a NEW spec that mints a Warden assertion on an AWS source and names no
+// assertion_profile is stored with assertion_profile=aws — explicitly, so spec read
+// shows it — while an explicit choice, a spec that mints nothing, and a non-AWS
+// source are left alone.
+func TestCredentialConfigStore_CreateSpec_DefaultsAWSProfile(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "vault-fed", Type: credential.SourceTypeVault,
+		Config: credential.NewConfig(map[string]string{
+			"address": "https://vault.example", "auth_method": "oidc_federation",
+		}),
+	}))
+
+	federated := func(extra map[string]string) credential.Config {
+		cfg := map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return credential.NewConfig(cfg)
+	}
+	create := func(name, source string, cfg credential.Config) string {
+		t.Helper()
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{Name: name, Type: "vault_token", Source: source, Config: cfg}))
+		stored, err := store.GetSpec(ctx, name)
+		require.NoError(t, err)
+		return stored.Config.Get(credential.ConfigAssertionProfile)
+	}
+
+	assert.Equal(t, profiles.AWSProfileName, create("aws-unset", "aws-fed", federated(nil)),
+		"a new AWS federated spec naming no profile is stored with aws")
+	assert.Equal(t, credential.DefaultAssertionProfileName,
+		create("aws-optout", "aws-fed", federated(map[string]string{credential.ConfigAssertionProfile: "default"})),
+		"an explicit default is the opt-out, and is kept")
+	assert.Equal(t, profiles.AWSProfileName,
+		create("aws-explicit", "aws-fed", federated(map[string]string{credential.ConfigAssertionProfile: "aws"})))
+	assert.Empty(t, create("vault-unset", "vault-fed", federated(nil)),
+		"no default exists for a non-AWS source, so nothing is written")
+	assert.Empty(t, create("aws-static", "aws-fed", credential.NewConfig(map[string]string{
+		"mint_method": "secrets_manager",
+		"secret_id":   "prod/db",
+	})), "an AWS spec that mints no Warden assertion gets no profile — it could not use one")
+}
+
+// A spec valid under default but not under the aws profile it would be defaulted to
+// is refused at create — with an error that says the profile was DEFAULTED and how to
+// opt out, rather than one about a profile the operator never wrote. Nothing is stored.
+func TestCredentialConfigStore_CreateSpec_DefaultedProfileRejectionExplains(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "aws-res", Type: "vault_token", Source: "aws-fed",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			credential.ConfigAssertionResource:  "aws-iam:arn:aws:iam::1:role/R",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}),
+	})
+	require.Error(t, err)
+	assertBadRequest(t, err)
+	assert.Contains(t, err.Error(), "never emits warden_resource")
+	assert.Contains(t, err.Error(), "assertion_profile defaulted to 'aws'")
+	assert.Contains(t, err.Error(), "e.g. to 'default'", "the error must say how to opt out")
+
+	_, getErr := store.GetSpec(ctx, "aws-res")
+	assert.Error(t, getErr, "a refused spec must not be stored")
+}
+
+// TestCredentialConfigStore_LegacyAWSSpecIsNeverDefaulted is the upgrade guarantee at
+// the write path: an AWS federated spec stored before the create-time default existed
+// (no assertion_profile) keeps no key through an UPDATE — the default runs at create
+// only, never from validateSpec, which updates and the rotation/connect write-backs
+// share. Were it applied there, the spec would silently switch to the session-tag
+// shape on its next write, and every trust policy without sts:TagSession would start
+// refusing its tokens.
+func TestCredentialConfigStore_LegacyAWSSpecIsNeverDefaulted(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	cfg := map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+		"mint_method":                       "secrets_manager",
+		"secret_id":                         "prod/db",
+	}
+	createSpecAsLegacy(t, store, ctx, &credential.CredSpec{
+		Name: "legacy", Type: "vault_token", Source: "aws-fed", Config: credential.NewConfig(cfg),
+	})
+
+	// An ordinary edit, with the registry (and so the default) live again.
+	cfg["secret_id"] = "prod/db-v2"
+	require.NoError(t, store.UpdateSpec(ctx, &credential.CredSpec{
+		Name: "legacy", Type: "vault_token", Source: "aws-fed", Config: credential.NewConfig(cfg),
+	}))
+
+	stored, err := store.GetSpec(ctx, "legacy")
+	require.NoError(t, err)
+	assert.Equal(t, "prod/db-v2", stored.Config.Get("secret_id"), "precondition: the update landed")
+	assert.Empty(t, stored.Config.Get(credential.ConfigAssertionProfile),
+		"an update must never write the create-time default into a legacy spec")
+}
+
+// TestCredentialConfigStore_ValidateSpec_AWSProfile drives the real builtin aws
+// profile through spec-create: its source pin, and the checks its ValidateSpec owns
+// (metadata keys must be valid AWS session-tag keys; an explicit assertion_resource
+// is refused because the profile never emits it). Each rejection is a 400.
+func TestCredentialConfigStore_ValidateSpec_AWSProfile(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "vault-fed", Type: credential.SourceTypeVault,
+		Config: credential.NewConfig(map[string]string{
+			"address": "https://vault.example", "auth_method": "oidc_federation",
+		}),
+	}))
+
+	spec := func(name, source string, extra map[string]string) *credential.CredSpec {
+		cfg := map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			credential.ConfigAssertionProfile:   profiles.AWSProfileName,
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return &credential.CredSpec{Name: name, Type: "vault_token", Source: source, Config: credential.NewConfig(cfg)}
+	}
+
+	tests := []struct {
+		name     string
+		spec     *credential.CredSpec
+		errorMsg string // empty => expect success
+	}{
+		{
+			name: "accepted on an aws source",
+			spec: spec("aws-ok", "aws-fed", map[string]string{
+				credential.ConfigAssertionMetadataClaims: "team,env",
+			}),
+		},
+		{
+			name: "accepted with assertion_resource=none",
+			spec: spec("aws-none", "aws-fed", map[string]string{
+				credential.ConfigAssertionResource: credential.AssertionResourceNone,
+			}),
+		},
+		{
+			name:     "rejected on a non-aws source (source pin)",
+			spec:     spec("aws-on-vault", "vault-fed", nil),
+			errorMsg: "requires a source of type [aws]",
+		},
+		{
+			name: "rejected: explicit assertion_resource the profile never emits",
+			spec: spec("aws-res", "aws-fed", map[string]string{
+				credential.ConfigAssertionResource: "aws-iam:arn:aws:iam::1:role/R",
+			}),
+			errorMsg: "never emits warden_resource",
+		},
+		{
+			name: "rejected: metadata keys that collide case-insensitively as tags",
+			spec: spec("aws-dup", "aws-fed", map[string]string{
+				credential.ConfigAssertionMetadataClaims: "Team,team",
+			}),
+			errorMsg: "AWS session tag keys are case-insensitive",
+		},
+		{
+			name: "rejected: a metadata key that is not a valid tag key",
+			spec: spec("aws-badkey", "aws-fed", map[string]string{
+				credential.ConfigAssertionMetadataClaims: "team;env",
+			}),
+			errorMsg: "is not a valid AWS session tag key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.CreateSpec(ctx, tt.spec)
+			if tt.errorMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errorMsg)
+			assertBadRequest(t, err)
+		})
+	}
+}
+
 func TestCredentialConfigStore_ValidateSpec_AssertionProfileNeedsWardenIdentity(t *testing.T) {
 	store, ctx := setupTestCredentialConfigStore(t)
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{

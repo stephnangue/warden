@@ -23,5 +23,10 @@ func RegisterBuiltinProfiles(registry *credential.AssertionProfileRegistry) erro
 		return err
 	}
 
+	// Register the AWS STS shape (composite sub + session tags; pinned to AWS sources)
+	if err := registry.Register(&AWSProfile{}); err != nil {
+		return err
+	}
+
 	return nil
 }

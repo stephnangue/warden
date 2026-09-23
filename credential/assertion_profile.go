@@ -17,16 +17,18 @@ import (
 )
 
 // ConfigAssertionProfile is the spec-config key selecting the claim shape of a
-// warden_identity assertion. Absent/empty means DefaultAssertionProfileName, for
-// every source type — the profile is never derived from the source.
+// warden_identity assertion.
 //
-// Deriving it would be an upgrade-time outage: a profile's whole job can be to
-// change `sub`, and an AWS IAM trust policy binds on `sub`, so every existing spec
-// would start presenting a subject its trust policy does not match with nothing in
-// the spec config having changed. It is also consistent with its siblings —
-// assertion_resource, assertion_metadata_claims and assertion_user_claims are all
-// opt-in, precisely because they change what crosses a trust boundary, and the
-// claim SHAPE is the largest such change there is.
+// AT MINT, absent/empty always means DefaultAssertionProfileName, for every source
+// type — an unset key is never reinterpreted from the source. Reinterpreting it would
+// be an upgrade-time outage: every stored spec would start presenting a token shape
+// its upstream trust policy was not written for, with nothing in its config changed.
+//
+// AT CREATE, a source type may name a profile that a new spec gets when it mints an
+// assertion and sets none (AWS: the aws profile); the store writes that value into
+// the new spec's config, so the choice is explicit and visible on read. Specs stored
+// before such a default existed carry no key, and so keep minting default. See
+// applyCreateTimeAssertionProfile in the core config store.
 //
 // Valid only when subject_token_source or actor_token_source is warden_identity.
 const ConfigAssertionProfile = "assertion_profile"
