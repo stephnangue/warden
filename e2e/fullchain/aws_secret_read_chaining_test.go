@@ -227,15 +227,20 @@ func setupAWSChainedSpecs(t *testing.T) {
 	// The referenced specs: the whole credential, read from one stored secret, once
 	// per subject source. subject_token_source is not optional — a chained secret is
 	// minted as the caller, and the store refuses the reference otherwise.
-	for _, ref := range []struct{ name, subject string }{
-		{awsChainAgentSecretSpec, "agent_identity"},
-		{awsChainWardenSecretSpec, "warden_identity"},
+	//
+	// The warden_identity row names assertion_profile=default: a new AWS spec that
+	// mints an assertion would otherwise default to the aws profile, which carries
+	// the role and metadata as session tags and emits no warden_resource — and this
+	// row checks warden_resource below.
+	for _, ref := range []struct{ name, subject, extra string }{
+		{awsChainAgentSecretSpec, "agent_identity", ""},
+		{awsChainWardenSecretSpec, "warden_identity", `,"assertion_profile":"default"`},
 	} {
 		mustWrite("POST", "sys/cred/specs/"+ref.name, `{
 			"type":"key_value","source":"`+awsChainAWSSource+`","config":{
 				"mint_method":"secret_read","secret_id":"`+awsChainSecretID+`",
 				"role_arn":"arn:aws:iam::123456789012:role/WardenSecretsReader",
-				"subject_token_source":"`+ref.subject+`"}}`,
+				"subject_token_source":"`+ref.subject+`"`+ref.extra+`}}`,
 			"create the referenced secret spec for "+ref.subject)
 	}
 

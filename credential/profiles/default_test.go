@@ -115,10 +115,9 @@ func TestDefaultProfile_Claims_Minimal(t *testing.T) {
 // whatever token it is handed — which is why cacheIdentity guards `RoleName != ""`.
 //
 // default emits the empty warden_role rather than erroring or omitting the claim.
-// Pinning it here is what makes a future profile's divergence — the planned aws
-// profile, for one, would refuse to mint, since a packed subject cannot drop a
-// segment without breaking prefix matching — a deliberate, reviewed change rather
-// than a silent regression.
+// Pinning it here keeps each profile's role-less behavior a deliberate, reviewed
+// choice rather than an accident: aws, for one, omits its warden_role tag instead
+// (see TestAWSProfile_Claims_RoleLessAndSparseMetadata).
 func TestDefaultProfile_Claims_RoleLess(t *testing.T) {
 	req := fixedRequest()
 	req.Identity.RoleName = ""

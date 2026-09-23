@@ -2753,8 +2753,11 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceDerived(t *testing.T) {
 		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
 			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
-			"mint_method":                       "secrets_manager",
-			"secret_id":                         "prod/db",
+			// warden_resource is a default-profile claim, and a new AWS federated
+			// spec defaults to aws, which never emits it — so name default.
+			credential.ConfigAssertionProfile: credential.DefaultAssertionProfileName,
+			"mint_method":                     "secrets_manager",
+			"secret_id":                       "prod/db",
 		}),
 	}))
 
@@ -2833,9 +2836,12 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut(t *testi
 			Config: credential.NewConfig(map[string]string{
 				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
 				credential.ConfigAssertionAudience:  "sts.amazonaws.com",
-				credential.ConfigAssertionResource:  resourceCfg,
-				"mint_method":                       "secrets_manager",
-				"secret_id":                         "prod/db",
+				// assertion_resource is a default-profile feature; a new AWS federated
+				// spec defaults to aws, which rejects it — so name default.
+				credential.ConfigAssertionProfile:  credential.DefaultAssertionProfileName,
+				credential.ConfigAssertionResource: resourceCfg,
+				"mint_method":                      "secrets_manager",
+				"secret_id":                        "prod/db",
 			}),
 		}))
 		return &logical.TokenEntry{CredentialSpec: name, PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
@@ -3373,20 +3379,25 @@ func TestCacheIdentity_ProfileFragment(t *testing.T) {
 			"mint_method":                       "secrets_manager",
 			"secret_id":                         "prod/db",
 		}
+		spec := &credential.CredSpec{Name: name, Type: "vault_token", Source: "aws-prof"}
 		if profileName != "" {
 			cfg[credential.ConfigAssertionProfile] = profileName
+			spec.Config = credential.NewConfig(cfg)
+			require.NoError(t, c.credConfigStore.CreateSpec(ctx, spec))
+		} else {
+			// "Unset" can only mean a spec stored BEFORE the create-time default
+			// existed: a new AWS federated spec is given assertion_profile=aws.
+			spec.Config = credential.NewConfig(cfg)
+			createSpecAsLegacy(t, c.credConfigStore, ctx, spec)
 		}
-		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
-			Name: name, Type: "vault_token", Source: "aws-prof",
-			Config: credential.NewConfig(cfg),
-		}))
 		return &logical.TokenEntry{
 			CredentialSpec: name, PrincipalID: "p", NamespaceID: "n",
 			MountAccessor: "m", RoleName: "reader",
 		}
 	}
 
-	// Unset → no fragment at all, so the key is byte-identical to a pre-profile key.
+	// A spec stored before profiles existed (no key) → no fragment at all, so the
+	// key is byte-identical to a pre-profile key: upgrading moves no cache entry.
 	teUnset := newSpecTE("prof-unset", "")
 	inUnset, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), teUnset)
 	require.NoError(t, err)
@@ -3461,6 +3472,97 @@ func TestCacheIdentity_ProfileFragmentAfterAllFragments(t *testing.T) {
 // profile CAN be persisted by a test or bootstrap setup. Such a spec must NOT then
 // quietly mint the default shape — a caller that asked for a different claim set
 // silently getting the old one is exactly what the registry exists to prevent.
+// TestResolveExchangeInputs_AWSProfile drives the real aws profile end to end
+// through the request path: the cache identity gains "\x00prof=aws" after every
+// other fragment, and the minted assertion carries the composite sub plus the role
+// and projected metadata as AWS session tags — and no warden_* claim, not even
+// warden_resource, which this spec would otherwise derive.
+func TestResolveExchangeInputs_AWSProfile(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-e2e", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "orders-reader", Type: "vault_token", Source: "aws-e2e",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource:      credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:       "sts.amazonaws.com",
+			credential.ConfigAssertionProfile:        profiles.AWSProfileName,
+			credential.ConfigAssertionMetadataClaims: "team,env",
+			"mint_method":                            "secrets_manager",
+			"secret_id":                              "prod/db", // derives a resource aws must not emit
+		}),
+	}))
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "orders-reader", PrincipalID: "agent-checkout-7", NamespaceID: "ns-3f2a1b",
+		MountAccessor: "auth_jwt_9c1e", RoleName: "orders-reader",
+		Metadata: map[string]string{"team": "payments", "env": "prod", "unlisted": "never projected"},
+	}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+	require.NoError(t, err)
+
+	assert.True(t, strings.HasSuffix(inputs.SubjectCacheIdentity, "\x00prof=aws"),
+		"the aws profile must key its own cache dimension, last: %q", inputs.SubjectCacheIdentity)
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+
+	assert.Equal(t, "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7", claims["sub"])
+	assert.Equal(t, "sts.amazonaws.com", claims["aud"])
+	assert.Equal(t, map[string]any{
+		"principal_tags": map[string]any{
+			"warden_role": []any{"orders-reader"},
+			"team":        []any{"payments"},
+			"env":         []any{"prod"},
+		},
+	}, claims["https://aws.amazon.com/tags"], "only the listed metadata keys become tags")
+	for claim := range claims {
+		assert.False(t, strings.HasPrefix(claim, "warden_"), "aws must not emit %s", claim)
+	}
+
+	header := decodeAssertionHeader(t, tok)
+	assert.Equal(t, "JWT", header["typ"])
+}
+
+// TestResolveExchangeInputs_LegacyAWSSpecMintsDefault is the upgrade guarantee at
+// mint: an AWS federated spec stored before the create-time default existed carries
+// no assertion_profile, and unset still means default at mint — so it keeps emitting
+// exactly the claims its trust policy was written against, with no session tags (a
+// tagged token would be refused by any role lacking sts:TagSession).
+func TestResolveExchangeInputs_LegacyAWSSpecMintsDefault(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-legacy", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	createSpecAsLegacy(t, c.credConfigStore, ctx, &credential.CredSpec{
+		Name: "legacy", Type: "vault_token", Source: "aws-legacy",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}),
+	})
+
+	te := &logical.TokenEntry{CredentialSpec: "legacy", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m", RoleName: "reader"}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+	require.NoError(t, err)
+	assert.NotContains(t, inputs.SubjectCacheIdentity, "prof=", "a legacy spec keys as default")
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	assert.Equal(t, "p", claims["warden_sub"], "the default shape, as before the upgrade")
+	assert.Equal(t, "reader", claims["warden_role"])
+	assert.NotContains(t, claims, "https://aws.amazon.com/tags", "no session tags on a legacy spec")
+}
+
 func TestResolveAssertionProfile_NilRegistry(t *testing.T) {
 	c := &Core{}
 	require.Nil(t, c.assertionProfileRegistry)
@@ -3488,7 +3590,8 @@ func TestResolveAssertionProfile_UnknownName(t *testing.T) {
 	_, err = c.resolveAssertionProfile("nope")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown assertion profile: nope")
-	assert.Contains(t, err.Error(), "available profiles: [default]")
+	// Every builtin, sorted.
+	assert.Contains(t, err.Error(), "available profiles: [aws default]")
 }
 
 // A spec naming a profile this build lacks must fail BEFORE any cache interaction,

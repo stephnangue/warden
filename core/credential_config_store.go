@@ -12,6 +12,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -314,6 +315,63 @@ func (s *CredentialConfigStore) checkSpecReferencesLocked(namespaceID, specName 
 // ============================================================================
 
 // CreateSpec creates a new credential spec in the namespace from context
+// createTimeAssertionProfiles names, per source type, the assertion profile a NEW spec
+// gets when it mints a Warden assertion and names no assertion_profile itself.
+var createTimeAssertionProfiles = map[string]string{
+	credential.SourceTypeAWS: profiles.AWSProfileName,
+}
+
+// applyCreateTimeAssertionProfile writes the source type's default assertion profile
+// into a new spec's config when the spec mints a Warden assertion and sets none.
+//
+// It runs at CREATE only — never from validateSpec, which also runs on updates and on
+// the rotation and connect write-backs. A spec stored before this default existed
+// has no assertion_profile and keeps minting the default shape its upstream trust
+// policies were written against; applying the default anywhere else would flip it on
+// its next write-back. For the same reason an unset key is never reinterpreted at
+// mint: unset still means "default" for every spec that reaches the issuer without
+// one. Writing the value into the config makes the choice explicit and visible on
+// spec read, and an operator opts out by naming another profile (e.g. "default").
+//
+// The defaulted value is validated here, against the profile it defaults to, so a
+// spec that is valid under default but not under the defaulted profile is refused
+// with an error that says the profile was defaulted and how to opt out — instead of
+// a message about a profile the operator never wrote.
+//
+// A nil registry, one without the profile, or a missing source leaves the spec
+// untouched: the first two would only fail every mint, and validateSpec reports the
+// missing source.
+func (s *CredentialConfigStore) applyCreateTimeAssertionProfile(ctx context.Context, spec *credential.CredSpec) error {
+	if spec.Config.Get(credential.ConfigAssertionProfile) != "" {
+		return nil
+	}
+	mintsAssertion := spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity ||
+		spec.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
+	if !mintsAssertion {
+		return nil
+	}
+	reg := s.core.assertionProfileRegistry
+	if reg == nil {
+		return nil
+	}
+	source, err := s.GetSource(ctx, spec.Source)
+	if err != nil || source == nil {
+		return nil
+	}
+	name, ok := createTimeAssertionProfiles[source.Type]
+	if !ok || !reg.HasProfile(name) {
+		return nil
+	}
+
+	defaulted := spec.Config.With(credential.ConfigAssertionProfile, name)
+	if err := credential.ValidateAssertionProfileConfig(reg, defaulted, source.Type); err != nil {
+		return logical.ErrBadRequestf("%s (assertion_profile defaulted to '%s' for a spec that mints a Warden assertion on a '%s' source; set assertion_profile explicitly, e.g. to '%s', to choose another shape)",
+			err, name, source.Type, credential.DefaultAssertionProfileName)
+	}
+	spec.Config = defaulted
+	return nil
+}
+
 func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential.CredSpec) error {
 	if s.isClosed() {
 		return ErrConfigStoreClosed
@@ -335,6 +393,10 @@ func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential
 	}
 	if exists {
 		return ErrSpecAlreadyExists
+	}
+
+	if err := s.applyCreateTimeAssertionProfile(ctx, spec); err != nil {
+		return err
 	}
 
 	if err := s.ValidateSpec(ctx, spec); err != nil {
