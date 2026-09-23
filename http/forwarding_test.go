@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -323,3 +325,25 @@ func TestGetProxy_ErrorHandler_ConnectionError_NoLeader(t *testing.T) {
 // =============================================================================
 // wrapGenericHandler standby forwarding path
 // =============================================================================
+
+// The standby's proxy carries the request id this node assigned to the
+// active node, which would otherwise handle — and audit — the request with
+// none. A request with no id is not given an invented one here.
+func TestGetProxy_DirectorCarriesRequestID(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	cert := &x509.Certificate{}
+	cert.Subject.CommonName = "fw-test"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Leaf: cert}}}
+	f := newStandbyForwarder(log, func() *tls.Config { return tlsCfg }, 30)
+	proxy := f.getProxy("https://leader:8201", "https://leader:8200")
+	require.NotNil(t, proxy)
+
+	withID := httptest.NewRequest(http.MethodGet, "https://standby:8200/v1/aws/gateway", nil)
+	withID = withID.WithContext(context.WithValue(withID.Context(), middleware.RequestIDKey, "standby-7/abc-000042"))
+	proxy.Director(withID)
+	assert.Equal(t, "standby-7/abc-000042", withID.Header.Get("X-Request-Id"))
+
+	without := httptest.NewRequest(http.MethodGet, "https://standby:8200/v1/aws/gateway", nil)
+	proxy.Director(without)
+	assert.Empty(t, without.Header.Values("X-Request-Id"))
+}

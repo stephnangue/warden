@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 )
@@ -72,7 +73,11 @@ func NewClusterListener(cfg ClusterListenerConfig) (*ClusterListener, error) {
 	})
 
 	server := &http.Server{
-		Handler:      clusterHandler,
+		// A forwarded request keeps the id the forwarding node assigned it
+		// (X-Request-Id), or gets one, so it is audited and answered under an
+		// id like any other. Taking the id from the header is safe for the
+		// same reason as the cert headers above.
+		Handler:      middleware.RequestID(clusterHandler),
 		IdleTimeout:  time.Minute,
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,

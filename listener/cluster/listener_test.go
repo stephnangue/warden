@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -400,4 +401,54 @@ func getFreePort(t *testing.T) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 	return port
+}
+
+// A forwarded request keeps the id the forwarding node gave it, and one that
+// arrives without an id is given one, so no forwarded request is handled —
+// and audited — without an id.
+func TestClusterListener_RequestID(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	tlsCfg := generateTestClusterTLSConfig(t)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, middleware.GetReqID(r.Context()))
+	})
+	addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	ln, err := NewClusterListener(ClusterListenerConfig{
+		Logger:        log,
+		Address:       addr,
+		Handler:       handler,
+		TLSConfigFunc: func() *tls.Config { return tlsCfg },
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ln.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	defer ln.Stop()
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			Certificates: tlsCfg.Certificates,
+			RootCAs:      tlsCfg.RootCAs,
+		}},
+		Timeout: 5 * time.Second,
+	}
+	requestID := func(header string) string {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s/v1/aws/gateway", addr), nil)
+		require.NoError(t, err)
+		if header != "" {
+			req.Header.Set("X-Request-Id", header)
+		}
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+
+	assert.Equal(t, "standby-7/abc-000042", requestID("standby-7/abc-000042"),
+		"the forwarding node's id must be kept")
+	assert.NotEmpty(t, requestID(""), "a request without an id must be given one")
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/audit"
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
@@ -119,6 +120,30 @@ func TestAuditStandbyForwardedRequest(t *testing.T) {
 	found := h.GrepNodeLog(t, leaderNodeNum, "e2e-audit-fwd")
 	if !found {
 		t.Fatalf("expected 'e2e-audit-fwd' to appear in leader (node %d) log for forwarded request", leaderNodeNum)
+	}
+
+	// The leader audits the forwarded request under the id the standby gave
+	// it, not under none. Audit writes are asynchronous, hence the poll; the
+	// cleanup's deletes go to the leader directly, so they are skipped.
+	var forwarded []audit.LogEntry
+	for i := 0; i < 30 && len(forwarded) == 0; i++ {
+		for _, e := range h.ReadAuditEntries(t, leaderNodeNum, "e2e-audit-fwd") {
+			if e.Request != nil && e.Request.Operation != "delete" {
+				forwarded = append(forwarded, e)
+			}
+		}
+		if len(forwarded) == 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	if len(forwarded) == 0 {
+		t.Fatalf("no audit entry on the leader (node %d) for the forwarded request", leaderNodeNum)
+	}
+	for _, e := range forwarded {
+		if e.Request.ID == "" {
+			t.Errorf("leader audited the forwarded request's %s entry (%s %s) with no request id",
+				e.Type, e.Request.Operation, e.Request.Path)
+		}
 	}
 
 	h.CleanupNamespaces(t, leader, "e2e-audit-fwd")

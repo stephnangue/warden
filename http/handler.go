@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
 	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stephnangue/warden/core"
 	"github.com/stephnangue/warden/listener"
@@ -261,6 +262,13 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 					Bytes: cert.Raw,
 				})
 				req.Header.Set("X-SSL-Client-Cert", url.QueryEscape(string(pemBytes)))
+			}
+
+			// Carry the request id this node assigned, so the active node
+			// audits and answers the request under the same id rather than
+			// none.
+			if id := middleware.GetReqID(req.Context()); id != "" {
+				req.Header.Set(middleware.RequestIDHeader, id)
 			}
 		},
 		Transport: transport,
