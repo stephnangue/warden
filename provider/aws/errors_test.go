@@ -439,3 +439,30 @@ func TestRenderGatewayError(t *testing.T) {
 		assert.Nil(t, b.RenderGatewayError(&logical.Request{HTTPRequest: r}, nil))
 	})
 }
+
+// The forward's own failures take the codes of what went wrong: a request it
+// could not build is Warden's fault, an upstream it could not reach or that
+// did not answer in time is unavailable. Each keeps its status.
+func TestForwardError(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		text   string
+		code   string
+	}{
+		{http.StatusInternalServerError, "Internal server error", "InternalFailure"},
+		{http.StatusBadGateway, "Bad Gateway", "ServiceUnavailable"},
+		{http.StatusGatewayTimeout, "Gateway Timeout", "ServiceUnavailable"},
+	} {
+		t.Run(tc.text, func(t *testing.T) {
+			r := gatewayRequest("POST", "", "sts", map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+			rec := httptest.NewRecorder()
+			forwardError(&logical.Request{HTTPRequest: r, RequestID: "rid"})(rec, tc.status, tc.text)
+
+			assert.Equal(t, tc.status, rec.Code)
+			assert.Equal(t, "text/xml", rec.Header().Get("Content-Type"))
+			assert.Contains(t, rec.Body.String(), "<Code>"+tc.code+"</Code>")
+			assert.Contains(t, rec.Body.String(), "<Message>Warden: "+tc.text+"</Message>")
+			assert.Equal(t, "rid", rec.Header().Get("X-Amzn-RequestId"))
+		})
+	}
+}

@@ -103,6 +103,17 @@ func getTransparentSigningCredentials(t *testing.T) (accessKeyID, secretAccessKe
 // STS GetCallerIdentity call (POST with form body).
 func signSTSRequest(t *testing.T, targetURL, accessKeyID, secretAccessKey string) *http.Request {
 	t.Helper()
+	// Transparent mode: role name as AccessKeyID, JWT as SecretAccessKey and SessionToken
+	return signSTSRequestWith(t, targetURL, aws.Credentials{
+		AccessKeyID:     accessKeyID,
+		SecretAccessKey: secretAccessKey,
+		SessionToken:    secretAccessKey,
+	})
+}
+
+// signSTSRequestWith is signSTSRequest signing with creds as given.
+func signSTSRequestWith(t *testing.T, targetURL string, creds aws.Credentials) *http.Request {
+	t.Helper()
 
 	body := "Action=GetCallerIdentity&Version=2011-06-15"
 	req, err := http.NewRequest(http.MethodPost, targetURL, strings.NewReader(body))
@@ -114,13 +125,6 @@ func signSTSRequest(t *testing.T, targetURL, accessKeyID, secretAccessKey string
 	// Compute payload hash
 	payloadHash := sha256.Sum256([]byte(body))
 	payloadHashHex := hex.EncodeToString(payloadHash[:])
-
-	// Transparent mode: role name as AccessKeyID, JWT as SecretAccessKey and SessionToken
-	creds := aws.Credentials{
-		AccessKeyID:     accessKeyID,
-		SecretAccessKey: secretAccessKey,
-		SessionToken:    secretAccessKey,
-	}
 
 	signer := v4.NewSigner()
 	err = signer.SignHTTP(context.Background(), creds, req, payloadHashHex, "sts", "us-east-1", time.Now())
@@ -166,13 +170,12 @@ func TestSigV4ThroughStandbyForwarding(t *testing.T) {
 	resp.Body.Close()
 
 	// The key assertion: SigV4 verification on Warden must NOT fail.
-	// A 403 from Warden's signature verification contains "Signature" in the body.
-	// A 403 from AWS (fake credentials rejected) contains XML with an error code
-	// like "InvalidClientTokenId" — this means Warden's verification PASSED and
-	// the request was correctly re-signed and forwarded to AWS.
+	// A 403 from AWS (fake credentials rejected) carries an error code like
+	// "InvalidClientTokenId" — this means Warden's verification PASSED and the
+	// request was correctly re-signed and forwarded to AWS.
 	if resp.StatusCode == http.StatusForbidden {
 		bodyStr := string(bodyBytes)
-		if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+		if isWardenSignatureRejection(bodyStr) {
 			t.Fatalf("SigV4 verification failed through standby (status 403): "+
 				"Warden rejected the signature, likely due to Host header rewrite. Body: %s", bodyStr)
 		}
@@ -195,7 +198,7 @@ func TestSigV4ThroughStandbyForwarding(t *testing.T) {
 
 	if resp2.StatusCode == http.StatusForbidden {
 		bodyStr := string(bodyBytes2)
-		if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+		if isWardenSignatureRejection(bodyStr) {
 			t.Fatalf("leader direct: Warden SigV4 verification failed (status 403). Body: %s", bodyStr)
 		}
 		t.Logf("leader direct: status 403 from upstream AWS (SigV4 verification on Warden passed)")
@@ -262,9 +265,7 @@ func sendSigV4AndAssert(t *testing.T, req *http.Request, label string) int {
 	if resp.StatusCode == http.StatusForbidden {
 		bodyStr := string(bodyBytes)
 		// Distinguish Warden's SigV4 rejection from AWS rejecting fake credentials.
-		// Warden's rejection contains "Signature" without XML <Error>.
-		// AWS rejection contains XML with error codes like "InvalidClientTokenId".
-		if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+		if isWardenSignatureRejection(bodyStr) {
 			t.Fatalf("%s: SigV4 verification failed (status 403) — "+
 				"signature was likely broken during forwarding. Body: %s", label, bodyStr)
 		}
@@ -315,7 +316,7 @@ func TestConcurrentSigV4ThroughStandby(t *testing.T) {
 			if resp.StatusCode == http.StatusForbidden {
 				bodyStr := string(bodyBytes)
 				// Only count as failure if it's Warden's rejection, not AWS's
-				if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+				if isWardenSignatureRejection(bodyStr) {
 					mu.Lock()
 					failures = append(failures, fmt.Sprintf("goroutine %d: Warden SigV4 rejection", idx))
 					mu.Unlock()
@@ -383,7 +384,7 @@ func TestSigV4DuringLeaderStepDown(t *testing.T) {
 			// Only flag Warden's SigV4 rejection, not AWS's rejection of fake creds
 			if resp.StatusCode == http.StatusForbidden {
 				bodyStr := string(bodyBytes)
-				if strings.Contains(bodyStr, "Signature") && !strings.Contains(bodyStr, "<Error>") {
+				if isWardenSignatureRejection(bodyStr) {
 					got403 = true
 				}
 			}
@@ -566,6 +567,40 @@ func TestSigV4BadJWTRendersAWSError(t *testing.T) {
 	assertAWSQueryError(t, resp, string(respBody), "InvalidClientTokenId", "Warden: ", true)
 }
 
+// TestSigV4BadSignatureRendersAWSError verifies that a request carrying a
+// valid JWT but a signature that does not verify — signed with a secret other
+// than the JWT — is answered with STS's own XML error for a bad signature.
+func TestSigV4BadSignatureRendersAWSError(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+	setupAWSProvider(t, leader)
+	accessKeyID, jwt := getTransparentSigningCredentials(t)
+
+	req := signSTSRequestWith(t, fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(leader)), aws.Credentials{
+		AccessKeyID:     accessKeyID,
+		SecretAccessKey: "not-the-jwt",
+		SessionToken:    jwt,
+	})
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for a signature that does not verify, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	if !isWardenSignatureRejection(string(respBody)) {
+		t.Errorf("expected Warden's own signature rejection: %s", string(respBody))
+	}
+	assertAWSQueryError(t, resp, string(respBody), "SignatureDoesNotMatch", "Warden: Signature does not match", true)
+}
+
 // assertAWSQueryError checks that resp is an awsQuery error response — the
 // shape STS answers with — carrying code and a message starting with
 // messagePrefix, and, when withRequestID is set, Warden's request id.
@@ -592,4 +627,12 @@ func assertAWSQueryError(t *testing.T, resp *http.Response, body, code, messageP
 	} else if !strings.Contains(body, "<RequestId>"+rid+"</RequestId>") {
 		t.Errorf("body request id does not match the header's %q: %s", rid, body)
 	}
+}
+
+// isWardenSignatureRejection reports whether a 403 body is Warden refusing the
+// request's SigV4 signature, as opposed to AWS refusing the fake credentials
+// Warden forwarded. Both are AWS-shaped errors now; only Warden's messages
+// start with "Warden: ".
+func isWardenSignatureRejection(body string) bool {
+	return strings.Contains(body, "Warden: Signature")
 }

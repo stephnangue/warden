@@ -458,7 +458,7 @@ func RemoveAWSChunkedEncoding(r *http.Request) {
 // bypassing httputil.ReverseProxy which modifies headers and breaks SigV4
 // signatures. The response streams back verbatim.
 func ForwardDirect(log *logger.GatedLogger, w http.ResponseWriter, r *http.Request, body []byte, transport http.RoundTripper) {
-	ForwardDirectFiltered(log, w, r, body, transport, 0, nil)
+	ForwardDirectOpts(log, w, r, body, transport, ForwardOptions{})
 }
 
 // ForwardDirectFiltered is ForwardDirect with an optional response modifier.
@@ -471,10 +471,37 @@ func ForwardDirect(log *logger.GatedLogger, w http.ResponseWriter, r *http.Reque
 // response the caller couldn't transform is never leaked. Non-success
 // responses stream through untouched.
 func ForwardDirectFiltered(log *logger.GatedLogger, w http.ResponseWriter, r *http.Request, body []byte, transport http.RoundTripper, maxBody int64, modify func(contentType string, body []byte) ([]byte, error)) {
+	ForwardDirectOpts(log, w, r, body, transport, ForwardOptions{MaxBody: maxBody, Modify: modify})
+}
+
+// ForwardOptions tunes ForwardDirectOpts. The zero value is ForwardDirect.
+type ForwardOptions struct {
+	// Modify and MaxBody are ForwardDirectFiltered's modify and maxBody.
+	Modify  func(contentType string, body []byte) ([]byte, error)
+	MaxBody int64
+	// OnError, when set, answers a failure the forward raised itself — the
+	// request could not be built, the upstream could not be reached or did not
+	// answer in time, or a filtered body could not be transformed — in place of
+	// the plain-text http.Error, so a provider can answer in its clients' own
+	// wire format. status and text are what http.Error would have sent.
+	OnError func(w http.ResponseWriter, status int, text string)
+}
+
+// fail answers a failure the forward raised itself.
+func (o *ForwardOptions) fail(w http.ResponseWriter, status int, text string) {
+	if o.OnError != nil {
+		o.OnError(w, status, text)
+		return
+	}
+	http.Error(w, text, status)
+}
+
+// ForwardDirectOpts is ForwardDirect with the options ForwardOptions describes.
+func ForwardDirectOpts(log *logger.GatedLogger, w http.ResponseWriter, r *http.Request, body []byte, transport http.RoundTripper, opts ForwardOptions) {
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("failed to create direct request", logger.Err(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		opts.fail(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 	outReq.Header = r.Header.Clone()
@@ -487,6 +514,17 @@ func ForwardDirectFiltered(log *logger.GatedLogger, w http.ResponseWriter, r *ht
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {
+		// The request's own deadline — a mount's timeout — passed before the
+		// upstream answered. The client is still waiting: written nothing, it
+		// would read an empty 200.
+		if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+			log.Error("direct forward timed out",
+				logger.Err(err),
+				logger.String("request_id", middleware.GetReqID(r.Context())),
+			)
+			opts.fail(w, http.StatusGatewayTimeout, "Gateway Timeout")
+			return
+		}
 		// Client-side cancellation (the inbound r.Context was canceled
 		// before the upstream answered) is not a Warden error. Common
 		// shapes: MCP Streamable HTTP's GET notification stream that
@@ -501,7 +539,7 @@ func ForwardDirectFiltered(log *logger.GatedLogger, w http.ResponseWriter, r *ht
 			return
 		}
 		log.Error("direct forward failed", logger.Err(err))
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		opts.fail(w, http.StatusBadGateway, "Bad Gateway")
 		return
 	}
 	defer resp.Body.Close()
@@ -509,8 +547,8 @@ func ForwardDirectFiltered(log *logger.GatedLogger, w http.ResponseWriter, r *ht
 	// Filtered path: buffer a successful response, transform it, and write it
 	// with a corrected length. Fails closed rather than stream a body it
 	// could not transform.
-	if modify != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		writeFilteredResponse(log, w, resp, maxBody, modify)
+	if opts.Modify != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		writeFilteredResponse(log, w, resp, &opts)
 		return
 	}
 
@@ -538,33 +576,33 @@ func ForwardDirectFiltered(log *logger.GatedLogger, w http.ResponseWriter, r *ht
 	}
 }
 
-// writeFilteredResponse buffers resp's body (capped at maxBody), runs it
-// through modify, and writes the result with a corrected Content-Length. It
-// fails closed with 502 on a read error, an over-cap body, or a modify error.
-// An empty body is written as-is without invoking modify.
-func writeFilteredResponse(log *logger.GatedLogger, w http.ResponseWriter, resp *http.Response, maxBody int64, modify func(contentType string, body []byte) ([]byte, error)) {
+// writeFilteredResponse buffers resp's body (capped at opts.MaxBody), runs it
+// through opts.Modify, and writes the result with a corrected Content-Length.
+// It fails closed with 502 on a read error, an over-cap body, or a modify
+// error. An empty body is written as-is without invoking Modify.
+func writeFilteredResponse(log *logger.GatedLogger, w http.ResponseWriter, resp *http.Response, opts *ForwardOptions) {
 	var reader io.Reader = resp.Body
-	if maxBody > 0 {
-		reader = io.LimitReader(resp.Body, maxBody+1)
+	if opts.MaxBody > 0 {
+		reader = io.LimitReader(resp.Body, opts.MaxBody+1)
 	}
 	buf, err := io.ReadAll(reader)
 	if err != nil {
 		log.Error("filtered forward: read upstream body", logger.Err(err))
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		opts.fail(w, http.StatusBadGateway, "Bad Gateway")
 		return
 	}
-	if maxBody > 0 && int64(len(buf)) > maxBody {
+	if opts.MaxBody > 0 && int64(len(buf)) > opts.MaxBody {
 		log.Error("filtered forward: response exceeds max body size")
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		opts.fail(w, http.StatusBadGateway, "Bad Gateway")
 		return
 	}
 
 	out := buf
 	if len(buf) > 0 {
-		out, err = modify(resp.Header.Get("Content-Type"), buf)
+		out, err = opts.Modify(resp.Header.Get("Content-Type"), buf)
 		if err != nil {
 			log.Error("filtered forward: modify failed", logger.Err(err))
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			opts.fail(w, http.StatusBadGateway, "Bad Gateway")
 			return
 		}
 	}

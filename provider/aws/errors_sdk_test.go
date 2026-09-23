@@ -390,3 +390,83 @@ func assertAPIError(t *testing.T, err error, code, message string) {
 	assert.Equal(t, code, apiErr.ErrorCode())
 	assert.Equal(t, message, apiErr.ErrorMessage())
 }
+
+// TestGatewayFailures_RealSDKClients puts the failures the gateway raises
+// itself — once core has let the request through — in front of real AWS SDK
+// clients: each client signs a real request, handleGateway fails it, and the
+// client must read the code, message, status and request id, and retry
+// exactly the transient failures.
+func TestGatewayFailures_RealSDKClients(t *testing.T) {
+	var upstream atomic.Pointer[http.RoundTripper]
+	var attempts atomic.Int32
+	b := newGatewayBackend(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return (*upstream.Load()).RoundTrip(r)
+	}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		b.handleGateway(r.Context(), &logical.Request{
+			Path: strings.TrimPrefix(r.URL.Path, "/v1/aws/"), HTTPRequest: r, ResponseWriter: w,
+			RequestID: "rid-gw", Credential: gatewayCredential(),
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := sdkConfig(srv.URL + "/v1/aws/gateway")
+	badCfg := cfg.Copy()
+	// A secret key that is not the session token's JWT: the signature does
+	// not verify.
+	badCfg.Credentials = credentials.NewStaticCredentialsProvider("my-role", "eyJwrong", "eyJhbGciOiJSUzI1NiJ9.e30.sig")
+	ctx := context.Background()
+
+	stsCall := func(cfg aws.Config) error {
+		_, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, nil)
+		return err
+	}
+	for _, tc := range []struct {
+		name     string
+		call     func() error
+		upstream http.RoundTripper
+		timeout  time.Duration
+		status   int
+		code     string
+		message  string
+		retried  bool
+	}{
+		{"signature mismatch, sts", func() error { return stsCall(badCfg) }, upstreamOK, 0,
+			403, "SignatureDoesNotMatch", "Warden: Signature does not match", false},
+		{"signature mismatch, secretsmanager", func() error {
+			_, err := secretsmanager.NewFromConfig(badCfg).ListSecrets(ctx, nil)
+			return err
+		}, upstreamOK, 0, 403, "InvalidSignatureException", "Warden: Signature does not match", false},
+		{"signature mismatch, s3", func() error {
+			_, err := s3.NewFromConfig(badCfg, func(o *s3.Options) { o.UsePathStyle = true }).ListBuckets(ctx, nil)
+			return err
+		}, upstreamOK, 0, 403, "SignatureDoesNotMatch", "Warden: Signature does not match", false},
+		{"upstream unreachable", func() error { return stsCall(cfg) }, upstreamDown, 0,
+			502, "ServiceUnavailable", "Warden: Bad Gateway", true},
+		{"upstream too slow for the mount's timeout", func() error { return stsCall(cfg) }, upstreamSilent, 20 * time.Millisecond,
+			504, "ServiceUnavailable", "Warden: Gateway Timeout", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream.Store(&tc.upstream)
+			// Only the slow case runs under a mount timeout, so no other case
+			// can be overtaken by it on a loaded machine.
+			b.SetTimeout(tc.timeout)
+			attempts.Store(0)
+
+			err := tc.call()
+			require.Error(t, err)
+			assertAPIError(t, err, tc.code, tc.message)
+			var respErr *awshttp.ResponseError
+			require.ErrorAs(t, err, &respErr)
+			assert.Equal(t, tc.status, respErr.HTTPStatusCode())
+			assert.Equal(t, "rid-gw", respErr.ServiceRequestID())
+
+			wantAttempts := int32(1)
+			if tc.retried {
+				wantAttempts = 3
+			}
+			assert.Equal(t, wantAttempts, attempts.Load())
+		})
+	}
+}

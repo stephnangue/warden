@@ -52,7 +52,8 @@ func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	sigv4.ForwardDirect(b.Logger, req.ResponseWriter, r, body, transport)
+	sigv4.ForwardDirectOpts(b.Logger, req.ResponseWriter, r, body, transport,
+		sigv4.ForwardOptions{OnError: forwardError(req)})
 }
 
 // processRequest handles all request processing before forwarding.
@@ -61,7 +62,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 1: Read and buffer request body
 	bodyBytes, err := sigv4.ReadRequestBody(req.HTTPRequest, b.MaxBodySize())
 	if err != nil {
-		http.Error(req.ResponseWriter, "Failed to read request body", http.StatusBadRequest)
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Failed to read request body")
 		return nil, nil, err
 	}
 	if bodyBytes == nil {
@@ -71,7 +72,9 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 2: Extract service, region, and credentials from Authorization header
 	service, region, _, err := sigv4.ExtractFromAuthHeader(req.HTTPRequest.Header.Get("Authorization"))
 	if err != nil {
-		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+		// Not SigV4 at all, or a SigV4 header whose credential scope does not
+		// parse, so its signature cannot be checked.
+		writeAWSError(req.ResponseWriter, req, http.StatusUnauthorized, codesSignature, "Unauthorized")
 		return nil, nil, err
 	}
 
@@ -101,12 +104,12 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	valid, err := b.verifyIncomingSignature(req.HTTPRequest, bodyBytes, verifyCreds, service, region)
 	if err != nil {
 		b.Logger.Warn("Signature verification failed", logger.Err(err))
-		http.Error(req.ResponseWriter, "Signature verification failed", http.StatusForbidden)
+		writeAWSError(req.ResponseWriter, req, http.StatusForbidden, codesSignature, "Signature verification failed")
 		return nil, nil, err
 	}
 	if !valid {
 		b.Logger.Warn("Signature does not match")
-		http.Error(req.ResponseWriter, "Signature does not match", http.StatusForbidden)
+		writeAWSError(req.ResponseWriter, req, http.StatusForbidden, codesSignature, "Signature does not match")
 		return nil, nil, fmt.Errorf("signature mismatch")
 	}
 
@@ -137,7 +140,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	awsCreds, err := b.getCredentials(req)
 	if err != nil {
 		b.Logger.Warn("Fail to extract aws credentials", logger.Err(err))
-		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+		writeAWSError(req.ResponseWriter, req, http.StatusUnauthorized, codesAuth, "Unauthorized")
 		return nil, nil, err
 	}
 
@@ -162,7 +165,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 
 	proc := b.processorRegistry.FindProcessor(processorCtx)
 	if proc == nil {
-		http.Error(req.ResponseWriter, "Service not supported", http.StatusBadRequest)
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Service not supported")
 		return nil, nil, fmt.Errorf("no processor found for service: %s", service)
 	}
 
@@ -174,7 +177,10 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 8: Process the request
 	result, err := proc.Process(processorCtx)
 	if err != nil {
-		http.Error(req.ResponseWriter, "Failed to process request", http.StatusBadGateway)
+		// Every processor error is the request itself — an account id or
+		// access point that does not parse, a region with no endpoint — so it
+		// is a 400 the client must not retry.
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Failed to process request")
 		return nil, nil, err
 	}
 
@@ -190,7 +196,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 9: Apply the processor result to the request
 	target, err := url.Parse(result.TargetURL)
 	if err != nil {
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		writeAWSError(req.ResponseWriter, req, http.StatusInternalServerError, codesInternal, "Internal server error")
 		return nil, nil, err
 	}
 
@@ -235,8 +241,12 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	bodyBytes = b.normalizeRequest(req.HTTPRequest, bodyBytes)
 
 	// Step 12: Re-sign the request with valid credentials
+	clientAuth := req.HTTPRequest.Header.Get("Authorization")
 	if err := b.resignRequest(ctx, req.HTTPRequest, awsCreds, signingService, signingRegion, bodyBytes); err != nil {
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		// Re-signing drops the client's Authorization header before it signs;
+		// put it back, since the answer's format is read from it.
+		req.HTTPRequest.Header.Set("Authorization", clientAuth)
+		writeAWSError(req.ResponseWriter, req, http.StatusInternalServerError, codesInternal, "Internal server error")
 		return nil, nil, err
 	}
 
