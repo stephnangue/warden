@@ -199,10 +199,11 @@ const ConfigAssertionResource = "assertion_resource"
 // The ceiling is enforced at mint rather than compared at spec-create: the issuer's
 // value can change after a spec is stored, and because every spec write re-runs
 // validation, rejecting here would make lowering the issuer TTL break unrelated
-// edits to specs that were valid when written. The cost is that a request above the
-// ceiling is reduced silently. Spec-create checks only that the value is a duration
-// of at least MinAssertionTTL. Valid only when subject_token_source or
-// actor_token_source is warden_identity.
+// edits to specs that were valid when written. So a request above the ceiling is
+// reduced at mint rather than refused; spec create and update return a warning when
+// that will happen, so the reduction is not silent. Spec-create checks only that the
+// value is a duration of at least MinAssertionTTL. Valid only when
+// subject_token_source or actor_token_source is warden_identity.
 const ConfigAssertionTTL = "assertion_ttl"
 
 // MinAssertionTTL is the shortest assertion lifetime a spec may request.

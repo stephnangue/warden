@@ -599,7 +599,7 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		return logical.ErrorResponse(err), nil
 	}
 
-	return b.respondCreated(map[string]any{
+	data := map[string]any{
 		"name":            spec.Name,
 		"type":            spec.Type,
 		"source":          spec.Source,
@@ -608,7 +608,40 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		"max_ttl":         int64(spec.MaxTTL.Seconds()),
 		"rotation_period": int64(spec.RotationPeriod.Seconds()),
 		"message":         fmt.Sprintf("Successfully created credential spec %s", name),
-	}), nil
+	}
+	if w := b.core.assertionTTLWarnings(spec.Config); len(w) > 0 {
+		data["warnings"] = w
+	}
+	return b.respondCreated(data), nil
+}
+
+// assertionTTLWarnings reports when a spec's requested assertion_ttl exceeds the
+// issuer's current assertion_ttl, and so will be capped at mint.
+//
+// A warning, not a rejection. The issuer's value can change after the spec is stored,
+// and spec validation re-runs on every spec write, so a rejection would go stale and
+// start failing unrelated edits (see credential.ConfigAssertionTTL). The warning keeps
+// the cap from being silent at the one moment an operator is looking.
+//
+// It rides in the response DATA under "warnings", not logical.Response.Warnings: the
+// HTTP layer serializes only the data, so the latter would never reach the operator.
+// Nil when nothing is requested, nothing would be capped, or no issuer is configured.
+func (c *Core) assertionTTLWarnings(config credential.Config) []string {
+	requested := credential.RequestedAssertionTTL(config)
+	if requested == 0 {
+		return nil
+	}
+	issuer := c.OIDCIssuer()
+	if issuer == nil {
+		return nil
+	}
+	ceiling := issuer.AssertionTTL()
+	if requested <= ceiling {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s %s exceeds the issuer's assertion_ttl %s: this spec's assertions will be minted with %s, since the issuer caps every assertion at its own lifetime",
+		credential.ConfigAssertionTTL, requested, ceiling, ceiling)}
 }
 
 // handleCredentialSpecRead handles GET /sys/cred/specs/{name}
@@ -739,10 +772,14 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		return logical.ErrorResponse(err), nil
 	}
 
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"name":    updatedSpec.Name,
 		"message": fmt.Sprintf("Successfully updated credential spec %s", name),
-	}), nil
+	}
+	if w := b.core.assertionTTLWarnings(updatedSpec.Config); len(w) > 0 {
+		data["warnings"] = w
+	}
+	return b.respondSuccess(data), nil
 }
 
 // handleCredentialSpecAuthorize handles POST /sys/cred/specs/{name}/authorize.

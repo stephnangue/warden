@@ -479,3 +479,33 @@ func mergeMap(dst, src map[string]any) {
 		dst[k] = v
 	}
 }
+
+// PrintWarnings writes each non-fatal server warning to stderr as "warning: ...".
+//
+// Stderr, whatever the output format: warnings are for the operator, and keeping
+// them off stdout leaves -o json output clean for an agent to parse. The same data
+// is still present in the JSON body under "warnings" for a caller that wants it.
+func PrintWarnings(warnings []string) {
+	for _, w := range warnings {
+		if w != "" {
+			fmt.Fprintln(errWriter, "warning:", w)
+		}
+	}
+}
+
+// WarningsFromData extracts a server response's "warnings" (a JSON array) as
+// strings, for commands that read the raw response data rather than a typed API
+// output. Nil when absent.
+func WarningsFromData(data map[string]any) []string {
+	items, ok := data["warnings"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, it := range items {
+		if s, ok := it.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
