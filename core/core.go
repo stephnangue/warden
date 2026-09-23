@@ -28,6 +28,7 @@ import (
 	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/internal/locking"
 	"github.com/stephnangue/warden/internal/namespace"
@@ -212,6 +213,9 @@ type Core struct {
 	// Global registries shared across all namespaces
 	credentialTypeRegistry   *credential.TypeRegistry
 	credentialDriverRegistry *credential.DriverRegistry
+	// assertionProfileRegistry holds the claim shapes a warden_identity assertion
+	// can be minted in. Written once in NewCore, read-only thereafter.
+	assertionProfileRegistry *credential.AssertionProfileRegistry
 
 	// expirationManager provides active TTL enforcement for tokens and credentials
 	// Uses timer-based expiration instead of relying on lazy cache eviction
@@ -665,16 +669,20 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	// Create SkillStore (storage view is wired up at unseal time).
 	c.skillStore = NewSkillStore(c)
 
-	// Initialize global credential type and driver registries
+	// Initialize global credential type, driver and assertion-profile registries
 	c.credentialTypeRegistry = credential.NewTypeRegistry()
 	c.credentialDriverRegistry = credential.NewDriverRegistry(c.logger.WithSystem("credential.driver"))
+	c.assertionProfileRegistry = credential.NewAssertionProfileRegistry()
 
-	// Register builtin credential types and drivers
+	// Register builtin credential types, drivers and assertion profiles
 	if err := types.RegisterBuiltinTypes(c.credentialTypeRegistry); err != nil {
 		return nil, fmt.Errorf("failed to register builtin credential types: %w", err)
 	}
 	if err := drivers.RegisterBuiltinDrivers(c.credentialDriverRegistry); err != nil {
 		return nil, fmt.Errorf("failed to register builtin credential drivers: %w", err)
+	}
+	if err := profiles.RegisterBuiltinProfiles(c.assertionProfileRegistry); err != nil {
+		return nil, fmt.Errorf("failed to register builtin assertion profiles: %w", err)
 	}
 
 	if conf.HAPhysical != nil && conf.HAPhysical.HAEnabled() {
@@ -734,6 +742,11 @@ func (c *Core) CredentialTypeRegistry() *credential.TypeRegistry {
 
 func (c *Core) CredentialDriverRegistry() *credential.DriverRegistry {
 	return c.credentialDriverRegistry
+}
+
+// AssertionProfileRegistry returns the registry of warden_identity claim shapes.
+func (c *Core) AssertionProfileRegistry() *credential.AssertionProfileRegistry {
+	return c.assertionProfileRegistry
 }
 
 // IsInitialized returns whether warden init has been called

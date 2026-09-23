@@ -2774,6 +2774,51 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceDerived(t *testing.T) {
 // explicit assertion_resource override wins over derivation (emitted verbatim,
 // colon and all) and that assertion_resource=none suppresses the claim even when
 // the spec would otherwise derive one.
+// TestResolveExchangeInputs_WardenIdentity_AssertionTTL drives the spec-level
+// assertion_ttl through the real setup → mint path: the spec's value is a REQUEST
+// the issuer caps at its own AssertionTTL(), so a spec can shorten its assertions
+// but never lengthen them past the retired-key pruning window. Unset keeps today's
+// behavior exactly — the issuer's lifetime.
+func TestResolveExchangeInputs_WardenIdentity_AssertionTTL(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.Equal(t, defaultAssertionTTL, c.oidcIssuer.AssertionTTL(), "precondition: default 5m ceiling")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-ttl", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+
+	lifetime := func(name, ttl string) time.Duration {
+		t.Helper()
+		cfg := map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}
+		if ttl != "" {
+			cfg[credential.ConfigAssertionTTL] = ttl
+		}
+		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+			Name: name, Type: "vault_token", Source: "aws-ttl", Config: credential.NewConfig(cfg),
+		}))
+		te := &logical.TokenEntry{CredentialSpec: name, PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+		require.NoError(t, err)
+		tok, err := inputs.ResolveSubjectToken(ctx)
+		require.NoError(t, err)
+		claims := decodeAssertionClaims(t, tok)
+		return time.Duration(claims["exp"].(float64)-claims["iat"].(float64)) * time.Second
+	}
+
+	assert.Equal(t, defaultAssertionTTL, lifetime("ttl-unset", ""),
+		"unset must keep the issuer's lifetime, exactly as before")
+	assert.Equal(t, 90*time.Second, lifetime("ttl-short", "90s"),
+		"a spec may request a shorter lifetime")
+	assert.Equal(t, defaultAssertionTTL, lifetime("ttl-long", "2h"),
+		"a spec asking to outlive the issuer's lifetime is capped, not honoured")
+}
+
 func TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")

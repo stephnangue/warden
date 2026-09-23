@@ -12,6 +12,8 @@ import (
 
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1085,39 +1087,89 @@ func TestOIDCIssuer_Mint_WardenUserAndSubClaims(t *testing.T) {
 	assert.Len(t, wu, 2)
 }
 
-// TestMintIdentityAssertion_ClaimRoster is a tripwire, not a behaviour test.
+// profileRoster records, per assertion profile, exactly which claims that profile
+// emits and which cache dimension covers each one. It is the doc-comment table that
+// used to live above this test, turned into data so the tripwire can be driven off
+// the registry instead of off one hardcoded mint.
+type profileRoster struct {
+	// claims is the exact, sorted claim set a fully-populated mint must produce.
+	claims []string
+	// coverage maps each claim to the cache dimension that covers it. Every entry
+	// must be non-empty: "which dimension covers this?" is the question the
+	// tripwire exists to force an answer to.
+	coverage map[string]string
+}
+
+// assertionRosters is the tripwire's data, not a behaviour fixture.
 //
-// Every claim below is something a downstream may bind its authorization to, so
-// every one of them has to be inside a cache key — otherwise a cached answer can be
-// served to a caller who would have been told something different. warden_role was
-// exactly that defect: minted, documented as bindable, and in no key, so one
-// principal's two roles shared a chained-secret entry.
+// Every claim here is something a downstream may bind its authorization to, so every
+// one of them has to be inside a cache key — otherwise a cached answer can be served
+// to a caller who would have been told something different. warden_role was exactly
+// that defect: minted, documented as bindable, and in no key, so one principal's two
+// roles shared a chained-secret entry.
 //
-// Adding a claim without a matching cache dimension re-opens that class, and nothing
-// else would notice. This fails when the roster changes, so whoever adds a claim has
-// to come here and record which dimension covers it.
+// Adding a claim, or a whole profile, without a matching cache dimension re-opens
+// that class and nothing else would notice. The test below fails if a registered
+// profile has no roster here, if a roster names an unregistered profile, if a
+// profile's minted claims differ from its roster, or if any claim's coverage is
+// blank — so whoever adds either has to come here and record the dimension.
 //
-// It can only see what this mint emits, so a claim gated behind a new input would
-// ship past it silently: enable any new conditional claim in the mint below, or the
+// It can only see what the mint below emits, so a claim gated behind a new input
+// would ship past it silently: populate every optional field in the mint, or the
 // tripwire is blind to exactly the case it exists for.
-//
-//	iss/iat/nbf/exp/jti  volatile or constant by design — the reason cacheIdentity
-//	                     exists at all, rather than keying on the assertion bytes
-//	sub                  cacheIdentity's first fragment (wardenSubject)
-//	aud                  cacheIdentity's second fragment
-//	warden_sub           inside wardenSubject
-//	warden_namespace     inside wardenSubject, which carries the namespace ID while
-//	                     this claim carries the path — sound only because a namespace
-//	                     cannot be renamed, so path and ID move together (a rename API
-//	                     would make this claim uncovered)
-//	warden_auth_mount    inside wardenSubject
-//	warden_role          cacheIdentity's "role=" fragment
-//	warden_resource      cacheIdentity's "res=" fragment
-//	warden_metadata      cacheIdentity's metadata fingerprint
-//	warden_user          the ":u:" token-id dimension on the manager's cache keys,
-//	                     deliberately not in cacheIdentity (see buildAssertionSetup)
+var assertionRosters = map[string]profileRoster{
+	credential.DefaultAssertionProfileName: {
+		claims: []string{
+			"aud", "exp", "iat", "iss", "jti", "nbf", "sub",
+			"warden_auth_mount", "warden_metadata", "warden_namespace",
+			"warden_resource", "warden_role", "warden_sub", "warden_user",
+		},
+		coverage: map[string]string{
+			// Volatile or constant by design — the reason cacheIdentity exists at
+			// all, rather than keying on the assertion bytes.
+			"iss": "volatile/constant by design",
+			"iat": "volatile/constant by design",
+			"nbf": "volatile/constant by design",
+			"exp": "volatile/constant by design",
+			"jti": "volatile/constant by design",
+
+			"sub":               "cacheIdentity's first fragment (wardenSubject)",
+			"aud":               "cacheIdentity's second fragment",
+			"warden_sub":        "inside wardenSubject",
+			"warden_auth_mount": "inside wardenSubject",
+			// Sound only because a namespace cannot be renamed, so path and ID move
+			// together. A rename API would make this claim UNCOVERED: wardenSubject
+			// carries the namespace ID while this claim carries the path.
+			"warden_namespace": "inside wardenSubject (ID, not path — safe only while namespaces cannot be renamed)",
+			"warden_role":      "cacheIdentity's \"role=\" fragment",
+			"warden_resource":  "cacheIdentity's \"res=\" fragment",
+			"warden_metadata":  "cacheIdentity's metadata fingerprint",
+			"warden_user": "the \":u:\" token-id dimension on the manager's cache keys, " +
+				"deliberately not in cacheIdentity (see buildAssertionSetup)",
+		},
+	},
+}
+
 func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {
-	iss := newReadyIssuer(t, "https://warden-oidc.example")
+	reg := credential.NewAssertionProfileRegistry()
+	require.NoError(t, profiles.RegisterBuiltinProfiles(reg))
+
+	registered := reg.ListProfiles()
+
+	// Every registered profile must have a roster. This is the tripwire's teeth: a
+	// new profile cannot land without recording its claims and their cache coverage.
+	for _, name := range registered {
+		_, ok := assertionRosters[name]
+		assert.True(t, ok,
+			"profile %q is registered but has no roster entry: add one to assertionRosters recording each claim's cache dimension", name)
+	}
+	// And every roster must name a registered profile, so a removed profile does not
+	// leave a stale roster that silently asserts nothing.
+	for name := range assertionRosters {
+		assert.True(t, reg.HasProfile(name),
+			"roster entry %q names no registered profile (available: %v)", name, registered)
+	}
+
 	te := &logical.TokenEntry{
 		PrincipalID:   "spiffe://acme.internal/agent/refund-bot",
 		RoleName:      "payments-agent",
@@ -1126,31 +1178,124 @@ func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {
 		MountAccessor: "auth_jwt_abc",
 	}
 
-	// Every optional claim populated, so the roster is the full surface rather than
-	// whatever a minimal mint happens to emit.
-	token, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{
-		Audience:   "https://sts.example/aud",
-		TTL:        5 * time.Minute,
-		Alg:        oidcAlgRS256,
-		Metadata:   map[string]string{"team": "payments"},
-		Resource:   "https://api.example/db",
-		UserClaims: map[string]string{"sub": "alice"},
-	})
+	for _, name := range registered {
+		roster, ok := assertionRosters[name]
+		if !ok {
+			continue // already reported above
+		}
+		t.Run(name, func(t *testing.T) {
+			profile, err := reg.GetByName(name)
+			require.NoError(t, err)
+
+			iss := newReadyIssuer(t, "https://warden-oidc.example")
+
+			// Every optional claim populated, so the roster is the full surface
+			// rather than whatever a minimal mint happens to emit.
+			token, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{
+				Audience:   "https://sts.example/aud",
+				TTL:        5 * time.Minute,
+				Alg:        oidcAlgRS256,
+				Metadata:   map[string]string{"team": "payments"},
+				Resource:   "https://api.example/db",
+				UserClaims: map[string]string{"sub": "alice"},
+				Profile:    profile,
+			})
+			require.NoError(t, err)
+
+			claims := decodeAssertionClaims(t, token)
+
+			got := make([]string, 0, len(claims))
+			for k := range claims {
+				got = append(got, k)
+			}
+			sort.Strings(got)
+
+			want := append([]string(nil), roster.claims...)
+			sort.Strings(want)
+
+			assert.Equal(t, want, got,
+				"profile %q's claims changed: put the new claim in a cache dimension, then update its roster", name)
+
+			// Every rostered claim needs a non-blank dimension recorded.
+			for _, claim := range roster.claims {
+				dimension, ok := roster.coverage[claim]
+				assert.True(t, ok, "profile %q claim %q has no cache-coverage entry", name, claim)
+				assert.NotEmpty(t, dimension,
+					"profile %q claim %q records a blank cache dimension", name, claim)
+			}
+			// And no STALE rows: a coverage entry for a claim the profile no longer
+			// emits would otherwise linger, quietly asserting nothing while making
+			// the roster look complete.
+			for claim := range roster.coverage {
+				assert.Contains(t, roster.claims, claim,
+					"profile %q records cache coverage for %q, which it does not emit", name, claim)
+			}
+		})
+	}
+}
+
+// mintedLifetime mints with the requested TTL and returns exp - iat, the lifetime
+// the issuer actually granted.
+func mintedLifetime(t *testing.T, iss *OIDCIssuer, requested time.Duration) time.Duration {
+	t.Helper()
+	c := profileTestClaims(nil)
+	c.TTL = requested
+	tok, err := iss.MintIdentityAssertion(context.Background(), profileTestTokenEntry(), c)
 	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	// JSON numbers decode as float64.
+	exp, iat := claims["exp"].(float64), claims["iat"].(float64)
+	return time.Duration(exp-iat) * time.Second
+}
 
-	claims := decodeAssertionClaims(t, token)
+// TestMinAssertionTTL_CoversClockSkewLeeway is the drift guard for the spec-level
+// assertion_ttl floor. credential.MinAssertionTTL cannot reference the issuer's
+// leeway (credential cannot import core), so this pins the premise it is derived
+// from: the issuer backdates nbf by clockSkewLeeway because a verifier's clock may
+// lag by that much, so by the same premise it may lead by that much — and an
+// assertion shorter than the leeway can be judged expired on arrival. Lower the
+// floor below the leeway, or raise the leeway above it, and this fails.
+func TestMinAssertionTTL_CoversClockSkewLeeway(t *testing.T) {
+	assert.GreaterOrEqual(t, credential.MinAssertionTTL, defaultClockSkewLeeway,
+		"MinAssertionTTL (%s) must be at least the issuer's clock-skew leeway (%s)",
+		credential.MinAssertionTTL, defaultClockSkewLeeway)
+}
 
-	got := make([]string, 0, len(claims))
-	for k := range claims {
-		got = append(got, k)
-	}
-	sort.Strings(got)
+// TestMintIdentityAssertion_CapsTTLAtIssuerTTL pins that the issuer, not its
+// callers, enforces the premise retired-key pruning rests on: no assertion outlives
+// the issuer's own AssertionTTL(). An assertion allowed to would outlive its signing
+// key once the key is pruned, and fail verification upstream — intermittently,
+// gated on rotation timing.
+func TestMintIdentityAssertion_CapsTTLAtIssuerTTL(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+	require.Equal(t, defaultAssertionTTL, iss.AssertionTTL(), "precondition: default 5m ceiling")
 
-	want := []string{
-		"aud", "exp", "iat", "iss", "jti", "nbf", "sub",
-		"warden_auth_mount", "warden_metadata", "warden_namespace",
-		"warden_resource", "warden_role", "warden_sub", "warden_user",
-	}
-	assert.Equal(t, want, got,
-		"the assertion's claims changed: add the new claim to a cache dimension (see the table above), then update this roster")
+	// Longer than the ceiling → capped at the ceiling.
+	assert.Equal(t, defaultAssertionTTL, mintedLifetime(t, iss, 2*time.Hour),
+		"a request above the issuer's AssertionTTL must be capped, not honoured")
+
+	// Shorter than the ceiling → honoured as-is: a spec may narrow.
+	assert.Equal(t, 90*time.Second, mintedLifetime(t, iss, 90*time.Second))
+
+	// Exactly the ceiling → unchanged (today's only production path).
+	assert.Equal(t, defaultAssertionTTL, mintedLifetime(t, iss, defaultAssertionTTL))
+}
+
+// TestMintIdentityAssertion_CapFollowsRuntimeTTLChange is why the cap CAPS rather
+// than rejects: AssertionTTL() can change at runtime, so a caller that read the old
+// value just before an operator lowered it must still get a (shorter) assertion,
+// not an error. The ceiling is read under the same lock the mint already takes.
+func TestMintIdentityAssertion_CapFollowsRuntimeTTLChange(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+
+	stale := iss.AssertionTTL() // a caller reads 5m...
+	iss.SetAssertionTTL(time.Minute)
+
+	// ...and mints after the operator lowered it to 1m: capped, not failed.
+	assert.Equal(t, time.Minute, mintedLifetime(t, iss, stale))
+
+	// Raising the ceiling lets a longer request through, up to the new ceiling.
+	iss.SetAssertionTTL(time.Hour)
+	assert.Equal(t, 30*time.Minute, mintedLifetime(t, iss, 30*time.Minute))
+	assert.Equal(t, time.Hour, mintedLifetime(t, iss, 3*time.Hour))
 }

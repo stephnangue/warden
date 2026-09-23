@@ -1346,6 +1346,26 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		}
 	}
 
+	// The assertion profile — that the named claim shape exists, that a
+	// source-pinned profile is paired with a source type it supports, and that the
+	// profile accepts the spec's other assertion_* keys. Source-aware and
+	// registry-aware, so it lives here and not in the structural validator.
+	//
+	// This is MANDATORY, not belt-and-braces: nothing in the tree rejects an
+	// unknown spec-config VALUE on its own (ValidateSchema walks only declared
+	// validators), so without this call assertion_profile=aws2 would be stored
+	// happily and fail only at mint, on every request the spec ever served.
+	//
+	// It does not close the misspelled-KEY gap — assertion_profle=aws is still
+	// accepted silently and the spec mints the default shape. That gap is
+	// pre-existing and applies equally to every other assertion_* key; closing it
+	// means unknown-key rejection across all spec config.
+	if mintsAssertion {
+		if err := credential.ValidateAssertionProfileConfig(s.core.assertionProfileRegistry, spec.Config, source.Type); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
+	}
+
 	// A grafana spec mints tokens on a service account the operator provisioned, so
 	// it must name one — its own, or the source's default. This is the layer that
 	// can see both: the credential type is handed the source's TYPE but never its

@@ -11,6 +11,7 @@ import (
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -51,10 +52,19 @@ func setupTestCredentialConfigStore(t *testing.T) (*CredentialConfigStore, conte
 	// Create minimal Core for testing. rawConfig must be non-nil even with nothing
 	// stored in it: any validation path that checks rotation-period bounds loads it,
 	// and a nil pointer there panics rather than falling back to the defaults.
+	//
+	// The assertion-profile registry IS populated, unlike the type/driver registries
+	// this minimal Core leaves nil: an unknown assertion_profile must be rejected at
+	// spec-create, and a nil registry deliberately skips that check. Tests that want
+	// the nil-registry path exercise it explicitly against a bare &Core{}.
 	core := &Core{
-		barrier:   barrier,
-		logger:    log,
-		rawConfig: new(atomic.Value),
+		barrier:                  barrier,
+		logger:                   log,
+		rawConfig:                new(atomic.Value),
+		assertionProfileRegistry: credential.NewAssertionProfileRegistry(),
+	}
+	if err := profiles.RegisterBuiltinProfiles(core.assertionProfileRegistry); err != nil {
+		t.Fatalf("failed to register builtin assertion profiles: %v", err)
 	}
 
 	// Create credential config store

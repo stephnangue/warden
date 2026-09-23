@@ -226,6 +226,7 @@ func TestIsReservedSpecConfigKey(t *testing.T) {
 		ConfigActorTokenSource, ConfigActorTokenType,
 		ConfigAssertionAudience, ConfigAssertionMetadataClaims,
 		ConfigAssertionUserClaims, ConfigAssertionAlgorithm, ConfigAssertionResource,
+		ConfigAssertionProfile, ConfigAssertionTTL,
 		"mint_method", "kv2_mount", "secret_path", "secret_id", "role_arn",
 		"version_stage", "version_id", "secret_version", "credential_type", "json_key_map",
 		RawAdjunctFieldsKey, RawRotatedRefreshTokenKey, "__anything",
