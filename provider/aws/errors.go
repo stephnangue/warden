@@ -171,6 +171,13 @@ var (
 		query: "ServiceUnavailable", ec2: "Unavailable",
 		s3: "ServiceUnavailable", json: "ServiceUnavailableException",
 	}
+	// codesSignature is a request whose signature did not verify. The AWS SDK
+	// for Go treats each as a possible clock skew, retrying it only when the
+	// response's Date header shows its clock is off.
+	codesSignature = errorCodes{
+		query: "SignatureDoesNotMatch", ec2: "AuthFailure",
+		s3: "SignatureDoesNotMatch", json: "InvalidSignatureException",
+	}
 )
 
 // awsError is a failure put in AWS's terms: the status and code an AWS SDK acts
@@ -271,6 +278,39 @@ func wardenMessage(err error) string {
 		return "Warden: " + strings.Join(msgs, "; ")
 	}
 	return "Warden: " + err.Error()
+}
+
+// writeAWSError answers a gateway request the provider failed itself, once
+// core has let it through: status and codes are the failure in AWS's terms,
+// text is Warden's message for it. A SigV4 request gets the error as the
+// service it targets would send it; anything else keeps the plain-text
+// answer, since its client is not an AWS SDK.
+func writeAWSError(w http.ResponseWriter, req *logical.Request, status int, codes errorCodes, text string) {
+	if !sigv4.IsSigV4Request(req.HTTPRequest) {
+		http.Error(w, text, status)
+		return
+	}
+	resp := renderAWSError(inferProtocol(req.HTTPRequest),
+		awsError{status: status, codes: codes, message: "Warden: " + text}, req.RequestID)
+	h := w.Header()
+	for k, v := range resp.Headers {
+		h[k] = v
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(resp.Body)
+}
+
+// forwardError answers, through writeAWSError, a failure sigv4's forward
+// raised itself: it could not build the request (500), or the upstream could
+// not be reached (502) or did not answer in time (504).
+func forwardError(req *logical.Request) func(http.ResponseWriter, int, string) {
+	return func(w http.ResponseWriter, status int, text string) {
+		codes := codesInternal
+		if status == http.StatusBadGateway || status == http.StatusGatewayTimeout {
+			codes = codesUnavailable
+		}
+		writeAWSError(w, req, status, codes, text)
+	}
 }
 
 // renderAWSError writes e in the wire format of protocol t, as a response the

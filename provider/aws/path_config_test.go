@@ -810,6 +810,9 @@ func TestForwardDirect(t *testing.T) {
 			Logger: createTestLogger(),
 		},
 	}
+	// sharedTransport is nil until some test builds it; do so here, so the
+	// test does not depend on running after one that does.
+	initTransport()
 	b.StreamingBackend.InitProxy(sharedTransport)
 
 	r := httptest.NewRequest(http.MethodGet, mockUpstream.URL+"/test", nil)
