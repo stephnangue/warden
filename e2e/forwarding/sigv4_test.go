@@ -527,5 +527,69 @@ func TestSigV4PolicyDenialThroughStandby(t *testing.T) {
 		t.Fatalf("got 403 from SigV4 verification instead of policy denial: %s", respStr)
 	}
 
+	// The denial is answered as STS itself would, so an AWS SDK can parse it.
+	// The request id is not checked here: the active node assigns none to a
+	// request forwarded from a standby, so it is checked on the direct path
+	// instead (TestSigV4BadJWTRendersAWSError).
+	assertAWSQueryError(t, resp, respStr, "AccessDenied", "Warden: permission denied", false)
+
 	t.Logf("policy denial through standby: status %d, body=%s (correctly denied by policy, not SigV4)", resp.StatusCode, respStr)
+}
+
+// TestSigV4BadJWTRendersAWSError verifies that a gateway request whose JWT
+// fails authentication is answered with an error the client's AWS SDK can
+// parse — STS's own XML error, with the code STS uses for an unrecognized
+// credential — instead of Warden's JSON error.
+func TestSigV4BadJWTRendersAWSError(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+	setupAWSProvider(t, leader)
+
+	// Well-formed enough to be taken for a JWT, but not signed by any issuer the
+	// auth method trusts.
+	badJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlMmUifQ.bm90LWEtc2lnbmF0dXJl"
+	req := signSTSRequest(t, fmt.Sprintf("%s/v1/aws/gateway", h.NodeURL(leader)), "e2e-aws-sigv4", badJWT)
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for an unrecognized credential, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	assertAWSQueryError(t, resp, string(respBody), "InvalidClientTokenId", "Warden: ", true)
+}
+
+// assertAWSQueryError checks that resp is an awsQuery error response — the
+// shape STS answers with — carrying code and a message starting with
+// messagePrefix, and, when withRequestID is set, Warden's request id.
+func assertAWSQueryError(t *testing.T, resp *http.Response, body, code, messagePrefix string, withRequestID bool) {
+	t.Helper()
+	if ct := resp.Header.Get("Content-Type"); ct != "text/xml" {
+		t.Errorf("Content-Type: got %q, want text/xml; body: %s", ct, body)
+	}
+	if !strings.Contains(body, "<ErrorResponse><Error>") {
+		t.Errorf("body is not an awsQuery error response: %s", body)
+	}
+	if !strings.Contains(body, "<Code>"+code+"</Code>") {
+		t.Errorf("body does not carry code %s: %s", code, body)
+	}
+	if !strings.Contains(body, "<Message>"+messagePrefix) {
+		t.Errorf("message does not start with %q: %s", messagePrefix, body)
+	}
+	if !withRequestID {
+		return
+	}
+	rid := resp.Header.Get("X-Amzn-RequestId")
+	if rid == "" {
+		t.Errorf("no X-Amzn-RequestId header")
+	} else if !strings.Contains(body, "<RequestId>"+rid+"</RequestId>") {
+		t.Errorf("body request id does not match the header's %q: %s", rid, body)
+	}
 }
