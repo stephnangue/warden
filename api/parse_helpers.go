@@ -68,3 +68,20 @@ func parseConfigMap(v any) map[string]string {
 	}
 	return result
 }
+
+// parseWarnings converts a JSON "warnings" array to []string, skipping any entry
+// that is not a non-empty string. Returns nil when absent or not an array, so a
+// response without warnings decodes to a nil slice.
+func parseWarnings(v any) []string {
+	items, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, it := range items {
+		if s, ok := it.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}

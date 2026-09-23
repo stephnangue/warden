@@ -25,6 +25,12 @@ const (
 	tokenExchangeGrantIDJAG     = "id_jag"
 )
 
+// tokenExchangeGrants is every accepted `grant` value. It is the single source of
+// truth for both the source-config OneOf check and the assertion-profile
+// reserved-name drift test, so a new grant cannot become a registrable profile name
+// without failing that test. Unexported so it cannot be widened at runtime.
+var tokenExchangeGrants = []string{tokenExchangeGrantRFC8693, tokenExchangeGrantJWTBearer, tokenExchangeGrantIDJAG}
+
 // tokenTypeIDJAG is the requested_token_type for an ID-JAG assertion (leg 1 of
 // the cross-app-access flow).
 const tokenTypeIDJAG = "urn:ietf:params:oauth:token-type:id-jag"
@@ -142,7 +148,7 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 			Example("https://idp.example.com/oauth2/v1/token"),
 
 		credential.StringField("grant").
-			OneOf(tokenExchangeGrantRFC8693, tokenExchangeGrantJWTBearer, tokenExchangeGrantIDJAG).
+			OneOf(tokenExchangeGrants...).
 			Describe("Exchange grant: rfc8693 (token-exchange), jwt_bearer (assertion; Entra OBO), or id_jag (cross-app access)").
 			Example("rfc8693"),
 

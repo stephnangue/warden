@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/internal/remotesign"
@@ -278,7 +279,19 @@ func (b *SystemBackend) handleOIDCIssuerConfigWrite(ctx context.Context, _ *logi
 			cfg.IssuerURL = strings.TrimSpace(v.(string))
 		}
 		if v, ok := d.GetOk("assertion_ttl"); ok {
-			cfg.TTL = (time.Duration(v.(int)) * time.Second).String()
+			ttl := time.Duration(v.(int)) * time.Second
+			// The same floor as the spec-level assertion_ttl: this value caps every
+			// spec's assertion, so a too-short one here makes every spec's assertion
+			// arrive expired. Checked only against the value supplied in THIS write
+			// — not the merged config — so an issuer already stored with a shorter
+			// TTL does not start rejecting unrelated issuer-config edits. Zero is
+			// left alone: the reader treats it as "use the default".
+			if ttl > 0 && ttl < credential.MinAssertionTTL {
+				return logical.ErrorResponse(logical.ErrBadRequestf(
+					"assertion_ttl (%s) must be at least %s, the verifier clock-skew the issuer tolerates (a shorter assertion can be expired on arrival)",
+					ttl, credential.MinAssertionTTL)), true
+			}
+			cfg.TTL = ttl.String()
 		}
 		if v, ok := d.GetOk("key_rotation_period"); ok {
 			cfg.KeyRotationPeriod = (time.Duration(v.(int)) * time.Second).String()

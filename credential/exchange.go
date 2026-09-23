@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // RFC 8693 §3 token-type identifiers. These label the format of a subject or
@@ -64,6 +65,16 @@ const (
 	// carried in the user_identity subject — so actor=warden_identity requires
 	// subject_token_source=user_identity).
 	SourceWardenIdentity = "warden_identity"
+)
+
+// subjectTokenSources and actorTokenSources are the accepted values of the two
+// *_token_source keys. They are the single source of truth for both the
+// ValidateExchangeSpecConfig OneOf check and the assertion-profile reserved-name
+// drift test, so a value added here cannot become a registrable profile name
+// without failing that test. Unexported so they cannot be widened at runtime.
+var (
+	subjectTokenSources = []string{SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity}
+	actorTokenSources   = []string{SourceAgentIdentity, SourceWardenIdentity, SourceNone}
 )
 
 // ConfigAssertionAudience is the spec-config key naming the `aud` of a
@@ -173,6 +184,51 @@ func AssertionAlgorithm(config Config) string {
 // other value is emitted verbatim. Valid only when
 // subject_token_source=warden_identity.
 const ConfigAssertionResource = "assertion_resource"
+
+// ConfigAssertionTTL is the spec-config key requesting the lifetime of this spec's
+// warden_identity assertion, as a Go duration string ("90s", "2m"). Absent/empty
+// means the issuer's own assertion_ttl.
+//
+// It is a REQUEST, never an override: the issuer mints with
+// min(requested, issuer assertion_ttl), so a spec can shorten its assertions but
+// never lengthen them. The ceiling matters because the issuer prunes a retired
+// signing key once it has been retired for its assertion_ttl plus a grace, on the
+// premise that no assertion it signed can still be live; a spec allowed past the
+// ceiling would mint assertions that outlive their key.
+//
+// The ceiling is enforced at mint rather than compared at spec-create: the issuer's
+// value can change after a spec is stored, and because every spec write re-runs
+// validation, rejecting here would make lowering the issuer TTL break unrelated
+// edits to specs that were valid when written. So a request above the ceiling is
+// reduced at mint rather than refused; spec create and update return a warning when
+// that will happen, so the reduction is not silent. Spec-create checks only that the
+// value is a duration of at least MinAssertionTTL. Valid only when
+// subject_token_source or actor_token_source is warden_identity.
+const ConfigAssertionTTL = "assertion_ttl"
+
+// MinAssertionTTL is the shortest assertion lifetime a spec may request.
+//
+// Not a guessed number: it equals the issuer's clock-skew leeway. The issuer
+// backdates nbf by that leeway on the premise that a verifier's clock may LAG by up to
+// that much; by the same premise it may LEAD by that much, so an assertion living less
+// than the leeway can be judged expired on arrival. Below that the failure is
+// deterministic: exp is truncated to whole seconds, so a sub-second request mints
+// exp == iat — expired at birth. A core test pins this constant against the issuer's
+// leeway so the two cannot drift.
+const MinAssertionTTL = time.Minute
+
+// RequestedAssertionTTL returns the spec's requested assertion lifetime, or 0 when
+// unset (meaning: use the issuer's). The value is validated at spec-create; a
+// persisted value that no longer parses, or is not positive, also yields 0, which
+// falls back to the issuer's lifetime — the safe direction, since that is the
+// ceiling anyway. (Passing a non-positive value on instead would trip the issuer's
+// ttl guard and fail every mint for the spec.)
+func RequestedAssertionTTL(config Config) time.Duration {
+	if d := GetDuration(config, ConfigAssertionTTL, 0); d > 0 {
+		return d
+	}
+	return 0
+}
 
 // AssertionResourceNone is the ConfigAssertionResource value that suppresses the
 // warden_resource claim entirely (opt-out), for deployments that do not want a
@@ -391,8 +447,8 @@ func SpecRequestsExchange(config Config) bool {
 // closed at mint time instead.
 func ValidateExchangeSpecConfig(config Config) error {
 	if err := ValidateSchema(config,
-		StringField(ConfigSubjectTokenSource).OneOf(SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity),
-		StringField(ConfigActorTokenSource).OneOf(SourceAgentIdentity, SourceWardenIdentity, SourceNone),
+		StringField(ConfigSubjectTokenSource).OneOf(subjectTokenSources...),
+		StringField(ConfigActorTokenSource).OneOf(actorTokenSources...),
 		StringField(ConfigAssertionAlgorithm).OneOf(AssertionAlgRS256, AssertionAlgES256),
 	); err != nil {
 		return err
@@ -445,6 +501,33 @@ func ValidateExchangeSpecConfig(config Config) error {
 	if config.Get(ConfigAssertionResource) != "" && !mintsAssertion {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 			ConfigAssertionResource, SourceWardenIdentity)
+	}
+	// Selecting the assertion's claim shape only makes sense when Warden mints it.
+	// That the NAMED profile exists, and that a source-pinned profile matches the
+	// source, is checked one layer up in the core config store — it needs the
+	// registry and the source type, which this source-agnostic validator has
+	// neither of.
+	if config.Get(ConfigAssertionProfile) != "" && !mintsAssertion {
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
+			ConfigAssertionProfile, SourceWardenIdentity)
+	}
+	// Requesting an assertion lifetime only makes sense when Warden mints one. The
+	// value must be a positive duration; whether it exceeds the issuer's own
+	// assertion_ttl is deliberately NOT checked here — the issuer caps it at mint,
+	// and its value can change after this spec is stored (see ConfigAssertionTTL).
+	if raw := config.Get(ConfigAssertionTTL); raw != "" {
+		if !mintsAssertion {
+			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
+				ConfigAssertionTTL, SourceWardenIdentity)
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("field '%s': must be a duration (e.g. '90s', '2m')", ConfigAssertionTTL)
+		}
+		if d < MinAssertionTTL {
+			return fmt.Errorf("field '%s': must be at least %s, the verifier clock-skew the issuer tolerates (a shorter assertion can be expired on arrival)",
+				ConfigAssertionTTL, MinAssertionTTL)
+		}
 	}
 	// An actor is only meaningful in the delegation shape — the agent acting on
 	// behalf of a distinct user subject — so an actor requires

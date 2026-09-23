@@ -654,6 +654,28 @@ func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 	assert.Contains(t, fields, "totally_unknown")
 }
 
+// TestAPIKeyCredType_SensitiveConfigFieldsFor_AssertionProfileReadable pins why
+// assertion_profile has to be in reservedSpecConfigKeys, which is not bookkeeping:
+// an api_key spec masks every key it does not recognise, so without the reserved
+// entry an operator reading back a spec would find the profile name redacted — a
+// claim-shape selector, not a secret.
+func TestAPIKeyCredType_SensitiveConfigFieldsFor_AssertionProfileReadable(t *testing.T) {
+	ct := NewAPIKeyCredType()
+
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
+		"api_key":                         "sk-xxxx",
+		"mint_method":                     "static_apikey",
+		credential.ConfigAssertionProfile: credential.DefaultAssertionProfileName,
+		credential.ConfigAssertionTTL:     "2m",
+	}))
+
+	assert.Contains(t, fields, "api_key", "the actual secret still masks")
+	assert.NotContains(t, fields, credential.ConfigAssertionProfile,
+		"assertion_profile is a claim-shape selector and must read back in the clear")
+	assert.NotContains(t, fields, credential.ConfigAssertionTTL,
+		"assertion_ttl is a lifetime request and must read back in the clear")
+}
+
 // TestAPIKeyCredType_SensitiveConfigFieldsFor_UnderscorePrefixIsNotTrusted pins
 // the one exemption that must not apply here.
 //

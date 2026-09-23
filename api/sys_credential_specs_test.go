@@ -181,6 +181,48 @@ func TestSys_UpdateCredentialSpec(t *testing.T) {
 	}
 }
 
+// TestSys_CredentialSpecWarnings pins that non-fatal server warnings — e.g. an
+// assertion_ttl the issuer will cap at mint — reach the typed outputs of both create
+// and update, and that a response without them decodes to nil.
+func TestSys_CredentialSpecWarnings(t *testing.T) {
+	const warning = "assertion_ttl 2h0m0s exceeds the issuer's assertion_ttl 5m0s"
+	body := `{"data":{"name":"my-spec","message":"ok","warnings":["` + warning + `"]}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Address = server.URL
+	client, _ := NewClient(config)
+
+	created, err := client.Sys().CreateCredentialSpec("my-spec", &CreateCredentialSpecInput{Type: "kv", Source: "my-src"})
+	if err != nil {
+		t.Fatalf("CreateCredentialSpec failed: %v", err)
+	}
+	if len(created.Warnings) != 1 || created.Warnings[0] != warning {
+		t.Errorf("create: expected [%q], got %q", warning, created.Warnings)
+	}
+
+	updated, err := client.Sys().UpdateCredentialSpec("my-spec", &UpdateCredentialSpecInput{})
+	if err != nil {
+		t.Fatalf("UpdateCredentialSpec failed: %v", err)
+	}
+	if len(updated.Warnings) != 1 || updated.Warnings[0] != warning {
+		t.Errorf("update: expected [%q], got %q", warning, updated.Warnings)
+	}
+
+	body = `{"data":{"name":"my-spec","message":"ok"}}`
+	clean, err := client.Sys().CreateCredentialSpec("my-spec", &CreateCredentialSpecInput{Type: "kv", Source: "my-src"})
+	if err != nil {
+		t.Fatalf("CreateCredentialSpec failed: %v", err)
+	}
+	if clean.Warnings != nil {
+		t.Errorf("a response without warnings must decode to nil, got %q", clean.Warnings)
+	}
+}
+
 func TestSys_UpdateCredentialSpec_NilInput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

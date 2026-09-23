@@ -122,6 +122,8 @@ var reservedSpecConfigKeys = map[string]struct{}{
 	ConfigAssertionUserClaims:     {},
 	ConfigAssertionAlgorithm:      {},
 	ConfigAssertionResource:       {},
+	ConfigAssertionProfile:        {},
+	ConfigAssertionTTL:            {},
 
 	// Store-backed mint locators (string literals in the drivers).
 	"mint_method":     {},

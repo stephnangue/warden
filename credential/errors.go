@@ -9,6 +9,21 @@ var (
 	// ErrTypeAlreadyRegistered is returned when attempting to register a duplicate credential type
 	ErrTypeAlreadyRegistered = errors.New("credential type already registered")
 
+	// ErrAssertionProfileNotFound is returned when an assertion profile is not found in the registry
+	ErrAssertionProfileNotFound = errors.New("assertion profile not found")
+
+	// ErrAssertionProfileAlreadyRegistered is returned when attempting to register a duplicate assertion profile
+	ErrAssertionProfileAlreadyRegistered = errors.New("assertion profile already registered")
+
+	// ErrAssertionProfileNameReserved is returned when attempting to register an
+	// assertion profile under a name that collides with a sibling spec-config value
+	// (an exchange grant, a *_token_source value, or a token-type/typ value).
+	ErrAssertionProfileNameReserved = errors.New("assertion profile name is reserved")
+
+	// ErrAssertionProfileInvalid is returned when a profile is structurally unfit to
+	// register — currently, an empty typ header.
+	ErrAssertionProfileInvalid = errors.New("invalid assertion profile")
+
 	// ErrDriverNotFound is returned when a driver is not found in the registry
 	ErrDriverNotFound = errors.New("driver not found")
 

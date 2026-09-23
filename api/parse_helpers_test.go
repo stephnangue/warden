@@ -95,3 +95,30 @@ func TestParseConfigMap(t *testing.T) {
 		}
 	})
 }
+
+func TestParseWarnings(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+		want []string
+	}{
+		{"absent", nil, nil},
+		{"not an array", "oops", nil},
+		{"empty array", []interface{}{}, nil},
+		{"strings", []interface{}{"a", "b"}, []string{"a", "b"}},
+		{"skips non-strings and blanks", []interface{}{"a", 42, "", "b"}, []string{"a", "b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseWarnings(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseWarnings(%v) = %q, want %q", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("parseWarnings(%v)[%d] = %q, want %q", tt.in, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

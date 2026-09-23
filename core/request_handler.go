@@ -25,6 +25,7 @@ import (
 	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
@@ -1638,6 +1639,10 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		inputs.SubjectTokenType = credential.TokenTypeJWT
 		inputs.SubjectCacheIdentity = setup.cacheIdentity
 		inputs.ResolveSubjectToken = setup.resolve
+		// UserClaims/AgentClaims below alias maps the mint closure may marshal
+		// concurrently (the chained path's fetchUncached branches mint per request
+		// with no coalescing), so they are READ-ONLY from here on. The profile
+		// interface documents the profile's half of that contract; this is core's.
 		// Surface the projected user claims so the driver can template a per-user
 		// request (e.g. kv2_read's secret_path) — the same projection embedded in the
 		// assertion's warden_user claim. Nil unless the spec set assertion_user_claims.
@@ -1713,6 +1718,28 @@ type assertionSetup struct {
 	agentClaims map[string]string
 }
 
+// resolveAssertionProfile maps a spec's assertion_profile name onto a registered
+// profile, failing closed on a name this build does not have.
+//
+// The nil-registry case is pinned here rather than left to the issuer's nil-Profile
+// fallback, which would otherwise hide it: spec-create validation passes on a nil
+// registry, so a spec naming a non-default profile CAN be persisted by a test or
+// bootstrap setup. Such a spec must not then quietly mint the default shape — a
+// caller that asked for a different claim set getting the old one silently is
+// exactly the failure the registry exists to prevent. So: nil registry accepts only
+// the default name, and rejects everything else.
+func (c *Core) resolveAssertionProfile(name string) (credential.AssertionProfile, error) {
+	reg := c.assertionProfileRegistry
+	if reg == nil {
+		if name == credential.DefaultAssertionProfileName {
+			return profiles.Default(), nil
+		}
+		return nil, fmt.Errorf("assertion profile %q is unavailable (no profile registry)", name)
+	}
+
+	return reg.Resolve(name)
+}
+
 // buildAssertionSetup validates the OIDC issuer is ready and derives the
 // audience, resource, and projected metadata for a warden_identity assertion of
 // te, returning a stable cache fragment (identity + audience [+ role]
@@ -1730,6 +1757,16 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	issuer := c.OIDCIssuer()
 	if issuer == nil || !issuer.Ready() {
 		return nil, fmt.Errorf("spec %q requires warden_identity but the OIDC issuer is not enabled/ready", specName)
+	}
+
+	// Resolve the claim shape ONCE per request, here — off the signing path. The
+	// resolved profile is snapshotted into the mint closure below, so signing takes
+	// no registry lock, and a spec naming a profile this build lacks fails here,
+	// before any cache interaction.
+	profileName := credential.AssertionProfileName(spec.Config)
+	profile, err := c.resolveAssertionProfile(profileName)
+	if err != nil {
+		return nil, fmt.Errorf("spec %q: %w", specName, err)
 	}
 
 	// The assertion audience: an explicit spec value wins; otherwise derive it
@@ -1825,9 +1862,9 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// source config, which can change under a fixed specName) and the projected-
 	// metadata fingerprint. Each fragment is appended only when non-empty, so the
 	// no-resource / no-metadata cache keys stay byte-for-byte unchanged; the
-	// fragments carry mutually non-prefix leads — "role=", "res=", and the '{' of
-	// the marshalled metadata JSON — so one fragment's start cannot be read as
-	// another's.
+	// fragments carry mutually non-prefix leads — "role=", "res=", "prof=", and the
+	// '{' of the marshalled metadata JSON — so one fragment's start cannot be read
+	// as another's.
 	//
 	// That disambiguates starts, not contents: a value holding a NUL could spell a
 	// later fragment that is itself absent. Nothing can reach it — role names are
@@ -1842,11 +1879,35 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// presented — the chained-secret cache shares a fetch across an agent's
 	// sessions by design, and without this fragment two roles are one agent to it.
 	// Appended only when set. Minting needs a principal, not a role, so a role-less
-	// entry can mint — every auth method simply requires a role at login today, which
-	// is what makes the empty case unreachable rather than anything here. Should that
-	// ever change, role-less tokens share one key and assert an empty role, which is
-	// still consistent; and until then the conditional keeps every key that predates
-	// this fragment byte-identical.
+	// entry can mint — and one does reach here: every auth method requires a role at
+	// login, but a root token is not issued by an auth method and carries no role,
+	// and the access path mints for whatever token it is handed. Role-less tokens
+	// share one key and assert an empty role, which is consistent (they are
+	// indistinguishable to the upstream too), and the conditional keeps every key
+	// that predates this fragment byte-identical.
+	//
+	// The profile is folded in because it decides the claim SHAPE, so two specs with
+	// identical identity, audience, role, resource and metadata can still assert
+	// materially different things to the upstream — a different `sub`, a promoted
+	// user, a dropped claim set — and must not share a cached answer.
+	//
+	// ONE fragment is enough, and it is worth saying why. Every input a profile can
+	// read is already fingerprinted: identity and audience directly, role via
+	// "role=", resource via "res=", projected metadata via mdFingerprint, and the
+	// user via the Manager's ":u:" token-id dimension. A profile only changes how
+	// those are RENDERED, so its name is the single new degree of freedom. Should a
+	// later profile ever read something outside that set, it needs a fragment of its
+	// own — that is the moment to give the interface a CacheFragment method, not
+	// before.
+	//
+	// This reaches every cache mechanically, with nothing further to remember:
+	// cacheIdentity becomes inputs.Subject/ActorCacheIdentity, which
+	// ExchangeInputs.Fingerprint() hashes, which keys both the primary cache entry
+	// and (as its "fp" component) chainedSecretCacheKey.
+	//
+	// Appended only for a non-default profile, so every cache key that predates this
+	// fragment stays byte-for-byte identical — the same discipline as the fragments
+	// above.
 	cacheIdentity := wardenSubject(te) + "\x00" + audience
 	if te.RoleName != "" {
 		cacheIdentity += "\x00role=" + te.RoleName
@@ -1857,6 +1918,14 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	if mdFingerprint != "" {
 		cacheIdentity += "\x00" + mdFingerprint
 	}
+	// Keyed on the RESOLVED profile's Name(), not the config string that selected
+	// it. Identical today, but it keeps an alias possible later: were two config
+	// names ever to resolve to one profile (say, after a rename), they would share
+	// one cache dimension rather than splitting it — which is the only objection
+	// the naming rules raise against aliases.
+	if name := profile.Name(); name != credential.DefaultAssertionProfileName {
+		cacheIdentity += "\x00prof=" + name
+	}
 
 	// The spec selects the assertion signing algorithm (default RS256). The issuer
 	// maintains a keyset per algorithm, so either is available with no cold start;
@@ -1864,18 +1933,33 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// deferred to a cache MISS (invoked by the Manager's singleflight leader), so at
 	// most one assertion is minted per miss and none on the hot path.
 	alg := credential.AssertionAlgorithm(spec.Config)
+	// The spec may request a shorter assertion lifetime (assertion_ttl). It is only
+	// a request: the issuer caps it at its own AssertionTTL(), so a spec can never
+	// mint past the issuer's lifetime. Parsed once here (the spec config is
+	// fixed for this request); the issuer default is read inside the closure, at
+	// mint time, so a runtime change to it is honoured.
+	//
+	// Not a cache dimension: exp is volatile by design (see the claim roster), the
+	// primary cache key already carries the spec name, and the chained key hashes
+	// the spec config, so an edit to this value refills chained entries as it should.
+	requestedTTL := credential.RequestedAssertionTTL(spec.Config)
 	return &assertionSetup{
 		cacheIdentity: cacheIdentity,
 		userClaims:    userClaims,
 		agentClaims:   agentClaims,
 		resolve: func(ctx context.Context) (string, error) {
+			ttl := requestedTTL
+			if ttl == 0 {
+				ttl = issuer.AssertionTTL()
+			}
 			return issuer.MintIdentityAssertion(ctx, te, AssertionClaims{
 				Audience:   audience,
-				TTL:        issuer.AssertionTTL(),
+				TTL:        ttl,
 				Alg:        alg,
 				Metadata:   projected,
 				Resource:   resource,
 				UserClaims: userClaims,
+				Profile:    profile,
 			})
 		},
 	}, nil

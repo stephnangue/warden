@@ -4,6 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // stubResolve is a no-op lazy subject-token provider for tests.
@@ -557,5 +561,68 @@ func TestValidateExchangeSpecConfig_AssertionUserClaimsGate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), ConfigAssertionUserClaims) {
 		t.Errorf("error should name the offending field, got: %v", err)
+	}
+}
+
+func TestValidateExchangeSpecConfig_AssertionTTL(t *testing.T) {
+	wid := func(ttl string) Config {
+		return NewConfig(map[string]string{
+			ConfigSubjectTokenSource: SourceWardenIdentity,
+			ConfigAssertionTTL:       ttl,
+		})
+	}
+
+	// Accepted: any duration of at least MinAssertionTTL, the boundary included.
+	// Whether it exceeds the issuer's own assertion_ttl is deliberately NOT checked
+	// here — the issuer caps at mint.
+	for _, ok := range []string{"60s", "1m", "90s", "2m", "1h", "10h"} {
+		assert.NoError(t, ValidateExchangeSpecConfig(wid(ok)), "%q must be accepted", ok)
+	}
+
+	// Rejected: not a duration, or shorter than MinAssertionTTL. The sub-second
+	// cases are the deterministic failure — exp truncates to whole seconds, so
+	// "500ms" would mint exp == iat, expired at birth.
+	for _, tc := range []struct{ val, want string }{
+		{"five minutes", "must be a duration"},
+		{"300", "must be a duration"}, // bare number: ambiguous unit, refused
+		{"500ms", "must be at least"},
+		{"1ns", "must be at least"},
+		{"1s", "must be at least"},
+		{"59s", "must be at least"},
+		{"0s", "must be at least"},
+		{"-5m", "must be at least"},
+	} {
+		err := ValidateExchangeSpecConfig(wid(tc.val))
+		require.Error(t, err, "%q must be rejected", tc.val)
+		assert.Contains(t, err.Error(), ConfigAssertionTTL)
+		assert.Contains(t, err.Error(), tc.want)
+	}
+
+	// Rejected without a Warden-minted assertion, like its assertion_* siblings.
+	err := ValidateExchangeSpecConfig(NewConfig(map[string]string{ConfigAssertionTTL: "2m"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ConfigAssertionTTL)
+	assert.Contains(t, err.Error(), SourceWardenIdentity)
+
+	// Accepted on the actor slot too (the delegation shape).
+	assert.NoError(t, ValidateExchangeSpecConfig(NewConfig(map[string]string{
+		ConfigSubjectTokenSource: SourceUserIdentity,
+		ConfigActorTokenSource:   SourceWardenIdentity,
+		ConfigAssertionTTL:       "2m",
+	})))
+}
+
+func TestRequestedAssertionTTL(t *testing.T) {
+	assert.Equal(t, time.Duration(0), RequestedAssertionTTL(Config{}), "unset means use the issuer's")
+	assert.Equal(t, 2*time.Minute,
+		RequestedAssertionTTL(NewConfig(map[string]string{ConfigAssertionTTL: "2m"})))
+
+	// A persisted value that is unparseable or not positive falls back to 0 (the
+	// issuer's lifetime) rather than being passed on, where a non-positive TTL
+	// would trip the issuer's guard and fail every mint for the spec.
+	for _, bad := range []string{"garbage", "0s", "-5m"} {
+		assert.Equal(t, time.Duration(0),
+			RequestedAssertionTTL(NewConfig(map[string]string{ConfigAssertionTTL: bad})),
+			"%q must fall back to the issuer's lifetime", bad)
 	}
 }

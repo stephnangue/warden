@@ -28,6 +28,9 @@ type CreateCredentialSpecOutput struct {
 	MaxTTL         time.Duration     `json:"max_ttl"`
 	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
 	Message        string            `json:"message"`
+	// Warnings are non-fatal notices about the stored spec — e.g. an assertion_ttl
+	// the issuer will cap at mint. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CredentialSpecInfo represents credential spec metadata
@@ -57,6 +60,9 @@ type UpdateCredentialSpecInput struct {
 type UpdateCredentialSpecOutput struct {
 	Name    string `json:"name"`
 	Message string `json:"message"`
+	// Warnings are non-fatal notices about the stored spec — e.g. an assertion_ttl
+	// the issuer will cap at mint. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CreateCredentialSpec creates a new credential spec
@@ -132,6 +138,7 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 	if v, ok := resource.Data["rotation_period"]; ok {
 		output.RotationPeriod = parseDurationFromSeconds(v)
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }
@@ -316,6 +323,7 @@ func (c *Sys) UpdateCredentialSpecWithContext(ctx context.Context, name string, 
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }

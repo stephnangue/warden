@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -404,6 +405,91 @@ func TestSystemBackend_HandleCredentialSpecCreate_InvalidTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestSystemBackend_HandleCredentialSpec_AssertionTTLWarning pins that a spec
+// requesting a longer assertion_ttl than the issuer's is ACCEPTED (the issuer caps it
+// at mint, and a rejection would go stale once the issuer's value changes) but is
+// told so, in the response data where the operator will actually see it.
+func TestSystemBackend_HandleCredentialSpec_AssertionTTLWarning(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	core.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.Equal(t, defaultAssertionTTL, core.OIDCIssuer().AssertionTTL(), "precondition: 5m ceiling")
+	require.NoError(t, core.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}),
+	}))
+
+	schema := backend.pathCredentials()[2].Fields
+	specRaw := func(name, ttl string) map[string]interface{} {
+		return map[string]interface{}{
+			"name":   name,
+			"type":   "aws_access_keys",
+			"source": "aws-fed",
+			"config": map[string]interface{}{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+				credential.ConfigAssertionTTL:       ttl,
+				"mint_method":                       "sts_assume_role",
+				"role_arn":                          "arn:aws:iam::123456789012:role/OrdersReader",
+			},
+		}
+	}
+	create := func(name, ttl string) *logical.Response {
+		raw := specRaw(name, ttl)
+		resp, err := backend.handleCredentialSpecCreate(ctx,
+			createTestRequest(logical.CreateOperation, "cred/specs/"+name, raw), createFieldData(schema, raw))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.Nil(t, resp.Err, "an above-ceiling assertion_ttl is accepted, not rejected")
+		require.Equal(t, http.StatusCreated, resp.StatusCode)
+		return resp
+	}
+
+	// Above the ceiling: accepted, with a warning naming both values.
+	resp := create("ttl-long", "2h")
+	warnings, ok := resp.Data["warnings"].([]string)
+	require.True(t, ok, "an above-ceiling request must carry warnings in the response data")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "2h0m0s exceeds the issuer's assertion_ttl 5m0s")
+	assert.Contains(t, warnings[0], "minted with 5m0s")
+
+	// Within the ceiling: no warnings key at all, so every other response is unchanged.
+	resp = create("ttl-short", "90s")
+	_, present := resp.Data["warnings"]
+	assert.False(t, present, "a request the issuer honours must not warn")
+
+	// Update raises the ceiling-crossing the same way.
+	upRaw := map[string]interface{}{
+		"name":   "ttl-short",
+		"config": specRaw("ttl-short", "3h")["config"],
+	}
+	upResp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/ttl-short", upRaw), createFieldData(schema, upRaw))
+	require.NoError(t, err)
+	require.NotNil(t, upResp)
+	require.Nil(t, upResp.Err)
+	upWarnings, ok := upResp.Data["warnings"].([]string)
+	require.True(t, ok, "update must carry the warning too")
+	assert.Contains(t, upWarnings[0], "3h0m0s exceeds")
+}
+
+func TestCore_AssertionTTLWarnings(t *testing.T) {
+	cfg := func(ttl string) credential.Config {
+		return credential.NewConfig(map[string]string{credential.ConfigAssertionTTL: ttl})
+	}
+
+	// No issuer configured: nothing to compare against, so no warning.
+	noIssuer := &Core{}
+	assert.Nil(t, noIssuer.assertionTTLWarnings(cfg("2h")))
+
+	c := &Core{}
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+
+	assert.Nil(t, c.assertionTTLWarnings(credential.Config{}), "unset: nothing requested")
+	assert.Nil(t, c.assertionTTLWarnings(cfg("90s")), "below the ceiling")
+	assert.Nil(t, c.assertionTTLWarnings(cfg("5m")), "at the ceiling is not capped")
+	assert.Len(t, c.assertionTTLWarnings(cfg("5m1s")), 1, "just above the ceiling is capped")
 }
 
 func TestSystemBackend_HandleCredentialSpecRead(t *testing.T) {

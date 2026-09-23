@@ -397,3 +397,41 @@ func TestRenderMap_TextFormatQuotesAmbiguousValues(t *testing.T) {
 }
 
 // --- ProjectMap pre-existing tests above remain in place ---
+
+// --- Server warnings ---
+
+// PrintWarnings goes to stderr whatever the format, so -o json stdout stays clean
+// for an agent to parse.
+func TestPrintWarnings_StderrOnly(t *testing.T) {
+	stdout, stderr := setupCapture(t)
+
+	PrintWarnings([]string{"first", "", "second"})
+
+	if stdout.Len() != 0 {
+		t.Errorf("warnings must not reach stdout, got %q", stdout.String())
+	}
+	if got, want := stderr.String(), "warning: first\nwarning: second\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestPrintWarnings_None(t *testing.T) {
+	stdout, stderr := setupCapture(t)
+	PrintWarnings(nil)
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("no warnings must print nothing, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestWarningsFromData(t *testing.T) {
+	if got := WarningsFromData(nil); got != nil {
+		t.Errorf("nil data: got %q", got)
+	}
+	if got := WarningsFromData(map[string]any{"name": "x"}); got != nil {
+		t.Errorf("absent warnings: got %q", got)
+	}
+	got := WarningsFromData(map[string]any{"warnings": []any{"a", 7, "", "b"}})
+	if !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("got %q, want [a b]", got)
+	}
+}

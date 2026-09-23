@@ -298,6 +298,60 @@ func TestSysOIDCIssuerConfig_RotationValidation(t *testing.T) {
 	assert.Contains(t, resp.Err.Error(), "must exceed jwks_cache_ttl")
 }
 
+// TestSysOIDCIssuerConfig_AssertionTTLFloor pins the issuer-level assertion_ttl
+// floor. The issuer's value caps every spec's assertion, so one below
+// credential.MinAssertionTTL would make every spec's assertion arrive expired.
+func TestSysOIDCIssuerConfig_AssertionTTLFloor(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	schema := backend.pathOIDCIssuer()[0].Fields
+	write := func(raw map[string]any) *logical.Response {
+		resp, err := backend.handleOIDCIssuerConfigWrite(ctx, createTestRequest(logical.UpdateOperation, "oidc-issuer/config", raw), createFieldData(schema, raw))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		return resp
+	}
+	base := func(ttlSeconds int) map[string]any {
+		return map[string]any{"issuer_url": "https://iss.example", "assertion_ttl": ttlSeconds}
+	}
+
+	for _, below := range []int{1, 30, 59} {
+		resp := write(base(below))
+		require.True(t, resp.IsError(), "assertion_ttl=%ds must be rejected", below)
+		assert.Contains(t, resp.Err.Error(), "assertion_ttl")
+		assert.Contains(t, resp.Err.Error(), "must be at least")
+	}
+
+	// The boundary and above are accepted.
+	assert.False(t, write(base(60)).IsError(), "60s is the floor itself")
+	assert.False(t, write(base(300)).IsError())
+
+	// Zero is left alone: the reader treats it as "use the default".
+	assert.False(t, write(base(0)).IsError(), "0 means default and must stay writable")
+}
+
+// TestSysOIDCIssuerConfig_AssertionTTLFloorChecksOnlyTheSuppliedValue is why the
+// floor is checked against the value in THIS write, not the merged config: an issuer
+// already stored with a shorter TTL (written before the floor existed) must not start
+// rejecting unrelated issuer-config edits.
+func TestSysOIDCIssuerConfig_AssertionTTLFloorChecksOnlyTheSuppliedValue(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	schema := backend.pathOIDCIssuer()[0].Fields
+
+	// A pre-floor config, stored directly as an older build would have written it.
+	storage := NewBarrierView(core.barrier, oidcIssuerStorePrefix)
+	require.NoError(t, saveIssuerConfig(ctx, storage, &issuerConfig{
+		IssuerURL: "https://iss.example",
+		TTL:       (30 * time.Second).String(),
+	}))
+
+	// An unrelated edit — no assertion_ttl in the request — goes through.
+	raw := map[string]any{"retired_key_grace": 7200}
+	resp, err := backend.handleOIDCIssuerConfigWrite(ctx, createTestRequest(logical.UpdateOperation, "oidc-issuer/config", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.False(t, resp.IsError(), "an unrelated edit must not be blocked by a stored pre-floor TTL: %v", resp.Err)
+}
+
 func TestSysOIDCIssuerConfig_RootNamespaceOnly(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
 	schema := backend.pathOIDCIssuer()[0].Fields
