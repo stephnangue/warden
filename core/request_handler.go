@@ -547,6 +547,8 @@ func streamedStatusCode(captured int, ctxErr error) int {
 func (c *Core) handleCancelableRequest(ctx context.Context, req *logical.Request) (resp *logical.Response, err error) {
 	// MountPoint will not always be set at this point, so we ensure the req contains it
 	req.MountPoint = c.router.MatchingMount(ctx, req.Path)
+	// Routing rewrites req.Path; the gateway failure hook needs the original.
+	routePath := req.Path
 
 	err = c.PopulateTokenEntry(ctx, req)
 	if err != nil {
@@ -573,6 +575,11 @@ func (c *Core) handleCancelableRequest(ctx context.Context, req *logical.Request
 			resp.StatusCode = streamedStatusCode(srw.StatusCode(), ctxErr)
 		}
 	}
+
+	// A gateway request Warden failed itself is answered in the owning
+	// provider's native wire format when the provider renders one. Done before
+	// the audit so the audit records what the client actually receives.
+	resp, err = c.renderGatewayFailure(ctx, req, routePath, resp, err)
 
 	// Create an audit trail of the response
 	auditEntry := c.buildResponseAuditEntry(ctx, req, resp, auth, te, err)
@@ -2060,7 +2067,9 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	// Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
 	cred, err := c.credentialManager.IssueCredential(ctx, caller, te.CredentialSpec, inputs)
 	if err != nil {
-		return fmt.Errorf("failed to issue credential: %w", err)
+		// Typed so a gateway error renderer can tell a credential-issuance
+		// failure from the others that share its status; Error() is unchanged.
+		return &logical.CredentialIssueError{Spec: te.CredentialSpec, Err: err}
 	}
 
 	// Inject credential into request
