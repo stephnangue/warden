@@ -2,9 +2,11 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -320,4 +322,62 @@ func TestStreamingBackend_InitProxy(t *testing.T) {
 	}
 	sb.InitProxy(http.DefaultTransport)
 	assert.NotNil(t, sb.Proxy)
+}
+
+// proxyRoundTripFunc is an http.RoundTripper made of a function.
+type proxyRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f proxyRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The proxy's own failures: an upstream it cannot reach is a 502, and one that
+// has not answered when the request's deadline — a mount's timeout — passes is
+// a 504, where it used to write nothing and so send an empty 200. A client
+// that went away still gets nothing written.
+func TestStreamingBackend_InitProxy_Failures(t *testing.T) {
+	untilDone := proxyRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+	refused := proxyRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})
+	expired := func() context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	gone := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+
+	for _, tc := range []struct {
+		name      string
+		transport http.RoundTripper
+		ctx       func() context.Context
+		status    int
+		body      string
+	}{
+		{"upstream unreachable", refused, context.Background, http.StatusBadGateway, "Bad Gateway\n"},
+		{"upstream too slow for the mount's timeout", untilDone, expired, http.StatusGatewayTimeout, "Gateway Timeout\n"},
+		{"client went away", untilDone, gone, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &StreamingBackend{Backend: &Backend{}, Logger: newTestLogger()}
+			sb.InitProxy(tc.transport)
+			r := httptest.NewRequest(http.MethodGet, "http://upstream.test/v1/x", nil).WithContext(tc.ctx())
+
+			rec := httptest.NewRecorder()
+			sb.Proxy.ServeHTTP(rec, r)
+
+			if tc.status == 0 {
+				assert.Empty(t, rec.Header())
+				assert.Zero(t, rec.Body.Len())
+				return
+			}
+			assert.Equal(t, tc.status, rec.Code)
+			assert.Equal(t, tc.body, rec.Body.String())
+		})
+	}
 }

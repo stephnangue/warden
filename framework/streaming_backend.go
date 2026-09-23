@@ -726,7 +726,8 @@ func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
 //     installed atomically.
 //
 // The proxy uses an empty Director (providers prepare requests before ServeHTTP)
-// and a standard error handler that logs and returns 502.
+// and a standard error handler that logs and returns 502, or 504 when the
+// request's deadline passed first.
 // Logger must be set on the StreamingBackend before calling this method.
 func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 	swap := b.ensureTransport()
@@ -735,6 +736,17 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 		Director:  func(req *http.Request) {},
 		Transport: swap,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// The request's own deadline — a mount's timeout — passed before
+			// the upstream answered. The client is still waiting: written
+			// nothing, it would read an empty 200.
+			if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+				b.Logger.Error("proxy timed out",
+					logger.Err(err),
+					logger.String("target_url", r.URL.String()),
+				)
+				http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+				return
+			}
 			// Client-side cancellation isn't a Warden error. Common
 			// shapes: MCP Streamable HTTP's GET notification stream
 			// the client opens then disconnects, or a long tool-call
