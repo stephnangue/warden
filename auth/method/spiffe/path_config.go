@@ -48,7 +48,14 @@ func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.R
 	}, nil
 }
 
+// handleConfigWrite builds the merged config, persists it, and only then
+// installs it, so a write that is refused or cannot be stored leaves the mount
+// on what storage holds. Writes are serialized, so each merges onto the
+// configuration the previous one left.
 func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	conf := make(map[string]any)
 
 	b.configMu.RLock()
@@ -64,20 +71,14 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 		}
 	}
 
-	if err := b.setupSPIFFEConfig(ctx, conf); err != nil {
+	config, err := buildSPIFFEConfig(conf)
+	if err != nil {
 		return &logical.Response{StatusCode: http.StatusBadRequest, Err: err}, nil
 	}
 
-	// Persist normalized config so a restart parses consistent types.
+	// Persist normalized config before installing it.
 	if b.storageView != nil {
-		b.configMu.RLock()
-		normalized := map[string]any{
-			"token_ttl":    b.config.TokenTTL.String(),
-			"default_role": b.config.DefaultRole,
-		}
-		b.configMu.RUnlock()
-
-		entry, err := sdklogical.StorageEntryJSON("config", normalized)
+		entry, err := sdklogical.StorageEntryJSON("config", normalizedSPIFFEConfig(config))
 		if err != nil {
 			return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 		}
@@ -85,6 +86,8 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 			return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 		}
 	}
+
+	b.installConfig(config)
 
 	return &logical.Response{StatusCode: http.StatusOK, Data: map[string]any{"message": "configuration updated"}}, nil
 }

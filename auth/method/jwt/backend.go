@@ -56,10 +56,13 @@ type JWTAuthConfig struct {
 // jwtAuthBackend is the framework-based JWT authentication backend
 type jwtAuthBackend struct {
 	*framework.Backend
-	config      *JWTAuthConfig
-	configMu    sync.RWMutex
-	logger      *logger.GatedLogger
-	storageView sdklogical.Storage
+	config   *JWTAuthConfig
+	configMu sync.RWMutex
+	// configWriteMu serializes config writes and the storage load: a write
+	// merges onto the live config, so two racing would lose one writer's keys.
+	configWriteMu sync.Mutex
+	logger        *logger.GatedLogger
+	storageView   sdklogical.Storage
 }
 
 var _ logical.Factory = Factory
@@ -105,11 +108,29 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// setupJWTConfig initializes the JWT configuration
+// setupJWTConfig builds the JWT configuration and installs it.
 func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any) error {
-	config, err := mapToJWTAuthConfig(conf)
+	config, err := buildJWTConfig(ctx, conf)
 	if err != nil {
 		return err
+	}
+	b.installConfig(config)
+	return nil
+}
+
+// installConfig makes config the live configuration. It cannot fail.
+func (b *jwtAuthBackend) installConfig(config *JWTAuthConfig) {
+	b.configMu.Lock()
+	b.config = config
+	b.configMu.Unlock()
+}
+
+// buildJWTConfig parses and validates conf and builds its key set and
+// validator, without touching the backend.
+func buildJWTConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, error) {
+	config, err := mapToJWTAuthConfig(conf)
+	if err != nil {
+		return nil, err
 	}
 
 	var keySet jwt.KeySet
@@ -139,38 +160,38 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		sourcesSet++
 	}
 	if sourcesSet != 1 {
-		return fmt.Errorf("exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys must be set (got %d)", sourcesSet)
+		return nil, fmt.Errorf("exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys must be set (got %d)", sourcesSet)
 	}
 
 	switch {
 	case hasOIDC:
 		if err := verifyOIDCDiscoveryURLReachable(ctx, config.OIDCDiscoveryURL, config.OIDCDiscoveryCA); err != nil {
-			return fmt.Errorf("oidc_discovery_url is not reachable: %v", err)
+			return nil, fmt.Errorf("oidc_discovery_url is not reachable: %v", err)
 		}
 		keySet, err = jwt.NewOIDCDiscoveryKeySet(ctx, config.OIDCDiscoveryURL, config.OIDCDiscoveryCA)
 		if err != nil {
-			return fmt.Errorf("failed to create OIDC discovery keyset: %v", err)
+			return nil, fmt.Errorf("failed to create OIDC discovery keyset: %v", err)
 		}
 	case hasJWKS:
 		if err := verifyJWKSURLReachable(ctx, config.JWKSURL, config.JWKSCA); err != nil {
-			return fmt.Errorf("jwks_url is not reachable: %v", err)
+			return nil, fmt.Errorf("jwks_url is not reachable: %v", err)
 		}
 		keySet, err = jwt.NewJSONWebKeySet(ctx, config.JWKSURL, config.JWKSCA)
 		if err != nil {
-			return fmt.Errorf("failed to create JWKS keyset: %v", err)
+			return nil, fmt.Errorf("failed to create JWKS keyset: %v", err)
 		}
 	case hasPubKeys:
 		pubKeys := make([]crypto.PublicKey, 0, len(config.JWTValidationPubKeys))
 		for i, pemStr := range config.JWTValidationPubKeys {
 			pubKey, err := jwt.ParsePublicKeyPEM([]byte(pemStr))
 			if err != nil {
-				return fmt.Errorf("jwt_validation_pubkeys[%d]: failed to parse PEM: %v", i, err)
+				return nil, fmt.Errorf("jwt_validation_pubkeys[%d]: failed to parse PEM: %v", i, err)
 			}
 			pubKeys = append(pubKeys, pubKey)
 		}
 		keySet, err = jwt.NewStaticKeySet(pubKeys)
 		if err != nil {
-			return fmt.Errorf("failed to create static keyset: %v", err)
+			return nil, fmt.Errorf("failed to create static keyset: %v", err)
 		}
 	}
 
@@ -179,14 +200,33 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 	// Create validator
 	validator, err := jwt.NewValidator(keySet)
 	if err != nil {
-		return fmt.Errorf("failed to create validator: %v", err)
+		return nil, fmt.Errorf("failed to create validator: %v", err)
 	}
 	config.validator = validator
 
-	b.configMu.Lock()
-	b.config = config
-	b.configMu.Unlock()
-	return nil
+	return config, nil
+}
+
+// normalizedJWTConfig is config in the form storage holds, so that on restart
+// the parser always sees consistent types (e.g., token_ttl is always a
+// duration string, never a raw int from an HTTP request).
+func normalizedJWTConfig(config *JWTAuthConfig) map[string]any {
+	return map[string]any{
+		"oidc_discovery_url":     config.OIDCDiscoveryURL,
+		"oidc_discovery_ca_pem":  config.OIDCDiscoveryCA,
+		"jwks_url":               config.JWKSURL,
+		"jwks_ca_pem":            config.JWKSCA,
+		"jwt_validation_pubkeys": config.JWTValidationPubKeys,
+		"bound_issuer":           config.BoundIssuer,
+		"bound_audiences":        config.BoundAudiences,
+		"bound_subject":          config.BoundSubject,
+		"bound_claims":           config.BoundClaims,
+		"user_claim":             config.UserClaim,
+		"groups_claim":           config.GroupsClaim,
+		"group_policy_prefix":    config.GroupPolicyPrefix,
+		"token_ttl":              config.TokenTTL.String(),
+		"default_role":           config.DefaultRole,
+	}
 }
 
 // Initialize loads persisted config from storage
@@ -194,6 +234,11 @@ func (b *jwtAuthBackend) Initialize(ctx context.Context) error {
 	if b.storageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	// Load persisted config from storage
 	entry, err := b.storageView.Get(ctx, "config")

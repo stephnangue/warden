@@ -69,10 +69,13 @@ type KubernetesAuthConfig struct {
 // kubernetesAuthBackend is the framework-based kubernetes auth method.
 type kubernetesAuthBackend struct {
 	*framework.Backend
-	config      *KubernetesAuthConfig
-	configMu    sync.RWMutex
-	logger      *logger.GatedLogger
-	storageView sdklogical.Storage
+	config   *KubernetesAuthConfig
+	configMu sync.RWMutex
+	// configWriteMu serializes config writes and the storage load: a write
+	// merges onto the live config, so two racing would lose one writer's keys.
+	configWriteMu sync.Mutex
+	logger        *logger.GatedLogger
+	storageView   sdklogical.Storage
 }
 
 var _ logical.Factory = Factory
@@ -116,32 +119,62 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// setupConfig parses the operator-supplied config map, builds the HTTP
-// client used for TokenReview calls, validates required fields, and
-// installs the resulting KubernetesAuthConfig under the backend mutex.
-func (b *kubernetesAuthBackend) setupConfig(_ context.Context, conf map[string]any) error {
-	cfg, err := mapToKubernetesAuthConfig(conf)
+// setupConfig builds the operator-supplied config map and installs the
+// resulting KubernetesAuthConfig under the backend mutex.
+func (b *kubernetesAuthBackend) setupConfig(ctx context.Context, conf map[string]any) error {
+	cfg, err := buildConfig(ctx, conf)
 	if err != nil {
 		return err
 	}
+	b.installConfig(cfg)
+	return nil
+}
+
+// installConfig makes cfg the live configuration. It cannot fail.
+func (b *kubernetesAuthBackend) installConfig(cfg *KubernetesAuthConfig) {
+	b.configMu.Lock()
+	b.config = cfg
+	b.configMu.Unlock()
+}
+
+// buildConfig parses the operator-supplied config map, validates required
+// fields, and builds the HTTP client used for TokenReview calls, without
+// touching the backend.
+func buildConfig(_ context.Context, conf map[string]any) (*KubernetesAuthConfig, error) {
+	cfg, err := mapToKubernetesAuthConfig(conf)
+	if err != nil {
+		return nil, err
+	}
 
 	if cfg.KubernetesHost == "" {
-		return fmt.Errorf("kubernetes_host is required")
+		return nil, fmt.Errorf("kubernetes_host is required")
 	}
 	if cfg.KubernetesCACert == "" && !cfg.TLSSkipVerify {
-		return fmt.Errorf("kubernetes_ca_cert is required unless tls_skip_verify is true")
+		return nil, fmt.Errorf("kubernetes_ca_cert is required unless tls_skip_verify is true")
 	}
 
 	client, err := buildKubernetesClient(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to build kubernetes HTTP client: %w", err)
+		return nil, fmt.Errorf("failed to build kubernetes HTTP client: %w", err)
 	}
 	cfg.httpClient = client
 
-	b.configMu.Lock()
-	b.config = cfg
-	b.configMu.Unlock()
-	return nil
+	return cfg, nil
+}
+
+// normalizedConfig is cfg in the form storage holds, so a restart parses
+// consistent types.
+func normalizedConfig(cfg *KubernetesAuthConfig) map[string]any {
+	return map[string]any{
+		"kubernetes_host":        cfg.KubernetesHost,
+		"kubernetes_ca_cert":     cfg.KubernetesCACert,
+		"token_reviewer_jwt":     cfg.TokenReviewerJWT,
+		"tls_skip_verify":        cfg.TLSSkipVerify,
+		"issuer":                 cfg.Issuer,
+		"disable_iss_validation": cfg.DisableIssValidation,
+		"token_ttl":              cfg.TokenTTL.String(),
+		"default_role":           cfg.DefaultRole,
+	}
 }
 
 // Initialize loads persisted config from storage and re-runs setupConfig
@@ -150,6 +183,12 @@ func (b *kubernetesAuthBackend) Initialize(ctx context.Context) error {
 	if b.storageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	entry, err := b.storageView.Get(ctx, "config")
 	if err != nil {
 		return fmt.Errorf("failed to read config from storage: %w", err)

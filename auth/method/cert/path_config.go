@@ -100,8 +100,16 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 	}, nil
 }
 
-// handleConfigWrite handles writing the configuration
+// handleConfigWrite handles writing the configuration.
+//
+// The write is built, persisted, and only then installed, so a write that is
+// refused or cannot be stored leaves the mount authenticating against what
+// storage holds. Writes are serialized, so each merges onto the configuration
+// the previous one left.
 func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	// Build config map from field data
 	conf := make(map[string]any)
 
@@ -125,31 +133,18 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}
 	}
 
-	// Setup new config
-	if err := b.setupCertConfig(ctx, conf); err != nil {
+	// Build new config
+	config, err := buildCertConfig(ctx, conf)
+	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
 		}, nil
 	}
 
-	// Persist the normalized config to storage so that on restart the
-	// parser always sees consistent types (e.g., token_ttl is always a
-	// duration string, never a raw int from an HTTP request).
+	// Persist the normalized config before installing it
 	if b.storageView != nil {
-		b.configMu.RLock()
-		normalized := map[string]any{
-			"trusted_ca_pem":  b.config.TrustedCAPEM,
-			"principal_claim": b.config.PrincipalClaim,
-			"token_ttl":       b.config.TokenTTL.String(),
-			"revocation_mode": b.config.RevocationMode,
-			"crl_cache_ttl":   b.config.CRLCacheTTL,
-			"ocsp_timeout":    b.config.OCSPTimeout,
-			"default_role":    b.config.DefaultRole,
-		}
-		b.configMu.RUnlock()
-
-		entry, err := sdklogical.StorageEntryJSON("config", normalized)
+		entry, err := sdklogical.StorageEntryJSON("config", normalizedCertConfig(config))
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
@@ -163,6 +158,8 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 			}, nil
 		}
 	}
+
+	b.installConfig(config)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

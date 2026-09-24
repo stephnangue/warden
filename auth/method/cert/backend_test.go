@@ -159,7 +159,7 @@ func TestCalculateTTL(t *testing.T) {
 
 	role := &CertRole{TokenTTL: "1h"}
 
-	ttl := b.calculateTTL(cert, role)
+	ttl := calculateTTL(b.config, cert, role)
 	// Should be capped by cert validity (~30min), not role (1h) or config (2h)
 	assert.Less(t, ttl, 31*time.Minute)
 	assert.Greater(t, ttl, 28*time.Minute)
@@ -447,7 +447,7 @@ func TestGetCAPool_RoleSpecific(t *testing.T) {
 	b.config = nil
 
 	role := &CertRole{Certificate: caPEM}
-	pool, err := b.getCAPool(role)
+	pool, err := getCAPool(b.config, role)
 	require.NoError(t, err)
 	assert.NotNil(t, pool)
 }
@@ -459,7 +459,7 @@ func TestGetCAPool_GlobalConfig(t *testing.T) {
 	b.config = &CertAuthConfig{caPool: caPool}
 
 	role := &CertRole{}
-	pool, err := b.getCAPool(role)
+	pool, err := getCAPool(b.config, role)
 	require.NoError(t, err)
 	assert.NotNil(t, pool)
 }
@@ -469,7 +469,7 @@ func TestGetCAPool_None(t *testing.T) {
 	b.config = &CertAuthConfig{}
 
 	role := &CertRole{}
-	pool, err := b.getCAPool(role)
+	pool, err := getCAPool(b.config, role)
 	require.NoError(t, err)
 	assert.Nil(t, pool)
 }

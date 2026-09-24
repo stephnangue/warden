@@ -46,8 +46,14 @@ func (b *certAuthBackend) pathLogin() *framework.Path {
 
 // handleLogin handles the certificate login operation
 func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// Snapshot config under the lock, then release it: the lock is NOT held
+	// across the role lookup and the OCSP/CRL round-trip, so a config write
+	// neither waits on in-flight logins nor, while it waits, stalls new ones.
+	// The snapshot carries its own CA pool and revocation checker, so one
+	// login is judged by one configuration throughout.
 	b.configMu.RLock()
-	defer b.configMu.RUnlock()
+	config := b.config
+	b.configMu.RUnlock()
 
 	// Extract client certificate from TLS connection or forwarded header
 	cert := extractClientCert(req)
@@ -57,8 +63,8 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 
 	// Get role name — fall back to default_role if configured
 	roleName := d.Get("role").(string)
-	if roleName == "" && b.config != nil && b.config.DefaultRole != "" {
-		roleName = b.config.DefaultRole
+	if roleName == "" && config != nil && config.DefaultRole != "" {
+		roleName = config.DefaultRole
 	}
 	if roleName == "" {
 		return logical.ErrorResponse(logical.ErrBadRequest("missing role")), nil
@@ -78,7 +84,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 
 	// Build CA pool: role-specific overrides global
-	caPool, err := b.getCAPool(role)
+	caPool, err := getCAPool(config, role)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}
@@ -104,9 +110,8 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 
 	// Check certificate revocation status if configured
-	if b.revocationChecker != nil && b.config != nil &&
-		b.config.RevocationMode != "" && b.config.RevocationMode != "none" {
-		if err := b.revocationChecker.checkRevocation(cert, verifiedChains, b.config.RevocationMode); err != nil {
+	if config != nil && config.revocationChecker != nil {
+		if err := config.revocationChecker.checkRevocation(cert, verifiedChains, config.RevocationMode); err != nil {
 			b.logger.Warn("login failed: certificate revocation check", lgr.Err(err), lgr.String("role", roleName))
 			return &logical.Response{
 				StatusCode: http.StatusUnauthorized,
@@ -126,8 +131,8 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 
 	// Determine principal claim source: role overrides global config
 	principalClaim := role.PrincipalClaim
-	if principalClaim == "" && b.config != nil {
-		principalClaim = b.config.PrincipalClaim
+	if principalClaim == "" && config != nil {
+		principalClaim = config.PrincipalClaim
 	}
 	if principalClaim == "" {
 		principalClaim = "cn"
@@ -145,7 +150,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 
 	// Calculate effective TTL
-	effectiveTTL := b.calculateTTL(cert, role)
+	effectiveTTL := calculateTTL(config, cert, role)
 
 	tokenType := "cert_role"
 
@@ -175,18 +180,18 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 
 // getCAPool returns the CA pool to use for cert verification.
 // Role-specific CA overrides the global trusted CAs.
-func (b *certAuthBackend) getCAPool(role *CertRole) (*x509.CertPool, error) {
+func getCAPool(config *CertAuthConfig, role *CertRole) (*x509.CertPool, error) {
 	if role.Certificate != "" {
 		return buildCAPool(role.Certificate)
 	}
-	if b.config != nil && b.config.caPool != nil {
-		return b.config.caPool, nil
+	if config != nil && config.caPool != nil {
+		return config.caPool, nil
 	}
 	return nil, nil
 }
 
 // calculateTTL returns the effective TTL, capped by the certificate's NotAfter.
-func (b *certAuthBackend) calculateTTL(cert *x509.Certificate, role *CertRole) time.Duration {
+func calculateTTL(config *CertAuthConfig, cert *x509.Certificate, role *CertRole) time.Duration {
 	// Start with the certificate's remaining validity
 	certTTL := time.Until(cert.NotAfter)
 	if certTTL <= 0 {
@@ -201,8 +206,8 @@ func (b *certAuthBackend) calculateTTL(cert *x509.Certificate, role *CertRole) t
 
 	// Global config TTL
 	var configTTL time.Duration
-	if b.config != nil {
-		configTTL = b.config.TokenTTL
+	if config != nil {
+		configTTL = config.TokenTTL
 	}
 
 	// Pick the smallest positive TTL among: certTTL, roleTTL, configTTL

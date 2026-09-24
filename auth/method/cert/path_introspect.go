@@ -39,8 +39,11 @@ type introspectedRole struct {
 // aggregator (Part 3) fans out across multiple mounts and must tolerate
 // non-matching mounts without error.
 func (b *certAuthBackend) handleIntrospectRoles(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	// Snapshot config under the lock, then release it rather than hold it
+	// across the role reads below.
 	b.configMu.RLock()
-	defer b.configMu.RUnlock()
+	config := b.config
+	b.configMu.RUnlock()
 
 	cert := extractClientCert(req)
 	if cert == nil {
@@ -62,7 +65,7 @@ func (b *certAuthBackend) handleIntrospectRoles(ctx context.Context, req *logica
 		if role == nil {
 			continue
 		}
-		if b.certSatisfiesRole(cert, role) {
+		if certSatisfiesRole(config, cert, role) {
 			matches = append(matches, introspectedRole{
 				Name:        role.Name,
 				Description: role.Description,
@@ -92,8 +95,8 @@ func introspectEmpty() *logical.Response {
 // against the role's effective CA pool. Revocation checks are skipped
 // here; introspection is advisory, and the full revocation check runs
 // at login time.
-func verifyCertForRole(cert *x509.Certificate, role *CertRole, b *certAuthBackend) error {
-	caPool, err := b.getCAPool(role)
+func verifyCertForRole(config *CertAuthConfig, cert *x509.Certificate, role *CertRole) error {
+	caPool, err := getCAPool(config, role)
 	if err != nil {
 		return err
 	}
@@ -110,8 +113,8 @@ func verifyCertForRole(cert *x509.Certificate, role *CertRole, b *certAuthBacken
 // certSatisfiesRole reports whether the presented certificate would be accepted
 // by the role — the same trust decision login makes, minus the revocation check
 // (introspection is advisory): the x509 chain check plus the role constraints.
-func (b *certAuthBackend) certSatisfiesRole(cert *x509.Certificate, role *CertRole) bool {
-	if err := verifyCertForRole(cert, role, b); err != nil {
+func certSatisfiesRole(config *CertAuthConfig, cert *x509.Certificate, role *CertRole) bool {
+	if err := verifyCertForRole(config, cert, role); err != nil {
 		return false
 	}
 	return validateCertConstraints(cert, role) == nil

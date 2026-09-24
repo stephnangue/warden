@@ -29,10 +29,13 @@ type SPIFFEAuthConfig struct {
 
 type spiffeAuthBackend struct {
 	*framework.Backend
-	config      *SPIFFEAuthConfig
-	configMu    sync.RWMutex
-	logger      *logger.GatedLogger
-	storageView sdklogical.Storage
+	config   *SPIFFEAuthConfig
+	configMu sync.RWMutex
+	// configWriteMu serializes config writes and the storage load: a write
+	// merges onto the live config, so two racing would lose one writer's keys.
+	configWriteMu sync.Mutex
+	logger        *logger.GatedLogger
+	storageView   sdklogical.Storage
 
 	// spiffe holds the SPIFFE substrate (trust-domain store, verification set,
 	// federation refresh loop).
@@ -85,17 +88,65 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
+// setupSPIFFEConfig builds conf and installs it.
 func (b *spiffeAuthBackend) setupSPIFFEConfig(_ context.Context, conf map[string]any) error {
-	config, err := mapToSPIFFEAuthConfig(conf)
+	config, err := buildSPIFFEConfig(conf)
 	if err != nil {
 		return err
+	}
+	b.installConfig(config)
+	return nil
+}
+
+// installConfig makes config the live configuration. It cannot fail.
+func (b *spiffeAuthBackend) installConfig(config *SPIFFEAuthConfig) {
+	b.configMu.Lock()
+	b.config = config
+	b.configMu.Unlock()
+}
+
+// buildSPIFFEConfig parses conf, without touching the backend.
+func buildSPIFFEConfig(conf map[string]any) (*SPIFFEAuthConfig, error) {
+	config, err := mapToSPIFFEAuthConfig(conf)
+	if err != nil {
+		return nil, err
 	}
 	if config.TokenTTL == 0 {
 		config.TokenTTL = time.Hour
 	}
-	b.configMu.Lock()
-	b.config = config
-	b.configMu.Unlock()
+	return config, nil
+}
+
+// normalizedSPIFFEConfig is config in the form storage holds, so a restart
+// parses consistent types.
+func normalizedSPIFFEConfig(config *SPIFFEAuthConfig) map[string]any {
+	return map[string]any{
+		"token_ttl":    config.TokenTTL.String(),
+		"default_role": config.DefaultRole,
+	}
+}
+
+// loadConfig installs the persisted config, if any. It holds configWriteMu:
+// the mount is routed before it is initialized, so a config write can already
+// be under way, and loading storage over it would undo it.
+func (b *spiffeAuthBackend) loadConfig(ctx context.Context) error {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
+	entry, err := b.storageView.Get(ctx, "config")
+	if err != nil {
+		return fmt.Errorf("failed to read config from storage: %w", err)
+	}
+	if entry == nil {
+		return nil
+	}
+	var configMap map[string]any
+	if err := entry.DecodeJSON(&configMap); err != nil {
+		return fmt.Errorf("failed to decode config: %w", err)
+	}
+	if err := b.setupSPIFFEConfig(ctx, configMap); err != nil {
+		return fmt.Errorf("failed to setup spiffe config from storage: %w", err)
+	}
 	return nil
 }
 
@@ -107,18 +158,8 @@ func (b *spiffeAuthBackend) Initialize(ctx context.Context) error {
 		return nil
 	}
 
-	entry, err := b.storageView.Get(ctx, "config")
-	if err != nil {
-		return fmt.Errorf("failed to read config from storage: %w", err)
-	}
-	if entry != nil {
-		var configMap map[string]any
-		if err := entry.DecodeJSON(&configMap); err != nil {
-			return fmt.Errorf("failed to decode config: %w", err)
-		}
-		if err := b.setupSPIFFEConfig(ctx, configMap); err != nil {
-			return fmt.Errorf("failed to setup spiffe config from storage: %w", err)
-		}
+	if err := b.loadConfig(ctx); err != nil {
+		return err
 	}
 
 	// Fail closed: if the bundles cannot be loaded, the mount must not serve logins.

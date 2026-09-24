@@ -29,15 +29,22 @@ type CertAuthConfig struct {
 
 	// Internal — parsed CA pool
 	caPool *x509.CertPool `json:"-"`
+	// Internal — revocation checker for RevocationMode, nil when it is off.
+	// Held here so it is installed with the mode it serves.
+	revocationChecker *revocationChecker `json:"-"`
 }
 
 type certAuthBackend struct {
 	*framework.Backend
-	config            *CertAuthConfig
-	configMu          sync.RWMutex
-	logger            *logger.GatedLogger
-	storageView       sdklogical.Storage
-	revocationChecker *revocationChecker
+	// config is replaced whole, never modified in place, so a reader may keep
+	// the pointer it took under configMu after releasing the lock.
+	config   *CertAuthConfig
+	configMu sync.RWMutex
+	// configWriteMu serializes config writes and the storage load: a write
+	// merges onto the live config, so two racing would lose one writer's keys.
+	configWriteMu sync.Mutex
+	logger        *logger.GatedLogger
+	storageView   sdklogical.Storage
 }
 
 var _ logical.Factory = Factory
@@ -87,10 +94,29 @@ var validRevocationModes = []string{"", "none", "crl", "ocsp", "best_effort"}
 // validPrincipalClaims lists the allowed values for principal_claim.
 var validPrincipalClaims = []string{"cn", "dns_san", "email_san", "uri_san", "serial"}
 
-func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any) error {
-	config, err := mapToCertAuthConfig(conf)
+// setupCertConfig builds conf and installs it.
+func (b *certAuthBackend) setupCertConfig(ctx context.Context, conf map[string]any) error {
+	config, err := buildCertConfig(ctx, conf)
 	if err != nil {
 		return err
+	}
+	b.installConfig(config)
+	return nil
+}
+
+// installConfig makes config the live configuration. It cannot fail.
+func (b *certAuthBackend) installConfig(config *CertAuthConfig) {
+	b.configMu.Lock()
+	b.config = config
+	b.configMu.Unlock()
+}
+
+// buildCertConfig parses and validates conf into a configuration ready to
+// install, without touching the backend.
+func buildCertConfig(_ context.Context, conf map[string]any) (*CertAuthConfig, error) {
+	config, err := mapToCertAuthConfig(conf)
+	if err != nil {
+		return nil, err
 	}
 
 	if config.TokenTTL == 0 {
@@ -100,12 +126,12 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 		config.PrincipalClaim = "cn"
 	}
 	if !isValidPrincipalClaim(config.PrincipalClaim) {
-		return fmt.Errorf("invalid principal_claim %q; must be one of: %v", config.PrincipalClaim, validPrincipalClaims)
+		return nil, fmt.Errorf("invalid principal_claim %q; must be one of: %v", config.PrincipalClaim, validPrincipalClaims)
 	}
 
 	// Validate revocation mode
 	if !isValidRevocationMode(config.RevocationMode) {
-		return fmt.Errorf("invalid revocation_mode %q; must be one of: none, crl, ocsp, best_effort", config.RevocationMode)
+		return nil, fmt.Errorf("invalid revocation_mode %q; must be one of: none, crl, ocsp, best_effort", config.RevocationMode)
 	}
 
 	// Parse and validate CRL cache TTL
@@ -113,7 +139,7 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 	if config.CRLCacheTTL != "" {
 		d, err := time.ParseDuration(config.CRLCacheTTL)
 		if err != nil {
-			return fmt.Errorf("invalid crl_cache_ttl: %w", err)
+			return nil, fmt.Errorf("invalid crl_cache_ttl: %w", err)
 		}
 		crlCacheTTL = d
 	}
@@ -123,7 +149,7 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 	if config.OCSPTimeout != "" {
 		d, err := time.ParseDuration(config.OCSPTimeout)
 		if err != nil {
-			return fmt.Errorf("invalid ocsp_timeout: %w", err)
+			return nil, fmt.Errorf("invalid ocsp_timeout: %w", err)
 		}
 		ocspTimeout = d
 	}
@@ -132,23 +158,32 @@ func (b *certAuthBackend) setupCertConfig(_ context.Context, conf map[string]any
 	if config.TrustedCAPEM != "" {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM([]byte(config.TrustedCAPEM)) {
-			return fmt.Errorf("trusted_ca_pem contains no valid certificates")
+			return nil, fmt.Errorf("trusted_ca_pem contains no valid certificates")
 		}
 		config.caPool = pool
 	}
 
 	// Initialize revocation checker if revocation is enabled
-	mode := config.RevocationMode
-	if mode != "" && mode != "none" {
-		b.revocationChecker = newRevocationChecker(crlCacheTTL, ocspTimeout)
-	} else {
-		b.revocationChecker = nil
+	if mode := config.RevocationMode; mode != "" && mode != "none" {
+		config.revocationChecker = newRevocationChecker(crlCacheTTL, ocspTimeout)
 	}
 
-	b.configMu.Lock()
-	b.config = config
-	b.configMu.Unlock()
-	return nil
+	return config, nil
+}
+
+// normalizedCertConfig is config in the form storage holds, so that on restart
+// the parser always sees consistent types (e.g., token_ttl is always a
+// duration string, never a raw int from an HTTP request).
+func normalizedCertConfig(config *CertAuthConfig) map[string]any {
+	return map[string]any{
+		"trusted_ca_pem":  config.TrustedCAPEM,
+		"principal_claim": config.PrincipalClaim,
+		"token_ttl":       config.TokenTTL.String(),
+		"revocation_mode": config.RevocationMode,
+		"crl_cache_ttl":   config.CRLCacheTTL,
+		"ocsp_timeout":    config.OCSPTimeout,
+		"default_role":    config.DefaultRole,
+	}
 }
 
 func isValidRevocationMode(mode string) bool {
@@ -174,6 +209,11 @@ func (b *certAuthBackend) Initialize(ctx context.Context) error {
 	if b.storageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.storageView.Get(ctx, "config")
 	if err != nil {
