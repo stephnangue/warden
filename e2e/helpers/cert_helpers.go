@@ -301,13 +301,10 @@ func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.P
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
 	time.Sleep(1 * time.Second)
 
-	// Configure vault-cert provider
+	// Configure vault-cert provider in one write: the provider refuses a
+	// config without auto_auth_path, and a refused write applies nothing.
 	APIRequest(t, "PUT", "vault-cert/config", port,
-		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
-
-	// Configure auth path (cert auth must exist first)
-	APIRequest(t, "POST", "vault-cert/config", port,
-		`{"auto_auth_path":"auth/cert/"}`)
+		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s","auto_auth_path":"auth/cert/"}`)
 
 	// Policy for vault-cert gateway access
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
@@ -410,13 +407,10 @@ func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
 	time.Sleep(1 * time.Second)
 
-	// Configure vault-cert provider
+	// Configure vault-cert provider in one write: the provider refuses a
+	// config without auto_auth_path, and a refused write applies nothing.
 	APIRequest(t, "PUT", "vault-cert/config", port,
-		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
-
-	// Configure auth path (cert auth must exist first)
-	APIRequest(t, "POST", "vault-cert/config", port,
-		`{"auto_auth_path":"auth/cert/"}`)
+		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s","auto_auth_path":"auth/cert/"}`)
 
 	// Policy for vault-cert gateway access
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
@@ -572,13 +566,10 @@ func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
 	APIRequest(t, "POST", "sys/providers/vault-cert", port, `{"type":"vault"}`)
 	time.Sleep(1 * time.Second)
 
-	// Configure vault-cert provider
+	// Configure vault-cert provider in one write: the provider refuses a
+	// config without auto_auth_path, and a refused write applies nothing.
 	APIRequest(t, "PUT", "vault-cert/config", port,
-		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
-
-	// Configure auth path (cert auth must exist first)
-	APIRequest(t, "POST", "vault-cert/config", port,
-		`{"auto_auth_path":"auth/cert/"}`)
+		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s","auto_auth_path":"auth/cert/"}`)
 
 	// Policy for vault-cert gateway access
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,

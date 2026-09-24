@@ -48,8 +48,9 @@ var headersToRemove = []string{
 }
 
 func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) {
-	// Check if Vault address is configured
-	if b.vaultAddress == "" {
+	// Read once: a config write may replace it mid-request.
+	address := b.address()
+	if address == "" {
 		b.Logger.Error("vault_address not configured")
 		http.Error(req.ResponseWriter, "Vault provider not configured", http.StatusServiceUnavailable)
 		return
@@ -86,7 +87,7 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	}
 
 	// Build target URL
-	targetURL, err := b.buildTargetURL(req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
+	targetURL, err := targetURLFor(address, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
@@ -132,6 +133,11 @@ func (b *vaultBackend) getVaultToken(req *logical.Request) (string, error) {
 
 // buildTargetURL constructs the target Vault URL from the gateway path
 func (b *vaultBackend) buildTargetURL(path, rawQuery string) (string, error) {
+	return targetURLFor(b.address(), path, rawQuery)
+}
+
+// targetURLFor constructs the target URL at address from the gateway path.
+func targetURLFor(address, path, rawQuery string) (string, error) {
 	// Find gateway path marker
 	gatewayIdx := strings.Index(path, "/gateway")
 	if gatewayIdx == -1 {
@@ -149,9 +155,9 @@ func (b *vaultBackend) buildTargetURL(path, rawQuery string) (string, error) {
 
 	// Build URL string directly (avoid url.Parse overhead for simple case)
 	if rawQuery != "" {
-		return b.vaultAddress + vaultPath + "?" + rawQuery, nil
+		return address + vaultPath + "?" + rawQuery, nil
 	}
-	return b.vaultAddress + vaultPath, nil
+	return address + vaultPath, nil
 }
 
 // prepareHeaders removes unwanted headers and injects the Vault token (if provided)

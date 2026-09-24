@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -14,8 +15,30 @@ import (
 // gcpBackend is the streaming backend for GCP provider operations
 type gcpBackend struct {
 	*framework.StreamingBackend
+
+	// mu guards the TLS settings, which a config write replaces while a
+	// config read reports them.
+	mu            sync.RWMutex
 	tlsSkipVerify bool
 	caData        string
+
+	// configWriteMu serializes config writes, so each one validates, persists
+	// and applies against the configuration the previous one left.
+	configWriteMu sync.Mutex
+}
+
+// tlsSettings is the TLS configuration of the transport to GCP.
+func (b *gcpBackend) tlsSettings() (skipVerify bool, caData string) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.tlsSkipVerify, b.caData
+}
+
+// setTLSSettings replaces the TLS settings.
+func (b *gcpBackend) setTLSSettings(skipVerify bool, caData string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tlsSkipVerify, b.caData = skipVerify, caData
 }
 
 // extractTokens resolves the two principals on a GCP gateway request.
@@ -113,11 +136,10 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		parsedConfig := parseConfig(conf.Config)
 		b.SetMaxBodySize(parsedConfig.MaxBodySize)
 		b.SetTimeout(parsedConfig.Timeout)
-		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
-		b.caData = parsedConfig.CAData
+		b.setTLSSettings(parsedConfig.TLSSkipVerify, parsedConfig.CAData)
 
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if parsedConfig.TLSSkipVerify || parsedConfig.CAData != "" {
+			transport, err := newTransportWithTLS(parsedConfig.CAData, parsedConfig.TLSSkipVerify)
 			if err != nil {
 				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 			}
@@ -140,6 +162,11 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+	// The mount is routed before it is initialized, so a config write can
+	// arrive now; it must not interleave with loading or seeding the stored
+	// config, or the seeded defaults could overwrite what it persisted.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	// Load persisted config from storage
 	entry, err := b.StorageView.Get(ctx, "config")
@@ -161,16 +188,15 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
 		b.SetMaxBodySize(config.MaxBodySize)
-		b.tlsSkipVerify = config.TLSSkipVerify
-		b.caData = config.CAData
+		b.setTLSSettings(config.TLSSkipVerify, config.CAData)
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
 				b.SetTimeout(timeout)
 			}
 		}
 
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if config.TLSSkipVerify || config.CAData != "" {
+			transport, err := newTransportWithTLS(config.CAData, config.TLSSkipVerify)
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}
@@ -187,11 +213,12 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 		// No persisted config — persist the defaults so a newly enabled
 		// GCP provider is immediately configured and readable.
 		tc := b.TransparentConfig()
+		skipVerify, caData := b.tlsSettings()
 		defaultEntry, err := sdklogical.StorageEntryJSON("config", map[string]any{
 			"max_body_size":   b.MaxBodySize(),
 			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,

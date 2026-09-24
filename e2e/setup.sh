@@ -624,10 +624,12 @@ warden_api POST "sys/providers/vault" '{"type":"vault"}'
 
 sleep 1
 
-# 9b. Configure Vault provider address
+# 9b. Configure Vault provider, transparent mode included. One write: the
+# provider refuses a config without auto_auth_path, and a refused write
+# applies nothing. The auth mount it names is enabled in 9f.
 echo "  Configuring Vault provider..."
 warden_api PUT "vault/config" \
-  "{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"timeout\":\"30s\"}"
+  "{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"timeout\":\"30s\",\"auto_auth_path\":\"auth/jwt/\"}"
 
 # 9c. Create credential source (AppRole auth to Vault dev server)
 echo "  Creating credential source 'vault-e2e'..."
@@ -668,10 +670,7 @@ echo "  Creating JWT role 'e2e-reader'..."
 warden_api POST "auth/jwt/role/e2e-reader" \
   '{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
 
-# 9i. Enable transparent mode on Vault provider
-echo "  Enabling transparent mode..."
-warden_api POST "vault/config" \
-  '{"auto_auth_path":"auth/jwt/"}'
+# 9i. (Transparent mode is configured with the provider, in 9b.)
 
 # 9j. Enable Warden's own OIDC issuer (workload identity federation).
 #
