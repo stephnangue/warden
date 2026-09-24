@@ -112,16 +112,34 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 }
 
 // handleConfigWrite handles writing the provider configuration.
+//
+// A write changes nothing until it has succeeded: every value is validated and
+// built — the transport and the provider's extra state included — into locals,
+// persisted, and only then applied, so a rejected write leaves the running
+// configuration exactly as it was, and a storage failure leaves it matching
+// storage. Writes are serialized, so each one works from the configuration
+// the previous one left.
 func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	// Read tls_skip_verify before URL validation so HTTP can be conditionally allowed
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
+	// One snapshot of the provider-local fields this write builds on. The
+	// extra state is cloned, so OnConfigWrite may mutate its input in place:
+	// the live map is read concurrently by gateway-path code (DynamicHeaders,
+	// ResolveUpstream).
 	b.mu.RLock()
-	skipVerify := b.tlsSkipVerify
+	oldURL := b.providerURL
+	oldSkipVerify := b.tlsSkipVerify
+	oldCAData := b.caData
+	extraState := cloneExtraState(b.extraState)
 	b.mu.RUnlock()
+
+	// Read tls_skip_verify before URL validation so HTTP can be conditionally allowed
+	skipVerify := oldSkipVerify
 	if val, ok := d.GetOk("tls_skip_verify"); ok {
 		skipVerify = val.(bool)
 	}
 
-	// Validate inputs before acquiring the write lock
 	var newURL string
 	if val, ok := d.GetOk(b.spec.URLConfigKey); ok {
 		addr := val.(string)
@@ -205,12 +223,7 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		}, nil
 	}
 
-	// Process TLS settings
-	b.mu.RLock()
-	oldSkipVerify := b.tlsSkipVerify
-	oldCAData := b.caData
-	b.mu.RUnlock()
-
+	// Process TLS settings, compared against the snapshot
 	newSkipVerify := oldSkipVerify
 	newCAData := oldCAData
 	tlsChanged := false
@@ -239,67 +252,54 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		}
 	}
 
-	// Apply framework-side fields atomically (no lock).
-	if hasMaxBodySize {
-		b.SetMaxBodySize(newMaxBodySize)
-	} else if b.MaxBodySize() == 0 {
-		b.SetMaxBodySize(framework.DefaultMaxBodySize)
-	}
-	if hasTimeout {
-		b.SetTimeout(newTimeout)
-	} else if b.Timeout() == 0 {
-		b.SetTimeout(b.spec.DefaultTimeout)
-	}
-
-	// Apply provider-local fields under write lock.
-	b.mu.Lock()
-	if newURL != "" {
-		b.providerURL = newURL
-	}
-	if tlsChanged {
-		b.tlsSkipVerify = newSkipVerify
-		b.caData = newCAData
-	}
-	if tlsChanged {
-		b.SetTransport(newTransport)
-	}
-
-	b.StreamingBackend.SetTransparentConfig(tc)
-
-	// Process extra config fields. Pass a clone of extraState so OnConfigWrite
-	// implementations can safely mutate the input in place — the live map is
-	// concurrently read by gateway-path code (DynamicHeaders, ResolveUpstream)
-	// and must not be mutated under any other than the write lock.
+	// The provider's extra config fields, into the cloned state. A refusal
+	// here is a 400 like any other, before anything has changed.
+	newState := extraState
 	if b.spec.OnConfigWrite != nil {
-		newState, err := b.spec.OnConfigWrite(d, cloneExtraState(b.extraState))
+		var err error
+		newState, err = b.spec.OnConfigWrite(d, extraState)
 		if err != nil {
-			b.mu.Unlock()
 			return &logical.Response{
 				StatusCode: http.StatusBadRequest,
 				Err:        logical.ErrBadRequest(err.Error()),
 			}, nil
 		}
-		b.extraState = newState
 	}
 
-	// Snapshot config for persistence while still holding the lock
+	// The values this write leaves in force.
+	providerURL := oldURL
+	if newURL != "" {
+		providerURL = newURL
+	}
+	maxBodySize := b.MaxBodySize()
+	if hasMaxBodySize {
+		maxBodySize = newMaxBodySize
+	} else if maxBodySize == 0 {
+		maxBodySize = framework.DefaultMaxBodySize
+	}
+	timeout := b.Timeout()
+	if hasTimeout {
+		timeout = newTimeout
+	} else if timeout == 0 {
+		timeout = b.spec.DefaultTimeout
+	}
+
 	configData := map[string]any{
-		b.spec.URLConfigKey: b.providerURL,
-		"max_body_size":     b.MaxBodySize(),
-		"timeout":           b.Timeout().String(),
+		b.spec.URLConfigKey: providerURL,
+		"max_body_size":     maxBodySize,
+		"timeout":           timeout.String(),
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"user_auth_path":    tc.UserAuthPath,
 		"user_auth_role":    tc.UserAuthRole,
-		"tls_skip_verify":   b.tlsSkipVerify,
-		"ca_data":           b.caData,
+		"tls_skip_verify":   newSkipVerify,
+		"ca_data":           newCAData,
 	}
 	if b.spec.OnConfigRead != nil {
-		for k, v := range b.spec.OnConfigRead(b.extraState) {
+		for k, v := range b.spec.OnConfigRead(newState) {
 			configData[k] = v
 		}
 	}
-	b.mu.Unlock()
 
 	// Persist config to storage
 	if b.StorageView != nil {
@@ -317,6 +317,21 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 			}, nil
 		}
 	}
+
+	// Apply. Nothing below can fail. Framework-side fields are atomic;
+	// provider-local ones go under the write lock.
+	b.SetMaxBodySize(maxBodySize)
+	b.SetTimeout(timeout)
+	b.mu.Lock()
+	b.providerURL = providerURL
+	if tlsChanged {
+		b.tlsSkipVerify = newSkipVerify
+		b.caData = newCAData
+		b.SetTransport(newTransport)
+	}
+	b.StreamingBackend.SetTransparentConfig(tc)
+	b.extraState = newState
+	b.mu.Unlock()
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

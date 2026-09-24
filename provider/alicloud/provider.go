@@ -27,6 +27,10 @@ type alicloudBackend struct {
 	tlsSkipVerify bool
 	caData        string
 	proxyDomains  []string
+
+	// configWriteMu serializes config writes, so each one validates, persists
+	// and applies against the configuration the previous one left.
+	configWriteMu sync.Mutex
 }
 
 // getProxyDomains returns a snapshot of the configured proxy domains under
@@ -211,6 +215,10 @@ func (b *alicloudBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+	// The mount is routed before it is initialized, so a config write can
+	// arrive now; it must not interleave with loading the stored config.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {

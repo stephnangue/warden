@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/aws/processor"
 	"github.com/stephnangue/warden/provider/aws/processor/s3"
@@ -25,12 +28,38 @@ type HostRewrite struct {
 // awsBackend is the streaming backend for AWS provider operations
 type awsBackend struct {
 	*framework.StreamingBackend
-	signer            *v4.Signer
-	s3Signer          *v4.Signer // Signer for S3/S3-Control with DisableURIPathEscaping
-	proxyDomains      []string
-	processorRegistry *processor.ProcessorRegistry
-	tlsSkipVerify     bool
-	caData            string
+	signer   *v4.Signer
+	s3Signer *v4.Signer // Signer for S3/S3-Control with DisableURIPathEscaping
+
+	// mu guards the three fields below, which a config write replaces while
+	// a config read reports them.
+	mu            sync.RWMutex
+	proxyDomains  []string
+	tlsSkipVerify bool
+	caData        string
+
+	// processorRegistry holds the request processors built for proxyDomains.
+	// A config write replaces it whole while requests read it.
+	processorRegistry atomic.Pointer[processor.ProcessorRegistry]
+
+	// configWriteMu serializes config writes, so each one validates, persists
+	// and applies against the configuration the previous one left.
+	configWriteMu sync.Mutex
+}
+
+// settings is the configuration the processors and the transport are built
+// from.
+func (b *awsBackend) settings() (proxyDomains []string, skipVerify bool, caData string) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.proxyDomains, b.tlsSkipVerify, b.caData
+}
+
+// setSettings replaces the configuration settings reports.
+func (b *awsBackend) setSettings(proxyDomains []string, skipVerify bool, caData string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.proxyDomains, b.tlsSkipVerify, b.caData = proxyDomains, skipVerify, caData
 }
 
 // extractTokens resolves the principals on an AWS gateway request.
@@ -146,16 +175,14 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			return nil, fmt.Errorf("invalid configuration: %w", err)
 		}
 		parsedConfig := parseConfig(conf.Config)
-		b.proxyDomains = parsedConfig.ProxyDomains
+		b.setSettings(parsedConfig.ProxyDomains, parsedConfig.TLSSkipVerify, parsedConfig.CAData)
 		b.SetMaxBodySize(parsedConfig.MaxBodySize)
 		b.SetTimeout(parsedConfig.Timeout)
-		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
-		b.caData = parsedConfig.CAData
 		b.initializeProcessors()
 
 		// Update transport if custom TLS config is set
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if parsedConfig.TLSSkipVerify || parsedConfig.CAData != "" {
+			transport, err := newTransportWithTLS(parsedConfig.CAData, parsedConfig.TLSSkipVerify)
 			if err != nil {
 				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 			}
@@ -179,6 +206,10 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+	// The mount is routed before it is initialized, so a config write can
+	// arrive now; it must not interleave with loading the stored config.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	// Load persisted config from storage
 	entry, err := b.StorageView.Get(ctx, "config")
@@ -198,10 +229,8 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
-		b.proxyDomains = config.ProxyDomains
+		b.setSettings(config.ProxyDomains, config.TLSSkipVerify, config.CAData)
 		b.SetMaxBodySize(config.MaxBodySize)
-		b.tlsSkipVerify = config.TLSSkipVerify
-		b.caData = config.CAData
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
 				b.SetTimeout(timeout)
@@ -210,8 +239,8 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 		b.initializeProcessors()
 
 		// Update transport if custom TLS config is set
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if config.TLSSkipVerify || config.CAData != "" {
+			transport, err := newTransportWithTLS(config.CAData, config.TLSSkipVerify)
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}
@@ -239,14 +268,21 @@ func (b *awsBackend) handleGatewayStreaming(ctx context.Context, req *logical.Re
 	return nil
 }
 
+// initializeProcessors installs processors built for the current proxy
+// domains.
 func (b *awsBackend) initializeProcessors() {
-	b.processorRegistry = processor.NewProcessorRegistry()
+	proxyDomains, _, _ := b.settings()
+	b.processorRegistry.Store(newProcessorRegistry(proxyDomains, b.Logger))
+}
 
-	// Register processors
-	b.processorRegistry.Register(s3.NewS3AccessPointProcessor(b.proxyDomains, b.Logger))
-	b.processorRegistry.Register(s3.NewS3ControlProcessor(b.proxyDomains, b.Logger))
-	b.processorRegistry.Register(s3.NewS3Processor(b.proxyDomains, b.Logger))
-	b.processorRegistry.Register(processor.NewGenericAWSProcessor(b.proxyDomains, b.Logger))
+// newProcessorRegistry builds the request processors for proxyDomains.
+func newProcessorRegistry(proxyDomains []string, log *logger.GatedLogger) *processor.ProcessorRegistry {
+	registry := processor.NewProcessorRegistry()
+	registry.Register(s3.NewS3AccessPointProcessor(proxyDomains, log))
+	registry.Register(s3.NewS3ControlProcessor(proxyDomains, log))
+	registry.Register(s3.NewS3Processor(proxyDomains, log))
+	registry.Register(processor.NewGenericAWSProcessor(proxyDomains, log))
+	return registry
 }
 
 // SensitiveConfigFields returns the list of config fields that should be masked in output

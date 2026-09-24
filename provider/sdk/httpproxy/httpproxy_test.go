@@ -3,6 +3,7 @@ package httpproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -719,6 +720,85 @@ func TestConfigWrite_WithExtraFields(t *testing.T) {
 		Path:      "config",
 	})
 	assert.Equal(t, "v2", resp.Data["version"])
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write the provider's own hook refuses, or one that cannot be persisted,
+// changes nothing: not the URL, the limits, the TLS settings, the transparent
+// config, nor the provider's extra state. Before, everything but the extra
+// state was live by the time the hook refused, and everything was by the time
+// the storage write failed.
+func TestConfigWrite_RefusedOrUnpersistedChangesNothing(t *testing.T) {
+	spec := testSpec()
+	spec.ExtraConfigFields = map[string]*framework.FieldSchema{
+		"version": {Type: framework.TypeString},
+	}
+	spec.OnConfigWrite = func(d *framework.FieldData, state map[string]any) (map[string]any, error) {
+		if val, ok := d.GetOk("version"); ok {
+			if val.(string) == "bad" {
+				return nil, errors.New("unsupported version")
+			}
+			state["version"] = val.(string)
+		}
+		return state, nil
+	}
+	write := func(b logical.Backend, data map[string]any) *logical.Response {
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.UpdateOperation, Path: "config", Data: data,
+		})
+		require.NoError(t, err)
+		return resp
+	}
+	unchanged := func(t *testing.T, pb *proxyBackend) {
+		t.Helper()
+		pb.mu.RLock()
+		defer pb.mu.RUnlock()
+		assert.Equal(t, "https://original.example.com", pb.providerURL)
+		assert.False(t, pb.tlsSkipVerify)
+		assert.Equal(t, "v1", pb.extraState["version"])
+		assert.Equal(t, 30*time.Second, pb.Timeout())
+		assert.Equal(t, "auth/jwt/", pb.TransparentConfig().AutoAuthPath)
+	}
+	change := map[string]any{
+		"test_url": "https://changed.example.com", "timeout": 99, "tls_skip_verify": true,
+		"auto_auth_path": "auth/other/",
+	}
+
+	t.Run("hook refuses", func(t *testing.T) {
+		b := setupBackend(t, spec)
+		require.Equal(t, http.StatusOK, write(b, map[string]any{
+			"test_url": "https://original.example.com", "auto_auth_path": "auth/jwt/", "version": "v1",
+		}).StatusCode)
+
+		data := map[string]any{"version": "bad"}
+		for k, v := range change {
+			data[k] = v
+		}
+		require.Equal(t, http.StatusBadRequest, write(b, data).StatusCode)
+		unchanged(t, b.(*proxyBackend))
+	})
+
+	t.Run("storage fails", func(t *testing.T) {
+		b := setupBackend(t, spec)
+		require.Equal(t, http.StatusOK, write(b, map[string]any{
+			"test_url": "https://original.example.com", "auto_auth_path": "auth/jwt/", "version": "v1",
+		}).StatusCode)
+		pb := b.(*proxyBackend)
+		pb.StorageView = failingStorage{newInmemStorage()}
+
+		data := map[string]any{"version": "v2"}
+		for k, v := range change {
+			data[k] = v
+		}
+		require.Equal(t, http.StatusInternalServerError, write(b, data).StatusCode)
+		unchanged(t, pb)
+	})
 }
 
 // --- Gateway proxy tests ---
