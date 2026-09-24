@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
@@ -304,6 +308,87 @@ func TestConfigWrite_ClearingTLSRestoresVerification(t *testing.T) {
 	}).StatusCode)
 	require.False(t, verifiesTLS(t, b))
 
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"auto_auth_path": "auth/jwt/"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"tls_skip_verify": false}).StatusCode)
 	assert.True(t, verifiesTLS(t, b))
+}
+
+// A write that leaves the TLS settings as they are keeps the transport, and
+// with it the connections it holds. Before, every write on a mount with custom
+// TLS built a new transport and dropped the old one's connections.
+func TestConfigWrite_UnchangedTLSKeepsTransport(t *testing.T) {
+	var opened atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			opened.Add(1)
+		}
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	b := setupBackend(t)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{
+		"auto_auth_path": "auth/jwt/", "tls_skip_verify": true,
+	}).StatusCode)
+
+	get := func() {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+		resp, err := b.Transport().RoundTrip(req)
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	get()
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"default_role": "reader"}).StatusCode)
+	get()
+
+	assert.Equal(t, int32(1), opened.Load(), "the second request must reuse the first one's connection")
+}
+
+// Loading stored settings without TLS goes back to the shared transport, so
+// one built from mount-time TLS settings does not outlive them.
+func TestInitialize_StoredConfigWithoutTLSRestoresVerification(t *testing.T) {
+	storage := newInmemStorage()
+	entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{"auto_auth_path": "auth/jwt/"})
+	require.NoError(t, storage.Put(context.Background(), entry))
+
+	b, err := Factory(context.Background(), &logical.BackendConfig{
+		StorageView: storage,
+		Logger:      testLogger(),
+		Config:      map[string]any{"tls_skip_verify": true},
+	})
+	require.NoError(t, err)
+	ab := b.(*alicloudBackend)
+	require.False(t, verifiesTLS(t, ab))
+
+	require.NoError(t, ab.Initialize(context.Background()))
+	assert.True(t, verifiesTLS(t, ab))
+}
+
+// A write names some keys; every key it does not name keeps its value. Before,
+// each unnamed key was reset to its default, so setting a default role turned
+// off the mount's custom TLS and dropped its proxy domains.
+func TestConfigWrite_PartialWriteKeepsUnnamedKeys(t *testing.T) {
+	b := setupBackend(t)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{
+		"auto_auth_path": "auth/jwt/", "timeout": 90, "max_body_size": 2048,
+		"tls_skip_verify": true, "proxy_domains": "proxy.example.com",
+	}).StatusCode)
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"default_role": "reader"}).StatusCode)
+
+	assert.Equal(t, 90*time.Second, b.Timeout())
+	assert.Equal(t, int64(2048), b.MaxBodySize())
+	assert.Equal(t, []string{"proxy.example.com"}, b.getProxyDomains())
+	assert.False(t, verifiesTLS(t, b), "tls_skip_verify must have survived a write that did not name it")
+	assert.Equal(t, "reader", b.TransparentConfig().DefaultAuthRole)
+
+	// And what storage holds is the merged whole.
+	entry, err := b.StorageView.Get(context.Background(), "config")
+	require.NoError(t, err)
+	var stored map[string]any
+	require.NoError(t, entry.DecodeJSON(&stored))
+	assert.Equal(t, "1m30s", stored["timeout"])
+	assert.Equal(t, true, stored["tls_skip_verify"])
+	assert.Equal(t, []any{"proxy.example.com"}, stored["proxy_domains"])
 }
