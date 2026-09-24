@@ -96,9 +96,15 @@ func (b *kubernetesAuthBackend) handleConfigRead(_ context.Context, _ *logical.R
 }
 
 // handleConfigWrite merges the request fields with the existing config,
-// runs setupConfig (which validates + rebuilds the HTTP client), then
-// persists the normalized form to storage.
+// runs buildConfig (which validates + rebuilds the HTTP client), persists
+// the normalized form to storage, and only then installs it — so a write
+// that is refused or cannot be stored leaves the mount authenticating
+// against what storage holds. Writes are serialized, so each merges onto
+// the configuration the previous one left.
 func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	conf := make(map[string]any)
 
 	b.configMu.RLock()
@@ -120,7 +126,8 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 		}
 	}
 
-	if err := b.setupConfig(ctx, conf); err != nil {
+	cfg, err := buildConfig(ctx, conf)
+	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
@@ -128,20 +135,7 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 	}
 
 	if b.storageView != nil {
-		b.configMu.RLock()
-		normalized := map[string]any{
-			"kubernetes_host":        b.config.KubernetesHost,
-			"kubernetes_ca_cert":     b.config.KubernetesCACert,
-			"token_reviewer_jwt":     b.config.TokenReviewerJWT,
-			"tls_skip_verify":        b.config.TLSSkipVerify,
-			"issuer":                 b.config.Issuer,
-			"disable_iss_validation": b.config.DisableIssValidation,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"default_role":           b.config.DefaultRole,
-		}
-		b.configMu.RUnlock()
-
-		entry, err := sdklogical.StorageEntryJSON("config", normalized)
+		entry, err := sdklogical.StorageEntryJSON("config", normalizedConfig(cfg))
 		if err != nil {
 			return &logical.Response{StatusCode: http.StatusInternalServerError, Err: err}, nil
 		}
@@ -149,6 +143,8 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 			return &logical.Response{StatusCode: http.StatusInternalServerError, Err: err}, nil
 		}
 	}
+
+	b.installConfig(cfg)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

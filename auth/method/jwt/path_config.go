@@ -130,8 +130,16 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 	}, nil
 }
 
-// handleConfigWrite handles writing the configuration
+// handleConfigWrite handles writing the configuration.
+//
+// The write is built, persisted, and only then installed, so a write that is
+// refused or cannot be stored leaves the mount authenticating against what
+// storage holds. Writes are serialized, so each merges onto the configuration
+// the previous one left.
 func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	// Build config map from field data
 	conf := make(map[string]any)
 
@@ -162,38 +170,18 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		}
 	}
 
-	// Setup new config
-	if err := b.setupJWTConfig(ctx, conf); err != nil {
+	// Build new config
+	config, err := buildJWTConfig(ctx, conf)
+	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
 		}, nil
 	}
 
-	// Persist the normalized config to storage so that on restart the
-	// parser always sees consistent types (e.g., token_ttl is always a
-	// duration string, never a raw int from an HTTP request).
+	// Persist the normalized config before installing it
 	if b.storageView != nil {
-		b.configMu.RLock()
-		normalized := map[string]any{
-			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
-			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
-			"jwks_url":               b.config.JWKSURL,
-			"jwks_ca_pem":            b.config.JWKSCA,
-			"jwt_validation_pubkeys": b.config.JWTValidationPubKeys,
-			"bound_issuer":           b.config.BoundIssuer,
-			"bound_audiences":        b.config.BoundAudiences,
-			"bound_subject":          b.config.BoundSubject,
-			"bound_claims":           b.config.BoundClaims,
-			"user_claim":             b.config.UserClaim,
-			"groups_claim":           b.config.GroupsClaim,
-			"group_policy_prefix":    b.config.GroupPolicyPrefix,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"default_role":           b.config.DefaultRole,
-		}
-		b.configMu.RUnlock()
-
-		entry, err := sdklogical.StorageEntryJSON("config", normalized)
+		entry, err := sdklogical.StorageEntryJSON("config", normalizedJWTConfig(config))
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
@@ -207,6 +195,8 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 			}, nil
 		}
 	}
+
+	b.installConfig(config)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

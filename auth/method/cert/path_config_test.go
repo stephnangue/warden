@@ -66,7 +66,7 @@ func TestSetupCertConfig_ValidWithRevocation(t *testing.T) {
 		"ocsp_timeout":    "10s",
 	})
 	require.NoError(t, err)
-	assert.NotNil(t, b.revocationChecker)
+	assert.NotNil(t, b.config.revocationChecker)
 }
 
 func TestSetupCertConfig_NoRevocationChecker(t *testing.T) {
@@ -75,7 +75,7 @@ func TestSetupCertConfig_NoRevocationChecker(t *testing.T) {
 		"revocation_mode": "none",
 	})
 	require.NoError(t, err)
-	assert.Nil(t, b.revocationChecker)
+	assert.Nil(t, b.config.revocationChecker)
 }
 
 // =============================================================================
