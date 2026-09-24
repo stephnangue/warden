@@ -26,24 +26,56 @@ func (b *dualgatewayBackend) extraConfigKeys() []string {
 	return specExtraConfigKeys(b.spec)
 }
 
-// applyParsedConfig resolves conf into live backend state and returns the
-// snapshot to persist. It is the only place configuration is applied — mount
-// time, storage load and config write all route through it, so the three can
-// never drift into honouring different subsets of the config surface.
-//
-// Nothing is mutated until every fallible step has succeeded: an unusable
-// ca_data leaves a serving mount exactly as it was, rather than half-moved to a
-// configuration that cannot reach its upstream.
-//
-// The returned snapshot is computed from conf alone rather than read back off
-// the backend, so a writer racing in between resolution and Put cannot tear it.
+// resolvedConfig is a configuration resolved and built, ready to install: every
+// step that can fail is behind it.
+type resolvedConfig struct {
+	parsed       providerConfig
+	transparent  *framework.TransparentConfig
+	extraRaw     map[string]any
+	extraState   map[string]any
+	newTransport http.RoundTripper
+	// perMount is the transport built for this configuration's TLS settings,
+	// or nil when it rides the shared one.
+	perMount *http.Transport
+	// persist is what storage records for this configuration, computed from
+	// conf alone rather than read back off the backend.
+	persist map[string]any
+}
+
+// discard releases what resolveConfig built, for a configuration that will
+// not be installed. A transport that has served no request holds nothing yet;
+// this keeps that true should resolving ever start to use it.
+func (r *resolvedConfig) discard() {
+	if r.perMount != nil {
+		r.perMount.CloseIdleConnections()
+	}
+}
+
+// applyParsedConfig resolves conf and installs it, returning the snapshot to
+// persist. Mount time and storage load route through it and the config write
+// through its two halves, so the three can never drift into honouring
+// different subsets of the config surface.
 //
 // conf must already have passed validateConfig. This applies; it does not
 // validate.
 func (b *dualgatewayBackend) applyParsedConfig(conf map[string]any) (map[string]any, error) {
+	r, err := b.resolveConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+	b.installConfig(r)
+	return r.persist, nil
+}
+
+// resolveConfig resolves conf and builds what installing it needs, without
+// touching the backend: an unusable ca_data leaves a serving mount exactly as
+// it was, rather than half-moved to a configuration that cannot reach its
+// upstream.
+func (b *dualgatewayBackend) resolveConfig(conf map[string]any) (*resolvedConfig, error) {
 	parsed := parseConfig(b.spec, conf)
 
-	// Build the transport first — the one step here that can fail.
+	// Build the transport first — the one step here that can fail. It is
+	// installed only by installConfig.
 	var (
 		newTransport http.RoundTripper = sharedTransport
 		perMount     *http.Transport
@@ -94,36 +126,47 @@ func (b *dualgatewayBackend) applyParsedConfig(conf map[string]any) (map[string]
 		persist[k] = v
 	}
 
+	return &resolvedConfig{
+		parsed: parsed,
+		transparent: &framework.TransparentConfig{
+			AutoAuthPath:    autoAuthPath,
+			DefaultAuthRole: defaultRole,
+			UserAuthPath:    userAuthPath,
+			UserAuthRole:    userAuthRole,
+		},
+		extraRaw:     extraRaw,
+		extraState:   extraState,
+		newTransport: newTransport,
+		perMount:     perMount,
+		persist:      persist,
+	}, nil
+}
+
+// installConfig makes r the live configuration. It cannot fail.
+func (b *dualgatewayBackend) installConfig(r *resolvedConfig) {
 	b.mu.Lock()
 	outgoing := b.installedTransport
-	b.providerURL = parsed.ProviderURL
-	b.tlsSkipVerify = parsed.TLSSkipVerify
-	b.caData = parsed.CAData
-	b.extraRaw = extraRaw
-	b.extraState = extraState
-	b.installedTransport = perMount
+	b.providerURL = r.parsed.ProviderURL
+	b.tlsSkipVerify = r.parsed.TLSSkipVerify
+	b.caData = r.parsed.CAData
+	b.extraRaw = r.extraRaw
+	b.extraState = r.extraState
+	b.installedTransport = r.perMount
 	b.mu.Unlock()
 
 	// Framework-side fields carry their own atomics; no lock needed.
-	b.SetMaxBodySize(parsed.MaxBodySize)
-	b.SetTimeout(parsed.Timeout)
-	b.SetTransport(newTransport)
-	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-		AutoAuthPath:    autoAuthPath,
-		DefaultAuthRole: defaultRole,
-		UserAuthPath:    userAuthPath,
-		UserAuthRole:    userAuthRole,
-	})
+	b.SetMaxBodySize(r.parsed.MaxBodySize)
+	b.SetTimeout(r.parsed.Timeout)
+	b.SetTransport(r.newTransport)
+	b.StreamingBackend.SetTransparentConfig(r.transparent)
 
 	// Release the connections of the transport just replaced. Only a per-mount
 	// one is ours to close — sharedTransport serves every other mount of every
 	// dual-mode provider. In-flight requests keep the connections they hold;
 	// this reaches only idle ones.
-	if outgoing != nil && outgoing != perMount {
+	if outgoing != nil && outgoing != r.perMount {
 		outgoing.CloseIdleConnections()
 	}
-
-	return persist, nil
 }
 
 // snapshotForMerge returns live configuration in the shape parseConfig expects,

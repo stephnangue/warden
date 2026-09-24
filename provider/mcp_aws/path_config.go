@@ -100,14 +100,18 @@ func (b *mcpAWSBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 }
 
 // handleConfigWrite merges incoming fields with the live config and applies.
-// Always re-runs applyParsedConfig so the URL → region inference is reapplied
-// — if an operator changes mcp_aws_url to a different-region host, the cached
-// region must move with it.
+// Always re-resolves the merged config so the URL → region inference is
+// reapplied — if an operator changes mcp_aws_url to a different-region host,
+// the cached region must move with it.
 //
-// The persist data is the snapshot returned by applyParsedConfig — it captures
-// what THIS write resolved to, computed from the merged config alone, so it
-// cannot be torn by a concurrent writer racing in between resolution and Put.
+// The write is resolved, persisted, and only then installed, so a write that
+// is refused or cannot be stored leaves the mount serving what storage holds.
+// Writes are serialized, so each merges onto the configuration the previous
+// one left.
 func (b *mcpAWSBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	conf := b.snapshotForMerge()
 
 	for _, k := range []string{
@@ -148,7 +152,7 @@ func (b *mcpAWSBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 		}, nil
 	}
 
-	persist, err := b.applyParsedConfig(conf)
+	resolved, err := b.resolveConfig(conf)
 	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
@@ -157,14 +161,18 @@ func (b *mcpAWSBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 	}
 
 	if b.StorageView != nil {
-		entry, err := sdklogical.StorageEntryJSON("config", persist)
+		entry, err := sdklogical.StorageEntryJSON("config", resolved.persist)
 		if err != nil {
+			resolved.discard()
 			return &logical.Response{StatusCode: http.StatusInternalServerError, Err: err}, nil
 		}
 		if err := b.StorageView.Put(ctx, entry); err != nil {
+			resolved.discard()
 			return &logical.Response{StatusCode: http.StatusInternalServerError, Err: err}, nil
 		}
 	}
+
+	b.installConfig(resolved)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

@@ -167,7 +167,7 @@ func (b *dualgatewayBackend) handleConfigWrite(ctx context.Context, req *logical
 		}, nil
 	}
 
-	persistData, err := b.applyParsedConfig(conf)
+	resolved, err := b.resolveConfig(conf)
 	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
@@ -175,24 +175,28 @@ func (b *dualgatewayBackend) handleConfigWrite(ctx context.Context, req *logical
 		}, nil
 	}
 
-	// Persist what this write resolved to, computed from the merged config
-	// alone — not read back off the backend, where a concurrent writer could
-	// tear it.
+	// Persist what this write resolved to before installing it, so a write
+	// that cannot be stored is not served either: the mount keeps matching
+	// storage.
 	if b.StorageView != nil {
-		entry, err := sdklogical.StorageEntryJSON("config", persistData)
+		entry, err := sdklogical.StorageEntryJSON("config", resolved.persist)
 		if err != nil {
+			resolved.discard()
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
 				Err:        err,
 			}, nil
 		}
 		if err := b.StorageView.Put(ctx, entry); err != nil {
+			resolved.discard()
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
 				Err:        err,
 			}, nil
 		}
 	}
+
+	b.installConfig(resolved)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,
