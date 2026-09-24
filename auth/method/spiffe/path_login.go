@@ -34,6 +34,9 @@ func (b *spiffeAuthBackend) pathLogin() *framework.Path {
 // jwt field) takes precedence over an X.509-SVID (a forwarded/TLS cert), so an
 // explicitly-presented JWT-SVID is not shadowed by an ambient mesh cert.
 func (b *spiffeAuthBackend) handleLogin(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// One snapshot of the config serves the whole login, so a config write
+	// landing mid-login cannot give it the role default of one configuration
+	// and the token TTL of the next.
 	b.configMu.RLock()
 	config := b.config
 	b.configMu.RUnlock()
@@ -57,15 +60,15 @@ func (b *spiffeAuthBackend) handleLogin(ctx context.Context, req *logical.Reques
 
 	jwtToken := d.Get("jwt").(string)
 	if jwtToken != "" {
-		return b.handleJWTSVIDLogin(ctx, req, role, jwtToken)
+		return b.handleJWTSVIDLogin(ctx, req, config, role, jwtToken)
 	}
 	if cert := extractClientCert(req); cert != nil {
-		return b.handleX509SVIDLogin(ctx, req, role, cert)
+		return b.handleX509SVIDLogin(ctx, req, config, role, cert)
 	}
 	return logical.ErrorResponse(logical.ErrBadRequest("no X.509-SVID (TLS/forwarded certificate) or JWT-SVID presented")), nil
 }
 
-func (b *spiffeAuthBackend) handleX509SVIDLogin(ctx context.Context, req *logical.Request, role *SPIFFERole, cert *x509.Certificate) (*logical.Response, error) {
+func (b *spiffeAuthBackend) handleX509SVIDLogin(ctx context.Context, req *logical.Request, config *SPIFFEAuthConfig, role *SPIFFERole, cert *x509.Certificate) (*logical.Response, error) {
 	expectedTD, err := spiffeid.TrustDomainFromString(role.TrustDomain)
 	if err != nil {
 		b.logger.Warn("login failed: role has invalid trust_domain", lgr.Err(err), lgr.String("role", role.Name))
@@ -87,10 +90,10 @@ func (b *spiffeAuthBackend) handleX509SVIDLogin(ctx context.Context, req *logica
 	principalID := id.String()
 	fingerprint := certFingerprint(cert)
 	metadata := extractSPIFFEIDMetadata(role.MetadataMappings, id)
-	return b.authResponse(req, role, principalID, b.calculateTTL(cert.NotAfter, role), fingerprint, nil, metadata), nil
+	return b.authResponse(req, role, principalID, calculateTTL(config, cert.NotAfter, role), fingerprint, nil, metadata), nil
 }
 
-func (b *spiffeAuthBackend) handleJWTSVIDLogin(ctx context.Context, req *logical.Request, role *SPIFFERole, jwtToken string) (*logical.Response, error) {
+func (b *spiffeAuthBackend) handleJWTSVIDLogin(ctx context.Context, req *logical.Request, config *SPIFFEAuthConfig, role *SPIFFERole, jwtToken string) (*logical.Response, error) {
 	expectedTD, err := spiffeid.TrustDomainFromString(role.TrustDomain)
 	if err != nil {
 		b.logger.Warn("login failed: role has invalid trust_domain", lgr.Err(err), lgr.String("role", role.Name))
@@ -128,7 +131,7 @@ func (b *spiffeAuthBackend) handleJWTSVIDLogin(ctx context.Context, req *logical
 	}
 	metadata := mergeStringMaps(extractSPIFFEIDMetadata(role.MetadataMappings, svid.ID), claimMeta)
 
-	resp := b.authResponse(req, role, svid.ID.String(), b.calculateTTL(svid.Expiry, role), jwtToken, actors, metadata)
+	resp := b.authResponse(req, role, svid.ID.String(), calculateTTL(config, svid.Expiry, role), jwtToken, actors, metadata)
 	resp.Auth.Policies = policies
 	return resp, nil
 }
@@ -231,7 +234,7 @@ func (b *spiffeAuthBackend) resolveGroupPolicies(role *SPIFFERole, claims map[st
 // calculateTTL caps the token TTL by the SVID's expiry (so the token never
 // outlives the SVID), then by the role and config TTLs. A zero role/config TTL
 // means "no cap from that source," not "expire immediately."
-func (b *spiffeAuthBackend) calculateTTL(svidExpiry time.Time, role *SPIFFERole) time.Duration {
+func calculateTTL(config *SPIFFEAuthConfig, svidExpiry time.Time, role *SPIFFERole) time.Duration {
 	effective := time.Until(svidExpiry)
 	if effective <= 0 {
 		return 0
@@ -239,12 +242,10 @@ func (b *spiffeAuthBackend) calculateTTL(svidExpiry time.Time, role *SPIFFERole)
 	if roleTTL, err := role.ParseTokenTTL(); err == nil && roleTTL > 0 && roleTTL < effective {
 		effective = roleTTL
 	}
-	b.configMu.RLock()
 	var configTTL time.Duration
-	if b.config != nil {
-		configTTL = b.config.TokenTTL
+	if config != nil {
+		configTTL = config.TokenTTL
 	}
-	b.configMu.RUnlock()
 	if configTTL > 0 && configTTL < effective {
 		effective = configTTL
 	}

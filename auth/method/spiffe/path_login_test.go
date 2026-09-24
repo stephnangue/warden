@@ -111,6 +111,19 @@ func TestX509SVIDLogin_TTLCappedByNotAfter(t *testing.T) {
 	assert.LessOrEqual(t, resp.Auth.TokenTTL, 5*time.Minute)
 }
 
+// The TTL comes from the config the login snapshotted, never the live one, so
+// a config write mid-login cannot change it: the smallest of the SVID's
+// remaining life, the role TTL and that config's TTL, a zero meaning no cap.
+func TestCalculateTTL_UsesTheGivenConfig(t *testing.T) {
+	expiry := time.Now().Add(time.Hour)
+	role := &SPIFFERole{TokenTTL: "30m"}
+
+	assert.Equal(t, 10*time.Minute, calculateTTL(&SPIFFEAuthConfig{TokenTTL: 10 * time.Minute}, expiry, role))
+	assert.Equal(t, 30*time.Minute, calculateTTL(&SPIFFEAuthConfig{TokenTTL: 2 * time.Hour}, expiry, role))
+	assert.Equal(t, 30*time.Minute, calculateTTL(nil, expiry, role))
+	assert.Equal(t, time.Duration(0), calculateTTL(nil, time.Now().Add(-time.Minute), role))
+}
+
 // --- JWT-SVID login ---
 
 func TestJWTSVIDLogin_Valid(t *testing.T) {
