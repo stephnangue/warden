@@ -4,8 +4,12 @@
 package logical
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
+
+	"github.com/stephnangue/warden/credential"
 )
 
 // GatewayFailureClass says why Warden failed a gateway request itself, before —
@@ -109,3 +113,29 @@ func (e *CredentialIssueError) Error() string {
 // Unwrap returns the underlying cause, so errors.Is/As and GetErrorCode see
 // through the wrapper.
 func (e *CredentialIssueError) Unwrap() error { return e.Err }
+
+// Status is the HTTP status the failure is answered with, or 0 to derive it
+// from the cause like any other error.
+//
+// An upstream that refused the credential Warden presented — a 4xx other than
+// 408 or 429 — is a 403: the caller's request is sound, but it will not
+// succeed until the configuration changes, so a client must not retry it, and
+// every retry would ask the upstream again. An upstream that was briefly
+// unable to answer — a 408, a 429, a 5xx, or no answer at all — is a 503,
+// which clients retry.
+func (e *CredentialIssueError) Status() int {
+	if status, ok := credential.UpstreamStatus(e.Err); ok {
+		switch {
+		case status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500:
+			return http.StatusServiceUnavailable
+		case status >= 400:
+			return http.StatusForbidden
+		}
+		return 0
+	}
+	var netErr net.Error
+	if errors.Is(e.Err, context.DeadlineExceeded) || errors.As(e.Err, &netErr) {
+		return http.StatusServiceUnavailable
+	}
+	return 0
+}

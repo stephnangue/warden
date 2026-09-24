@@ -15,6 +15,28 @@ const (
 	DefaultMaxBodySize = 1 << 20
 )
 
+// StatusError is an upstream's answer with a status the caller does not
+// accept. It keeps the status inspectable after the error is wrapped, so a
+// caller further up can tell an upstream that refused a request (a 4xx) from
+// one that was briefly unable to serve it (a 5xx), without matching text. Err
+// carries the message, worded as the code that saw the response wants it.
+type StatusError struct {
+	Status int
+	Err    error
+}
+
+func (e *StatusError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("status %d", e.Status)
+	}
+	return e.Err.Error()
+}
+
+func (e *StatusError) Unwrap() error { return e.Err }
+
+// HTTPStatus is the status the upstream answered with.
+func (e *StatusError) HTTPStatus() int { return e.Status }
+
 // HTTPRetryConfig configures HTTP retry behavior.
 type HTTPRetryConfig struct {
 	// MaxAttempts is the maximum number of attempts (including the initial request)
@@ -142,7 +164,7 @@ func ExecuteWithRetry(
 		if bodyErr != nil {
 			bodyStr = fmt.Sprintf("[body read error: %v]", bodyErr)
 		}
-		lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, bodyStr)
+		lastErr = &StatusError{Status: resp.StatusCode, Err: fmt.Errorf("status %d: %s", resp.StatusCode, bodyStr)}
 
 		// Check if status is retryable
 		shouldRetry := false

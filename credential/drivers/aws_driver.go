@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -853,7 +854,15 @@ func (d *AWSDriver) assumeRoleWithWebIdentity(ctx context.Context, spec *credent
 
 	result, err := d.anonSTSClient.AssumeRoleWithWebIdentity(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("STS AssumeRoleWithWebIdentity failed for %s: %w", roleArn, err)
+		err = fmt.Errorf("STS AssumeRoleWithWebIdentity failed for %s: %w", roleArn, err)
+		// STS answers a failure to reach the identity provider — here Warden's
+		// own issuer — with a 400, but documents it as transient. Mark it so,
+		// or it would read as a refusal a client must not retry.
+		var idpErr *ststypes.IDPCommunicationErrorException
+		if errors.As(err, &idpErr) {
+			return nil, &httputil.StatusError{Status: http.StatusServiceUnavailable, Err: err}
+		}
+		return nil, err
 	}
 	// The single choke point for both consumers: the shaping in credsFromWebIdentity
 	// and the credential provider the federated secret fetch is built from. Checking

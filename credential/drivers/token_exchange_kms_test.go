@@ -249,6 +249,11 @@ func TestKMSAssertion_SignFailureMapping(t *testing.T) {
 				assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected,
 					"refetching cannot mend an unreachable backend, and must not evict a good capability")
 			}
+			// Whichever way it is classified, the store's answer stays readable,
+			// so a mint that still fails after the refetch is answered by it.
+			status, ok := credential.UpstreamStatus(err)
+			assert.True(t, ok, "the store's status must survive: %v", err)
+			assert.Equal(t, tc.status, status)
 		})
 	}
 }

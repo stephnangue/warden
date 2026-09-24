@@ -845,9 +845,9 @@ func TestAnthropic_WIFSessionReusesItsTokenThenRemintsEarly(t *testing.T) {
 // is not retried, and the assertion — exchangeable until it expires — does not come
 // back in the error the caller reads.
 //
-// 500 rather than 401 or 403: the caller authenticated and was authorised. What failed
-// is the trust between Warden's issuer and the organization, which the caller cannot
-// change.
+// 403: what failed is the trust between Warden's issuer and the organization, which
+// neither the caller nor a retry can change. A 500 would be retried by every SDK, and
+// each retry would ask the organization again for a token it will keep refusing.
 func TestAnthropic_WIFRejectedExchangeFailsClosed(t *testing.T) {
 	ensureEnv(t)
 	ensureAnthropicOAuth(t)
@@ -860,7 +860,7 @@ func TestAnthropic_WIFRejectedExchangeFailsClosed(t *testing.T) {
 		Role:         anthropicWIFRejected.role,
 	})
 	h.AssertChain(t, upstream, status, body, h.ChainWant{
-		Status:        500,
+		Status:        403,
 		UpstreamCalls: 0,
 	})
 

@@ -43,6 +43,41 @@ func (f *recordingFactory) Create(config Config, _ *logger.GatedLogger) (SourceD
 	return &recordingDriver{config: config}, nil
 }
 
+// refusedError is an upstream's refusal, reporting its status.
+type refusedError struct{ status int }
+
+func (e *refusedError) Error() string   { return "upstream refused" }
+func (e *refusedError) HTTPStatus() int { return e.status }
+
+// refusingFactory is a driver whose creation calls its upstream, as a login
+// or token fetch does, and is refused.
+type refusingFactory struct{ recordingFactory }
+
+func (f *refusingFactory) Type() string { return "refusing" }
+func (f *refusingFactory) Create(Config, *logger.GatedLogger) (SourceDriver, error) {
+	return nil, &refusedError{status: 401}
+}
+
+// A driver whose creation is refused by its upstream fails with that refusal
+// still readable, so the request is answered as a refusal rather than as a
+// server error clients retry.
+func TestGetOrCreateDriver_CreationRefusalKeepsItsStatus(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	registry := NewDriverRegistry(log)
+	require.NoError(t, registry.RegisterFactory(&refusingFactory{}))
+	store := newMockConfigStore()
+	store.sources["src"] = &CredSource{Name: "src", Type: "refusing", Config: NewConfig(nil)}
+	coordinator := NewDriverCoordinator(registry, store, log)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	_, err := coordinator.GetOrCreateDriver(ctx, "src")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDriverCreationFailed)
+	status, ok := UpstreamStatus(err)
+	assert.True(t, ok, "the refusal must survive being wrapped as a creation failure: %v", err)
+	assert.Equal(t, 401, status)
+}
+
 // TestGetOrCreateDriver_RefusesToInstallDriverBuiltFromStaleConfig covers the window
 // between reading a source and installing the driver built from it.
 //

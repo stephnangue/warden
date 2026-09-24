@@ -118,7 +118,10 @@ func (r *DriverRegistry) CreateDriver(ctx context.Context, sourceName string, so
 	// Create driver instance
 	driver, err := factory.Create(source.Config, r.log)
 	if err != nil {
-		return nil, false, fmt.Errorf("%w: %s: %v", ErrDriverCreationFailed, source.Type, err)
+		// Both wrapped: a driver that calls its upstream while being created
+		// (a login, a token fetch) can fail with that upstream's refusal,
+		// which callers classify by the cause's type.
+		return nil, false, fmt.Errorf("%w: %s: %w", ErrDriverCreationFailed, source.Type, err)
 	}
 
 	// Store instance with namespace-qualified key

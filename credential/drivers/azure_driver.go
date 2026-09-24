@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -142,7 +143,8 @@ func (d *AzureDriver) doAzureRequest(ctx context.Context, apiReq azureAPIRequest
 		if bodyErr != nil {
 			bodyStr = fmt.Sprintf("[body read error: %v]", bodyErr)
 		}
-		lastErr = fmt.Errorf("%s failed with status %d: %s", apiReq.operation, resp.StatusCode, bodyStr)
+		lastErr = &httputil.StatusError{Status: resp.StatusCode,
+			Err: fmt.Errorf("%s failed with status %d: %s", apiReq.operation, resp.StatusCode, bodyStr)}
 
 		shouldRetry := false
 		for _, rs := range retryStatuses {

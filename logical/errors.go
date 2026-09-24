@@ -153,6 +153,15 @@ func GetErrorCode(err error) int {
 	case errors.Is(err, credential.ErrUserRequired):
 		return http.StatusUnauthorized
 	}
+	// A credential that could not be issued answers with the status its
+	// cause calls for: a refusal by the upstream is not the server error it
+	// would otherwise fall through to.
+	var issue *CredentialIssueError
+	if errors.As(err, &issue) {
+		if status := issue.Status(); status != 0 {
+			return status
+		}
+	}
 	// Check if the error wraps a CodedError. Only recurse when there is an inner
 	// error: an error that implements Unwrap() but returns nil (e.g. a token
 	// endpoint error carrying only a parsed OAuth code) is still a real failure
