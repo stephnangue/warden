@@ -89,6 +89,12 @@ type mcpAWSBackend struct {
 	// makes cache reuse a feature.
 	signer *v4.Signer
 
+	// configWriteMu serialises config writes and the storage load. A partial
+	// write is a read-merge-persist-install sequence, so two racing would lose
+	// one writer's keys against the other's snapshot. It is not on any request
+	// path.
+	configWriteMu sync.Mutex
+
 	mu          sync.RWMutex
 	upstreamURL *url.URL
 	// configRegion is the operator-supplied region (empty if not set).
@@ -211,21 +217,58 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// applyParsedConfig parses conf, validates it, builds the new transport,
-// and installs all resolved values under a single write lock. Returns the
-// canonical data to persist (computed from the input alone, never from b.*,
-// so it can't be stale by the time the caller calls Put).
-//
-// Validation + transport build happen BEFORE the lock is taken so a failure
-// in either leaves b.* untouched — no half-mutated state if the CA bundle
-// is malformed or a TLS-toggle build fails.
+// resolvedConfig is a configuration resolved and built, ready to install: every
+// step that can fail is behind it.
+type resolvedConfig struct {
+	upstreamURL   *url.URL
+	configRegion  string
+	region        string
+	listenTimeout time.Duration
+	tlsSkipVerify bool
+	caData        string
+	maxBody       int64
+	timeout       time.Duration
+	transport     http.RoundTripper
+	// perMount is the transport built for this configuration's TLS settings,
+	// or nil when it rides the shared one.
+	perMount    *http.Transport
+	transparent *framework.TransparentConfig
+	// persist is the canonical data to store, computed from the input alone,
+	// never from b.*.
+	persist map[string]any
+}
+
+// discard releases what resolveConfig built, for a configuration that will
+// not be installed. A transport that has served no request holds nothing yet;
+// this keeps that true should resolving ever start to use it.
+func (r *resolvedConfig) discard() {
+	if r.perMount != nil {
+		r.perMount.CloseIdleConnections()
+	}
+}
+
+// applyParsedConfig resolves conf and installs it, returning the data to
+// persist. Mount time and storage load go through it; a config write uses its
+// two halves so it can persist in between.
+func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, error) {
+	r, err := b.resolveConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+	b.installConfig(r)
+	return r.persist, nil
+}
+
+// resolveConfig parses conf, validates it and builds the new transport,
+// without touching b.* — a malformed CA bundle or a region that cannot be
+// resolved leaves the mount exactly as it was.
 //
 // TLS handling covers both directions: a config that drops tls_skip_verify
 // or clears ca_data falls back to the shared default transport (the prior
 // implementation only rebuilt when the NEW config had overrides, which left
 // a stuck-state bug where toggling skip-verify off kept the old skip-verify
 // transport in place).
-func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, error) {
+func (b *mcpAWSBackend) resolveConfig(conf map[string]any) (*resolvedConfig, error) {
 	parsed := httpproxy.ParseConfig(conf, "mcp_aws_url", DefaultMCPAWSURL, DefaultMCPAWSTimeout)
 	u, err := url.Parse(parsed.ProviderURL)
 	if err != nil {
@@ -247,18 +290,19 @@ func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, 
 		return nil, fmt.Errorf("region is required: upstream host %q does not yield a region; set the region config field", u.Host)
 	}
 
-	// Build the transport BEFORE touching state. Either branch returns a
-	// valid http.RoundTripper, so a config-write that removes TLS overrides
-	// successfully falls back to sharedTransport.
-	var newTransport http.RoundTripper
+	// Either branch yields a valid http.RoundTripper, so a config-write that
+	// removes TLS overrides successfully falls back to sharedTransport.
+	var (
+		newTransport http.RoundTripper = sharedTransport
+		perMount     *http.Transport
+	)
 	if parsed.TLSSkipVerify || parsed.CAData != "" {
 		tr, err := httpproxy.NewTransportWithTLS(parsed.CAData, parsed.TLSSkipVerify)
 		if err != nil {
 			return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 		}
 		newTransport = tr
-	} else {
-		newTransport = sharedTransport
+		perMount = tr
 	}
 
 	maxBody := parsed.MaxBodySize
@@ -285,32 +329,48 @@ func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, 
 		"ca_data":         parsed.CAData,
 	}
 
+	return &resolvedConfig{
+		upstreamURL:   u,
+		configRegion:  configRegion,
+		region:        resolvedRegion,
+		listenTimeout: listenTimeout,
+		tlsSkipVerify: parsed.TLSSkipVerify,
+		caData:        parsed.CAData,
+		maxBody:       maxBody,
+		timeout:       timeout,
+		transport:     newTransport,
+		perMount:      perMount,
+		transparent: &framework.TransparentConfig{
+			AutoAuthPath:    parsed.AutoAuthPath,
+			DefaultAuthRole: parsed.DefaultAuthRole,
+			UserAuthPath:    parsed.UserAuthPath,
+			UserAuthRole:    parsed.UserAuthRole,
+		},
+		persist: persist,
+	}, nil
+}
+
+// installConfig makes r the live configuration. It cannot fail.
+func (b *mcpAWSBackend) installConfig(r *resolvedConfig) {
 	b.mu.Lock()
-	b.upstreamURL = u
-	b.configRegion = configRegion
-	b.region = resolvedRegion
-	b.listenTimeout = listenTimeout
-	b.tlsSkipVerify = parsed.TLSSkipVerify
-	b.caData = parsed.CAData
+	b.upstreamURL = r.upstreamURL
+	b.configRegion = r.configRegion
+	b.region = r.region
+	b.listenTimeout = r.listenTimeout
+	b.tlsSkipVerify = r.tlsSkipVerify
+	b.caData = r.caData
 	b.mu.Unlock()
 
 	// Framework-side fields are atomic; no lock needed.
-	b.SetMaxBodySize(maxBody)
-	b.SetTimeout(timeout)
-	b.SetTransport(newTransport)
+	b.SetMaxBodySize(r.maxBody)
+	b.SetTimeout(r.timeout)
+	b.SetTransport(r.transport)
 
 	// SetTransparentConfig is the framework's own writer; it does its own
 	// pointer swap on b.TransparentConfig. Concurrent readers see either the
 	// old or new pointer, never a torn one — TransparentConfig is replaced
 	// wholesale, not mutated in place.
-	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-		AutoAuthPath:    parsed.AutoAuthPath,
-		DefaultAuthRole: parsed.DefaultAuthRole,
-		UserAuthPath:    parsed.UserAuthPath,
-		UserAuthRole:    parsed.UserAuthRole,
-	})
-
-	return persist, nil
+	b.StreamingBackend.SetTransparentConfig(r.transparent)
 }
 
 // Initialize loads persisted configuration from storage. The embedded
@@ -321,6 +381,11 @@ func (b *mcpAWSBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {

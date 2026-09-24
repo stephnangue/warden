@@ -19,9 +19,10 @@ type dualgatewayBackend struct {
 	spec     *ProviderSpec
 	s3Signer *v4.Signer // SigV4 signer with DisableURIPathEscaping for S3
 
-	// configWriteMu serialises the config-write handler. mu guards individual
-	// field reads and writes; this guards the whole read-merge-apply-persist
-	// sequence, which mu cannot since the apply must not hold it.
+	// configWriteMu serialises config writes and the storage load. mu guards
+	// individual field reads and writes; this guards the whole
+	// read-merge-persist-install sequence, which mu cannot since the install
+	// must not hold it.
 	configWriteMu sync.Mutex
 
 	mu            sync.RWMutex   // protects mutable fields below
@@ -154,6 +155,11 @@ func (b *dualgatewayBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {

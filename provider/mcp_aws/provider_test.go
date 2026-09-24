@@ -2,7 +2,10 @@ package mcp_aws
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -471,4 +474,77 @@ func TestInitialize_ListenTimeoutDefaultsForOlderConfig(t *testing.T) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	assert.Equal(t, httpproxy.DefaultListenTimeout, b.listenTimeout)
+}
+
+func writeConfig(b *mcpAWSBackend, raw map[string]any) *logical.Response {
+	resp, _ := b.handleConfigWrite(context.Background(), nil, makeFieldData(b.pathConfig(), raw))
+	return resp
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write that cannot be persisted is not applied either: the mount keeps
+// serving what storage holds. Before, the new URL, region, timeout,
+// transparent config and transport were live by the time the storage write
+// failed.
+func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
+	b := setupBackend(t)
+	require.Equal(t, 200, writeConfig(b, map[string]any{"auto_auth_path": "auth/jwt/"}).StatusCode)
+	b.StorageView = failingStorage{newInmemStorage()}
+
+	resp := writeConfig(b, map[string]any{
+		"mcp_aws_url":     "https://aws-mcp.eu-frankfurt-1.api.aws/mcp",
+		"timeout":         99,
+		"tls_skip_verify": true,
+		"auto_auth_path":  "auth/other/",
+	})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	snap := b.snapshot()
+	assert.Equal(t, "aws-mcp.us-east-1.api.aws", snap.upstreamURL.Host)
+	assert.Equal(t, "us-east-1", snap.region)
+	assert.Equal(t, DefaultMCPAWSTimeout, snap.timeout)
+	assert.Equal(t, "auth/jwt/", b.TransparentConfig().AutoAuthPath)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err := snap.transport.RoundTrip(req)
+	var verifyErr *tls.CertificateVerificationError
+	assert.ErrorAs(t, err, &verifyErr, "an unpersisted write must not have turned TLS verification off")
+}
+
+// Two partial writes racing each merge onto the configuration the other left,
+// so neither loses the other's key. Before, both could merge onto the same
+// snapshot and the second to install undid the first.
+func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		b := setupBackend(t)
+		require.Equal(t, 200, writeConfig(b, map[string]any{"auto_auth_path": "auth/jwt/"}).StatusCode)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			writeConfig(b, map[string]any{"region": "eu-west-1"})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			writeConfig(b, map[string]any{"timeout": 77})
+		}()
+		close(start)
+		wg.Wait()
+
+		snap := b.snapshot()
+		require.Equal(t, "eu-west-1", snap.region, "iteration %d lost the region write", i)
+		require.Equal(t, 77*time.Second, snap.timeout, "iteration %d lost the timeout write", i)
+	}
 }
