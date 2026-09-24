@@ -13,10 +13,12 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -403,15 +405,18 @@ func getFreePort(t *testing.T) int {
 	return port
 }
 
-// A forwarded request keeps the id the forwarding node gave it, and one that
-// arrives without an id is given one, so no forwarded request is handled —
-// and audited — without an id.
-func TestClusterListener_RequestID(t *testing.T) {
+// A forwarded request keeps the id the forwarding node gave it and the client
+// address it resolved, and one that arrives without an id is given one, so no
+// forwarded request is handled — and audited — without an id. The internal
+// id header goes no further than the listener; the client's own X-Request-Id
+// is left alone.
+func TestClusterListener_ForwardedRequest(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	tlsCfg := generateTestClusterTLSConfig(t)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, middleware.GetReqID(r.Context()))
+		fmt.Fprintf(w, "%s|%s|%s|%s", middleware.GetReqID(r.Context()), listener.ClientIP(r),
+			r.Header.Get(listener.ForwardedRequestIDHeader), r.Header.Get("X-Request-Id"))
 	})
 	addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
 	ln, err := NewClusterListener(ClusterListenerConfig{
@@ -435,20 +440,34 @@ func TestClusterListener_RequestID(t *testing.T) {
 		}},
 		Timeout: 5 * time.Second,
 	}
-	requestID := func(header string) string {
+	forward := func(headers map[string]string) []string {
 		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s/v1/aws/gateway", addr), nil)
 		require.NoError(t, err)
-		if header != "" {
-			req.Header.Set("X-Request-Id", header)
+		for k, v := range headers {
+			req.Header.Set(k, v)
 		}
 		resp, err := client.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		return string(body)
+		return strings.Split(string(body), "|")
 	}
 
-	assert.Equal(t, "standby-7/abc-000042", requestID("standby-7/abc-000042"),
-		"the forwarding node's id must be kept")
-	assert.NotEmpty(t, requestID(""), "a request without an id must be given one")
+	got := forward(map[string]string{
+		listener.ForwardedRequestIDHeader: "standby-7/abc-000042",
+		"X-Request-Id":                    "the-clients-own",
+		"X-Forwarded-For":                 "198.51.100.1, 203.0.113.7",
+	})
+	assert.Equal(t, "standby-7/abc-000042", got[0], "the forwarding node's id must be kept")
+	assert.Equal(t, "203.0.113.7", got[1], "the entry the forwarding node appended is the client")
+	assert.Empty(t, got[2], "the internal header must go no further")
+	assert.Equal(t, "the-clients-own", got[3], "the client's X-Request-Id is left alone")
+
+	got = forward(map[string]string{"X-Request-Id": "the-clients-own"})
+	assert.NotEqual(t, "the-clients-own", got[0], "the client's X-Request-Id is not the request's id")
+	assert.NotEmpty(t, got[0])
+
+	got = forward(nil)
+	assert.NotEmpty(t, got[0], "a request without an id must be given one")
+	assert.Equal(t, "127.0.0.1", got[1], "without X-Forwarded-For, the connection's address")
 }

@@ -9,9 +9,12 @@ import (
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-// spoofedIP is a trusted proxy IP (in 172.16.0.0/12 from node configs)
-// used to simulate a different client IP. It must be in trusted_proxies
-// so that certForwardingMiddleware preserves X-SSL-Client-Cert headers.
+// spoofedIP is the client address the test claims through X-Forwarded-For,
+// to simulate a request from a different client. The listener honours the
+// header because the test's own connection comes from 127.0.0.1, which the
+// node configs list in trusted_proxies — so the test acts as the load
+// balancer. The address is itself in a trusted range (172.16.0.0/12), and an
+// all-trusted chain resolves to its leftmost entry.
 const spoofedIP = "172.16.0.1"
 
 // TestIPBinding verifies IP binding enforcement across auth methods and gateway modes.
@@ -89,8 +92,8 @@ func runIPBindingSubtests(t *testing.T, port int, clientCertPEM string) {
 		if status != 200 {
 			t.Fatalf("setup: expected 200, got %d", status)
 		}
-		// Second request with different IP — must use trusted proxy IP so
-		// certForwardingMiddleware preserves the X-SSL-Client-Cert header.
+		// Second request from a different client IP. The cert header is
+		// honoured because the connection comes from a trusted proxy address.
 		u := fmt.Sprintf("%s/v1/vault-cert/role/e2e-cert-reader/gateway/v1/secret/data/e2e/app-config", h.NodeURL(port))
 		headers := map[string]string{
 			"X-SSL-Client-Cert": h.URLEncodePEM(clientCertPEM),

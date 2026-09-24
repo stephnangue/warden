@@ -230,23 +230,25 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 			// Standard proxy header: original Host for backend awareness.
 			req.Header.Set("X-Forwarded-Host", req.Host)
 
-			// Set forwarding headers from the direct client connection.
-			// Append to X-Forwarded-For to preserve the chain from
-			// upstream proxies (load balancers, etc.).
-			clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
-			if err != nil {
-				// RemoteAddr may be a bare IP (no port) after middleware.RealIP
+			// The active node takes the client's address from the rightmost
+			// X-Forwarded-For entry: the address this node resolved, which
+			// must therefore always be the last one added, or the chain
+			// dropped — otherwise the rightmost entry would be whatever the
+			// client sent. ReverseProxy appends it itself, after this
+			// Director, when RemoteAddr is host:port, as the listener leaves
+			// it; only a bare address has to be appended here.
+			if _, _, err := net.SplitHostPort(req.RemoteAddr); err != nil {
 				if ip := net.ParseIP(req.RemoteAddr); ip != nil {
-					clientIP = req.RemoteAddr
-				}
-			}
-			if clientIP != "" {
-				if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
-					req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+					chain := append(req.Header.Values("X-Forwarded-For"), ip.String())
+					req.Header.Set("X-Forwarded-For", strings.Join(chain, ", "))
 				} else {
-					req.Header.Set("X-Forwarded-For", clientIP)
+					req.Header.Del("X-Forwarded-For")
 				}
 			}
+			// X-Real-IP is the client's own, never this node's view: a node
+			// from before the address was resolved at the listener would
+			// read it first.
+			req.Header.Del("X-Real-IP")
 			if req.TLS != nil {
 				req.Header.Set("X-Forwarded-Proto", "https")
 			} else if req.Header.Get("X-Forwarded-Proto") == "" {
@@ -266,9 +268,12 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 
 			// Carry the request id this node assigned, so the active node
 			// audits and answers the request under the same id rather than
-			// none.
+			// none. It travels in an internal header, which the cluster
+			// listener consumes: the client's own X-Request-Id is left as
+			// sent. A client-sent copy of the internal header never goes on.
+			req.Header.Del(listener.ForwardedRequestIDHeader)
 			if id := middleware.GetReqID(req.Context()); id != "" {
-				req.Header.Set(middleware.RequestIDHeader, id)
+				req.Header.Set(listener.ForwardedRequestIDHeader, id)
 			}
 		},
 		Transport: transport,

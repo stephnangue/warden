@@ -11,12 +11,15 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/listener"
 )
 
@@ -54,7 +57,7 @@ func TestCertForwardingMiddleware_TrustedProxyWithXSSLClientCert(t *testing.T) {
 	encodedPEM := url.QueryEscape(certPEM)
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+	handler := trustedForwardingMiddleware([]string{"127.0.0.1/32"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -88,7 +91,7 @@ func TestCertForwardingMiddleware_TrustedProxyWithXFCC(t *testing.T) {
 	xfcc := "Hash=" + certHash + ";Cert=" + encodedPEM + ";Subject=\"CN=xfcc-client\""
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"10.0.0.0/8"})(
+	handler := trustedForwardingMiddleware([]string{"10.0.0.0/8"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -115,7 +118,7 @@ func TestCertForwardingMiddleware_UntrustedProxyStripsHeaders(t *testing.T) {
 	encodedPEM := url.QueryEscape(certPEM)
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"10.0.0.0/8"})(
+	handler := trustedForwardingMiddleware([]string{"10.0.0.0/8"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -146,7 +149,7 @@ func TestCertForwardingMiddleware_NoTrustedProxies(t *testing.T) {
 	certPEM, _ := generateTestCert(t, "no-proxy-client")
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware(nil)(
+	handler := trustedForwardingMiddleware(nil)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -167,7 +170,7 @@ func TestCertForwardingMiddleware_NoTrustedProxies(t *testing.T) {
 
 func TestCertForwardingMiddleware_TrustedProxyNoCertHeader(t *testing.T) {
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+	handler := trustedForwardingMiddleware([]string{"127.0.0.1/32"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -186,6 +189,132 @@ func TestCertForwardingMiddleware_TrustedProxyNoCertHeader(t *testing.T) {
 	}
 }
 
+// The client's address is taken from forwarding headers only when the
+// connection comes from a trusted proxy, and then from the rightmost
+// X-Forwarded-For entry that is not itself a trusted proxy: entries to its
+// left are whatever the client sent.
+func TestTrustedForwardingMiddleware_ClientIP(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		peer    string
+		headers map[string][]string
+		want    string
+	}{
+		{"untrusted peer: headers ignored", "192.0.2.10:5000",
+			map[string][]string{"X-Real-Ip": {"10.1.1.1"}, "X-Forwarded-For": {"10.1.1.2"}}, "192.0.2.10:5000"},
+		{"trusted peer: X-Forwarded-For", "10.0.0.5:5000",
+			map[string][]string{"X-Forwarded-For": {"203.0.113.7"}}, "203.0.113.7:5000"},
+		{"trusted peer: rightmost untrusted entry, not the client's leftmost", "10.0.0.5:5000",
+			map[string][]string{"X-Forwarded-For": {"198.51.100.1, 203.0.113.7, 10.0.0.9"}}, "203.0.113.7:5000"},
+		{"trusted peer: every entry trusted, the leftmost", "10.0.0.5:5000",
+			map[string][]string{"X-Forwarded-For": {"10.0.0.8, 10.0.0.9"}}, "10.0.0.8:5000"},
+		{"trusted peer: several X-Forwarded-For lines", "10.0.0.5:5000",
+			map[string][]string{"X-Forwarded-For": {"198.51.100.1", "203.0.113.7"}}, "203.0.113.7:5000"},
+		{"trusted peer: X-Forwarded-For wins over X-Real-IP", "10.0.0.5:5000",
+			map[string][]string{"X-Real-Ip": {"198.51.100.1"}, "X-Forwarded-For": {"203.0.113.7"}}, "203.0.113.7:5000"},
+		{"trusted peer: X-Real-IP without X-Forwarded-For", "10.0.0.5:5000",
+			map[string][]string{"X-Real-Ip": {"203.0.113.7"}}, "203.0.113.7:5000"},
+		{"trusted peer: nothing valid, the peer", "10.0.0.5:5000",
+			map[string][]string{"X-Real-Ip": {"not-an-ip"}}, "10.0.0.5:5000"},
+		{"trusted peer: entries with ports", "10.0.0.5:5000",
+			map[string][]string{"X-Forwarded-For": {"198.51.100.1, 203.0.113.7:4567"}}, "203.0.113.7:5000"},
+		{"trusted peer: bracketed IPv6 with port", "10.0.0.5:5000",
+			map[string][]string{"X-Forwarded-For": {"198.51.100.1, [2001:db8::7]:443"}}, "[2001:db8::7]:5000"},
+		{"trusted peer: an unreadable entry stops the walk, not skipped", "10.0.0.5:5000",
+			map[string][]string{"X-Forwarded-For": {"198.51.100.1, unknown"}}, "10.0.0.5:5000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			handler := trustedForwardingMiddleware([]string{"10.0.0.0/8"})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = r.RemoteAddr }))
+			req := httptest.NewRequest("GET", "/test", nil)
+			req.RemoteAddr = tc.peer
+			for k, vs := range tc.headers {
+				req.Header[k] = vs
+			}
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got != tc.want {
+				t.Fatalf("RemoteAddr: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A trusted proxy's id is refused when it is not shaped like one, so a header
+// cannot put arbitrary text in the audit log; the cluster's internal id header
+// never survives the public listener.
+func TestTrustedForwardingMiddleware_RequestIDHygiene(t *testing.T) {
+	for _, tc := range []struct {
+		name, sent string
+		kept       bool
+	}{
+		{"plausible", "lb-7f3a9c/abc-000042", true},
+		{"too long", strings.Repeat("a", 129), false},
+		{"spaces and quotes", `a "b" c`, false},
+		{"newline", "a\nb", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var id, internal string
+			handler := trustedForwardingMiddleware([]string{"10.0.0.0/8"})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					id = middleware.GetReqID(r.Context())
+					internal = r.Header.Get(listener.ForwardedRequestIDHeader)
+				}))
+			req := httptest.NewRequest("GET", "/test", nil)
+			req.RemoteAddr = "10.0.0.5:5000"
+			req.Header["X-Request-Id"] = []string{tc.sent}
+			req.Header.Set(listener.ForwardedRequestIDHeader, "forged")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			if tc.kept != (id == tc.sent) {
+				t.Fatalf("id %q for sent %q, kept=%v", id, tc.sent, tc.kept)
+			}
+			if id == "" {
+				t.Fatal("every request must have an id")
+			}
+			if internal != "" {
+				t.Fatalf("the internal id header must not survive the public listener, got %q", internal)
+			}
+		})
+	}
+}
+
+// A request id is taken from X-Request-Id only when a trusted proxy sent it;
+// anyone else's request gets a new one. The header is left as sent either way,
+// so it still reaches the upstream.
+func TestTrustedForwardingMiddleware_RequestID(t *testing.T) {
+	for _, tc := range []struct {
+		name, peer string
+		honoured   bool
+	}{
+		{"trusted proxy", "10.0.0.5:5000", true},
+		{"anyone else", "192.0.2.10:5000", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var id, header string
+			handler := trustedForwardingMiddleware([]string{"10.0.0.0/8"})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					id = middleware.GetReqID(r.Context())
+					header = r.Header.Get("X-Request-Id")
+				}))
+			req := httptest.NewRequest("GET", "/test", nil)
+			req.RemoteAddr = tc.peer
+			req.Header.Set("X-Request-Id", "sent-id")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			if header != "sent-id" {
+				t.Fatalf("the X-Request-Id header must be left as sent, got %q", header)
+			}
+			if tc.honoured && id != "sent-id" {
+				t.Fatalf("a trusted proxy's id must be kept, got %q", id)
+			}
+			if !tc.honoured && (id == "" || id == "sent-id") {
+				t.Fatalf("an untrusted caller must get a new id, got %q", id)
+			}
+		})
+	}
+}
+
 func TestParseCIDRs(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -195,6 +324,7 @@ func TestParseCIDRs(t *testing.T) {
 		{"single CIDR", []string{"10.0.0.0/8"}, 1},
 		{"multiple CIDRs", []string{"10.0.0.0/8", "172.16.0.0/12"}, 2},
 		{"bare IP converted to /32", []string{"192.168.1.1"}, 1},
+		{"IPv4-mapped bare IP", []string{"::ffff:10.0.0.5"}, 1},
 		{"empty", nil, 0},
 	}
 
@@ -203,6 +333,13 @@ func TestParseCIDRs(t *testing.T) {
 			result := parseCIDRs(tc.input)
 			if len(result) != tc.expected {
 				t.Fatalf("expected %d networks, got %d", tc.expected, len(result))
+			}
+			// Every bare address must match itself, including the
+			// IPv4-mapped form, which once parsed as ::/32.
+			for _, in := range tc.input {
+				if ip := net.ParseIP(in); ip != nil && !isTrustedProxy(ip, result) {
+					t.Fatalf("%s does not match its own network %v", in, result)
+				}
 			}
 		})
 	}
@@ -266,7 +403,7 @@ func TestCertForwardingMiddleware_TLSFallback_NoProxies(t *testing.T) {
 	_, tlsCert := generateTestCert(t, "direct-tls-client")
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware(nil)(
+	handler := trustedForwardingMiddleware(nil)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -294,7 +431,7 @@ func TestCertForwardingMiddleware_TLSFallback_TrustedProxyNoHeaders(t *testing.T
 	_, tlsCert := generateTestCert(t, "passthrough-client")
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+	handler := trustedForwardingMiddleware([]string{"127.0.0.1/32"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -324,7 +461,7 @@ func TestCertForwardingMiddleware_HeaderWinsOverTLS(t *testing.T) {
 	_, tlsCert := generateTestCert(t, "tls-cert")
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+	handler := trustedForwardingMiddleware([]string{"127.0.0.1/32"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -353,7 +490,7 @@ func TestCertForwardingMiddleware_TLSFallback_UntrustedProxyWithTLS(t *testing.T
 	_, tlsCert := generateTestCert(t, "untrusted-tls-client")
 
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"10.0.0.0/8"})(
+	handler := trustedForwardingMiddleware([]string{"10.0.0.0/8"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -381,7 +518,7 @@ func TestCertForwardingMiddleware_TLSFallback_UntrustedProxyWithTLS(t *testing.T
 
 func TestCertForwardingMiddleware_NoCertAnywhere(t *testing.T) {
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware([]string{"127.0.0.1/32"})(
+	handler := trustedForwardingMiddleware([]string{"127.0.0.1/32"})(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -402,7 +539,7 @@ func TestCertForwardingMiddleware_NoCertAnywhere(t *testing.T) {
 
 func TestCertForwardingMiddleware_TLSWithEmptyPeerCerts(t *testing.T) {
 	var extractedCert *x509.Certificate
-	handler := certForwardingMiddleware(nil)(
+	handler := trustedForwardingMiddleware(nil)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			extractedCert = listener.ForwardedClientCert(r.Context())
 			w.WriteHeader(http.StatusOK)

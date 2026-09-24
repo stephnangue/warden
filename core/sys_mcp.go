@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -243,7 +244,7 @@ func (c *Core) handleMCPListRoles(ctx context.Context, _ *mcp.CallToolRequest, _
 
 	lreq := &logical.Request{
 		HTTPRequest: httpReq,
-		ClientIP:    httpReq.RemoteAddr,
+		ClientIP:    listener.ClientIP(httpReq),
 	}
 
 	// FieldData is ignored by the aggregator, so pass nil.

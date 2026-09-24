@@ -14,11 +14,14 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -403,6 +406,70 @@ func TestApiListener_PlainHTTP_Serves(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "plain-ok", string(body))
+}
+
+// TestApiListener_ForwardingHeadersTrust drives a real listener: forwarding
+// headers sent by a caller that is not a trusted proxy say nothing — not the
+// client certificate it would be logged in as, not the IP its token is bound
+// to, not the id it is audited under — while a trusted proxy's are honoured.
+// The certificate case is the regression test for the header check having
+// run after RealIP had already replaced the peer address with X-Real-IP.
+func TestApiListener_ForwardingHeadersTrust(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	certPEM, _ := generateTestCert(t, "victim")
+
+	type seen struct{ clientIP, requestID, certCN string }
+	serve := func(t *testing.T, trustedProxies []string) (string, *seen) {
+		got := &seen{}
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got.clientIP = listener.ClientIP(r)
+			got.requestID = middleware.GetReqID(r.Context())
+			if cert := listener.ForwardedClientCert(r.Context()); cert != nil {
+				got.certCN = cert.Subject.CommonName
+			}
+		})
+		addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+		ln, err := NewApiListener(ApiListenerConfig{
+			Logger: log, Address: addr, TLSDisable: true, TrustedProxies: trustedProxies,
+		}, handler)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		go ln.Start(ctx)
+		time.Sleep(200 * time.Millisecond)
+		t.Cleanup(func() { ln.Stop() })
+		return addr, got
+	}
+	send := func(t *testing.T, addr string) {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/v1/sys/health", addr), nil)
+		require.NoError(t, err)
+		req.Header.Set("X-Real-IP", "10.255.255.1")
+		req.Header.Set("X-Forwarded-For", "203.0.113.7")
+		req.Header.Set("X-SSL-Client-Cert", url.QueryEscape(certPEM))
+		req.Header.Set("X-Request-Id", "chosen-by-caller")
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+	}
+
+	t.Run("caller that is not a trusted proxy", func(t *testing.T) {
+		// X-Real-IP names an address inside trusted_proxies: the check must
+		// be made against the connection, not against what the caller says.
+		addr, got := serve(t, []string{"10.255.255.0/24"})
+		send(t, addr)
+		assert.Empty(t, got.certCN, "a forged certificate header must not log the caller in")
+		assert.Equal(t, "127.0.0.1", got.clientIP)
+		assert.NotEmpty(t, got.requestID)
+		assert.NotEqual(t, "chosen-by-caller", got.requestID)
+	})
+
+	t.Run("trusted proxy", func(t *testing.T) {
+		addr, got := serve(t, []string{"127.0.0.1/32"})
+		send(t, addr)
+		assert.Equal(t, "victim", got.certCN)
+		assert.Equal(t, "203.0.113.7", got.clientIP)
+		assert.Equal(t, "chosen-by-caller", got.requestID)
+	})
 }
 
 // =============================================================================
