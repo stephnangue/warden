@@ -252,12 +252,19 @@ func (b *alicloudBackend) Initialize(ctx context.Context) error {
 		}
 		b.mu.Unlock()
 
+		// Install the transport the stored settings call for — the shared one
+		// when they set no TLS, so one built from mount-time TLS settings does
+		// not outlive them. A config write rebuilds the transport only when
+		// the TLS settings change, so it relies on this matching them.
 		if b.tlsSkipVerify || b.caData != "" {
 			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}
 			b.SetTransport(transport)
+		} else {
+			initTransport()
+			b.SetTransport(sharedTransport)
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{

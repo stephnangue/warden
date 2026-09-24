@@ -79,6 +79,28 @@ func (b *alicloudBackend) handleConfigRead(ctx context.Context, req *logical.Req
 	}, nil
 }
 
+// snapshotForMerge returns the running configuration in the shape parseConfig
+// takes, as the base a config write overlays. A value never set is left out,
+// so parseConfig gives it its default as before.
+func (b *alicloudBackend) snapshotForMerge() map[string]any {
+	b.mu.RLock()
+	conf := map[string]any{
+		"tls_skip_verify": b.tlsSkipVerify,
+		"ca_data":         b.caData,
+	}
+	if b.proxyDomains != nil {
+		conf["proxy_domains"] = b.proxyDomains
+	}
+	b.mu.RUnlock()
+	if maxBodySize := b.MaxBodySize(); maxBodySize > 0 {
+		conf["max_body_size"] = maxBodySize
+	}
+	if timeout := b.Timeout(); timeout > 0 {
+		conf["timeout"] = timeout.String()
+	}
+	return conf
+}
+
 // handleConfigWrite handles writing the Alicloud provider configuration.
 //
 // A write changes nothing until it has succeeded: every value is validated and
@@ -89,7 +111,10 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
 
-	conf := make(map[string]any)
+	// A write is a partial update: it starts from what the mount is running
+	// and overlays only the keys the request names, so setting one key does
+	// not reset the others to their defaults.
+	conf := b.snapshotForMerge()
 	if val, ok := d.GetOk("max_body_size"); ok {
 		conf["max_body_size"] = val
 	}
@@ -136,22 +161,28 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}, nil
 	}
 
-	// Build the transport the TLS settings call for; it is installed only once
-	// the whole write has succeeded. Without custom TLS it is the shared one,
-	// so clearing TLS stops using the transport built for it.
+	// Build the transport the TLS settings call for if they changed (compared
+	// against what is running); it is installed only once the whole write has
+	// succeeded. Without custom TLS it is the shared one, so clearing TLS stops
+	// using the transport built for it.
+	b.mu.RLock()
+	tlsChanged := b.tlsSkipVerify != parsed.TLSSkipVerify || b.caData != parsed.CAData
+	b.mu.RUnlock()
 	var transport http.RoundTripper
-	if parsed.TLSSkipVerify || parsed.CAData != "" {
-		custom, err := newTransportWithTLS(parsed.CAData, parsed.TLSSkipVerify)
-		if err != nil {
-			return &logical.Response{
-				StatusCode: http.StatusBadRequest,
-				Err:        err,
-			}, nil
+	if tlsChanged {
+		if parsed.TLSSkipVerify || parsed.CAData != "" {
+			custom, err := newTransportWithTLS(parsed.CAData, parsed.TLSSkipVerify)
+			if err != nil {
+				return &logical.Response{
+					StatusCode: http.StatusBadRequest,
+					Err:        err,
+				}, nil
+			}
+			transport = custom
+		} else {
+			initTransport()
+			transport = sharedTransport
 		}
-		transport = custom
-	} else {
-		initTransport()
-		transport = sharedTransport
 	}
 
 	if b.StorageView != nil {
@@ -186,7 +217,9 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 	b.mu.Unlock()
 	b.SetMaxBodySize(parsed.MaxBodySize)
 	b.SetTimeout(parsed.Timeout)
-	b.SetTransport(transport)
+	if tlsChanged {
+		b.SetTransport(transport)
+	}
 	b.StreamingBackend.SetTransparentConfig(tc)
 
 	return &logical.Response{

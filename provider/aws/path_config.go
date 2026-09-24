@@ -80,6 +80,27 @@ func (b *awsBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 	}, nil
 }
 
+// snapshotForMerge returns the running configuration in the shape parseConfig
+// takes, as the base a config write overlays. A value never set is left out,
+// so parseConfig gives it its default as before.
+func (b *awsBackend) snapshotForMerge() map[string]any {
+	proxyDomains, skipVerify, caData := b.settings()
+	conf := map[string]any{
+		"tls_skip_verify": skipVerify,
+		"ca_data":         caData,
+	}
+	if proxyDomains != nil {
+		conf["proxy_domains"] = proxyDomains
+	}
+	if maxBodySize := b.MaxBodySize(); maxBodySize > 0 {
+		conf["max_body_size"] = maxBodySize
+	}
+	if timeout := b.Timeout(); timeout > 0 {
+		conf["timeout"] = timeout.String()
+	}
+	return conf
+}
+
 // handleConfigWrite handles writing the AWS provider configuration.
 //
 // A write changes nothing until it has succeeded: every value is validated and
@@ -90,8 +111,10 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
 
-	// Build config map from field data
-	conf := make(map[string]any)
+	// A write is a partial update: it starts from what the mount is running
+	// and overlays only the keys the request names, so setting one key does
+	// not reset the others to their defaults.
+	conf := b.snapshotForMerge()
 
 	// Apply values from request
 	if val, ok := d.GetOk("proxy_domains"); ok {

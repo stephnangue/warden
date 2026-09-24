@@ -221,6 +221,53 @@ func assertUnchanged(t *testing.T, b *awsBackend, registry any) {
 	assert.True(t, verifiesTLS(t, b), "TLS verification must still be on")
 }
 
+// A write names some keys; every key it does not name keeps its value. Before,
+// each unnamed key was reset to its default, so setting a default role
+// dropped the mount's proxy domains back to localhost and turned its custom
+// TLS off.
+func TestHandleConfigWrite_PartialWriteKeepsUnnamedKeys(t *testing.T) {
+	storage := newInmemStorage()
+	b := configuredBackend(storage)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{
+		"proxy_domains": "proxy.example.com", "timeout": 90, "max_body_size": 2048,
+		"tls_skip_verify": true,
+	}).StatusCode)
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"default_role": "reader"}).StatusCode)
+
+	domains, skipVerify, _ := b.settings()
+	assert.Equal(t, []string{"proxy.example.com"}, domains)
+	assert.True(t, skipVerify)
+	assert.False(t, verifiesTLS(t, b), "tls_skip_verify must have survived a write that did not name it")
+	assert.Equal(t, 90*time.Second, b.Timeout())
+	assert.Equal(t, int64(2048), b.MaxBodySize())
+	assert.Equal(t, "reader", b.TransparentConfig().DefaultAuthRole)
+
+	// And what storage holds is the merged whole.
+	entry, err := storage.Get(context.Background(), "config")
+	require.NoError(t, err)
+	var stored map[string]any
+	require.NoError(t, entry.DecodeJSON(&stored))
+	assert.Equal(t, []any{"proxy.example.com"}, stored["proxy_domains"])
+	assert.Equal(t, "1m30s", stored["timeout"])
+	assert.Equal(t, true, stored["tls_skip_verify"])
+}
+
+// A value set explicitly still replaces the running one, and clearing TLS
+// settings goes back to verifying.
+func TestHandleConfigWrite_ExplicitValuesStillReplace(t *testing.T) {
+	b := configuredBackend(newInmemStorage())
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"tls_skip_verify": true}).StatusCode)
+	require.False(t, verifiesTLS(t, b))
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{
+		"tls_skip_verify": false, "proxy_domains": "other.example.com",
+	}).StatusCode)
+	domains, _, _ := b.settings()
+	assert.Equal(t, []string{"other.example.com"}, domains)
+	assert.True(t, verifiesTLS(t, b))
+}
+
 // A rejected write changes nothing — not the domains, the limits, the
 // transparent config, the processors, nor the transport. Before, the write
 // below had installed its domains, its processors and a transport that skips
