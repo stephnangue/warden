@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/audit"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -214,6 +215,22 @@ func TestRenderGatewayFailure_Classes(t *testing.T) {
 			resp:       logical.ErrorResponse(issue),
 			wantClass:  logical.GatewayFailureMint,
 			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			// The upstream refused the credential Warden presented: a
+			// status clients do not retry, since every retry would ask again.
+			name: "credential refused by the upstream",
+			resp: logical.ErrorResponse(&logical.CredentialIssueError{Spec: "s",
+				Err: &httputil.StatusError{Status: http.StatusBadRequest, Err: errors.New("invalid_grant")}}),
+			wantClass:  logical.GatewayFailureMint,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "credential upstream unavailable",
+			resp: logical.ErrorResponse(&logical.CredentialIssueError{Spec: "s",
+				Err: &httputil.StatusError{Status: http.StatusBadGateway, Err: errors.New("bad gateway")}}),
+			wantClass:  logical.GatewayFailureMint,
+			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name:       "bad request",

@@ -2,6 +2,8 @@ package httputil
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -85,6 +87,14 @@ func TestExecuteWithRetry_NoRetryOnNonRetryableStatus(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected 1 call (no retry on 4xx), got %d", got)
+	}
+	// The status survives the caller wrapping the error, with the same text.
+	var statusErr *StatusError
+	if wrapped := fmt.Errorf("token request: %w", err); !errors.As(wrapped, &statusErr) || statusErr.HTTPStatus() != http.StatusBadRequest {
+		t.Fatalf("want a StatusError with 400 through wrapping, got %T %v", err, err)
+	}
+	if err.Error() != "status 400: " {
+		t.Fatalf("error text changed: %q", err.Error())
 	}
 }
 

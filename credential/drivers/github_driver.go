@@ -370,10 +370,12 @@ func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.Priva
 		// key has no fresher copy to fetch — so the caller decides by passing
 		// chained.
 		if chained && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-			return "", time.Time{}, fmt.Errorf("github: installation token request rejected: %w (status %d: %s)",
-				credential.ErrChainedSecretRejected, resp.StatusCode, string(respBody))
+			return "", time.Time{}, &httputil.StatusError{Status: resp.StatusCode,
+				Err: fmt.Errorf("github: installation token request rejected: %w (status %d: %s)",
+					credential.ErrChainedSecretRejected, resp.StatusCode, string(respBody))}
 		}
-		return "", time.Time{}, fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", time.Time{}, &httputil.StatusError{Status: resp.StatusCode,
+			Err: fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, string(respBody))}
 	}
 
 	var result struct {

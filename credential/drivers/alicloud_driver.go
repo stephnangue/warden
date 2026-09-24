@@ -831,7 +831,10 @@ func (d *AlicloudDriver) callJSON(
 				lastErr = alicloudErrorFromEnvelope(env)
 				continue
 			}
-			return nil, alicloudErrorFromEnvelope(env)
+			// A refusal: keep the status it came with, so a caller can tell it
+			// from a transient failure. A transient code keeps none — its
+			// status (often 400, for Throttling) would read as a refusal.
+			return nil, &httputil.StatusError{Status: status, Err: alicloudErrorFromEnvelope(env)}
 		}
 
 		// The 4xx statuses above are marked OK only to get their bodies back for
@@ -841,8 +844,8 @@ func (d *AlicloudDriver) callJSON(
 		// the whole point: callers that discard the body (rotation cleanup) would
 		// otherwise read it as success and silently leave a live key in place.
 		if status != http.StatusOK {
-			return nil, fmt.Errorf("alicloud %s returned HTTP %d with an unrecognised body: %s",
-				query.Get("Action"), status, alicloudBodyPreview(respBody))
+			return nil, &httputil.StatusError{Status: status, Err: fmt.Errorf("alicloud %s returned HTTP %d with an unrecognised body: %s",
+				query.Get("Action"), status, alicloudBodyPreview(respBody))}
 		}
 
 		return respBody, nil

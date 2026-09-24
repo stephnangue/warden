@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,11 +84,14 @@ func TestPostOAuthToken_ClassifiesErrorBody(t *testing.T) {
 		status   int
 		body     string
 		wantCode string
+		// upstream is the status a failed mint reads through the error:
+		// the transport status, or 400 for an OAuth error carried on a 200.
+		upstream int
 	}{
-		{name: "RFC 6749 400", status: http.StatusBadRequest, body: `{"error":"invalid_grant","error_description":"expired"}`, wantCode: "invalid_grant"},
-		{name: "RFC 6749 401", status: http.StatusUnauthorized, body: `{"error":"invalid_client"}`, wantCode: "invalid_client"},
-		{name: "error carried on a 200", status: http.StatusOK, body: `{"error":"access_denied"}`, wantCode: "access_denied"},
-		{name: "unparseable 400 is classified by status", status: http.StatusBadRequest, body: `<html>bad gateway</html>`},
+		{name: "RFC 6749 400", status: http.StatusBadRequest, body: `{"error":"invalid_grant","error_description":"expired"}`, wantCode: "invalid_grant", upstream: http.StatusBadRequest},
+		{name: "RFC 6749 401", status: http.StatusUnauthorized, body: `{"error":"invalid_client"}`, wantCode: "invalid_client", upstream: http.StatusUnauthorized},
+		{name: "error carried on a 200", status: http.StatusOK, body: `{"error":"access_denied"}`, wantCode: "access_denied", upstream: http.StatusBadRequest},
+		{name: "unparseable 400 is classified by status", status: http.StatusBadRequest, body: `<html>bad gateway</html>`, upstream: http.StatusBadRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,6 +103,12 @@ func TestPostOAuthToken_ClassifiesErrorBody(t *testing.T) {
 			require.True(t, errors.As(err, &tee), "want a classified tokenEndpointError, got %T", err)
 			assert.Equal(t, tt.status, tee.status)
 			assert.Equal(t, tt.wantCode, tee.code)
+
+			// A refusal's status is readable through the error, so a failed
+			// mint can be answered as a refusal rather than a server error.
+			status, ok := credential.UpstreamStatus(fmt.Errorf("mint: %w", err))
+			assert.True(t, ok)
+			assert.Equal(t, tt.upstream, status)
 		})
 	}
 }

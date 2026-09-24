@@ -688,6 +688,53 @@ func TestAWSDriver_WebIdentity_HappyPath(t *testing.T) {
 	assert.Greater(t, ttl, time.Duration(0))
 }
 
+// STS refusing the assertion is a refusal, and a failed mint is answered as
+// one; STS failing to reach Warden's issuer is answered 400 too, but is
+// transient, and must read as such so a client retries it.
+func TestAWSDriver_WebIdentity_FailureStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name, code string
+		want       int
+	}{
+		{"assertion refused", "InvalidIdentityToken", http.StatusBadRequest},
+		{"issuer unreachable from STS", "IDPCommunicationError", http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/xml")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <Error><Type>Sender</Type><Code>` + tc.code + `</Code><Message>no</Message></Error>
+  <RequestId>r</RequestId>
+</ErrorResponse>`))
+			}))
+			defer srv.Close()
+
+			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+			drv := &AWSDriver{
+				credSource: &credential.CredSource{Type: credential.SourceTypeAWS, Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"})},
+				logger:     log,
+				region:     "us-east-1",
+				anonSTSClient: sts.New(sts.Options{
+					Region:           "us-east-1",
+					BaseEndpoint:     aws.String(srv.URL),
+					Credentials:      aws.AnonymousCredentials{},
+					RetryMaxAttempts: 1,
+				}),
+			}
+			spec := &credential.CredSpec{Name: "wid", Config: credential.NewConfig(map[string]string{
+				"mint_method": "sts_assume_role", "role_arn": "arn:aws:iam::123456789012:role/App", "ttl": "15m",
+			})}
+			_, _, _, _, err := drv.MintCredentialWithExchange(context.TODO(), spec,
+				&credential.ExchangeInputs{SubjectToken: "eyJ.warden.assertion", SubjectTokenType: credential.TokenTypeJWT})
+			require.Error(t, err)
+			status, ok := credential.UpstreamStatus(err)
+			require.True(t, ok, "the failure must carry a status: %v", err)
+			assert.Equal(t, tc.want, status)
+		})
+	}
+}
+
 // TestAWSDriver_WebIdentity_ForwardedSubject_HappyPath drives the agent_identity
 // federation topology: the subject is the caller's inbound JWT that Warden forwards
 // untouched (not a Warden-minted assertion), so ResolveSubjectToken and SubjectCacheIdentity

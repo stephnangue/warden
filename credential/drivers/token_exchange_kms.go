@@ -67,7 +67,7 @@ func classifyCapabilitySignError(err error) error {
 		case http.StatusForbidden, http.StatusUnauthorized:
 			// The token was rejected: expired, or revoked under us. A fresh capability
 			// is exactly the fix.
-			return fmt.Errorf("token_exchange: the signing capability was refused: %w", credential.ErrChainedSecretRejected)
+			return fmt.Errorf("token_exchange: the signing capability was refused (%w): %w", err, credential.ErrChainedSecretRejected)
 		case http.StatusBadRequest:
 			// Most often the pinned version has fallen below the key's minimum after a
 			// rotation, which re-minting resolves by picking up the new version. A

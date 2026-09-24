@@ -712,6 +712,18 @@ func (e *tokenEndpointError) Error() string {
 
 func (e *tokenEndpointError) Unwrap() error { return e.err }
 
+// HTTPStatus is the status the token endpoint answered with; 0 when it never
+// answered (a transport failure, which Unwrap then carries). A parsed OAuth2
+// error code is a refusal whatever the transport status — some providers
+// report refusals on a 200 — so such an answer reads as the 400 RFC 6749
+// gives it.
+func (e *tokenEndpointError) HTTPStatus() int {
+	if e.code != "" && e.status < http.StatusBadRequest {
+		return http.StatusBadRequest
+	}
+	return e.status
+}
+
 // isRefreshTokenRejection reports whether a postTokenRequest error indicates the
 // refresh token (grant) was rejected: an explicit invalid_grant code, or — when
 // the body carried no code — an HTTP 400/401 status (the RFC 6749 statuses for a
