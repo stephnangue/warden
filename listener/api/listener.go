@@ -74,9 +74,7 @@ func NewApiListener(cfg ApiListenerConfig, httpHandler http.Handler) (*ApiListen
 	}
 
 	var handler http.Handler = httpHandler
-	handler = certForwardingMiddleware(cfg.TrustedProxies)(handler)
-	handler = middleware.RealIP(handler)
-	handler = middleware.RequestID(handler)
+	handler = trustedForwardingMiddleware(cfg.TrustedProxies)(handler)
 	handler = middleware.Recoverer(handler)
 
 	readTimeout := cfg.ReadTimeout

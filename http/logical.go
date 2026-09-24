@@ -3,12 +3,12 @@ package http
 import (
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/core"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -141,32 +141,11 @@ func operationFromHTTPMethod(r *http.Request) logical.Operation {
 	}
 }
 
-// extractClientIP extracts the client IP from the request.
-// It checks X-Real-IP header first (set by reverse proxies),
-// then X-Forwarded-For, then falls back to RemoteAddr.
+// extractClientIP is the client's address, as the listener resolved it into
+// r.RemoteAddr. X-Real-IP and X-Forwarded-For are not read here: the listener
+// honours them only from a trusted proxy or a forwarding node.
 func extractClientIP(r *http.Request) string {
-	// Check X-Real-IP first (commonly set by nginx)
-	clientIP := r.Header.Get("X-Real-IP")
-	if clientIP != "" {
-		return clientIP
-	}
-
-	// Check X-Forwarded-For
-	forwarded := r.Header.Get("X-Forwarded-For")
-	if forwarded != "" {
-		// Take the first IP in the list
-		if idx := strings.Index(forwarded, ","); idx != -1 {
-			return strings.TrimSpace(forwarded[:idx])
-		}
-		return strings.TrimSpace(forwarded)
-	}
-
-	// Fall back to RemoteAddr
-	clientIP = r.RemoteAddr
-	if host, _, err := net.SplitHostPort(clientIP); err == nil {
-		clientIP = host
-	}
-	return clientIP
+	return listener.ClientIP(r)
 }
 
 // errorToStatusCode maps errors to appropriate HTTP status codes.

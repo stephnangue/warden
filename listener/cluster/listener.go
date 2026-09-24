@@ -6,10 +6,10 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 )
@@ -64,20 +64,28 @@ func NewClusterListener(cfg ClusterListenerConfig) (*ClusterListener, error) {
 	// cert from headers (X-SSL-Client-Cert / XFCC) that the standby's
 	// reverse proxy preserved. This is safe because the cluster listener
 	// enforces mTLS — only authenticated cluster nodes can send requests here.
+	//
+	// The client's address and the request id are taken from the forwarding
+	// node the same way, for the same reason: that node already resolved both
+	// from the client's connection, and passes them on.
 	clusterHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		if cert := listener.ParseForwardedCert(r); cert != nil {
 			ctx = listener.WithForwardedClientCert(ctx, cert)
 		}
+		if ip := forwardingNodeClientIP(r); ip != nil {
+			if _, port, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				r.RemoteAddr = net.JoinHostPort(ip.String(), port)
+			} else {
+				r.RemoteAddr = ip.String()
+			}
+		}
+		ctx = listener.WithRequestID(ctx, forwardedRequestID(r))
 		cfg.Handler.ServeHTTP(w, r.WithContext(ctx))
 	})
 
 	server := &http.Server{
-		// A forwarded request keeps the id the forwarding node assigned it
-		// (X-Request-Id), or gets one, so it is audited and answered under an
-		// id like any other. Taking the id from the header is safe for the
-		// same reason as the cert headers above.
-		Handler:      middleware.RequestID(clusterHandler),
+		Handler:      clusterHandler,
 		IdleTimeout:  time.Minute,
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
@@ -111,6 +119,32 @@ func NewClusterListener(cfg ClusterListenerConfig) (*ClusterListener, error) {
 		address:       cfg.Address,
 		tlsConfigFunc: cfg.TLSConfigFunc,
 	}, nil
+}
+
+// forwardingNodeClientIP is the client's address as the forwarding node
+// resolved it: the rightmost X-Forwarded-For entry, which that node appended.
+// The entries to its left came from the client or its proxies and were
+// already weighed by the forwarding node. Nil when there is none.
+func forwardingNodeClientIP(r *http.Request) net.IP {
+	values := r.Header.Values("X-Forwarded-For")
+	if len(values) == 0 {
+		return nil
+	}
+	entries := strings.Split(values[len(values)-1], ",")
+	return net.ParseIP(strings.TrimSpace(entries[len(entries)-1]))
+}
+
+// forwardedRequestID is the id the forwarding node gave the request, taken
+// from the internal header and removed so it goes no further. Without it, the
+// request gets a new id, so no forwarded request is handled without one. The
+// request's X-Request-Id is not a fallback: it is whatever the client sent.
+func forwardedRequestID(r *http.Request) string {
+	id := r.Header.Get(listener.ForwardedRequestIDHeader)
+	r.Header.Del(listener.ForwardedRequestIDHeader)
+	if id == "" {
+		id = listener.NewRequestID()
+	}
+	return id
 }
 
 func (l *ClusterListener) Addr() string {
