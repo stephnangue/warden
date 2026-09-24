@@ -110,6 +110,12 @@ type mcpAWSBackend struct {
 	listenTimeout time.Duration
 	tlsSkipVerify bool
 	caData        string
+
+	// installedTransport is the per-mount transport currently in use, or nil
+	// when this mount rides the shared one. The framework's Transport() returns
+	// a stable wrapper rather than what was installed, so a replacement cannot
+	// otherwise be found again to close.
+	installedTransport *http.Transport
 }
 
 // shared transport, initialized once per process.
@@ -353,12 +359,14 @@ func (b *mcpAWSBackend) resolveConfig(conf map[string]any) (*resolvedConfig, err
 // installConfig makes r the live configuration. It cannot fail.
 func (b *mcpAWSBackend) installConfig(r *resolvedConfig) {
 	b.mu.Lock()
+	outgoing := b.installedTransport
 	b.upstreamURL = r.upstreamURL
 	b.configRegion = r.configRegion
 	b.region = r.region
 	b.listenTimeout = r.listenTimeout
 	b.tlsSkipVerify = r.tlsSkipVerify
 	b.caData = r.caData
+	b.installedTransport = r.perMount
 	b.mu.Unlock()
 
 	// Framework-side fields are atomic; no lock needed.
@@ -371,6 +379,13 @@ func (b *mcpAWSBackend) installConfig(r *resolvedConfig) {
 	// old or new pointer, never a torn one — TransparentConfig is replaced
 	// wholesale, not mutated in place.
 	b.StreamingBackend.SetTransparentConfig(r.transparent)
+
+	// Release the idle connections of the transport just replaced. Only a
+	// per-mount one is ours to close — sharedTransport serves every other
+	// mcp_aws mount. In-flight requests keep the connections they hold.
+	if outgoing != nil && outgoing != r.perMount {
+		outgoing.CloseIdleConnections()
+	}
 }
 
 // Initialize loads persisted configuration from storage. The embedded

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -546,5 +548,43 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		snap := b.snapshot()
 		require.Equal(t, "eu-west-1", snap.region, "iteration %d lost the region write", i)
 		require.Equal(t, 77*time.Second, snap.timeout, "iteration %d lost the timeout write", i)
+	}
+}
+
+// A per-mount transport a config write replaces has its idle connections
+// closed. Before, they stayed open until the idle timeout, one set for every
+// write that rebuilt the transport.
+func TestConfigWrite_ClosesReplacedTransport(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	b := setupBackend(t)
+	require.Equal(t, 200, writeConfig(b, map[string]any{"auto_auth_path": "auth/jwt/", "tls_skip_verify": true}).StatusCode)
+	require.NotNil(t, b.installedTransport)
+
+	// Leave one idle keep-alive connection on the per-mount transport.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := b.snapshot().transport.RoundTrip(req)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	require.Equal(t, 200, writeConfig(b, map[string]any{"tls_skip_verify": false}).StatusCode)
+	assert.Nil(t, b.installedTransport, "clearing TLS goes back to the shared transport")
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replaced transport's idle connection was not closed")
 	}
 }
