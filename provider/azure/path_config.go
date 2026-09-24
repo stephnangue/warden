@@ -70,13 +70,14 @@ func (b *azureBackend) pathConfig() *framework.Path {
 // handleConfigRead handles reading the Azure provider configuration
 func (b *azureBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	tc := b.TransparentConfig()
+	skipVerify, caData := b.tlsSettings()
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
 			"max_body_size":   b.MaxBodySize(),
 			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
@@ -85,63 +86,70 @@ func (b *azureBackend) handleConfigRead(ctx context.Context, req *logical.Reques
 	}, nil
 }
 
-// handleConfigWrite handles writing the Azure provider configuration
+// handleConfigWrite handles writing the Azure provider configuration.
+//
+// A write changes nothing until it has succeeded: every value is validated and
+// built — the transport included — into locals, persisted, and only then
+// applied, so a rejected write leaves the running configuration exactly as it
+// was, and a storage failure leaves it matching storage.
 func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	// For max_body_size: use provided value, or apply default if not yet set
+	maxBodySize := b.MaxBodySize()
 	if val, ok := d.GetOk("max_body_size"); ok {
-		b.SetMaxBodySize(val.(int64))
-	} else if b.MaxBodySize() == 0 {
-		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+		maxBodySize = val.(int64)
+	} else if maxBodySize == 0 {
+		maxBodySize = framework.DefaultMaxBodySize
 	}
 
 	// For timeout: use provided value, or apply default if not yet set
+	timeout := b.Timeout()
 	if val, ok := d.GetOk("timeout"); ok {
 		// TypeDurationSecond returns int (seconds)
-		b.SetTimeout(time.Duration(val.(int)) * time.Second)
-	} else if b.Timeout() == 0 {
-		b.SetTimeout(framework.DefaultTimeout)
+		timeout = time.Duration(val.(int)) * time.Second
+	} else if timeout == 0 {
+		timeout = framework.DefaultTimeout
 	}
 
-	// Handle TLS settings
-	tlsChanged := false
+	// Handle TLS settings, compared against what is running
+	skipVerify, caData := b.tlsSettings()
+	oldSkipVerify, oldCAData := skipVerify, caData
 	if val, ok := d.GetOk("tls_skip_verify"); ok {
-		newVal := val.(bool)
-		if b.tlsSkipVerify != newVal {
-			tlsChanged = true
-		}
-		b.tlsSkipVerify = newVal
+		skipVerify = val.(bool)
 	}
 	if val, ok := d.GetOk("ca_data"); ok {
-		newVal := val.(string)
-		if b.caData != newVal {
-			tlsChanged = true
-		}
-		b.caData = newVal
+		caData = val.(string)
 	}
 
-	// Update transport if TLS settings changed
+	// Build the transport now if TLS settings changed; it is installed only
+	// once the whole write has succeeded.
+	tlsChanged := skipVerify != oldSkipVerify || caData != oldCAData
+	var transport http.RoundTripper
 	if tlsChanged {
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if skipVerify || caData != "" {
+			custom, err := newTransportWithTLS(caData, skipVerify)
 			if err != nil {
 				return &logical.Response{
 					StatusCode: http.StatusBadRequest,
 					Err:        logical.ErrBadRequest(err.Error()),
 				}, nil
 			}
-			b.SetTransport(transport)
+			transport = custom
 		} else {
 			initTransport()
-			b.SetTransport(sharedTransport)
+			transport = sharedTransport
 		}
 	}
 
 	// Transparent mode settings — build new config from current values + overrides
+	current := b.TransparentConfig()
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig().AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig().DefaultAuthRole,
-		UserAuthPath:    b.TransparentConfig().UserAuthPath,
-		UserAuthRole:    b.TransparentConfig().UserAuthRole,
+		AutoAuthPath:    current.AutoAuthPath,
+		DefaultAuthRole: current.DefaultAuthRole,
+		UserAuthPath:    current.UserAuthPath,
+		UserAuthRole:    current.UserAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -177,15 +185,13 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		}, nil
 	}
 
-	b.StreamingBackend.SetTransparentConfig(tc)
-
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":   b.MaxBodySize(),
-			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"max_body_size":   maxBodySize,
+			"timeout":         timeout.String(),
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
@@ -204,6 +210,15 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 			}, nil
 		}
 	}
+
+	// Apply. Nothing below can fail.
+	b.SetMaxBodySize(maxBodySize)
+	b.SetTimeout(timeout)
+	b.setTLSSettings(skipVerify, caData)
+	if tlsChanged {
+		b.SetTransport(transport)
+	}
+	b.StreamingBackend.SetTransparentConfig(tc)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

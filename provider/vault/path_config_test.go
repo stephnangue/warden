@@ -2,13 +2,21 @@ package vault
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHandleConfigRead(t *testing.T) {
@@ -238,6 +246,146 @@ func TestHandleConfigWrite_TLSChange(t *testing.T) {
 	// across reconfigures; the underlying transport changes through SetTransport,
 	// observed via Transport().
 	assert.True(t, b.Transport() != sharedTransport, "transport should be a new instance")
+}
+
+// configuredBackend is a backend running a known configuration, over the
+// shared transport, with storage.
+func configuredBackend(t *testing.T, storage sdklogical.Storage) *vaultBackend {
+	t.Helper()
+	b := &vaultBackend{StreamingBackend: &framework.StreamingBackend{Logger: testLogger()}}
+	b.setConnection("https://vault.example.com:8200", false, "")
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(30 * time.Second)
+	b.SetTransparentConfig(&framework.TransparentConfig{AutoAuthPath: "auth/jwt/"})
+	initTransport()
+	b.InitProxy(sharedTransport)
+	b.StorageView = storage
+	return b
+}
+
+func writeConfig(b *vaultBackend, raw map[string]interface{}) *logical.Response {
+	resp, _ := b.handleConfigWrite(context.Background(), nil,
+		&framework.FieldData{Raw: raw, Schema: b.pathConfig().Fields})
+	return resp
+}
+
+// assertUnchanged checks the running configuration is still configuredBackend's.
+func assertUnchanged(t *testing.T, b *vaultBackend) {
+	t.Helper()
+	assert.Equal(t, "https://vault.example.com:8200", b.address())
+	skipVerify, caData := b.tlsSettings()
+	assert.False(t, skipVerify)
+	assert.Empty(t, caData)
+	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize())
+	assert.Equal(t, 30*time.Second, b.Timeout())
+	assert.Equal(t, "auth/jwt/", b.TransparentConfig().AutoAuthPath)
+}
+
+// A rejected write changes nothing: not the address, the limits, the
+// transparent config — and not the transport, which is proved by what it does.
+// Before, the write below turned TLS verification off on the running backend
+// and only then refused it.
+func TestHandleConfigWrite_RejectedWriteChangesNothing(t *testing.T) {
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer tlsServer.Close()
+	verifies := func(b *vaultBackend) bool {
+		req, _ := http.NewRequest(http.MethodGet, tlsServer.URL, nil)
+		resp, err := b.Transport().RoundTrip(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		// A self-signed server fails verification, and nothing else is wrong.
+		var verifyErr *tls.CertificateVerificationError
+		return errors.As(err, &verifyErr)
+	}
+
+	storage := newInmemStorage()
+	b := configuredBackend(t, storage)
+	require.True(t, verifies(b))
+
+	resp := writeConfig(b, map[string]interface{}{
+		"vault_address":   "https://other.example.com:8200",
+		"timeout":         99,
+		"max_body_size":   int64(1024),
+		"tls_skip_verify": true,
+		"auto_auth_path":  "",
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assertUnchanged(t, b)
+	assert.True(t, verifies(b), "a rejected write must not have turned TLS verification off")
+	assert.Empty(t, storage.data, "nothing is persisted")
+
+	// The same write, valid, does all of it.
+	resp = writeConfig(b, map[string]interface{}{
+		"vault_address":   "https://other.example.com:8200",
+		"tls_skip_verify": true,
+		"auto_auth_path":  "auth/jwt/",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "https://other.example.com:8200", b.address())
+	assert.False(t, verifies(b))
+}
+
+// A bad ca_data is refused every time it is sent. Before, the first refusal
+// left it recorded as current, so the second saw no change, skipped building
+// the transport that would have refused it, and saved it.
+func TestHandleConfigWrite_BadCADataRefusedEveryTime(t *testing.T) {
+	storage := newInmemStorage()
+	b := configuredBackend(t, storage)
+	for i := 0; i < 2; i++ {
+		resp := writeConfig(b, map[string]interface{}{"ca_data": "not-a-certificate", "auto_auth_path": "auth/jwt/"})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "attempt %d", i+1)
+	}
+	assertUnchanged(t, b)
+	assert.Empty(t, storage.data)
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write that cannot be persisted is not applied either, so the running
+// configuration never differs from what the node would load on restart.
+func TestHandleConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
+	b := configuredBackend(t, failingStorage{newInmemStorage()})
+	resp := writeConfig(b, map[string]interface{}{
+		"vault_address":  "https://other.example.com:8200",
+		"timeout":        99,
+		"auto_auth_path": "auth/other/",
+	})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assertUnchanged(t, b)
+}
+
+// Config writes replace the address while requests read it; run under -race.
+func TestHandleConfigWrite_ConcurrentWithRequests(t *testing.T) {
+	b := configuredBackend(t, newInmemStorage())
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				writeConfig(b, map[string]interface{}{
+					"vault_address":  fmt.Sprintf("https://vault-%d.example.com:8200", i),
+					"auto_auth_path": "auth/jwt/",
+				})
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				u, err := b.buildTargetURL("/v1/vault/gateway/v1/secret/data/x", "")
+				assert.NoError(t, err)
+				assert.True(t, strings.HasPrefix(u, "https://vault"), u)
+				_, _ = b.handleConfigRead(context.Background(), nil, nil)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestPathConfig_Schema(t *testing.T) {

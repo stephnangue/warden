@@ -453,8 +453,10 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 
 	// Vault provider
 	NSAPIRequest(t, "POST", "sys/providers/vault", ns, port, `{"type":"vault"}`)
+	// One write: the provider refuses a config without auto_auth_path, and a
+	// refused write applies nothing.
 	NSAPIRequest(t, "PUT", "vault/config", ns, port,
-		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s"}`)
+		`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s","auto_auth_path":"auth/jwt/"}`)
 
 	// Credential source
 	NSAPIRequest(t, "POST", "sys/cred/sources/vault-e2e", ns, port,
@@ -475,10 +477,6 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 	// JWT role
 	NSAPIRequest(t, "POST", "auth/jwt/role/e2e-reader", ns, port,
 		`{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
-
-	// Configure auth path
-	NSAPIRequest(t, "POST", "vault/config", ns, port,
-		`{"auto_auth_path":"auth/jwt/"}`)
 }
 
 // TeardownNSVaultEnv removes all resources created by SetupNSVaultEnv.

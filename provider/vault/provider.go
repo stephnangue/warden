@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/stephnangue/warden/framework"
@@ -42,9 +43,38 @@ var vaultUnauthenticatedPaths = []string{
 // vaultBackend is the streaming backend for Vault provider operations
 type vaultBackend struct {
 	*framework.StreamingBackend
+
+	// mu guards the three fields below, which a config write replaces while
+	// requests read the address.
+	mu            sync.RWMutex
 	vaultAddress  string
 	tlsSkipVerify bool
 	caData        string
+
+	// configWriteMu serializes config writes, so each one validates, persists
+	// and applies against the configuration the previous one left.
+	configWriteMu sync.Mutex
+}
+
+// address is the Vault server requests go to.
+func (b *vaultBackend) address() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.vaultAddress
+}
+
+// tlsSettings is the TLS configuration of the transport to Vault.
+func (b *vaultBackend) tlsSettings() (skipVerify bool, caData string) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.tlsSkipVerify, b.caData
+}
+
+// setConnection replaces the address and TLS settings together.
+func (b *vaultBackend) setConnection(address string, skipVerify bool, caData string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.vaultAddress, b.tlsSkipVerify, b.caData = address, skipVerify, caData
 }
 
 // extractTokens resolves the two principals on a Vault gateway request.
@@ -143,11 +173,9 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	// Apply configuration if provided
 	if len(conf.Config) > 0 {
 		parsedConfig := parseConfig(conf.Config)
-		b.vaultAddress = parsedConfig.VaultAddress
+		b.setConnection(parsedConfig.VaultAddress, parsedConfig.TLSSkipVerify, parsedConfig.CAData)
 		b.SetMaxBodySize(parsedConfig.MaxBodySize)
 		b.SetTimeout(parsedConfig.Timeout)
-		b.tlsSkipVerify = parsedConfig.TLSSkipVerify
-		b.caData = parsedConfig.CAData
 
 		// Honour transparent + per-user auth supplied at mount-enable time, not
 		// only via the config-write endpoint. Without this the fields are
@@ -160,8 +188,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		})
 
 		// Update transport if custom TLS config is set
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newVaultTransport(b.caData, b.tlsSkipVerify)
+		if parsedConfig.TLSSkipVerify || parsedConfig.CAData != "" {
+			transport, err := newVaultTransport(parsedConfig.CAData, parsedConfig.TLSSkipVerify)
 			if err != nil {
 				return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 			}
@@ -177,6 +205,10 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+	// The mount is routed before it is initialized, so a config write can
+	// arrive now; it must not interleave with loading the stored config.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	// Load persisted config from storage
 	entry, err := b.StorageView.Get(ctx, "config")
@@ -198,10 +230,8 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
-		b.vaultAddress = config.VaultAddress
+		b.setConnection(config.VaultAddress, config.TLSSkipVerify, config.CAData)
 		b.SetMaxBodySize(config.MaxBodySize)
-		b.tlsSkipVerify = config.TLSSkipVerify
-		b.caData = config.CAData
 		if config.Timeout != "" {
 			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
 				b.SetTimeout(timeout)
@@ -209,8 +239,8 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 		}
 
 		// Update transport if custom TLS config is set
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newVaultTransport(b.caData, b.tlsSkipVerify)
+		if config.TLSSkipVerify || config.CAData != "" {
+			transport, err := newVaultTransport(config.CAData, config.TLSSkipVerify)
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}

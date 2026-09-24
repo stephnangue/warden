@@ -75,14 +75,15 @@ func (b *vaultBackend) pathConfig() *framework.Path {
 // handleConfigRead handles reading the Vault provider configuration
 func (b *vaultBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	tc := b.TransparentConfig()
+	skipVerify, caData := b.tlsSettings()
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"vault_address":   b.vaultAddress,
+			"vault_address":   b.address(),
 			"max_body_size":   b.MaxBodySize(),
 			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
@@ -91,9 +92,22 @@ func (b *vaultBackend) handleConfigRead(ctx context.Context, req *logical.Reques
 	}, nil
 }
 
-// handleConfigWrite handles writing the Vault provider configuration
+// handleConfigWrite handles writing the Vault provider configuration.
+//
+// A write changes nothing until it has succeeded: every value is validated and
+// built — the transport included — into locals, persisted, and only then
+// applied, so a rejected write leaves the running configuration exactly as it
+// was, and a storage failure leaves it matching storage. Compared against what
+// is running, not against anything a failed write left behind.
 func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	// Apply values from request - framework already handles type conversion
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
+	address := b.address()
+	skipVerify, caData := b.tlsSettings()
+	oldSkipVerify, oldCAData := skipVerify, caData
+
+	// Values from the request - framework already handles type conversion
 	if val, ok := d.GetOk("vault_address"); ok {
 		addr := val.(string)
 		if err := validateVaultAddress(addr); err != nil {
@@ -102,58 +116,54 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 				Err:        logical.ErrBadRequest(err.Error()),
 			}, nil
 		}
-		b.vaultAddress = addr
+		address = addr
 	}
 
 	// For max_body_size: use provided value, or apply default if not yet set
+	maxBodySize := b.MaxBodySize()
 	if val, ok := d.GetOk("max_body_size"); ok {
-		b.SetMaxBodySize(val.(int64))
-	} else if b.MaxBodySize() == 0 {
-		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+		maxBodySize = val.(int64)
+	} else if maxBodySize == 0 {
+		maxBodySize = framework.DefaultMaxBodySize
 	}
 
 	// For timeout: use provided value, or apply default if not yet set
+	timeout := b.Timeout()
 	if val, ok := d.GetOk("timeout"); ok {
 		// TypeDurationSecond returns int (seconds)
-		b.SetTimeout(time.Duration(val.(int)) * time.Second)
-	} else if b.Timeout() == 0 {
-		b.SetTimeout(framework.DefaultTimeout)
+		timeout = time.Duration(val.(int)) * time.Second
+	} else if timeout == 0 {
+		timeout = framework.DefaultTimeout
 	}
 
-	tlsChanged := false
 	if val, ok := d.GetOk("tls_skip_verify"); ok {
-		newVal := val.(bool)
-		if b.tlsSkipVerify != newVal {
-			tlsChanged = true
-		}
-		b.tlsSkipVerify = newVal
+		skipVerify = val.(bool)
 	}
 	if val, ok := d.GetOk("ca_data"); ok {
-		newVal := val.(string)
-		if b.caData != newVal {
-			tlsChanged = true
-		}
-		b.caData = newVal
+		caData = val.(string)
 	}
 
-	// Update transport if TLS settings changed
+	// Build the transport now if TLS settings changed; it is installed only
+	// once the whole write has succeeded.
+	tlsChanged := skipVerify != oldSkipVerify || caData != oldCAData
+	var transport *http.Transport
 	if tlsChanged {
-		transport, err := newVaultTransport(b.caData, b.tlsSkipVerify)
+		var err error
+		transport, err = newVaultTransport(caData, skipVerify)
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusBadRequest,
 				Err:        logical.ErrBadRequest(err.Error()),
 			}, nil
 		}
-		b.SetTransport(transport)
 	}
-
 	// Transparent mode settings — build new config from current values + overrides
+	current := b.TransparentConfig()
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig().AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig().DefaultAuthRole,
-		UserAuthPath:    b.TransparentConfig().UserAuthPath,
-		UserAuthRole:    b.TransparentConfig().UserAuthRole,
+		AutoAuthPath:    current.AutoAuthPath,
+		DefaultAuthRole: current.DefaultAuthRole,
+		UserAuthPath:    current.UserAuthPath,
+		UserAuthRole:    current.UserAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -189,16 +199,14 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		}, nil
 	}
 
-	b.StreamingBackend.SetTransparentConfig(tc)
-
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"vault_address":   b.vaultAddress,
-			"max_body_size":   b.MaxBodySize(),
-			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"vault_address":   address,
+			"max_body_size":   maxBodySize,
+			"timeout":         timeout.String(),
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
@@ -217,6 +225,15 @@ func (b *vaultBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 			}, nil
 		}
 	}
+
+	// Apply. Nothing below can fail.
+	b.setConnection(address, skipVerify, caData)
+	b.SetMaxBodySize(maxBodySize)
+	b.SetTimeout(timeout)
+	if tlsChanged {
+		b.SetTransport(transport)
+	}
+	b.StreamingBackend.SetTransparentConfig(tc)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,
