@@ -2,6 +2,10 @@ package alicloud
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -241,4 +245,65 @@ func TestValidateConfig(t *testing.T) {
 		err := ValidateConfig(map[string]any{"unknown": "x"})
 		assert.Error(t, err)
 	})
+}
+
+func writeConfig(b *alicloudBackend, raw map[string]interface{}) *logical.Response {
+	resp, _ := b.handleConfigWrite(context.Background(), nil, makeFieldData(b.pathConfig(), raw))
+	return resp
+}
+
+// verifiesTLS reports whether the backend's transport verifies a server's
+// certificate: a request to a self-signed server fails verification exactly
+// then.
+func verifiesTLS(t *testing.T, b *alicloudBackend) bool {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := b.Transport().RoundTrip(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+	var verifyErr *tls.CertificateVerificationError
+	return errors.As(err, &verifyErr)
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write that cannot be persisted is not applied either: not its limits, its
+// domains, its transparent config, nor its transport. Before, all of them
+// were live by the time the storage write failed.
+func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
+	b := setupBackend(t)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"auto_auth_path": "auth/jwt/"}).StatusCode)
+	require.True(t, verifiesTLS(t, b))
+	b.StorageView = failingStorage{newInmemStorage()}
+
+	resp := writeConfig(b, map[string]interface{}{
+		"timeout": 99, "tls_skip_verify": true, "proxy_domains": "other.example.com", "auto_auth_path": "auth/other/",
+	})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Equal(t, DefaultTimeout, b.Timeout())
+	assert.Equal(t, "auth/jwt/", b.TransparentConfig().AutoAuthPath)
+	assert.NotEqual(t, []string{"other.example.com"}, b.getProxyDomains())
+	assert.True(t, verifiesTLS(t, b), "an unpersisted write must not have turned TLS verification off")
+}
+
+// Clearing TLS settings goes back to verifying transport. Before, only a
+// write that set them rebuilt the transport, so the one built to skip
+// verification stayed in use after they were cleared.
+func TestConfigWrite_ClearingTLSRestoresVerification(t *testing.T) {
+	b := setupBackend(t)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{
+		"tls_skip_verify": true, "auto_auth_path": "auth/jwt/",
+	}).StatusCode)
+	require.False(t, verifiesTLS(t, b))
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"auto_auth_path": "auth/jwt/"}).StatusCode)
+	assert.True(t, verifiesTLS(t, b))
 }

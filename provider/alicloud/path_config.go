@@ -79,7 +79,16 @@ func (b *alicloudBackend) handleConfigRead(ctx context.Context, req *logical.Req
 	}, nil
 }
 
+// handleConfigWrite handles writing the Alicloud provider configuration.
+//
+// A write changes nothing until it has succeeded: every value is validated and
+// built — the transport included — into locals, persisted, and only then
+// applied, so a rejected write leaves the running configuration exactly as it
+// was, and a storage failure leaves it matching storage.
 func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	conf := make(map[string]any)
 	if val, ok := d.GetOk("max_body_size"); ok {
 		conf["max_body_size"] = val
@@ -127,37 +136,33 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}, nil
 	}
 
-	b.mu.Lock()
-	b.SetMaxBodySize(parsed.MaxBodySize)
-	b.SetTimeout(parsed.Timeout)
-	b.tlsSkipVerify = parsed.TLSSkipVerify
-	b.caData = parsed.CAData
-	b.proxyDomains = parsed.ProxyDomains
-	b.mu.Unlock()
-
-	b.StreamingBackend.SetTransparentConfig(tc)
-
-	// Rebuild transport if TLS config changed
+	// Build the transport the TLS settings call for; it is installed only once
+	// the whole write has succeeded. Without custom TLS it is the shared one,
+	// so clearing TLS stops using the transport built for it.
+	var transport http.RoundTripper
 	if parsed.TLSSkipVerify || parsed.CAData != "" {
-		transport, err := newTransportWithTLS(parsed.CAData, parsed.TLSSkipVerify)
+		custom, err := newTransportWithTLS(parsed.CAData, parsed.TLSSkipVerify)
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusBadRequest,
 				Err:        err,
 			}, nil
 		}
-		b.SetTransport(transport)
+		transport = custom
+	} else {
+		initTransport()
+		transport = sharedTransport
 	}
 
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":   b.MaxBodySize(),
-			"timeout":         b.Timeout().String(),
+			"max_body_size":   parsed.MaxBodySize,
+			"timeout":         parsed.Timeout.String(),
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
-			"proxy_domains":   b.proxyDomains,
+			"tls_skip_verify": parsed.TLSSkipVerify,
+			"ca_data":         parsed.CAData,
+			"proxy_domains":   parsed.ProxyDomains,
 		})
 		if err != nil {
 			return &logical.Response{
@@ -172,6 +177,17 @@ func (b *alicloudBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 			}, nil
 		}
 	}
+
+	// Apply. Nothing below can fail.
+	b.mu.Lock()
+	b.tlsSkipVerify = parsed.TLSSkipVerify
+	b.caData = parsed.CAData
+	b.proxyDomains = parsed.ProxyDomains
+	b.mu.Unlock()
+	b.SetMaxBodySize(parsed.MaxBodySize)
+	b.SetTimeout(parsed.Timeout)
+	b.SetTransport(transport)
+	b.StreamingBackend.SetTransparentConfig(tc)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

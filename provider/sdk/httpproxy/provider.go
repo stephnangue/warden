@@ -223,6 +223,10 @@ type proxyBackend struct {
 	mu            sync.RWMutex
 	tlsSkipVerify bool
 	caData        string
+
+	// configWriteMu serializes config writes, so each one validates, persists
+	// and applies against the configuration the previous one left.
+	configWriteMu sync.Mutex
 }
 
 // ValidateSpec checks that required ProviderSpec fields are set.
@@ -395,6 +399,10 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+	// The mount is routed before it is initialized, so a config write can
+	// arrive now; it must not interleave with loading the stored config.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {

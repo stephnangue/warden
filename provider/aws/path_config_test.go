@@ -2,7 +2,9 @@ package aws
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -167,6 +169,143 @@ func TestHandleConfigWrite(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, entry)
 	})
+}
+
+// configuredBackend is a backend running a known configuration, over the
+// shared transport, with storage.
+func configuredBackend(storage sdklogical.Storage) *awsBackend {
+	b := &awsBackend{StreamingBackend: &framework.StreamingBackend{Logger: createTestLogger()}}
+	b.setSettings([]string{"warden.example.com"}, false, "")
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(30 * time.Second)
+	b.SetTransparentConfig(&framework.TransparentConfig{AutoAuthPath: "auth/jwt/"})
+	b.initializeProcessors()
+	initTransport()
+	b.InitProxy(sharedTransport)
+	b.StorageView = storage
+	return b
+}
+
+func writeConfig(b *awsBackend, raw map[string]interface{}) *logical.Response {
+	resp, _ := b.handleConfigWrite(context.Background(), nil,
+		&framework.FieldData{Raw: raw, Schema: b.pathConfig().Fields})
+	return resp
+}
+
+// verifiesTLS reports whether the backend's transport verifies a server's
+// certificate: a request to a self-signed server fails verification exactly
+// then.
+func verifiesTLS(t *testing.T, b *awsBackend) bool {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := b.Transport().RoundTrip(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+	var verifyErr *tls.CertificateVerificationError
+	return errors.As(err, &verifyErr)
+}
+
+func assertUnchanged(t *testing.T, b *awsBackend, registry any) {
+	t.Helper()
+	domains, skipVerify, caData := b.settings()
+	assert.Equal(t, []string{"warden.example.com"}, domains)
+	assert.False(t, skipVerify)
+	assert.Empty(t, caData)
+	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize())
+	assert.Equal(t, 30*time.Second, b.Timeout())
+	assert.Equal(t, "auth/jwt/", b.TransparentConfig().AutoAuthPath)
+	assert.Same(t, registry, b.processorRegistry.Load(), "the processors must not have been replaced")
+	assert.True(t, verifiesTLS(t, b), "TLS verification must still be on")
+}
+
+// A rejected write changes nothing — not the domains, the limits, the
+// transparent config, the processors, nor the transport. Before, the write
+// below had installed its domains, its processors and a transport that skips
+// verification by the time it was refused.
+func TestHandleConfigWrite_RejectedWriteChangesNothing(t *testing.T) {
+	storage := newInmemStorage()
+	b := configuredBackend(storage)
+	registry := b.processorRegistry.Load()
+
+	resp := writeConfig(b, map[string]interface{}{
+		"proxy_domains":   "other.example.com",
+		"timeout":         99,
+		"max_body_size":   1024,
+		"tls_skip_verify": true,
+		"auto_auth_path":  "",
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assertUnchanged(t, b, registry)
+	assert.Empty(t, storage.data)
+
+	resp = writeConfig(b, map[string]interface{}{
+		"proxy_domains":   "other.example.com",
+		"tls_skip_verify": true,
+		"auto_auth_path":  "auth/jwt/",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.NotSame(t, registry, b.processorRegistry.Load())
+	assert.False(t, verifiesTLS(t, b))
+}
+
+// A bad ca_data is refused every time it is sent, never saved.
+func TestHandleConfigWrite_BadCADataRefusedEveryTime(t *testing.T) {
+	storage := newInmemStorage()
+	b := configuredBackend(storage)
+	registry := b.processorRegistry.Load()
+	for i := 0; i < 2; i++ {
+		resp := writeConfig(b, map[string]interface{}{
+			"proxy_domains": "warden.example.com", "ca_data": "bm90LWEtY2VydGlmaWNhdGU=", "auto_auth_path": "auth/jwt/",
+		})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "attempt %d", i+1)
+	}
+	assertUnchanged(t, b, registry)
+	assert.Empty(t, storage.data)
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write that cannot be persisted is not applied either.
+func TestHandleConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
+	b := configuredBackend(failingStorage{newInmemStorage()})
+	registry := b.processorRegistry.Load()
+	resp := writeConfig(b, map[string]interface{}{
+		"proxy_domains": "other.example.com", "timeout": 99, "auto_auth_path": "auth/other/",
+	})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assertUnchanged(t, b, registry)
+}
+
+// Config writes replace the processors and settings while the request path
+// loads the processors and config reads take the settings; run under -race.
+func TestHandleConfigWrite_ConcurrentWithReads(t *testing.T) {
+	b := configuredBackend(newInmemStorage())
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				writeConfig(b, map[string]interface{}{"proxy_domains": "warden.example.com", "auto_auth_path": "auth/jwt/"})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				assert.NotNil(t, b.processorRegistry.Load())
+				_, _ = b.handleConfigRead(context.Background(), nil, nil)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // --- ValidateConfig tests ---

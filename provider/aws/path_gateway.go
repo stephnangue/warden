@@ -163,7 +163,12 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		logger.String("request_id", req.RequestID),
 	)
 
-	proc := b.processorRegistry.FindProcessor(processorCtx)
+	// Loaded once: a config write may replace it mid-request. A mount never
+	// configured has none, and so no processor for anything.
+	var proc processor.RequestProcessor
+	if registry := b.processorRegistry.Load(); registry != nil {
+		proc = registry.FindProcessor(processorCtx)
+	}
 	if proc == nil {
 		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Service not supported")
 		return nil, nil, fmt.Errorf("no processor found for service: %s", service)
