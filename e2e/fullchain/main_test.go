@@ -92,6 +92,9 @@ func TestMain(m *testing.M) {
 	if gcpStub != nil {
 		gcpStub.Close()
 	}
+	if azkvStub != nil {
+		azkvStub.Close()
+	}
 	if anthropicOAuth != nil {
 		anthropicOAuth.Close()
 	}
