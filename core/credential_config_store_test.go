@@ -3614,6 +3614,104 @@ func TestCredentialConfigStore_CreateSpec_DefaultedProfileRejectionExplains(t *t
 	assert.Error(t, getErr, "a refused spec must not be stored")
 }
 
+// TestCredentialConfigStore_CreateSpec_DefaultsAzureMinimal pins the Azure create-time
+// default: a NEW spec that mints a Warden assertion on an Azure source and names no
+// assertion_profile is stored with assertion_profile=minimal, since Entra binds only
+// iss/sub/aud. A spec that forwards the agent's own token mints no assertion and is
+// left alone, as is an explicit choice.
+func TestCredentialConfigStore_CreateSpec_DefaultsAzureMinimal(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "azure-fed", Type: credential.SourceTypeAzure,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+
+	spec := func(subject string, extra map[string]string) credential.Config {
+		cfg := map[string]string{
+			credential.ConfigSubjectTokenSource: subject,
+			"mint_method":                       "bearer_token",
+			"tenant_id":                         "00000000-0000-0000-0000-000000000001",
+			"client_id":                         "11111111-1111-1111-1111-111111111111",
+		}
+		if subject == credential.SourceWardenIdentity {
+			cfg[credential.ConfigAssertionAudience] = "api://AzureADTokenExchange"
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return credential.NewConfig(cfg)
+	}
+	create := func(name string, cfg credential.Config) string {
+		t.Helper()
+		require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{Name: name, Type: "vault_token", Source: "azure-fed", Config: cfg}))
+		stored, err := store.GetSpec(ctx, name)
+		require.NoError(t, err)
+		return stored.Config.Get(credential.ConfigAssertionProfile)
+	}
+
+	assert.Equal(t, profiles.MinimalProfileName, create("az-unset", spec(credential.SourceWardenIdentity, nil)),
+		"a new Azure federated spec naming no profile is stored with minimal")
+	assert.Equal(t, credential.DefaultAssertionProfileName,
+		create("az-optout", spec(credential.SourceWardenIdentity, map[string]string{credential.ConfigAssertionProfile: "default"})),
+		"an explicit default is the opt-out, and is kept")
+	assert.Empty(t, create("az-forwarded", spec(credential.SourceAgentIdentity, nil)),
+		"a spec that forwards the agent's token mints no Warden assertion, so gets no profile")
+
+	// Claim projection keys are still accepted under the defaulted profile: minimal
+	// never renders warden_user, but the keys also drive {{user.*}} templating, and
+	// Entra could not have conditioned on the projected claims anyway — it matches
+	// iss/sub/aud and reads nothing else.
+	assert.Equal(t, profiles.MinimalProfileName,
+		create("az-userclaims", spec(credential.SourceWardenIdentity, map[string]string{
+			credential.ConfigAssertionUserClaims: "sub,email",
+		})), "user-claim projection is accepted and the spec still defaults to minimal")
+
+	// An explicit resource is valid under default but has no effect under the
+	// defaulted minimal profile, so the refusal must say the profile was defaulted.
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "az-res", Type: "vault_token", Source: "azure-fed",
+		Config: spec(credential.SourceWardenIdentity, map[string]string{
+			credential.ConfigAssertionResource: "azure:https://management.azure.com/",
+		}),
+	})
+	require.Error(t, err)
+	assertBadRequest(t, err)
+	assert.Contains(t, err.Error(), "assertion_profile defaulted to 'minimal'")
+	assert.Contains(t, err.Error(), "e.g. to 'default'")
+}
+
+// A legacy Azure federated spec (stored before the default existed) keeps minting the
+// default shape through an update — its Entra trust was written against that subject,
+// and the upgrade must not change what it presents.
+func TestCredentialConfigStore_LegacyAzureSpecIsNeverDefaulted(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "azure-fed", Type: credential.SourceTypeAzure,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	cfg := map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "api://AzureADTokenExchange",
+		"mint_method":                       "bearer_token",
+		"tenant_id":                         "00000000-0000-0000-0000-000000000001",
+		"client_id":                         "11111111-1111-1111-1111-111111111111",
+	}
+	createSpecAsLegacy(t, store, ctx, &credential.CredSpec{
+		Name: "legacy-az", Type: "vault_token", Source: "azure-fed", Config: credential.NewConfig(cfg),
+	})
+
+	cfg["resource_uri"] = "https://vault.azure.net/"
+	require.NoError(t, store.UpdateSpec(ctx, &credential.CredSpec{
+		Name: "legacy-az", Type: "vault_token", Source: "azure-fed", Config: credential.NewConfig(cfg),
+	}))
+
+	stored, err := store.GetSpec(ctx, "legacy-az")
+	require.NoError(t, err)
+	assert.Equal(t, "https://vault.azure.net/", stored.Config.Get("resource_uri"), "precondition: the update landed")
+	assert.Empty(t, stored.Config.Get(credential.ConfigAssertionProfile),
+		"an update must never write the create-time default into a legacy spec")
+}
+
 // TestCredentialConfigStore_LegacyAWSSpecIsNeverDefaulted is the upgrade guarantee at
 // the write path: an AWS federated spec stored before the create-time default existed
 // (no assertion_profile) keeps no key through an UPDATE — the default runs at create

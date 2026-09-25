@@ -1171,6 +1171,22 @@ var assertionRosters = map[string]profileRoster{
 				"via its metadata fingerprint, and the tag shape itself via \"prof=aws\"",
 		},
 	},
+	profiles.MinimalProfileName: {
+		// Registered claims only: the mint below populates metadata, a resource and
+		// user claims, and minimal must emit none of them.
+		claims: []string{"aud", "exp", "iat", "iss", "jti", "nbf", "sub"},
+		coverage: map[string]string{
+			"iss": "volatile/constant by design",
+			"iat": "volatile/constant by design",
+			"nbf": "volatile/constant by design",
+			"exp": "volatile/constant by design",
+			"jti": "volatile/constant by design",
+
+			// The same composite as default, so the same fragment covers it.
+			"sub": "cacheIdentity's first fragment (wardenSubject)",
+			"aud": "cacheIdentity's second fragment",
+		},
+	},
 }
 
 func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {

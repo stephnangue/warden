@@ -25,7 +25,7 @@ import (
 // its upstream trust policy was not written for, with nothing in its config changed.
 //
 // AT CREATE, a source type may name a profile that a new spec gets when it mints an
-// assertion and sets none (AWS: the aws profile); the store writes that value into
+// assertion and sets none (AWS: aws; Azure: minimal); the store writes that value into
 // the new spec's config, so the choice is explicit and visible on read. Specs stored
 // before such a default existed carry no key, and so keep minting default. See
 // applyCreateTimeAssertionProfile in the core config store.
