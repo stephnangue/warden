@@ -121,6 +121,31 @@ type ExpirationRegistrar interface {
 type chainedSecret struct {
 	Data map[string]string
 	Type string
+	// ExpiresAt is when the referenced credential stops being valid, zero when it
+	// reported no lifetime. It travels with a cached entry so a hit knows how much
+	// lifetime is left, not how much there was when it was fetched.
+	ExpiresAt time.Time
+}
+
+// live reports whether the secret is still valid. The cache entry's own TTL runs from
+// when it was stored, a moment after ExpiresAt was computed, so an entry can briefly
+// outlive the secret; a hit on it is treated as a miss and fetched fresh rather than
+// handed to a consumer that would be refused for minting from an expired secret.
+func (cs chainedSecret) live() bool {
+	return cs.ExpiresAt.IsZero() || time.Now().Before(cs.ExpiresAt)
+}
+
+// newChainedSecret captures a fetched referenced credential for the consumer.
+func newChainedSecret(credB *Credential) chainedSecret {
+	cs := chainedSecret{Data: credB.Data, Type: credB.Type}
+	if credB.LeaseTTL > 0 {
+		issued := credB.IssuedAt
+		if issued.IsZero() {
+			issued = time.Now()
+		}
+		cs.ExpiresAt = issued.Add(credB.LeaseTTL)
+	}
+	return cs
 }
 
 // NewManager creates a new global credential manager
@@ -553,11 +578,11 @@ func (m *Manager) resolveAndMintChained(
 	mintFn func(ctx context.Context, spec *CredSpec, material SecretMaterial) (*Credential, error),
 ) (*Credential, error) {
 	spec := bound.spec
-	data, typ, fromCache, key, err := m.resolveChainedSecretData(ctx, caller, bound, secretRef, inputsB)
+	cs, fromCache, key, err := m.resolveChainedSecretData(ctx, caller, bound, secretRef, inputsB)
 	if err != nil {
 		return nil, err
 	}
-	material := m.buildSecretMaterial(bound, data, typ)
+	material := m.buildSecretMaterial(bound, cs.Data, cs.Type)
 
 	cred, err := mintFn(ctx, spec, material)
 	if err != nil && fromCache && (errors.Is(err, ErrChainedSecretRejected) || errors.Is(err, ErrRefreshTokenRejected) || errors.Is(err, ErrChainedSecretIncomplete)) {
@@ -565,13 +590,44 @@ func (m *Manager) resolveAndMintChained(
 		// something the driver needs — evict it and retry once with a fresh fetch, in
 		// case it was rotated or completed at the source after we cached it.
 		m.invalidateChainedSecret(key)
-		data, typ, _, _, rerr := m.resolveChainedSecretData(ctx, caller, bound, secretRef, inputsB)
+		var rerr error
+		cs, _, _, rerr = m.resolveChainedSecretData(ctx, caller, bound, secretRef, inputsB)
 		if rerr != nil {
 			return nil, rerr
 		}
-		return mintFn(ctx, spec, m.buildSecretMaterial(bound, data, typ))
+		cred, err = mintFn(ctx, spec, m.buildSecretMaterial(bound, cs.Data, cs.Type))
 	}
-	return cred, err
+	if err != nil {
+		return nil, err
+	}
+	if err := capToSecretLifetime(cred, cs.ExpiresAt, secretRef); err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+// capToSecretLifetime bounds a consuming credential by the lifetime of the secret it
+// was minted from. The consumer's own cache entry is bounded by its lifetime and the
+// session, and neither knows about the referenced secret: a secret that expires
+// mid-session would otherwise keep being vended, inside the consumer, until the
+// session ends. Capping LeaseTTL bounds that entry and makes IsExpired refuse it.
+func capToSecretLifetime(cred *Credential, expiresAt time.Time, secretRef string) error {
+	if cred == nil || expiresAt.IsZero() {
+		return nil
+	}
+	issued := cred.IssuedAt
+	if issued.IsZero() {
+		issued = time.Now()
+		cred.IssuedAt = issued
+	}
+	remaining := expiresAt.Sub(issued)
+	if remaining <= 0 {
+		return fmt.Errorf("secret_spec %q: the referenced secret expired before the consuming credential was issued", secretRef)
+	}
+	if cred.LeaseTTL == 0 || cred.LeaseTTL > remaining {
+		cred.LeaseTTL = remaining
+	}
+	return nil
 }
 
 // buildSecretMaterial resolves the secret_field for the consuming spec and wraps the
@@ -648,7 +704,7 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 // retry. A ttl <= 0, or a context without a namespace, disables caching and fetches
 // directly — the behaviour-preserving default. An entry never outlives the referenced
 // credential: a lifetime reported by the fetch caps the configured ttl.
-func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, bound boundSpec, secretRef string, inputsB *ExchangeInputs) (data map[string]string, typ string, fromCache bool, key string, err error) {
+func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, bound boundSpec, secretRef string, inputsB *ExchangeInputs) (cs chainedSecret, fromCache bool, key string, err error) {
 	ttl := bound.secretCacheTTL()
 	if ttl <= 0 {
 		return m.fetchUncached(ctx, caller, secretRef, inputsB)
@@ -683,22 +739,23 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 		return m.fetchUncached(ctx, caller, secretRef, inputsB)
 	}
 
-	if cs, ok := m.secretCache.Get(key); ok {
-		return copyStringMap(cs.Data), cs.Type, true, key, nil
+	if hit, ok := m.secretCache.Get(key); ok && hit.live() {
+		hit.Data = copyStringMap(hit.Data)
+		return hit, true, key, nil
 	}
 
 	// Miss: coalesce concurrent fetches for this key. A followed (non-leader) request
 	// receives the leader's freshly fetched value, so fromCache stays false for the
 	// whole group — the value is fresh this round, not a pre-existing cached entry.
 	v, ferr, _ := m.group.Do(key, func() (interface{}, error) {
-		if cs, ok := m.secretCache.Get(key); ok { // another goroutine populated it
+		if cs, ok := m.secretCache.Get(key); ok && cs.live() { // another goroutine populated it
 			return cs, nil
 		}
 		credB, e := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
 		if e != nil {
 			return nil, e
 		}
-		cs := chainedSecret{Data: credB.Data, Type: credB.Type}
+		cs := newChainedSecret(credB)
 		// A referenced credential carrying its own lifetime bounds the entry. Holding it
 		// for the full secret_cache_ttl would keep vending material that already stopped
 		// being valid, and the consumer would not discover that until the downstream
@@ -712,21 +769,22 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 		return cs, nil
 	})
 	if ferr != nil {
-		return nil, "", false, key, ferr
+		return chainedSecret{}, false, key, ferr
 	}
-	cs := v.(chainedSecret)
-	return copyStringMap(cs.Data), cs.Type, false, key, nil
+	cs = v.(chainedSecret)
+	cs.Data = copyStringMap(cs.Data)
+	return cs, false, key, nil
 }
 
 // fetchUncached performs the referenced fetch without consulting or populating the
 // cache, for every path that declines to cache. It reports fromCache=false and an empty
 // key, so the caller neither retries on a rejection nor tries to invalidate.
-func (m *Manager) fetchUncached(ctx context.Context, caller Caller, secretRef string, inputsB *ExchangeInputs) (map[string]string, string, bool, string, error) {
+func (m *Manager) fetchUncached(ctx context.Context, caller Caller, secretRef string, inputsB *ExchangeInputs) (chainedSecret, bool, string, error) {
 	credB, err := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
 	if err != nil {
-		return nil, "", false, "", err
+		return chainedSecret{}, false, "", err
 	}
-	return credB.Data, credB.Type, false, "", nil
+	return newChainedSecret(credB), false, "", nil
 }
 
 // secretCacheTTL resolves ConfigSecretCacheTTL spec-then-source. Returns 0 (no

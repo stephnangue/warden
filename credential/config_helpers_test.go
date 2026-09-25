@@ -117,6 +117,16 @@ func TestValidateSecretSelection(t *testing.T) {
 			wantErr:    "'secret_version' pins a revision of a stored secret",
 		},
 		{
+			name:       "secret_version on a Key Vault read",
+			config:     NewConfig(map[string]string{"mint_method": "secret_read", "secret_version": "0123456789abcdef0123456789abcdef"}),
+			sourceType: SourceTypeAzure,
+		},
+		{
+			name:       "json_key_map on a Key Vault read",
+			config:     NewConfig(map[string]string{"mint_method": "secret_read", "json_key_map": "a=b"}),
+			sourceType: SourceTypeAzure,
+		},
+		{
 			name:       "json_key_map on the retired Key Vault method",
 			config:     NewConfig(map[string]string{"mint_method": "key_vault_secret", "json_key_map": "a=b"}),
 			sourceType: SourceTypeAzure,
