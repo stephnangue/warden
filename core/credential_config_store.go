@@ -314,11 +314,15 @@ func (s *CredentialConfigStore) checkSpecReferencesLocked(namespaceID, specName 
 // CredSpec Operations
 // ============================================================================
 
-// CreateSpec creates a new credential spec in the namespace from context
 // createTimeAssertionProfiles names, per source type, the assertion profile a NEW spec
 // gets when it mints a Warden assertion and names no assertion_profile itself.
+//
+// Each entry is the shape the source's verifier can actually bind: AWS STS reads the
+// role and metadata as session tags (aws); Entra ID matches iss/sub/aud exactly and
+// reads nothing else, so it gets the registered claims alone (minimal).
 var createTimeAssertionProfiles = map[string]string{
-	credential.SourceTypeAWS: profiles.AWSProfileName,
+	credential.SourceTypeAWS:   profiles.AWSProfileName,
+	credential.SourceTypeAzure: profiles.MinimalProfileName,
 }
 
 // applyCreateTimeAssertionProfile writes the source type's default assertion profile
@@ -372,6 +376,7 @@ func (s *CredentialConfigStore) applyCreateTimeAssertionProfile(ctx context.Cont
 	return nil
 }
 
+// CreateSpec creates a new credential spec in the namespace from context
 func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential.CredSpec) error {
 	if s.isClosed() {
 		return ErrConfigStoreClosed
