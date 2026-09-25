@@ -109,16 +109,15 @@ func TestValidateSecretSelection(t *testing.T) {
 			sourceType: SourceTypeVault,
 		},
 		{
-			// secret_version predates this check on the Key Vault fetch, where it
-			// is an opaque identifier rather than a number. Rejecting it there
-			// would break every pinned Key Vault spec already written.
-			name:       "secret_version on a Key Vault read",
+			// Key Vault reads are not a secret_version store until they return as a
+			// stored-secret read; the retired key_vault_secret method honours nothing.
+			name:       "secret_version on the retired Key Vault method",
 			config:     NewConfig(map[string]string{"mint_method": "key_vault_secret", "secret_version": "abc123def456"}),
 			sourceType: SourceTypeAzure,
+			wantErr:    "'secret_version' pins a revision of a stored secret",
 		},
 		{
-			// The Key Vault fetch returns one secret, not a document to pick from.
-			name:       "json_key_map on a Key Vault read",
+			name:       "json_key_map on the retired Key Vault method",
 			config:     NewConfig(map[string]string{"mint_method": "key_vault_secret", "json_key_map": "a=b"}),
 			sourceType: SourceTypeAzure,
 			wantErr:    "'json_key_map' selects fields of a stored secret",

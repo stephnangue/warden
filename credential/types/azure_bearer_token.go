@@ -2,6 +2,8 @@ package types
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -58,16 +60,18 @@ func NewAzureBearerTokenCredType() *AzureBearerTokenCredType {
 func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("mint_method").
-			OneOf("bearer_token", "key_vault_secret").
+			OneOf("bearer_token").
 			Describe("Method for minting Azure credentials").
 			Example("bearer_token"),
 
 		credential.StringField("tenant_id").
+			Custom(func(v string) error { return credential.ValidateUUID("tenant_id", v) }).
 			Describe("Azure AD tenant ID (optional, defaults to source tenant)").
 			Example("12345678-1234-1234-1234-123456789012"),
 
 		credential.StringField("client_id").
 			Required().
+			Custom(func(v string) error { return credential.ValidateUUID("client_id", v) }).
 			Describe("Azure AD service principal client ID (application ID)").
 			Example("12345678-1234-1234-1234-123456789012"),
 
@@ -80,26 +84,20 @@ func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("uuid-secret-id"),
 
 		credential.StringField("resource_uri").
-			Describe("Azure resource URI to request token for (bearer_token method)").
+			Describe("Azure resource URI to request a token for; the client-credentials grant asks for its .default scope").
 			Example("https://management.azure.com/"),
-
-		credential.StringField("scopes").
-			Describe("Comma-separated list of OAuth2 scopes (bearer_token method)").
-			Example("https://graph.microsoft.com/.default"),
-
-		// Key Vault Secret fields
-		credential.StringField("vault_name").
-			Describe("Azure Key Vault name (required for key_vault_secret method)").
-			Example("my-keyvault"),
-
-		credential.StringField("secret_name").
-			Describe("Key Vault secret name (required for key_vault_secret method)").
-			Example("database-password"),
-
-		credential.StringField("secret_version").
-			Describe("Key Vault secret version (optional, defaults to latest)").
-			Example("abc123def456"),
 	}
+}
+
+// retiredBearerTokenKeys are keys this type once declared and no longer reads. The
+// schema ignores keys it does not know, so without an explicit refusal a spec
+// carrying one would be accepted and the key silently ignored — a spec that reads
+// as scoped, or as reading a Key Vault secret, while doing neither.
+var retiredBearerTokenKeys = map[string]string{
+	"scopes":         "the client-credentials grant takes a single '<resource>/.default' scope; set 'resource_uri' instead",
+	"vault_name":     "Key Vault reads are no longer an azure_bearer_token mint method",
+	"secret_name":    "Key Vault reads are no longer an azure_bearer_token mint method",
+	"secret_version": "Key Vault reads are no longer an azure_bearer_token mint method",
 }
 
 // ValidateConfig validates the Config for an Azure Bearer token credential spec
@@ -109,6 +107,17 @@ func (t *AzureBearerTokenCredType) ValidateConfig(config credential.Config, sour
 	// Step 1: Validate source type compatibility
 	if sourceType != credential.SourceTypeAzure {
 		return fmt.Errorf("azure_bearer_token credentials require an azure source, got: %s", sourceType)
+	}
+
+	// Checked ahead of the schema so the refusal names the retirement rather than
+	// listing the one method that is left.
+	if config.Get("mint_method") == "key_vault_secret" {
+		return fmt.Errorf("mint_method 'key_vault_secret' is no longer supported for azure_bearer_token")
+	}
+	for _, key := range slices.Sorted(maps.Keys(retiredBearerTokenKeys)) {
+		if config.Get(key) != "" {
+			return fmt.Errorf("'%s' is not supported by azure_bearer_token: %s", key, retiredBearerTokenKeys[key])
+		}
 	}
 
 	// Step 2: Validate config against schema
