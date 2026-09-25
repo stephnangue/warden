@@ -320,6 +320,95 @@ func TestChaining_TTLWithoutLeaseAccepted(t *testing.T) {
 	assert.Equal(t, "consumer-token:THE-SECRET", cred.Data["token"])
 }
 
+// TestChaining_ConsumerBoundedByReferencedLifetime: the consuming credential never
+// outlives the secret it was minted from. Its own cache entry is bounded by the
+// session, which knows nothing about the referenced secret; without the cap, a
+// secret expiring mid-session would keep being served inside the consumer until the
+// session ended — with no secret_cache_ttl involved at all.
+func TestChaining_ConsumerBoundedByReferencedLifetime(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": "THE-SECRET"}, nil, time.Second, "", nil
+	}
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA") // an hour-long session
+
+	cred, err := env.manager.IssueCredential(ctx, caller, "consumer", nil)
+	require.NoError(t, err)
+	assert.Greater(t, cred.LeaseTTL, time.Duration(0))
+	assert.LessOrEqual(t, cred.LeaseTTL, time.Second, "the consumer carries the secret's lifetime")
+
+	time.Sleep(1500 * time.Millisecond)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"past the secret's expiry the consumer is re-minted from a fresh fetch, not served from the session-long cache")
+}
+
+// TestChaining_CachedSecretCarriesRemainingLifetime: a consumer minted from a cached
+// secret is capped by what is left of the secret's lifetime, not by the lifetime it
+// had when it was fetched.
+func TestChaining_CachedSecretCarriesRemainingLifetime(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": "THE-SECRET"}, nil, 2 * time.Second, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+
+	time.Sleep(500 * time.Millisecond)
+	cred, err := env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), env.secretDriver.mintCalls.Load(), "precondition: the second consumer used the cached secret")
+	assert.Less(t, cred.LeaseTTL, 1600*time.Millisecond, "the cap is the lifetime left, not the lifetime fetched")
+}
+
+// A cached secret that has expired, though its cache entry has not yet been evicted,
+// is fetched fresh rather than handed to the consumer — which would refuse to mint
+// from it and fail the request at every expiry boundary.
+func TestChaining_ExpiredCachedSecretIsRefetched(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": "THE-SECRET"}, nil, time.Hour, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+
+	// Age the cached entry past its secret's expiry without evicting it — the window
+	// between the entry's TTL, which runs from when it was stored, and the secret's,
+	// which runs from when it was issued.
+	specB, err := env.store.GetSpec(ctx, "secret-spec")
+	require.NoError(t, err)
+	srcB, err := env.store.GetSource(ctx, "secretsource")
+	require.NoError(t, err)
+	key := chainedSecretCacheKey("test-namespace-id", "secret-spec", chainedSpecFingerprint(specB, srcB), caller, nil)
+	cs, ok := env.manager.secretCache.Get(key)
+	require.True(t, ok, "precondition: the secret is cached under the key the manager computes")
+	cs.ExpiresAt = time.Now().Add(-time.Second)
+	env.manager.secretCache.SetWithTTL(key, cs, 1, time.Hour)
+	env.manager.secretCache.Wait()
+
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err, "an expired cached secret must be refetched, not fail the request")
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load())
+}
+
 // TestChaining_CacheEntryClampedToReferencedTTL: a cached payload never outlives the
 // credential it was minted from. Holding it for the full secret_cache_ttl would keep
 // vending material that already stopped being valid, and the consumer would not find out
