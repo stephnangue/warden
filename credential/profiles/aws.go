@@ -101,9 +101,8 @@ func (AWSProfile) SourceTypes() []string { return []string{credential.SourceType
 // It never rejects assertion_user_claims: this profile does not render warden_user,
 // but that key also drives {{user.<claim>}} request templating on AWS specs.
 func (AWSProfile) ValidateSpec(config credential.Config) error {
-	if r := config.Get(credential.ConfigAssertionResource); r != "" && r != credential.AssertionResourceNone {
-		return fmt.Errorf("field '%s': profile '%s' never emits warden_resource, so an explicit resource would have no effect; remove it or set it to '%s'",
-			credential.ConfigAssertionResource, AWSProfileName, credential.AssertionResourceNone)
+	if err := rejectExplicitResource(AWSProfileName, config); err != nil {
+		return err
 	}
 
 	keys := credential.AssertionMetadataKeys(config)

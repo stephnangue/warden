@@ -233,5 +233,5 @@ func TestAWSProfile_Claims_Concurrent(t *testing.T) {
 func TestRegisterBuiltinProfiles_IncludesAWS(t *testing.T) {
 	reg := credential.NewAssertionProfileRegistry()
 	require.NoError(t, RegisterBuiltinProfiles(reg))
-	assert.Equal(t, []string{"aws", "default"}, reg.ListProfiles())
+	assert.Contains(t, reg.ListProfiles(), "aws")
 }

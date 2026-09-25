@@ -3591,7 +3591,7 @@ func TestResolveAssertionProfile_UnknownName(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown assertion profile: nope")
 	// Every builtin, sorted.
-	assert.Contains(t, err.Error(), "available profiles: [aws default]")
+	assert.Contains(t, err.Error(), "available profiles: [aws default minimal]")
 }
 
 // A spec naming a profile this build lacks must fail BEFORE any cache interaction,
