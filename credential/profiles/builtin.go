@@ -28,5 +28,11 @@ func RegisterBuiltinProfiles(registry *credential.AssertionProfileRegistry) erro
 		return err
 	}
 
+	// Register the registered-claims-only shape (for verifiers that bind iss/sub/aud
+	// exactly, such as Entra ID; not source-pinned)
+	if err := registry.Register(&MinimalProfile{}); err != nil {
+		return err
+	}
+
 	return nil
 }
