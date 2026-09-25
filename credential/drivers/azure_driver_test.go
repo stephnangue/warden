@@ -13,19 +13,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestAzureDriver creates an AzureDriver suitable for unit testing
+// Test identities. Real UUIDs, so requests get past tenant/client validation and
+// actually reach the test server — a malformed tenant would fail before any network
+// call and make a test pass for the wrong reason.
+const (
+	testAzureTenant = "00000000-0000-0000-0000-000000000001"
+	testAzureClient = "11111111-1111-1111-1111-111111111111"
+)
+
+// unreachableAzureHost refuses connections immediately, so a driver pointed at it
+// never reaches the real Entra ID or Graph.
+const unreachableAzureHost = "http://127.0.0.1:1"
+
+// newTestAzureDriver creates a static AzureDriver suitable for unit testing. Its
+// hosts point nowhere; tests that need a server set loginHost/graphHost.
 func newTestAzureDriver() *AzureDriver {
 	return &AzureDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeAzure,
 			Config: credential.NewConfig(map[string]string{
-				"tenant_id":     "test-tenant",
-				"client_id":     "test-client",
+				"tenant_id":     testAzureTenant,
+				"client_id":     testAzureClient,
 				"client_secret": "test-secret",
+				"secret_id":     "22222222-2222-2222-2222-222222222222",
 			}),
 		},
-		objectIDCache: make(map[string]string),
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		loginHost:  unreachableAzureHost,
+		graphHost:  unreachableAzureHost,
 	}
 }
 
@@ -226,38 +242,27 @@ func TestAzureDriver_MintCredential_BearerToken_MissingCredentials(t *testing.T)
 	assert.Contains(t, err.Error(), "'client_id' and 'client_secret'")
 }
 
-func TestAzureDriver_MintCredential_KeyVaultSecret_MissingConfig(t *testing.T) {
+// TestAzureDriver_MintCredential_KeyVaultSecretRemoved pins the retirement: the old
+// method built the vault URL from unvalidated spec config, so a spec could send a
+// Key Vault token to any host. It must be refused before any network call, whatever
+// the spec carries.
+func TestAzureDriver_MintCredential_KeyVaultSecretRemoved(t *testing.T) {
 	driver := newTestAzureDriver()
 
-	// Missing vault_name
 	spec := &credential.CredSpec{
 		Name: "test-kv",
 		Type: credential.TypeAzureBearerToken,
 		Config: credential.NewConfig(map[string]string{
 			"mint_method":   "key_vault_secret",
-			"client_id":     "test-client",
+			"client_id":     testAzureClient,
 			"client_secret": "test-secret",
-			"secret_name":   "test-secret",
+			"vault_name":    "evil.example/x#",
+			"secret_name":   "s",
 		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "'vault_name' and 'secret_name'")
-
-	// Missing secret_name
-	spec2 := &credential.CredSpec{
-		Name: "test-kv",
-		Type: credential.TypeAzureBearerToken,
-		Config: credential.NewConfig(map[string]string{
-			"mint_method":   "key_vault_secret",
-			"client_id":     "test-client",
-			"client_secret": "test-secret",
-			"vault_name":    "test-vault",
-		}),
-	}
-	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "'vault_name' and 'secret_name'")
+	assert.ErrorIs(t, err, errKeyVaultSecretRemoved)
 }
 
 func TestAzureDriver_SupportsRotation(t *testing.T) {
@@ -291,30 +296,6 @@ func TestAzureDriver_PrepareSpecRotation_MissingClientID(t *testing.T) {
 	_, _, _, err := driver.PrepareSpecRotation(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "'client_id'")
-}
-
-func TestAzureDriver_CommitSpecRotation(t *testing.T) {
-	driver := &AzureDriver{
-		credSource: &credential.CredSource{
-			Type: credential.SourceTypeAzure,
-			Config: credential.NewConfig(map[string]string{
-				"tenant_id":     "test-tenant",
-				"client_id":     "test-client",
-				"client_secret": "test-secret",
-			}),
-		},
-	}
-
-	spec := &credential.CredSpec{
-		Name: "test-spec",
-		Type: credential.TypeAzureBearerToken,
-	}
-
-	// CommitSpecRotation is a no-op - just logs
-	err := driver.CommitSpecRotation(context.TODO(), spec, map[string]string{
-		"client_secret": "new-secret",
-	})
-	assert.NoError(t, err)
 }
 
 func TestAzureDriver_CleanupSpecRotation_EmptyConfig(t *testing.T) {
@@ -364,51 +345,6 @@ func TestTruncateID(t *testing.T) {
 	}
 }
 
-func TestAzureDriver_CommitRotation_ResetsSourceVerified(t *testing.T) {
-	driver := newTestAzureDriver()
-	driver.sourceVerified = true
-
-	// CommitRotation will fail (no real Azure) but should reset sourceVerified first
-	err := driver.CommitRotation(context.TODO(), map[string]string{
-		"tenant_id":     "test-tenant",
-		"client_id":     "test-client",
-		"client_secret": "new-secret",
-	})
-	// Expected to fail because there's no real Azure AD to verify against
-	require.Error(t, err)
-
-	// sourceVerified must be false after rotation, regardless of verify outcome
-	assert.False(t, driver.sourceVerified, "sourceVerified should be reset after CommitRotation")
-}
-
-func TestAzureDriver_TokenCacheGeneration(t *testing.T) {
-	driver := newTestAzureDriver()
-	driver.tokenCache = make(map[string]*cachedAzureToken)
-
-	// Seed the cache with a token at generation 0
-	driver.tokenMu.Lock()
-	driver.tokenCache["https://management.azure.com/"] = &cachedAzureToken{
-		accessToken: "old-token",
-		expiresAt:   time.Now().Add(1 * time.Hour),
-		generation:  0,
-	}
-	driver.tokenMu.Unlock()
-
-	// Bump generation (simulates CommitRotation)
-	driver.tokenMu.Lock()
-	driver.credGeneration++
-	driver.tokenMu.Unlock()
-
-	// Cache lookup should miss because generation is stale
-	driver.tokenMu.Lock()
-	gen := driver.credGeneration
-	cached, ok := driver.tokenCache["https://management.azure.com/"]
-	hit := ok && cached.generation == gen && time.Now().Add(5*time.Minute).Before(cached.expiresAt)
-	driver.tokenMu.Unlock()
-
-	assert.False(t, hit, "stale-generation token should not be a cache hit")
-}
-
 func TestValidateTenantID(t *testing.T) {
 	tests := []struct {
 		tenantID string
@@ -438,48 +374,6 @@ func TestAzureDriver_ReadLimitedBody(t *testing.T) {
 	data, err := readLimitedBody(http.NoBody)
 	require.NoError(t, err)
 	assert.Empty(t, data)
-}
-
-// =============================================================================
-// AzureDriver doAzureRequest edge case
-// =============================================================================
-
-func TestAzureDriver_Cleanup_Nil(t *testing.T) {
-	driver := &AzureDriver{
-		credSource: &credential.CredSource{
-			Type:   credential.SourceTypeAzure,
-			Config: credential.NewConfig(map[string]string{}),
-		},
-		httpClient: &http.Client{},
-	}
-	err := driver.Cleanup(context.TODO())
-	assert.NoError(t, err)
-}
-
-// =============================================================================
-// db_helpers tests (if any coverage gaps)
-// =============================================================================
-
-func TestTokenCache_Expiry(t *testing.T) {
-	driver := newTestAzureDriver()
-	driver.tokenCache = make(map[string]*cachedAzureToken)
-
-	driver.tokenMu.Lock()
-	driver.tokenCache["scope"] = &cachedAzureToken{
-		accessToken: "token",
-		expiresAt:   time.Now().Add(-1 * time.Minute), // expired
-		generation:  driver.credGeneration,
-	}
-	driver.tokenMu.Unlock()
-
-	// Expired token should not be a cache hit
-	driver.tokenMu.Lock()
-	cached, ok := driver.tokenCache["scope"]
-	gen := driver.credGeneration
-	hit := ok && cached.generation == gen && time.Now().Add(5*time.Minute).Before(cached.expiresAt)
-	driver.tokenMu.Unlock()
-
-	assert.False(t, hit)
 }
 
 func TestAzureBearerTokenMetadata(t *testing.T) {
@@ -557,7 +451,6 @@ func TestAzureDriver_Create_Federation_Keyless(t *testing.T) {
 	require.NotNil(t, drv)
 
 	azureDrv := drv.(*AzureDriver)
-	assert.False(t, azureDrv.sourceVerified, "a keyless source performs no eager probe")
 	// A keyless source has nothing to rotate and never probes Graph.
 	assert.False(t, azureDrv.SupportsRotation())
 	assert.False(t, azureDrv.SupportsSpecRotation())
@@ -773,7 +666,7 @@ func TestAzureValidateConfig_AudienceOnlyFederation(t *testing.T) {
 		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method":   "static",
 			"tenant_id":     "00000000-0000-0000-0000-000000000000",
-			"client_id":     "cid",
+			"client_id":     testAzureClient,
 			"client_secret": "sec",
 			"secret_id":     "sid",
 			"audience":      "api://AzureADTokenExchange",
@@ -786,7 +679,7 @@ func TestAzureValidateConfig_AudienceOnlyFederation(t *testing.T) {
 		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"auth_method": "oidc_federation",
 			"tenant_id":   "00000000-0000-0000-0000-000000000000",
-			"client_id":   "cid",
+			"client_id":   testAzureClient,
 			"audience":    "api://custom",
 		}))
 		require.NoError(t, err)

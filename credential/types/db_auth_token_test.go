@@ -133,7 +133,9 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_WrongSource(t *testing.T) {
 	assert.Contains(t, err.Error(), "gcp source")
 }
 
-func TestDBAuthTokenCredType_ValidateConfig_Azure(t *testing.T) {
+// No azure mint path implements azure_db_iam_token, so a spec naming it is refused
+// where it is written rather than accepted and then failing every mint.
+func TestDBAuthTokenCredType_ValidateConfig_Azure_NotImplemented(t *testing.T) {
 	ct := NewDBAuthTokenCredType()
 
 	config := map[string]string{
@@ -143,20 +145,12 @@ func TestDBAuthTokenCredType_ValidateConfig_Azure(t *testing.T) {
 	}
 
 	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAzure)
-	assert.NoError(t, err)
-}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure_db_iam_token is not implemented")
 
-func TestDBAuthTokenCredType_ValidateConfig_Azure_MissingHost(t *testing.T) {
-	ct := NewDBAuthTokenCredType()
-
-	config := map[string]string{
-		"mint_method": "azure_db_iam_token",
-		"db_user":     "app-identity",
-	}
-
-	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAzure)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "db_host")
+	err = ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure source")
 }
 
 func TestDBAuthTokenCredType_ValidateConfig_Redshift_Provisioned(t *testing.T) {

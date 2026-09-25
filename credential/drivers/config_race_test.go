@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,56 @@ func TestAzureDriver_SourceCredsNeverMixesGenerations(t *testing.T) {
 	readers.Wait()
 	close(stop)
 	<-writerDone
+}
+
+// TestAzureDriver_CommitRotationIsRaceFreeWithProbeAndTokenReads drives the real
+// CommitRotation against the two paths that share its state: the Graph-permission
+// probe, whose cached result a commit once reset under the wrong lock, and the
+// source-token cache it invalidates. Every CommitRotation also bumps the generation,
+// so readers keep missing the cache and coalescing fetches while it runs.
+func TestAzureDriver_CommitRotationIsRaceFreeWithProbeAndTokenReads(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	driver := newTestAzureDriver()
+	driver.loginHost = server.URL
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		readers.Add(1)
+		go func(i int) {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if i%2 == 0 {
+					_ = driver.SupportsRotation()
+				} else {
+					_, _ = driver.getSourceToken(context.Background(), armResource)
+				}
+			}
+		}(i)
+	}
+
+	for gen := 0; gen < 50; gen++ {
+		require.NoError(t, driver.CommitRotation(context.Background(), map[string]string{
+			"tenant_id":     testAzureTenant,
+			"client_id":     testAzureClient,
+			"client_secret": fmt.Sprintf("secret-%d", gen),
+			"secret_id":     fmt.Sprintf("key-%d", gen),
+		}))
+	}
+
+	close(stop)
+	readers.Wait()
+	assert.Equal(t, "secret-49", driver.getClientSecret())
 }
 
 // TestGitLabDriver_CommitRotationIsRaceFreeWithMints drives the real CommitRotation,

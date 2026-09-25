@@ -178,13 +178,11 @@ var (
 		SourceTypeGCP:   {"secret_read": {}},
 	}
 
-	// secret_version pins a revision, which each store spells its own way: a
-	// number for KV v2 and for Secret Manager, an opaque identifier for Key Vault.
-	// A store that spells it differently again (version_id / version_stage on
-	// Secrets Manager) is absent here, so pinning there keeps using its own keys.
+	// secret_version pins a revision by number, as KV v2 and Secret Manager do. A
+	// store that spells it differently (version_id / version_stage on Secrets
+	// Manager) is absent here, so pinning there keeps using its own keys.
 	mintMethodsHonoringSecretVersion = map[string]map[string]struct{}{
 		SourceTypeVault: {"static_aws": {}, "static_apikey": {}, "kv2_read": {}},
-		SourceTypeAzure: {"key_vault_secret": {}},
 		SourceTypeGCP:   {"secret_read": {}},
 	}
 )
@@ -212,7 +210,7 @@ func ValidateSecretSelection(config Config, sourceType string) error {
 	}
 
 	if _, ok := mintMethodsHonoringSecretVersion[sourceType][mintMethod]; !ok && config.Get("secret_version") != "" {
-		return fmt.Errorf("'secret_version' pins a revision of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, key_vault_secret on an azure source, and secret_read on a gcp source", mintMethod)
+		return fmt.Errorf("'secret_version' pins a revision of a stored secret and is not supported by mint_method '%s'; it applies to static_aws, static_apikey and kv2_read on an hvault source, and secret_read on a gcp source", mintMethod)
 	}
 
 	return nil

@@ -33,7 +33,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 			name: "valid azure source with bearer_token",
 			config: map[string]string{
 				"mint_method":   "bearer_token",
-				"client_id":     "test-client-id",
+				"client_id":     "11111111-1111-1111-1111-111111111111",
 				"client_secret": "test-secret",
 				"secret_id":     "test-secret-id",
 			},
@@ -43,7 +43,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "valid azure source with default mint_method",
 			config: map[string]string{
-				"client_id":     "test-client-id",
+				"client_id":     "11111111-1111-1111-1111-111111111111",
 				"client_secret": "test-secret",
 				"secret_id":     "test-secret-id",
 			},
@@ -65,7 +65,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 			name: "missing client_secret",
 			config: map[string]string{
 				"mint_method": "bearer_token",
-				"client_id":   "test-client-id",
+				"client_id":   "11111111-1111-1111-1111-111111111111",
 				"secret_id":   "test-secret-id",
 			},
 			sourceType: credential.SourceTypeAzure,
@@ -76,7 +76,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 			name: "missing secret_id",
 			config: map[string]string{
 				"mint_method":   "bearer_token",
-				"client_id":     "test-client-id",
+				"client_id":     "11111111-1111-1111-1111-111111111111",
 				"client_secret": "test-secret",
 			},
 			sourceType: credential.SourceTypeAzure,
@@ -87,7 +87,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 			name: "unsupported mint_method",
 			config: map[string]string{
 				"mint_method":   "invalid",
-				"client_id":     "test-client-id",
+				"client_id":     "11111111-1111-1111-1111-111111111111",
 				"client_secret": "test-secret",
 				"secret_id":     "test-secret-id",
 			},
@@ -98,7 +98,7 @@ func TestAzureBearerTokenCredType_ValidateConfig(t *testing.T) {
 		{
 			name: "unsupported source type",
 			config: map[string]string{
-				"client_id":     "test-client-id",
+				"client_id":     "11111111-1111-1111-1111-111111111111",
 				"client_secret": "test-secret",
 				"secret_id":     "test-secret-id",
 			},
@@ -174,7 +174,7 @@ func TestAzureBearerTokenCredType_ValidateConfig_Federation(t *testing.T) {
 			errMsg:  "must not be set",
 		},
 		{
-			name: "federated spec rejects key_vault_secret",
+			name: "federated spec: key_vault_secret is retired",
 			config: map[string]string{
 				"mint_method":          "key_vault_secret",
 				"subject_token_source": "warden_identity",
@@ -183,7 +183,7 @@ func TestAzureBearerTokenCredType_ValidateConfig_Federation(t *testing.T) {
 				"client_id":            "11111111-1111-1111-1111-111111111111",
 			},
 			wantErr: true,
-			errMsg:  "not supported over federation",
+			errMsg:  "no longer supported",
 		},
 		{
 			name: "federated spec still requires client_id",
@@ -384,4 +384,47 @@ func TestAzureBearerTokenCredType_FieldSchemas(t *testing.T) {
 
 	// tenant_id should not be sensitive
 	assert.False(t, schemas["tenant_id"].Sensitive)
+}
+
+// TestAzureBearerTokenCredType_ValidateConfig_RetiredKeys pins the refusal of keys
+// this type no longer reads. The schema ignores unknown keys, so each would otherwise
+// be accepted and silently dropped.
+func TestAzureBearerTokenCredType_ValidateConfig_RetiredKeys(t *testing.T) {
+	ct := NewAzureBearerTokenCredType()
+	base := map[string]string{
+		"client_id":     "11111111-1111-1111-1111-111111111111",
+		"client_secret": "s",
+		"secret_id":     "k",
+	}
+	with := func(k, v string) credential.Config {
+		c := map[string]string{}
+		for bk, bv := range base {
+			c[bk] = bv
+		}
+		c[k] = v
+		return credential.NewConfig(c)
+	}
+
+	for key, want := range map[string]string{
+		"scopes":         "resource_uri",
+		"vault_name":     "Key Vault",
+		"secret_name":    "Key Vault",
+		"secret_version": "Key Vault",
+	} {
+		err := ct.ValidateConfig(with(key, "x"), credential.SourceTypeAzure)
+		require.Error(t, err, key)
+		assert.Contains(t, err.Error(), key)
+		assert.Contains(t, err.Error(), want)
+	}
+
+	err := ct.ValidateConfig(with("mint_method", "key_vault_secret"), credential.SourceTypeAzure)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "key_vault_secret")
+	assert.Contains(t, err.Error(), "no longer supported")
+
+	for _, key := range []string{"client_id", "tenant_id"} {
+		err := ct.ValidateConfig(with(key, "not-a-uuid"), credential.SourceTypeAzure)
+		require.Error(t, err, key)
+		assert.Contains(t, err.Error(), "must be a valid UUID")
+	}
 }

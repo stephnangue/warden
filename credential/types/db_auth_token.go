@@ -75,15 +75,16 @@ func NewDBAuthTokenCredType() *DBAuthTokenCredType {
 // ConfigSchema returns the declarative schema for database auth token credential config
 func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
-		// cloud_sql_iam_token stays listed so a spec naming it reaches ValidateConfig,
-		// which refuses it as unimplemented — dropping it here would answer the same
-		// spec with a generic "must be one of" that says nothing about why.
+		// cloud_sql_iam_token and azure_db_iam_token stay listed so a spec naming one
+		// reaches ValidateConfig, which refuses it as unimplemented — dropping them here
+		// would answer the same spec with a generic "must be one of" that says nothing
+		// about why.
 		credential.StringField("mint_method").
 			OneOf("rds_iam_token", "redshift_iam_token", "cloud_sql_iam_token", "azure_db_iam_token").
-			Describe("Method for minting database IAM auth tokens (cloud_sql_iam_token is not implemented)").
+			Describe("Method for minting database IAM auth tokens (cloud_sql_iam_token and azure_db_iam_token are not implemented)").
 			Example("rds_iam_token"),
 
-		// db_user is required for rds_iam_token / azure_db_iam_token (enforced in
+		// db_user is required for rds_iam_token (enforced in
 		// ValidateConfig). Not required for redshift_iam_token because the Redshift
 		// API returns the database user mapped from the IAM identity.
 		credential.StringField("db_user").
@@ -95,7 +96,7 @@ func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("mydb.abc123.us-east-1.rds.amazonaws.com"),
 
 		credential.StringField("db_host").
-			Describe("Database hostname (required for azure_db_iam_token)").
+			Describe("Database hostname (for azure_db_iam_token, which is not implemented)").
 			Example("mydb.postgres.database.azure.com"),
 
 		credential.StringField("db_port").
@@ -124,7 +125,7 @@ func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("myproject:us-central1:mydb"),
 
 		credential.StringField("resource_uri").
-			Describe("Azure AD resource URI override (azure_db_iam_token)").
+			Describe("Azure AD resource URI override (for azure_db_iam_token, which is not implemented)").
 			Example("https://ossrdbms-aad.database.windows.net/"),
 
 		credential.StringField("cluster_identifier").
@@ -203,12 +204,9 @@ func (t *DBAuthTokenCredType) ValidateConfig(config credential.Config, sourceTyp
 		if sourceType != credential.SourceTypeAzure {
 			return fmt.Errorf("azure_db_iam_token requires an azure source, got: %s", sourceType)
 		}
-		if config.Get("db_host") == "" {
-			return fmt.Errorf("azure_db_iam_token requires db_host")
-		}
-		if config.Get("db_user") == "" {
-			return fmt.Errorf("azure_db_iam_token requires db_user")
-		}
+		// Refused for the same reason as cloud_sql_iam_token: no azure mint path
+		// implements it, so a spec accepted here would fail every request.
+		return fmt.Errorf("azure_db_iam_token is not implemented for the azure driver")
 	default:
 		return fmt.Errorf("unsupported mint_method: %s", mintMethod)
 	}

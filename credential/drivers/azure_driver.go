@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper/httputil"
@@ -45,20 +47,51 @@ const (
 	azureAuthMethodOIDCFederation = "oidc_federation"
 )
 
-// tenantIDPattern matches Azure AD tenant IDs (UUID format)
-var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-
 // defaultAzureLoginHost is the public-cloud Entra ID authority host. The driver's
 // loginHost field defaults to this; tests override the field to point token
 // acquisition at a local server.
 const defaultAzureLoginHost = "https://login.microsoftonline.com"
 
+// defaultAzureGraphHost is the public-cloud Microsoft Graph host. Like loginHost it
+// is a struct field rather than config: rotation is the only Graph caller, and a
+// config override could only redirect writes to a tenant somewhere else. Tests set
+// the field to exercise rotation against a local server.
+const defaultAzureGraphHost = "https://graph.microsoft.com"
+
+// Resources the source's own tokens are requested for. graphResource names the API,
+// not the host — it stays the public Graph resource even when graphHost points at a
+// test server.
+const (
+	armResource   = "https://management.azure.com/"
+	graphResource = "https://graph.microsoft.com/"
+)
+
+// Source token cache tuning.
+const (
+	// azureSourceTokenRefreshBuffer is how long before expiry a cached source token
+	// stops being served, so a token handed out is never about to die in flight.
+	azureSourceTokenRefreshBuffer = 5 * time.Minute
+
+	// azureSourceTokenAttempts bounds how many times a token acquisition is retried
+	// because a rotation retired the credentials it was minted with. Each retry reads
+	// the new credentials, so a second attempt succeeds unless rotations land back to
+	// back.
+	azureSourceTokenAttempts = 3
+)
+
+// Graph-permission probe cache lifetimes. A success is stable — it can only change
+// when the source's credentials do, which is covered by the generation stamp — so it
+// is kept long. A failure is often transient (a network blip, an Entra hiccup), so it
+// is kept only long enough to avoid hammering Entra; caching it for the life of the
+// driver would switch rotation off until the driver happened to be rebuilt.
+const (
+	graphPermsPositiveTTL = time.Hour
+	graphPermsNegativeTTL = time.Minute
+)
+
 // validateTenantID checks that the tenant ID is a valid UUID
 func validateTenantID(tenantID string) error {
-	if !tenantIDPattern.MatchString(tenantID) {
-		return fmt.Errorf("invalid tenant_id '%s': must be a valid UUID", tenantID)
-	}
-	return nil
+	return credential.ValidateUUID("tenant_id", tenantID)
 }
 
 // truncateID safely truncates a string for logging, appending "..." if truncated
@@ -72,6 +105,18 @@ func truncateID(s string, n int) string {
 // readLimitedBody reads a response body with a size limit to prevent OOM
 func readLimitedBody(body io.Reader) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(body, maxResponseBodySize))
+}
+
+// azureScope turns a resource URI into the ".default" scope the client-credentials
+// grant takes. Entra expects the suffix after a slash — "https://management.azure.com/.default",
+// "api://<app-id>/.default" — so a resource written without its trailing slash must
+// not be glued straight onto ".default". A value that already is a .default scope is
+// passed through.
+func azureScope(resourceURI string) string {
+	if strings.HasSuffix(resourceURI, "/.default") {
+		return resourceURI
+	}
+	return strings.TrimSuffix(resourceURI, "/") + "/.default"
 }
 
 // azureAPIRequest describes an HTTP request to an Azure API endpoint
@@ -95,12 +140,12 @@ func (d *AzureDriver) doAzureRequest(ctx context.Context, apiReq azureAPIRequest
 			// Exponential backoff: 2s, 4s, 8s... with ~20% jitter
 			backoff := time.Duration(1<<uint(attempt)) * time.Second
 			jitter := time.Duration(rand.Int63n(int64(backoff / 5)))
-			delay := backoff + jitter
-
+			timer := time.NewTimer(backoff + jitter)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, ctx.Err()
-			case <-time.After(delay):
+			case <-timer.C:
 			}
 		}
 
@@ -178,52 +223,64 @@ var _ credential.ExchangeMinter = (*AzureDriver)(nil)
 // for Azure AD bearer tokens.
 //
 // The driver's source credentials are used for:
-// - Validating connectivity to Azure AD
-// - Rotating spec credentials via Microsoft Graph API (if Application.ReadWrite.All is granted)
+//   - Validating connectivity to Azure AD
+//   - Rotating source and spec credentials via Microsoft Graph (needs
+//     Application.ReadWrite.OwnedBy or Application.ReadWrite.All)
 //
-// The spec credentials (stored in CredSpec.Config) are used for:
-// - Minting bearer tokens for Azure resources
-// - Fetching secrets from Azure Key Vault
+// The spec credentials (stored in CredSpec.Config) are used for minting bearer
+// tokens for Azure resources.
+//
+// Locking. No lock is ever held across a network call. configMu guards the source
+// config field, which rotation replaces while mints are in flight; the token cache
+// carries its own lock; graphPermsMu guards the permission-probe result and is taken
+// before the token cache, never after it.
 type AzureDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 
-	// Token cache for source's API access (keyed by resource URI).
-	// credGeneration is bumped on rotation; tokens from old generations are stale.
-	tokenCache     map[string]*cachedAzureToken
-	credGeneration uint64
-	tokenMu        sync.Mutex
-
-	// configMu guards credSource.Config, which rotation replaces while mints are
-	// in flight. It is deliberately separate from tokenMu: token acquisition
-	// releases tokenMu for the duration of the HTTP call and reads the source
-	// credentials on the way, so tokenMu does not cover the config field at all.
-	//
-	// It is never held across acquiring another lock — sourceConfig takes it,
-	// reads one map header and releases — so the two locks cannot deadlock in
-	// either order, and a caller already holding tokenMu may read config freely.
-	// RWMutex because the readers are on the mint path.
+	// configMu guards credSource.Config. RWMutex because the readers are on the mint
+	// path. sourceConfig takes it, reads one map header and releases, so it never
+	// nests with another lock.
 	configMu sync.RWMutex
 
-	// Object ID cache: appID -> objectID (immutable mapping in Azure AD)
-	objectIDCache map[string]string
-	objectIDMu    sync.Mutex
+	// tokenCache holds the source's own tokens, keyed by resource URI. Its generation
+	// is bumped when rotation installs new credentials, so a token minted by the
+	// retired ones is never served. tokenGroup coalesces concurrent misses for the
+	// same resource and generation into one request to Entra.
+	tokenCache *TokenCache
+	tokenGroup singleflight.Group
 
-	// Cached result for hasGraphPermissions (separate lock from tokenMu
-	// to avoid holding tokenMu during the 10s permission-probe HTTP call)
-	graphPermsCached bool
-	graphPermsResult bool
-	graphPermsMu     sync.Mutex
+	// graphPerms caches the Graph-permission probe, stamped with the token-cache
+	// generation it was taken under so a rotation invalidates it without touching
+	// graphPermsMu. now is the clock the expiry is judged against; nil means
+	// time.Now (tests inject a fake).
+	graphPermsMu sync.Mutex
+	graphPerms   *graphPermsEntry
+	now          func() time.Time
 
 	// HTTP client for Azure API calls
 	httpClient *http.Client
 
-	// Entra ID authority host; empty means the public-cloud default. Tests set it
-	// to a local server so token acquisition can be exercised without Azure.
+	// Entra ID authority and Graph hosts; empty means the public-cloud defaults.
+	// Tests set them to a local server so token acquisition and rotation can be
+	// exercised without Azure.
 	loginHost string
+	graphHost string
+}
 
-	// Flag to track if source credentials have been verified
-	sourceVerified bool
+// graphPermsEntry is one cached Graph-permission probe result.
+type graphPermsEntry struct {
+	ok         bool
+	expiresAt  time.Time
+	generation uint64
+}
+
+// sourceTokenResult is what a coalesced source-token fetch hands its callers.
+// stored reports whether the token was filed under the generation it was requested
+// for; a token that was not was minted by credentials a rotation has since retired.
+type sourceTokenResult struct {
+	token  string
+	stored bool
 }
 
 // Config accessors — single source of truth is credSource.Config.
@@ -258,17 +315,28 @@ func (d *AzureDriver) getClientSecret() string {
 // a credential that never existed — and the resulting failure looks like a bad
 // stored secret rather than a torn read.
 func (d *AzureDriver) sourceCreds() (tenantID, clientID, clientSecret string) {
-	config := d.sourceConfig()
+	return azureCreds(d.sourceConfig())
+}
+
+// azureCreds reads the service principal triple from one config snapshot.
+func azureCreds(config credential.Config) (tenantID, clientID, clientSecret string) {
 	return credential.GetString(config, "tenant_id", ""),
 		credential.GetString(config, "client_id", ""),
 		credential.GetString(config, "client_secret", "")
 }
 
-// cachedAzureToken holds an Azure AD access token with expiry and generation
-type cachedAzureToken struct {
-	accessToken string
-	expiresAt   time.Time
-	generation  uint64
+func (d *AzureDriver) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
+}
+
+func (d *AzureDriver) graphBase() string {
+	if d.graphHost != "" {
+		return d.graphHost
+	}
+	return defaultAzureGraphHost
 }
 
 // AzureDriverFactory creates AzureDriver instances
@@ -293,7 +361,8 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 			Example("00000000-0000-0000-0000-000000000000"),
 
 		credential.StringField("client_id").
-			Describe("Azure AD application (client) ID (required for auth_method=static)").
+			Custom(func(v string) error { return credential.ValidateUUID("client_id", v) }).
+			Describe("Azure AD application (client) ID (UUID; required for auth_method=static)").
 			Example("11111111-1111-1111-1111-111111111111"),
 
 		credential.StringField("client_secret").
@@ -303,6 +372,11 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 		credential.StringField("secret_id").
 			Describe("Secret ID for the client secret (for rotation tracking; required for auth_method=static)").
 			Example("secret-id-uuid"),
+
+		credential.DurationField("activation_delay").
+			Custom(validateNonNegativeDuration).
+			Describe("How long a rotated client secret is left to propagate through Entra ID before Warden switches to it (default 5m)").
+			Example("5m"),
 
 		credential.StringField("ca_data").
 			Custom(ValidateCAData).
@@ -344,6 +418,19 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 	return nil
 }
 
+// validateNonNegativeDuration rejects a negative duration. The type check has
+// already run, so a parse failure cannot reach here.
+func validateNonNegativeDuration(v string) error {
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return err
+	}
+	if d < 0 {
+		return fmt.Errorf("must not be negative")
+	}
+	return nil
+}
+
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *AzureDriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret", "ca_data"}
@@ -353,14 +440,24 @@ func (f *AzureDriverFactory) SensitiveConfigFields() []string {
 func (f *AzureDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
 	mintMethod := specConfig.Get("mint_method")
 	switch mintMethod {
-	case "azure_db_iam_token":
-		return credential.TypeDBAuthToken, nil
 	case "", "bearer_token":
 		return credential.TypeAzureBearerToken, nil
+	case "azure_db_iam_token":
+		// Accepted by the db_auth_token schema so the refusal can be specific, but
+		// nothing mints it: inferring a type would let a spec be written that fails
+		// every mint.
+		return "", fmt.Errorf("mint_method 'azure_db_iam_token' is not implemented for the azure driver")
+	case "key_vault_secret":
+		return "", errKeyVaultSecretRemoved
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
 	}
 }
+
+// errKeyVaultSecretRemoved refuses the retired Key Vault mint method. It built the
+// vault URL from spec config without validating it, so a spec could send a Key Vault
+// token to any host.
+var errKeyVaultSecretRemoved = errors.New("mint_method 'key_vault_secret' is no longer supported for the azure driver")
 
 // Create instantiates a new AzureDriver
 func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
@@ -369,9 +466,8 @@ func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedL
 			Type:   credential.SourceTypeAzure,
 			Config: config,
 		},
-		logger:        log.WithSubsystem(credential.SourceTypeAzure),
-		tokenCache:    make(map[string]*cachedAzureToken),
-		objectIDCache: make(map[string]string),
+		logger:     log.WithSubsystem(credential.SourceTypeAzure),
+		tokenCache: NewTokenCache(),
 	}
 
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)
@@ -390,10 +486,10 @@ func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedL
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := driver.getSourceToken(ctx, "https://management.azure.com/"); err != nil {
+	if _, err := driver.getSourceToken(ctx, armResource); err != nil {
+		driver.httpClient.CloseIdleConnections()
 		return nil, fmt.Errorf("Azure authentication failed: %w", err)
 	}
-	driver.sourceVerified = true
 
 	return driver, nil
 }
@@ -414,9 +510,9 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	case "bearer_token":
 		return d.mintBearerToken(ctx, spec, "")
 	case "key_vault_secret":
-		return d.fetchKeyVaultSecret(ctx, spec)
+		return nil, nil, 0, "", errKeyVaultSecretRemoved
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Azure driver; use 'bearer_token' or 'key_vault_secret'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Azure driver; use 'bearer_token'", mintMethod)
 	}
 }
 
@@ -469,7 +565,7 @@ func azureAssertionResource(specCfg credential.Config) (string, bool) {
 	if credential.GetString(specCfg, "mint_method", "bearer_token") != "bearer_token" {
 		return "", false
 	}
-	uri := credential.GetString(specCfg, "resource_uri", "https://management.azure.com/")
+	uri := credential.GetString(specCfg, "resource_uri", armResource)
 	return "azure:" + uri, true
 }
 
@@ -481,7 +577,7 @@ func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.Cred
 	// Get SP identity from spec config (pre-provisioned)
 	tenantID := credential.GetString(spec.Config, "tenant_id", d.getTenantID())
 	clientID := credential.GetString(spec.Config, "client_id", "")
-	resourceURI := credential.GetString(spec.Config, "resource_uri", "https://management.azure.com/")
+	resourceURI := credential.GetString(spec.Config, "resource_uri", armResource)
 
 	var token string
 	var expiresIn int
@@ -534,75 +630,6 @@ func azureBearerTokenMetadata(clientID, tenantID, resourceURI string, ttl time.D
 	}
 }
 
-// fetchKeyVaultSecret fetches a secret from Azure Key Vault
-func (d *AzureDriver) fetchKeyVaultSecret(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	// Get SP credentials from spec config
-	tenantID := credential.GetString(spec.Config, "tenant_id", d.getTenantID())
-	clientID := credential.GetString(spec.Config, "client_id", "")
-	clientSecret := credential.GetString(spec.Config, "client_secret", "")
-	vaultName := credential.GetString(spec.Config, "vault_name", "")
-	secretName := credential.GetString(spec.Config, "secret_name", "")
-	secretVersion := credential.GetString(spec.Config, "secret_version", "")
-
-	if clientID == "" || clientSecret == "" {
-		return nil, nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'client_secret' for key_vault_secret mint method")
-	}
-	if vaultName == "" || secretName == "" {
-		return nil, nil, 0, "", fmt.Errorf("spec config must contain 'vault_name' and 'secret_name' for key_vault_secret mint method")
-	}
-
-	// Get bearer token for Key Vault
-	kvToken, _, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, "https://vault.azure.net/")
-	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to acquire Key Vault token: %w", err)
-	}
-
-	// Build Key Vault URL
-	vaultURL := fmt.Sprintf("https://%s.vault.azure.net", vaultName)
-	secretPath := fmt.Sprintf("/secrets/%s", secretName)
-	if secretVersion != "" {
-		secretPath += "/" + secretVersion
-	}
-	secretPath += "?api-version=7.4"
-
-	respBody, err := d.doAzureRequest(ctx, azureAPIRequest{
-		method:      "GET",
-		url:         vaultURL + secretPath,
-		bearerToken: kvToken,
-		okStatuses:  []int{http.StatusOK},
-		operation:   "fetchKeyVaultSecret",
-	}, nil, 1)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-
-	var secretResp struct {
-		Value string `json:"value"`
-		ID    string `json:"id"`
-	}
-	if err := json.Unmarshal(respBody, &secretResp); err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to decode Key Vault response: %w", err)
-	}
-
-	// Try to parse as JSON for structured secrets
-	rawData := make(map[string]interface{})
-	if err := json.Unmarshal([]byte(secretResp.Value), &rawData); err != nil {
-		// Not JSON, return as simple value
-		rawData["value"] = secretResp.Value
-	}
-
-	if d.logger != nil {
-		d.logger.Debug("fetched Azure Key Vault secret",
-			logger.String("spec", spec.Name),
-			logger.String("vault_name", vaultName),
-			logger.String("secret_name", secretName),
-		)
-	}
-
-	// Key Vault secrets are static - no TTL, no lease
-	return rawData, nil, 0, "", nil
-}
-
 // Revoke is a no-op for Azure credentials (they expire naturally)
 func (d *AzureDriver) Revoke(ctx context.Context, leaseID string) error {
 	// Azure bearer tokens cannot be revoked - they expire naturally
@@ -619,8 +646,13 @@ func (d *AzureDriver) Type() string {
 	return credential.SourceTypeAzure
 }
 
-// Cleanup releases resources
+// Cleanup releases the driver's idle connections. A driver is discarded on every
+// source update, rotation and spec-write test mint; without this its pooled
+// connections, and the goroutines serving them, outlive it.
 func (d *AzureDriver) Cleanup(ctx context.Context) error {
+	if d.httpClient != nil {
+		d.httpClient.CloseIdleConnections()
+	}
 	return nil
 }
 
@@ -630,41 +662,33 @@ func (d *AzureDriver) Cleanup(ctx context.Context) error {
 
 // SupportsRotation returns true if this driver can rotate its source credentials
 func (d *AzureDriver) SupportsRotation() bool {
-	// Source credentials can be rotated if we have Graph API access
-	// This requires the source SP to have Application.ReadWrite.All permission
 	return d.hasGraphPermissions()
 }
 
 // PrepareRotation creates a new client_secret for the source's SP.
 // Returns activateAfter to allow time for Azure AD eventual consistency propagation.
+//
+// It holds no lock: every value it derives comes from one config snapshot, and the
+// Graph calls — which can back off for tens of seconds on a 409 — must not stall the
+// source-token readers.
 func (d *AzureDriver) PrepareRotation(ctx context.Context) (map[string]string, map[string]string, time.Duration, error) {
-	d.tokenMu.Lock()
-	defer d.tokenMu.Unlock()
-
 	// One snapshot for everything this rotation derives from the current config, so
-	// the secret it retires, the map it copies and the delay it returns all describe
-	// the same generation.
+	// the app it adds to, the secret it retires, the map it copies and the delay it
+	// returns all describe the same generation.
 	current := d.sourceConfig()
+	clientID := credential.GetString(current, "client_id", "")
 	oldSecretID := credential.GetString(current, "secret_id", "")
 
-	// Get Graph API token
-	graphToken, err := d.getGraphTokenLocked(ctx)
+	graphToken, err := d.getGraphToken(ctx)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to get Graph API token: %w", err)
 	}
 
-	// Add new password credential first (single write, avoids 409 conflict).
-	// Orphan cleanup happens after success as non-critical housekeeping.
-	newSecret, newSecretID, err := d.addPasswordCredential(ctx, graphToken, d.getClientID())
+	newSecret, newSecretID, err := d.addPasswordCredential(ctx, graphToken, clientID)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to create new password credential: %w", err)
 	}
 
-	// Best-effort cleanup of orphaned credentials from previously failed rotations.
-	// Not time-critical since addPassword already succeeded.
-	d.removeOrphanedPasswordCredentials(ctx, graphToken, d.getClientID(), oldSecretID, newSecretID)
-
-	// Build new config
 	newConfig := make(map[string]string, current.Len())
 	for k, v := range current.All() {
 		newConfig[k] = v
@@ -672,7 +696,12 @@ func (d *AzureDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	newConfig["client_secret"] = newSecret
 	newConfig["secret_id"] = newSecretID
 
+	// The app travels with the key id. Cleanup can be retried for days on a driver
+	// built from whatever config is current by then; if the source has been pointed
+	// at another app meanwhile, removing the key from that app would find nothing and
+	// report success while the retired secret lives on in the original one.
 	cleanupConfig := map[string]string{
+		"client_id":     clientID,
 		"old_secret_id": oldSecretID,
 	}
 
@@ -690,33 +719,37 @@ func (d *AzureDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	return newConfig, cleanupConfig, activateAfter, nil
 }
 
-// CommitRotation activates new credentials in the driver
+// CommitRotation activates new credentials in the driver.
+//
+// The order is load-bearing:
+//
+//  1. Prove the new credentials first, before anything changes. The rotation manager
+//     has already persisted the new config by now, so what this protects is the old
+//     secret: the error stops the manager before its cleanup deletes it, leaving a
+//     working secret on the app while the new one is investigated. (The persisted
+//     update also retires this driver instance; the next one is built from the
+//     persisted config.)
+//  2. Swap the config.
+//  3. Bump the token-cache generation, AFTER the swap. A reader takes the generation
+//     before it reads the credentials; bumped first, a reader could still pick up the
+//     old credentials under the new generation and file their token as current.
+//  4. Pre-warm the Graph token, best effort, so CleanupRotation can reuse it.
+//
+// No lock is held across the network calls.
 func (d *AzureDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
-	d.tokenMu.Lock()
-	defer d.tokenMu.Unlock()
-
-	// Update config (single source of truth for credentials). Under configMu, not
-	// tokenMu: the readers are mints that never take tokenMu at all.
-	d.configMu.Lock()
-	d.credSource.Config = credential.NewConfig(newConfig)
-	d.configMu.Unlock()
-
-	// Bump generation to invalidate all cached tokens; old-generation entries
-	// are ignored on lookup without needing to clear the map.
-	d.credGeneration++
-	d.graphPermsCached = false
-	d.sourceVerified = false
-
-	// Verify new credentials work
-	_, err := d.getSourceTokenLocked(ctx, "https://management.azure.com/")
-	if err != nil {
+	next := credential.NewConfig(newConfig)
+	tenantID, clientID, clientSecret := azureCreds(next)
+	if _, _, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, armResource); err != nil {
 		return fmt.Errorf("failed to authenticate with new credentials: %w", err)
 	}
-	d.sourceVerified = true
 
-	// Pre-warm the Graph API token cache so CleanupRotation can reuse it
-	// instead of acquiring a fresh token that may hit an unpropagated AD node.
-	if _, err := d.getSourceTokenLocked(ctx, "https://graph.microsoft.com/"); err != nil && d.logger != nil {
+	d.configMu.Lock()
+	d.credSource.Config = next
+	d.configMu.Unlock()
+
+	d.tokenCache.InvalidateGeneration()
+
+	if _, err := d.getGraphToken(ctx); err != nil && d.logger != nil {
 		d.logger.Trace("Graph token not yet cached during commit, cleanup will retry")
 	}
 
@@ -734,12 +767,19 @@ func (d *AzureDriver) CleanupRotation(ctx context.Context, cleanupConfig map[str
 		return nil
 	}
 
+	// Entries staged before the app was recorded carry no client_id; for those the
+	// current config is the best available answer.
+	appID := cleanupConfig["client_id"]
+	if appID == "" {
+		appID = d.getClientID()
+	}
+
 	graphToken, err := d.getGraphToken(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get Graph API token: %w", err)
 	}
 
-	if err := d.removePasswordCredential(ctx, graphToken, d.getClientID(), oldSecretID); err != nil {
+	if err := d.removePasswordCredential(ctx, graphToken, appID, oldSecretID); err != nil {
 		return fmt.Errorf("failed to remove old password credential: %w", err)
 	}
 
@@ -777,16 +817,10 @@ func (d *AzureDriver) PrepareSpecRotation(ctx context.Context, spec *credential.
 		return nil, nil, 0, fmt.Errorf("failed to get Graph API token: %w", err)
 	}
 
-	// Add new password credential first (single write, avoids 409 conflict).
-	// Orphan cleanup happens after success as non-critical housekeeping.
 	newSecret, newSecretID, err := d.addPasswordCredential(ctx, graphToken, workloadAppID)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to create new password credential for workload SP: %w", err)
 	}
-
-	// Best-effort cleanup of orphaned credentials from previously failed rotations.
-	// Not time-critical since addPassword already succeeded.
-	d.removeOrphanedPasswordCredentials(ctx, graphToken, workloadAppID, oldSecretID, newSecretID)
 
 	// Build new spec config
 	newConfig := make(map[string]string)
@@ -817,10 +851,25 @@ func (d *AzureDriver) PrepareSpecRotation(ctx context.Context, spec *credential.
 	return newConfig, cleanupConfig, activateAfter, nil
 }
 
-// CommitSpecRotation activates new credentials for a spec
+// CommitSpecRotation proves the spec's new secret before the rotation completes.
+// The driver holds no per-spec state — the manager re-mints from the new spec config
+// — so the proof is the whole job: an error here stops the rotation manager before
+// its cleanup deletes the old secret, which is then the only one that still works.
+// The token is requested for the spec's own resource, the one its mints will ask for.
 func (d *AzureDriver) CommitSpecRotation(ctx context.Context, spec *credential.CredSpec, newConfig map[string]string) error {
-	// Nothing to do here - the credential manager will use the new spec config
-	// and re-mint bearer tokens with the new credentials
+	next := credential.NewConfig(newConfig)
+	tenantID := credential.GetString(next, "tenant_id", d.getTenantID())
+	clientID := credential.GetString(next, "client_id", "")
+	clientSecret := credential.GetString(next, "client_secret", "")
+	resourceURI := credential.GetString(next, "resource_uri", armResource)
+
+	if clientID == "" || clientSecret == "" {
+		return fmt.Errorf("rotated spec config must contain 'client_id' and 'client_secret'")
+	}
+	if _, _, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI); err != nil {
+		return fmt.Errorf("failed to authenticate with the rotated spec credentials: %w", err)
+	}
+
 	if d.logger != nil {
 		d.logger.Debug("committed spec credential rotation",
 			logger.String("spec", spec.Name),
@@ -866,7 +915,7 @@ func (d *AzureDriver) acquireToken(ctx context.Context, tenantID, clientID, clie
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("client_secret", clientSecret)
-	data.Set("scope", resourceURI+".default")
+	data.Set("scope", azureScope(resourceURI))
 	data.Set("grant_type", "client_credentials")
 	return d.postTokenRequest(ctx, tenantID, data, "acquireToken")
 }
@@ -880,7 +929,7 @@ func (d *AzureDriver) acquireTokenWithAssertion(ctx context.Context, tenantID, c
 	data.Set("client_id", clientID)
 	data.Set("client_assertion_type", clientAssertionType)
 	data.Set("client_assertion", assertion)
-	data.Set("scope", resourceURI+".default")
+	data.Set("scope", azureScope(resourceURI))
 	data.Set("grant_type", "client_credentials")
 	return d.postTokenRequest(ctx, tenantID, data, "acquireTokenWithAssertion")
 }
@@ -921,88 +970,82 @@ func (d *AzureDriver) postTokenRequest(ctx context.Context, tenantID string, dat
 		return "", 0, fmt.Errorf("failed to decode token response: %w", err)
 	}
 
+	// A 200 is not proof of a token. An empty one would be vended, or cached as the
+	// source's, and fail far from here; a non-positive lifetime would be vended as
+	// already expired.
+	if tokenResp.AccessToken == "" {
+		return "", 0, fmt.Errorf("%s: token response carried no access_token", operation)
+	}
+	if tokenResp.ExpiresIn <= 0 {
+		return "", 0, fmt.Errorf("%s: token response carried no positive expires_in (got %d)", operation, tokenResp.ExpiresIn)
+	}
+
 	return tokenResp.AccessToken, tokenResp.ExpiresIn, nil
 }
 
-// getSourceToken gets a cached token for the source's credentials.
-// Holds tokenMu only for cache reads/writes, NOT during the HTTP call,
-// so callers are not blocked by slow token acquisition.
+// getSourceToken returns a token for the source's own service principal, from the
+// cache when it holds a live one.
+//
+// Concurrent misses for one resource are coalesced into a single request to Entra.
+// The request runs detached from any one caller's context (bounded by the HTTP
+// client's timeout), so a caller that gives up does not fail the others waiting on
+// the same fetch; each caller still returns as soon as its own context ends.
+//
+// The generation is read before the credentials. A rotation that installs new
+// credentials while the request is in flight bumps it, the store is refused, and the
+// fetch runs again against the new credentials — bounded, so back-to-back rotations
+// cannot loop a caller forever.
 func (d *AzureDriver) getSourceToken(ctx context.Context, resourceURI string) (string, error) {
-	// Fast path: cache hit
-	d.tokenMu.Lock()
-	gen := d.credGeneration
-	if cached, ok := d.tokenCache[resourceURI]; ok &&
-		cached.generation == gen &&
-		time.Now().Add(5*time.Minute).Before(cached.expiresAt) {
-		token := cached.accessToken
-		d.tokenMu.Unlock()
-		return token, nil
-	}
-	d.tokenMu.Unlock()
+	for attempt := 0; attempt < azureSourceTokenAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if token, _, ok := d.tokenCache.Get(resourceURI, azureSourceTokenRefreshBuffer); ok {
+			return token, nil
+		}
 
-	// Slow path: acquire token WITHOUT holding lock
-	tenantID, clientID, clientSecret := d.sourceCreds()
-	token, expiresIn, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
-	if err != nil {
-		return "", err
-	}
+		gen := d.tokenCache.GetGeneration()
+		ch := d.tokenGroup.DoChan(fmt.Sprintf("%d|%s", gen, resourceURI), func() (interface{}, error) {
+			tenantID, clientID, clientSecret := d.sourceCreds()
+			token, expiresIn, err := d.acquireToken(context.WithoutCancel(ctx), tenantID, clientID, clientSecret, resourceURI)
+			if err != nil {
+				return nil, err
+			}
+			expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+			stored := d.tokenCache.SetIfGeneration(resourceURI, token, expiresAt, gen)
+			return sourceTokenResult{token: token, stored: stored}, nil
+		})
 
-	// Cache update under lock; discard if rotation happened during HTTP call
-	d.tokenMu.Lock()
-	if d.credGeneration != gen {
-		d.tokenMu.Unlock()
-		return d.getSourceToken(ctx, resourceURI)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case res := <-ch:
+			if res.Err != nil {
+				return "", res.Err
+			}
+			if r := res.Val.(sourceTokenResult); r.stored {
+				return r.token, nil
+			}
+			// Minted by credentials a rotation retired mid-flight; fetch again.
+		}
 	}
-	if d.tokenCache == nil {
-		d.tokenCache = make(map[string]*cachedAzureToken)
-	}
-	d.tokenCache[resourceURI] = &cachedAzureToken{
-		accessToken: token,
-		expiresAt:   time.Now().Add(time.Duration(expiresIn) * time.Second),
-		generation:  gen,
-	}
-	d.tokenMu.Unlock()
-	return token, nil
-}
-
-// getSourceTokenLocked acquires a token while the caller already holds tokenMu.
-// Used by PrepareRotation/CommitRotation which need atomicity across config + cache.
-func (d *AzureDriver) getSourceTokenLocked(ctx context.Context, resourceURI string) (string, error) {
-	gen := d.credGeneration
-	if cached, ok := d.tokenCache[resourceURI]; ok &&
-		cached.generation == gen &&
-		time.Now().Add(5*time.Minute).Before(cached.expiresAt) {
-		return cached.accessToken, nil
-	}
-
-	tenantID, clientID, clientSecret := d.sourceCreds()
-	token, expiresIn, err := d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
-	if err != nil {
-		return "", err
-	}
-
-	if d.tokenCache == nil {
-		d.tokenCache = make(map[string]*cachedAzureToken)
-	}
-	d.tokenCache[resourceURI] = &cachedAzureToken{
-		accessToken: token,
-		expiresAt:   time.Now().Add(time.Duration(expiresIn) * time.Second),
-		generation:  gen,
-	}
-	return token, nil
+	return "", fmt.Errorf("azure: source credentials were rotated %d times while acquiring a token for %s",
+		azureSourceTokenAttempts, resourceURI)
 }
 
 // getGraphToken gets a Graph API token for the source's credentials
 func (d *AzureDriver) getGraphToken(ctx context.Context) (string, error) {
-	return d.getSourceToken(ctx, "https://graph.microsoft.com/")
+	return d.getSourceToken(ctx, graphResource)
 }
 
-func (d *AzureDriver) getGraphTokenLocked(ctx context.Context) (string, error) {
-	return d.getSourceTokenLocked(ctx, "https://graph.microsoft.com/")
-}
-
-// hasGraphPermissions checks if the source has Graph API access (result is cached).
-// Uses graphPermsMu (not tokenMu) to avoid blocking token operations during the probe.
+// hasGraphPermissions reports whether the source can obtain a Microsoft Graph token,
+// the precondition for rotating anything. It does not prove the source holds
+// Application.ReadWrite.*: a token is issued without it, and a missing permission
+// surfaces as Graph's own 403 when rotation runs.
+//
+// The result is cached (see graphPermsPositiveTTL) and stamped with the token-cache
+// generation, so a rotation invalidates it without taking graphPermsMu. Lock order is
+// graphPermsMu, then the token cache, never the reverse.
 func (d *AzureDriver) hasGraphPermissions() bool {
 	// A keyless federation source has no client_secret, so the source-token probe
 	// below would be a doomed round-trip. It also has nothing to rotate.
@@ -1013,36 +1056,46 @@ func (d *AzureDriver) hasGraphPermissions() bool {
 	d.graphPermsMu.Lock()
 	defer d.graphPermsMu.Unlock()
 
-	if d.graphPermsCached {
-		return d.graphPermsResult
+	gen := d.tokenCache.GetGeneration()
+	now := d.clock()
+	if e := d.graphPerms; e != nil && e.generation == gen && now.Before(e.expiresAt) {
+		return e.ok
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := d.getSourceToken(ctx, "https://graph.microsoft.com/")
-	d.graphPermsCached = true
-	d.graphPermsResult = err == nil
-	return d.graphPermsResult
+	_, err := d.getSourceToken(ctx, graphResource)
+	ttl := graphPermsPositiveTTL
+	if err != nil {
+		ttl = graphPermsNegativeTTL
+	}
+	d.graphPerms = &graphPermsEntry{ok: err == nil, expiresAt: now.Add(ttl), generation: gen}
+	return err == nil
 }
 
 // ============================================================================
 // Microsoft Graph API Operations
 // ============================================================================
 
-// graphAppURL resolves an application's object ID and returns its Graph API base URL.
-func (d *AzureDriver) graphAppURL(ctx context.Context, graphToken, appID string) (string, error) {
-	objectID, err := d.getAppObjectID(ctx, graphToken, appID)
-	if err != nil {
+// graphAppURL returns the Graph URL of an application, addressed by its appId. Graph
+// v1.0 accepts the applications(appId='...') form directly, so no object-id lookup
+// is needed. The appId is spliced into the path, so it is held to a UUID first.
+func (d *AzureDriver) graphAppURL(appID string) (string, error) {
+	if err := credential.ValidateUUID("client_id", appID); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("https://graph.microsoft.com/v1.0/applications/%s", objectID), nil
+	return fmt.Sprintf("%s/v1.0/applications(appId='%s')", d.graphBase(), appID), nil
 }
 
 // addPasswordCredential adds a new password credential to an application.
 // Retries on HTTP 409 (Directory_ConcurrencyViolation) with exponential backoff.
+//
+// A response missing the secret or its key id is refused: persisted, it would become
+// the credential every later mint and rotation depends on. A key Graph did create is
+// removed again rather than left behind.
 func (d *AzureDriver) addPasswordCredential(ctx context.Context, graphToken, appID string) (string, string, error) {
-	appURL, err := d.graphAppURL(ctx, graphToken, appID)
+	appURL, err := d.graphAppURL(appID)
 	if err != nil {
 		return "", "", err
 	}
@@ -1052,7 +1105,10 @@ func (d *AzureDriver) addPasswordCredential(ctx context.Context, graphToken, app
 			"displayName": fmt.Sprintf("warden-rotated-%d", time.Now().Unix()),
 		},
 	}
-	bodyJSON, _ := json.Marshal(body)
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to encode addPassword request: %w", err)
+	}
 
 	respBody, err := d.doAzureRequest(ctx, azureAPIRequest{
 		method:      "POST",
@@ -1074,22 +1130,48 @@ func (d *AzureDriver) addPasswordCredential(ctx context.Context, graphToken, app
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", "", fmt.Errorf("failed to decode addPassword response: %w", err)
 	}
+	if result.SecretText == "" || result.KeyID == "" {
+		if result.KeyID != "" {
+			d.discardPasswordCredential(ctx, graphToken, appID, result.KeyID)
+		}
+		return "", "", fmt.Errorf("addPassword response is missing secretText or keyId")
+	}
 	return result.SecretText, result.KeyID, nil
+}
+
+// discardPasswordCredential removes a password credential Warden just created and
+// cannot use, so a failed rotation does not leave it on the app. Best effort: the
+// rotation has already failed, and this only decides whether it also leaks. Runs on a
+// detached context so a caller that gave up does not cancel the cleanup.
+func (d *AzureDriver) discardPasswordCredential(ctx context.Context, graphToken, appID, keyID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	if err := d.removePasswordCredential(cleanupCtx, graphToken, appID, keyID); err != nil && d.logger != nil {
+		d.logger.Warn("could not remove the unusable password credential just created",
+			logger.String("secret_id", truncateID(keyID, 8)),
+			logger.Err(err),
+		)
+	}
 }
 
 // removePasswordCredential removes a password credential from an application.
 // Retries on HTTP 409 (Directory_ConcurrencyViolation) with exponential backoff.
-// Treats "No password credential found" (HTTP 400) as success for idempotent delete.
+//
+// Removal is idempotent: a key that is already gone counts as removed. Graph documents
+// only the success response, not what a missing keyId returns, so the error text is not
+// trusted to say so. On a client error the app's credential list is consulted instead,
+// and only a keyId absent from it is treated as removed.
 func (d *AzureDriver) removePasswordCredential(ctx context.Context, graphToken, appID, keyID string) error {
-	appURL, err := d.graphAppURL(ctx, graphToken, appID)
+	appURL, err := d.graphAppURL(appID)
 	if err != nil {
 		return err
 	}
 
-	body := map[string]interface{}{
-		"keyId": keyID,
+	bodyJSON, err := json.Marshal(map[string]interface{}{"keyId": keyID})
+	if err != nil {
+		return fmt.Errorf("failed to encode removePassword request: %w", err)
 	}
-	bodyJSON, _ := json.Marshal(body)
 
 	_, err = d.doAzureRequest(ctx, azureAPIRequest{
 		method:      "POST",
@@ -1100,10 +1182,16 @@ func (d *AzureDriver) removePasswordCredential(ctx context.Context, graphToken, 
 		okStatuses:  []int{http.StatusOK, http.StatusNoContent},
 		operation:   "removePassword",
 	}, []int{http.StatusConflict}, removePasswordMaxAttempts)
-	// Treat "not found" as success (idempotent delete).
-	// This happens when orphan cleanup already removed the credential.
-	if err != nil && strings.Contains(err.Error(), "No password credential found") {
+	if err == nil {
 		return nil
+	}
+
+	var statusErr *httputil.StatusError
+	if errors.As(err, &statusErr) && statusErr.Status >= 400 && statusErr.Status < 500 {
+		creds, listErr := d.listPasswordCredentials(ctx, graphToken, appID)
+		if listErr == nil && !hasPasswordCredential(creds, keyID) {
+			return nil
+		}
 	}
 	return err
 }
@@ -1114,9 +1202,19 @@ type passwordCredentialInfo struct {
 	DisplayName string `json:"displayName"`
 }
 
+// hasPasswordCredential reports whether keyID is among creds.
+func hasPasswordCredential(creds []passwordCredentialInfo, keyID string) bool {
+	for _, c := range creds {
+		if strings.EqualFold(c.KeyID, keyID) {
+			return true
+		}
+	}
+	return false
+}
+
 // listPasswordCredentials lists all password credentials on an application
 func (d *AzureDriver) listPasswordCredentials(ctx context.Context, graphToken, appID string) ([]passwordCredentialInfo, error) {
-	appURL, err := d.graphAppURL(ctx, graphToken, appID)
+	appURL, err := d.graphAppURL(appID)
 	if err != nil {
 		return nil, err
 	}
@@ -1143,90 +1241,4 @@ func (d *AzureDriver) listPasswordCredentials(ctx context.Context, graphToken, a
 	}
 
 	return result.PasswordCredentials, nil
-}
-
-// removeOrphanedPasswordCredentials lists all password credentials on an application
-// and removes any warden-managed credentials not in the keep set.
-// Called after addPassword succeeds as best-effort housekeeping.
-// Errors are logged but not propagated.
-func (d *AzureDriver) removeOrphanedPasswordCredentials(ctx context.Context, graphToken, appID string, keepKeyIDs ...string) {
-	creds, err := d.listPasswordCredentials(ctx, graphToken, appID)
-	if err != nil {
-		if d.logger != nil {
-			d.logger.Warn("failed to list password credentials for orphan cleanup", logger.Err(err))
-		}
-		return
-	}
-
-	keepSet := make(map[string]bool, len(keepKeyIDs))
-	for _, id := range keepKeyIDs {
-		keepSet[id] = true
-	}
-
-	// Remove any warden-managed credentials that are not in the keep set
-	for _, cred := range creds {
-		if keepSet[cred.KeyID] {
-			continue
-		}
-		if !strings.HasPrefix(cred.DisplayName, "warden-rotated-") {
-			continue
-		}
-		if d.logger != nil {
-			d.logger.Warn("deleting orphaned password credential from previous failed rotation",
-				logger.String("orphaned_secret_id", truncateID(cred.KeyID, 8)),
-			)
-		}
-		if err := d.removePasswordCredential(ctx, graphToken, appID, cred.KeyID); err != nil && d.logger != nil {
-			d.logger.Warn("failed to remove orphaned password credential",
-				logger.String("orphaned_secret_id", truncateID(cred.KeyID, 8)),
-				logger.Err(err),
-			)
-		}
-	}
-}
-
-// getAppObjectID gets the object ID of an application from its app ID (client_id).
-// Results are cached because the appID -> objectID mapping is immutable in Azure AD.
-func (d *AzureDriver) getAppObjectID(ctx context.Context, graphToken, appID string) (string, error) {
-	d.objectIDMu.Lock()
-	if objectID, ok := d.objectIDCache[appID]; ok {
-		d.objectIDMu.Unlock()
-		return objectID, nil
-	}
-	d.objectIDMu.Unlock()
-
-	params := url.Values{}
-	params.Set("$filter", fmt.Sprintf("appId eq '%s'", appID))
-	params.Set("$select", "id")
-
-	respBody, err := d.doAzureRequest(ctx, azureAPIRequest{
-		method:      "GET",
-		url:         "https://graph.microsoft.com/v1.0/applications?" + params.Encode(),
-		bearerToken: graphToken,
-		okStatuses:  []int{http.StatusOK},
-		operation:   "getAppObjectID",
-	}, nil, 1)
-	if err != nil {
-		return "", err
-	}
-
-	var result struct {
-		Value []struct {
-			ID string `json:"id"`
-		} `json:"value"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("failed to decode application response: %w", err)
-	}
-
-	if len(result.Value) == 0 {
-		return "", fmt.Errorf("application with appId '%s' not found", appID)
-	}
-
-	objectID := result.Value[0].ID
-	d.objectIDMu.Lock()
-	d.objectIDCache[appID] = objectID
-	d.objectIDMu.Unlock()
-
-	return objectID, nil
 }
