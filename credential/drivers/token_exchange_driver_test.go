@@ -16,6 +16,7 @@ import (
 
 	josejwt "github.com/go-jose/go-jose/v3/jwt"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,6 +34,7 @@ func newExchangeDriver(config map[string]string, client *http.Client) *TokenExch
 	return &TokenExchangeDriver{
 		credSource: &credential.CredSource{Type: credential.SourceTypeTokenExchange, Config: credential.NewConfig(config)},
 		httpClient: client,
+		capSigners: remotesign.NewCapabilitySigners(nil, remotesign.CapabilityOptions{}),
 	}
 }
 

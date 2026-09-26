@@ -3,6 +3,7 @@ package drivers
 import (
 	"testing"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,4 +61,19 @@ func TestParseSecretPayload(t *testing.T) {
 		_, err := parseSecretPayload([]byte(`{}`))
 		require.Error(t, err)
 	})
+}
+
+// A producer for a backend with no capability codec has nothing to check its payload.*
+// bag against, so it must refuse rather than let the bag overwrite coordinates.
+func TestSigningCapabilityPayloadFields_UnknownBackend(t *testing.T) {
+	cfg := credential.NewConfig(map[string]string{"payload.client_id": "c", "payload.vault_token": "x"})
+	_, err := signingCapabilityPayloadFields(cfg, "cloudkms", nil, nil, "test")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no signing capability codec for backend "cloudkms"`)
+
+	got, err := signingCapabilityPayloadFields(credential.NewConfig(map[string]string{
+		"payload.client_id": "c", "payload.kid": "k",
+	}), "transit", nil, nil, "test")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"client_id": "c", "kid": "k"}, got)
 }

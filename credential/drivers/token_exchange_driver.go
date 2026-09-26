@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -91,26 +89,7 @@ type tokenExchangeChainedAuth struct {
 	// kms is set instead of secret when the referenced spec minted a signing
 	// capability rather than a key. The two are mutually exclusive: one carries the
 	// key, the other carries permission to use a key it will never see.
-	kms *kmsSignerMaterial
-}
-
-// kmsSignerMaterial is a signing capability fetched through chaining: which key, which
-// version, where it lives, and a token that may sign with it. It holds no key material —
-// that absence is the entire point of the method.
-type kmsSignerMaterial struct {
-	backend    string
-	token      string
-	address    string
-	namespace  string
-	mount      string
-	keyName    string
-	keyVersion string
-	alg        string
-	kid        string
-	// expiresAt is the capability token's expiry, when the producer reported one. It
-	// lets a spent capability be recognised without spending a round trip discovering
-	// it, and told apart from a broken one.
-	expiresAt time.Time
+	kms *remotesign.Capability
 }
 
 // TokenExchangeDriver exchanges a caller-derived identity (a subject token, and
@@ -122,10 +101,8 @@ type TokenExchangeDriver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
-	// kmsClients pools one token-less base client per signing backend address, cloned
-	// per assertion so the capability token never touches a shared client. In practice
-	// it holds a single entry.
-	kmsClients sync.Map
+	// capSigners signs with fetched signing capabilities over pooled connections.
+	capSigners *remotesign.CapabilitySigners
 }
 
 // TokenExchangeDriverFactory creates TokenExchangeDriver instances.
@@ -337,10 +314,14 @@ func (f *TokenExchangeDriverFactory) Create(config credential.Config, log *logge
 	if err != nil {
 		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 	}
+	driverLog := log.WithSubsystem(credential.SourceTypeTokenExchange)
 	return &TokenExchangeDriver{
 		credSource: &credential.CredSource{Type: credential.SourceTypeTokenExchange, Config: config},
-		logger:     log.WithSubsystem(credential.SourceTypeTokenExchange),
+		logger:     driverLog,
 		httpClient: client,
+		// The source's TLS settings describe its token endpoint, not the signing
+		// store, so they are not handed to the signers.
+		capSigners: remotesign.NewCapabilitySigners(driverLog, remotesign.CapabilityOptions{}),
 	}, nil
 }
 
@@ -403,7 +384,7 @@ func tokenExchangeChainedAuthFromMaterial(cfg credential.Config, material creden
 
 	secret := material.Secret()
 	var kid string
-	var kms *kmsSignerMaterial
+	var kms *remotesign.Capability
 
 	switch credential.GetString(cfg, "client_auth", clientAuthSecretPost) {
 	case clientAuthKMSPrivateKeyJWT:
@@ -413,8 +394,8 @@ func tokenExchangeChainedAuthFromMaterial(cfg credential.Config, material creden
 		// as key material to anything that later reads the struct.
 		secret = ""
 		var err error
-		if kms, err = kmsSignerFromMaterial(material); err != nil {
-			return nil, err
+		if kms, err = remotesign.DecodeCapability(material.Data); err != nil {
+			return nil, capabilityError(err)
 		}
 	case clientAuthSecretPost, clientAuthSecretBasic, "":
 		if secret == "" && material.Field == "" {
@@ -458,68 +439,6 @@ func tokenExchangeChainedAuthFromMaterial(cfg credential.Config, material creden
 	}
 
 	return &tokenExchangeChainedAuth{clientID: clientID, secret: secret, kid: kid, kms: kms}, nil
-}
-
-// kmsSignerFromMaterial reads a signing capability out of the referenced payload. Every
-// coordinate is required and read by its own name — the producer writes them all
-// together, so any one missing means a payload written by something else, or by an
-// older version of the producer.
-//
-// Those failures carry ErrChainedSecretIncomplete so a cached payload predating a field
-// is refetched once, rather than failing every mint for the rest of its cache window.
-func kmsSignerFromMaterial(material credential.SecretMaterial) (*kmsSignerMaterial, error) {
-	need := func(key string) (string, error) {
-		if v := material.Data[key]; v != "" {
-			return v, nil
-		}
-		return "", fmt.Errorf("token_exchange: the fetched signing capability has no %q: %w", key, credential.ErrChainedSecretIncomplete)
-	}
-
-	backend, err := need("kms_backend")
-	if err != nil {
-		return nil, err
-	}
-	if backend != remotesign.BackendTypeTransit {
-		// A backend this build cannot drive. Not a payload-freshness problem — refetching
-		// yields the same answer — so it must not ask the manager to retry.
-		return nil, fmt.Errorf("token_exchange: unsupported signing backend %q in the fetched capability", backend)
-	}
-
-	m := &kmsSignerMaterial{backend: backend, namespace: material.Data["vault_namespace"], kid: material.Data["kid"]}
-	for _, f := range []struct {
-		key string
-		dst *string
-	}{
-		{"vault_token", &m.token},
-		{"vault_address", &m.address},
-		{"transit_mount", &m.mount},
-		{"transit_key", &m.keyName},
-		{"signing_alg", &m.alg},
-	} {
-		if *f.dst, err = need(f.key); err != nil {
-			return nil, err
-		}
-	}
-
-	rawVersion, err := need("transit_key_version")
-	if err != nil {
-		return nil, err
-	}
-	// The producer always writes a concrete version, so an unusable one means a stale or
-	// foreign payload — something a refetch can fix.
-	if v, perr := strconv.Atoi(rawVersion); perr != nil || v < 1 {
-		return nil, fmt.Errorf("token_exchange: the fetched signing capability has an unusable key version %q: %w", rawVersion, credential.ErrChainedSecretIncomplete)
-	}
-	m.keyVersion = rawVersion
-
-	// Optional: without it the expiry preflight is simply skipped, and a spent
-	// capability is discovered by the store refusing to sign with it instead.
-	if raw := material.Data["token_expires_at"]; raw != "" {
-		if ts, perr := time.Parse(time.RFC3339, raw); perr == nil {
-			m.expiresAt = ts
-		}
-	}
-	return m, nil
 }
 
 // mintExchange runs the exchange for the configured grant. chained, when non-nil,
@@ -857,6 +776,7 @@ func (d *TokenExchangeDriver) Revoke(_ context.Context, _ string) error {
 // Cleanup releases resources.
 func (d *TokenExchangeDriver) Cleanup(_ context.Context) error {
 	d.httpClient.CloseIdleConnections()
+	d.capSigners.Close()
 	return nil
 }
 

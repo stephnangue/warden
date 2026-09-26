@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -306,7 +308,7 @@ func TestKMSAssertion_IgnoresSecretField(t *testing.T) {
 		credential.NewConfig(map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}), material)
 	require.NoError(t, err)
 	require.NotNil(t, auth.kms)
-	assert.Equal(t, "client-assertion", auth.kms.keyName)
+	assert.Equal(t, "client-assertion", auth.kms.Ref.KeyName)
 	assert.Empty(t, auth.secret, "no key material travels with a capability")
 }
 
@@ -497,6 +499,57 @@ func TestKMSAssertion_ConcurrentSigningKeepsCapabilitiesApart(t *testing.T) {
 		assert.NoError(t, rsa.VerifyPKCS1v15(&backend.keys[keyNames[i]].PublicKey, crypto.SHA256, h.Sum(nil), sig),
 			"assertion %d was not signed by the key its capability named", i)
 	}
+}
+
+// TestKMSAssertion_CleanupClosesSigningConnections: the signing store's connections are
+// pooled per driver, so the driver has to release them when it is replaced or removed.
+// Built through the factory, so it also covers the production wiring of the pool.
+func TestKMSAssertion_CleanupClosesSigningConnections(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	var closed atomic.Int32
+	kms := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		digest, err := base64.StdEncoding.DecodeString(body["input"].(string))
+		require.NoError(t, err)
+		sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest)
+		require.NoError(t, err)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"signature":   "vault:v2:" + base64.StdEncoding.EncodeToString(sig),
+			"key_version": 2,
+		}})
+	}))
+	kms.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateClosed {
+			closed.Add(1)
+		}
+	}
+	kms.Start()
+	defer kms.Close()
+
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"downstream","token_type":"Bearer","expires_in":1800}`))
+	}))
+	defer sts.Close()
+
+	sd, err := (&TokenExchangeDriverFactory{}).Create(credential.NewConfig(kmsSourceConfig(sts.URL)), testDriverLogger())
+	require.NoError(t, err)
+	d := sd.(*TokenExchangeDriver)
+	d.httpClient = sts.Client()
+
+	_, _, _, _, err = d.MintCredentialWithExchangeFromSecret(context.Background(),
+		&credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{})},
+		subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),
+		capabilityMaterial(kms.URL, nil))
+	require.NoError(t, err)
+	require.Zero(t, closed.Load(), "the signing connection is kept for reuse")
+
+	require.NoError(t, d.Cleanup(context.Background()))
+	require.Eventually(t, func() bool { return closed.Load() > 0 }, 2*time.Second, 10*time.Millisecond,
+		"Cleanup must close the pooled signing connections")
 }
 
 // TestKMSAssertion_IgnoresAmbientEnvironment: the client that spends a capability must

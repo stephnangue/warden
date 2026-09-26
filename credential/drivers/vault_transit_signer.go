@@ -26,13 +26,6 @@ const defaultTransitMount = "transit"
 // algorithm essentially every authorization server accepts for client assertions.
 const defaultSigningAlg = "RS256"
 
-// transitSignerPayloadPrefix marks spec-config keys carried verbatim into the minted
-// payload. What travels there means something only to the consumer — the OAuth client
-// the key is registered to, a key id an authorization server selects on — so this
-// driver copies it without interpreting it, rather than growing config keys for a
-// protocol it does not speak.
-const transitSignerPayloadPrefix = "payload."
-
 // mintTransitSigner builds the signing capability. The login token IS the credential,
 // as with a plain token mint, so it is never revoked here: the consumer needs it live
 // for as long as it holds the material.
@@ -80,14 +73,10 @@ func (d *VaultDriver) mintTransitSigner(
 		return nil, nil, 0, "", fmt.Errorf("vault: signing key %q is unusable for %s: %w", keyName, alg, err)
 	}
 
-	payload, err := transitSignerPayloadFields(spec.Config, userClaims, agentClaims)
+	payload, err := signingCapabilityPayloadFields(spec.Config, remotesign.BackendTypeTransit,
+		userClaims, agentClaims, "vault: mint_method="+mintMethodTransitSigner)
 	if err != nil {
 		return nil, nil, 0, "", err
-	}
-	if payload["client_id"] == "" {
-		return nil, nil, 0, "", fmt.Errorf(
-			"vault: mint_method=%s requires %sclient_id on the spec: the consumer names the client its assertion is for, and this driver only carries that name",
-			mintMethodTransitSigner, transitSignerPayloadPrefix)
 	}
 
 	// A key id the operator did not set is derived from the key and the exact version
@@ -97,30 +86,18 @@ func (d *VaultDriver) mintTransitSigner(
 		payload["kid"] = fmt.Sprintf("%s-v%s", info.Ref.KeyName, info.Ref.Version)
 	}
 
-	if loginTTL <= 0 {
-		// A role issuing a token with no expiry: give the cache layer a positive
-		// lifetime rather than a zero, which would read as "static" and never refresh.
-		loginTTL = 1 * time.Hour
-	}
-	if spec.MaxTTL > 0 && loginTTL > spec.MaxTTL {
-		loginTTL = spec.MaxTTL
-	}
+	loginTTL = signingCapabilityTTL(loginTTL, spec)
 
-	rawData := map[string]interface{}{
-		"kms_backend":         remotesign.BackendTypeTransit,
-		"vault_token":         loginAuth.ClientToken,
-		"vault_address":       credential.GetString(d.credSource.Config, "vault_address", ""),
-		"transit_mount":       mount,
-		"transit_key":         info.Ref.KeyName,
-		"transit_key_version": info.Ref.Version,
-		"signing_alg":         alg,
+	rawData := remotesign.EncodeTransitCapability(remotesign.TransitCapability{
+		Token:     loginAuth.ClientToken,
+		Address:   credential.GetString(d.credSource.Config, "vault_address", ""),
+		Namespace: credential.GetString(d.credSource.Config, "vault_namespace", ""),
+		Mount:     mount,
+		Ref:       info.Ref,
 		// Lets the consumer skip a round trip it already knows will fail, and tell a
 		// spent capability apart from a broken one.
-		"token_expires_at": time.Now().Add(loginTTL).UTC().Format(time.RFC3339),
-	}
-	if ns := credential.GetString(d.credSource.Config, "vault_namespace", ""); ns != "" {
-		rawData["vault_namespace"] = ns
-	}
+		ExpiresAt: time.Now().Add(loginTTL),
+	})
 	for k, v := range payload {
 		rawData[k] = v
 	}
@@ -210,38 +187,4 @@ func validateTransitSignerSpec(mintMethod string, spec *credential.CredSpec) err
 			mintMethodTransitSigner)
 	}
 	return nil
-}
-
-// transitSignerCoordinates are the payload names this driver writes itself. The
-// passthrough bag may not use them: stripped of its prefix, payload.vault_token would
-// land on the same key as the capability's real token and, being merged second, would
-// replace it — sending the capability somewhere else, or spending a token that is not
-// the one this mint obtained.
-var transitSignerCoordinates = map[string]struct{}{
-	"kms_backend": {}, "vault_token": {}, "vault_address": {}, "vault_namespace": {},
-	"transit_mount": {}, "transit_key": {}, "transit_key_version": {},
-	"signing_alg": {}, "token_expires_at": {},
-}
-
-// transitSignerPayloadFields collects the payload.* passthrough bag with its prefix
-// stripped. Values may be claim-templated, so one spec can front a different client and
-// a different key per caller.
-//
-// A name the driver writes itself is refused rather than dropped: silently ignoring it
-// would leave an operator with a spec that reads as though it set something.
-func transitSignerPayloadFields(config credential.Config, userClaims, agentClaims map[string]string) (map[string]string, error) {
-	out := map[string]string{}
-	for k, v := range credential.GetPrefixed(config, transitSignerPayloadPrefix) {
-		if _, reserved := transitSignerCoordinates[k]; reserved {
-			return nil, fmt.Errorf(
-				"vault: %s%s is not allowed: %q is part of the signing capability this mint writes, and carrying one here would replace it",
-				transitSignerPayloadPrefix, k, k)
-		}
-		resolved, err := resolveClaimTemplate(v, userClaims, agentClaims, transitSignerPayloadPrefix+k)
-		if err != nil {
-			return nil, err
-		}
-		out[k] = resolved
-	}
-	return out, nil
 }
