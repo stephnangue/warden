@@ -1,6 +1,7 @@
 package types
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -92,9 +93,9 @@ func TestKeyValueCredType_ValidateConfig(t *testing.T) {
 		{
 			name:       "unsupported source type",
 			config:     map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "github/ci"},
-			sourceType: credential.SourceTypeAzure,
+			sourceType: credential.SourceTypeKubernetes,
 			wantErr:    true,
-			errMsg:     "require an hvault, aws or gcp source",
+			errMsg:     "require an hvault, aws, gcp or azure source",
 		},
 		{
 			name:       "wrong mint_method",
@@ -481,4 +482,200 @@ func TestKeyValueCredType_GCP_RejectsTokenMintKeys(t *testing.T) {
 		require.Errorf(t, err, "%s must be refused on a secret_read spec", key)
 		assert.Contains(t, err.Error(), key)
 	}
+}
+
+// Azure fixtures. The ids are real UUIDs so the checks under test are the only reason
+// a spec could be refused.
+const (
+	testKVTenant  = "00000000-0000-0000-0000-000000000001"
+	testKVClient  = "11111111-1111-1111-1111-111111111111"
+	testKVVersion = "0123456789abcdef0123456789abcdef"
+)
+
+func TestKeyValueCredType_ValidateConfig_Azure(t *testing.T) {
+	ct := NewKeyValueCredType()
+	validate := func(cfg map[string]string) error {
+		return ct.ValidateConfig(credential.NewConfig(cfg), credential.SourceTypeAzure)
+	}
+	federated := func(extra map[string]string) map[string]string {
+		cfg := map[string]string{
+			"mint_method":                       "secret_read",
+			"vault_name":                        "acme-prod-kv",
+			"secret_name":                       "datadog-keys",
+			"tenant_id":                         testKVTenant,
+			"client_id":                         testKVClient,
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return cfg
+	}
+	static := func(extra map[string]string) map[string]string {
+		cfg := map[string]string{"mint_method": "secret_read", "vault_name": "acme-prod-kv", "secret_name": "datadog-keys"}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return cfg
+	}
+
+	t.Run("federated read naming its app", func(t *testing.T) {
+		require.NoError(t, validate(federated(nil)))
+	})
+
+	t.Run("static read as the source", func(t *testing.T) {
+		require.NoError(t, validate(static(nil)))
+	})
+
+	t.Run("pinned version and key map", func(t *testing.T) {
+		require.NoError(t, validate(federated(map[string]string{
+			"secret_version": testKVVersion, "json_key_map": "dd_api=api_key",
+		})))
+	})
+
+	t.Run("templated secret name", func(t *testing.T) {
+		require.NoError(t, validate(federated(map[string]string{"secret_name": "agent-{{agent.sub}}"})))
+	})
+
+	// The app is what the caller's token is exchanged at, so a federated spec cannot
+	// do without it.
+	for _, key := range []string{"client_id", "tenant_id"} {
+		t.Run("federated requires "+key, func(t *testing.T) {
+			cfg := federated(nil)
+			delete(cfg, key)
+			err := validate(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key)
+		})
+
+		t.Run("federated "+key+" must be a UUID", func(t *testing.T) {
+			err := validate(federated(map[string]string{key: "not-a-uuid"}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "must be a valid UUID")
+		})
+
+		// A static source reads as itself; an app named here would never be used.
+		t.Run("static refuses "+key, func(t *testing.T) {
+			err := validate(static(map[string]string{key: testKVClient}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "a static source reads as itself")
+		})
+	}
+
+	t.Run("vault_name and secret_name are required", func(t *testing.T) {
+		for _, key := range []string{"vault_name", "secret_name"} {
+			cfg := static(nil)
+			delete(cfg, key)
+			err := validate(cfg)
+			require.Errorf(t, err, "missing %s", key)
+			assert.Contains(t, err.Error(), key)
+		}
+	})
+
+	// The vault name becomes the request's host, so anything outside Key Vault's
+	// charset could send the Key Vault token somewhere else.
+	t.Run("hostile vault names are refused", func(t *testing.T) {
+		for _, name := range []string{
+			"evil.example/x#", "evil.example", "a", "ab", "1abc", "abc-", "a--b",
+			"abcdefghijklmnopqrstuvwxy", "with space", "kv?x", "kv#x",
+		} {
+			err := validate(static(map[string]string{"vault_name": name}))
+			require.Errorf(t, err, "vault_name %q must be refused", name)
+		}
+	})
+
+	t.Run("a templated vault name is refused", func(t *testing.T) {
+		err := validate(federated(map[string]string{"vault_name": "kv-{{agent.sub}}"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support claim templates")
+	})
+
+	t.Run("secret names outside Key Vault's charset are refused", func(t *testing.T) {
+		for _, name := range []string{"a/b", "a.b", "a_b", "a?b", "a#b", "../x", strings.Repeat("a", 128)} {
+			err := validate(static(map[string]string{"secret_name": name}))
+			require.Errorf(t, err, "secret_name %q must be refused", name)
+		}
+	})
+
+	t.Run("secret_version must be a Key Vault version", func(t *testing.T) {
+		for _, v := range []string{"3", "latest", testKVVersion[:31], testKVVersion + "0", "0123456789abcdef0123456789abcde/"} {
+			err := validate(static(map[string]string{"secret_version": v}))
+			require.Errorf(t, err, "secret_version %q must be refused", v)
+		}
+	})
+
+	t.Run("only secret_read is offered", func(t *testing.T) {
+		err := validate(static(map[string]string{"mint_method": "kv2_read"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be 'secret_read'")
+	})
+
+	// key_value masks nothing on read, so a secret here would sit in the clear.
+	t.Run("client_secret is refused", func(t *testing.T) {
+		err := validate(static(map[string]string{"client_secret": "s"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "client_secret")
+	})
+
+	t.Run("foreign and token-mint keys are refused", func(t *testing.T) {
+		for _, key := range []string{
+			"secret_id", "role_arn", "kv2_mount", "secret_path", "transit_key",
+			"project", "target_service_account", "scopes", "lifetime", "resource_uri", "credential_type",
+		} {
+			err := validate(static(map[string]string{key: "v"}))
+			require.Errorf(t, err, "%s must be refused on an azure spec", key)
+			assert.Contains(t, err.Error(), key)
+		}
+	})
+}
+
+// The rejection runs in every direction: an azure locator on another store's spec is
+// accepted by the schema and then never read.
+func TestKeyValueCredType_AzureLocatorsRejectedElsewhere(t *testing.T) {
+	ct := NewKeyValueCredType()
+	for _, key := range []string{"vault_name", "client_id", "tenant_id"} {
+		for _, tc := range []struct {
+			source string
+			cfg    map[string]string
+		}{
+			{credential.SourceTypeVault, map[string]string{"mint_method": "kv2_read", "kv2_mount": "secret", "secret_path": "a/b"}},
+			{credential.SourceTypeAWS, map[string]string{"mint_method": "secret_read", "secret_id": "prod/keys"}},
+			{credential.SourceTypeGCP, map[string]string{"mint_method": "secret_read", "secret_name": "keys", "project": "acme-prod"}},
+		} {
+			t.Run(tc.source+" refuses "+key, func(t *testing.T) {
+				cfg := map[string]string{key: "v"}
+				for k, v := range tc.cfg {
+					cfg[k] = v
+				}
+				err := ct.ValidateConfig(credential.NewConfig(cfg), tc.source)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), key)
+			})
+		}
+	}
+}
+
+// secret_version is a string in the schema because stores spell a revision
+// differently; the numbered stores still refuse anything but a positive integer.
+func TestKeyValueCredType_SecretVersionSpelledPerStore(t *testing.T) {
+	ct := NewKeyValueCredType()
+
+	gcp := map[string]string{"mint_method": "secret_read", "secret_name": "keys", "project": "acme-prod"}
+	for v, ok := range map[string]bool{"3": true, "0": false, "latest": false, testKVVersion: false} {
+		cfg := map[string]string{"secret_version": v}
+		for k, val := range gcp {
+			cfg[k] = val
+		}
+		err := ct.ValidateConfig(credential.NewConfig(cfg), credential.SourceTypeGCP)
+		if ok {
+			assert.NoErrorf(t, err, "gcp secret_version %q", v)
+		} else {
+			assert.Errorf(t, err, "gcp secret_version %q", v)
+		}
+	}
+
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
+		"mint_method": "secret_read", "vault_name": "acme-prod-kv", "secret_name": "keys", "secret_version": testKVVersion,
+	}), credential.SourceTypeAzure)
+	assert.NoError(t, err, "a Key Vault version is accepted on azure")
 }

@@ -241,6 +241,12 @@ func validateEndpointURL(v string) error {
 	if u.Host == "" {
 		return fmt.Errorf("endpoint has no host: %s", v)
 	}
+	// Request paths are appended to an endpoint, so a query or fragment in it would
+	// swallow them — the path would land inside the query string — and credentials in
+	// it would be sent with every call.
+	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("endpoint must be a base URL with no query, fragment or credentials: %s", v)
+	}
 	return nil
 }
 

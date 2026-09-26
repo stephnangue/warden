@@ -217,6 +217,7 @@ var _ credential.SourceDriver = (*AzureDriver)(nil)
 var _ credential.Rotatable = (*AzureDriver)(nil)
 var _ credential.SpecRotatable = (*AzureDriver)(nil)
 var _ credential.ExchangeMinter = (*AzureDriver)(nil)
+var _ credential.RotationConfigValidator = (*AzureDriverFactory)(nil)
 
 // AzureDriver mints credentials from Azure services.
 // It exchanges pre-provisioned service principal credentials (stored in specs)
@@ -262,10 +263,16 @@ type AzureDriver struct {
 	httpClient *http.Client
 
 	// Entra ID authority and Graph hosts; empty means the public-cloud defaults.
-	// Tests set them to a local server so token acquisition and rotation can be
-	// exercised without Azure.
+	// loginHost comes from the source's login_endpoint; graphHost has no config key
+	// and is set only by tests, so rotation can be exercised without Azure.
 	loginHost string
 	graphHost string
+
+	// keyVaultEndpoint, from the source's key_vault_endpoint, replaces the Key Vault
+	// base URL for every read; empty means https://<vault_name>.vault.azure.net.
+	// Like loginHost it is fixed when the driver is built — a config change rebuilds
+	// the driver — so it is read without a lock.
+	keyVaultEndpoint string
 }
 
 // graphPermsEntry is one cached Graph-permission probe result.
@@ -390,6 +397,16 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 		credential.StringField("audience").
 			Describe("Audience minted into a warden_identity assertion for this source (oidc_federation only; default api://AzureADTokenExchange)").
 			Example("api://AzureADTokenExchange"),
+
+		credential.StringField("login_endpoint").
+			Custom(validateEndpointURL).
+			Describe("Override the Entra ID authority host every token request goes to (default https://login.microsoftonline.com)").
+			Example("https://login.microsoftonline.com"),
+
+		credential.StringField("key_vault_endpoint").
+			Custom(validateEndpointURL).
+			Describe("Override the Key Vault base URL secret reads go to (default https://<vault_name>.vault.azure.net); applies to every vault this source reads").
+			Example("https://acme-prod-kv.vault.azure.net"),
 	); err != nil {
 		return err
 	}
@@ -431,6 +448,20 @@ func validateNonNegativeDuration(v string) error {
 	return nil
 }
 
+// ValidateRotationConfig refuses a rotation period on a source whose token requests or
+// Key Vault reads are redirected. Rotation writes to the real tenant through Graph,
+// which neither override redirects: it would rotate a secret in one place while the
+// source authenticates somewhere else.
+func (f *AzureDriverFactory) ValidateRotationConfig(config credential.Config) error {
+	if credential.GetString(config, "login_endpoint", "") == "" &&
+		credential.GetString(config, "key_vault_endpoint", "") == "" {
+		return nil
+	}
+	return fmt.Errorf("rotation_period cannot be set on a source that overrides " +
+		"login_endpoint or key_vault_endpoint: rotation manages client secrets in the " +
+		"real tenant through Microsoft Graph, which those overrides do not redirect")
+}
+
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *AzureDriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret", "ca_data"}
@@ -442,6 +473,10 @@ func (f *AzureDriverFactory) InferCredentialType(specConfig credential.Config) (
 	switch mintMethod {
 	case "", "bearer_token":
 		return credential.TypeAzureBearerToken, nil
+	case "secret_read":
+		// A Key Vault secret is vended under its own key names, the shape a chained
+		// consumer reads by name.
+		return credential.TypeKeyValue, nil
 	case "azure_db_iam_token":
 		// Accepted by the db_auth_token schema so the refusal can be specific, but
 		// nothing mints it: inferring a type would let a spec be written that fails
@@ -457,7 +492,7 @@ func (f *AzureDriverFactory) InferCredentialType(specConfig credential.Config) (
 // errKeyVaultSecretRemoved refuses the retired Key Vault mint method. It built the
 // vault URL from spec config without validating it, so a spec could send a Key Vault
 // token to any host.
-var errKeyVaultSecretRemoved = errors.New("mint_method 'key_vault_secret' is no longer supported for the azure driver")
+var errKeyVaultSecretRemoved = errors.New("mint_method 'key_vault_secret' is no longer supported for the azure driver; read Key Vault secrets with type key_value and mint_method secret_read")
 
 // Create instantiates a new AzureDriver
 func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
@@ -468,6 +503,9 @@ func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedL
 		},
 		logger:     log.WithSubsystem(credential.SourceTypeAzure),
 		tokenCache: NewTokenCache(),
+		// Trailing slashes trimmed so the paths appended to them join cleanly.
+		loginHost:        strings.TrimRight(credential.GetString(config, "login_endpoint", ""), "/"),
+		keyVaultEndpoint: strings.TrimRight(credential.GetString(config, "key_vault_endpoint", ""), "/"),
 	}
 
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)
@@ -509,11 +547,33 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	switch mintMethod {
 	case "bearer_token":
 		return d.mintBearerToken(ctx, spec, "")
+	case "secret_read":
+		return d.mintViaSecretRead(ctx, spec)
 	case "key_vault_secret":
 		return nil, nil, 0, "", errKeyVaultSecretRemoved
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Azure driver; use 'bearer_token'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Azure driver; use 'bearer_token' or 'secret_read'", mintMethod)
 	}
+}
+
+// mintViaSecretRead reads a Key Vault secret as the source's own service principal,
+// with a cached source token.
+//
+// A spec naming its own app is refused rather than silently read as the source: that
+// identity is honoured only over federation, where the caller's assertion authorizes
+// it. Neither principal's claims are available here either — this path runs when the
+// spec sets no subject_token_source — so a templated secret_name fails closed rather
+// than being sent literally.
+func (d *AzureDriver) mintViaSecretRead(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if credential.GetString(spec.Config, "client_id", "") != "" || credential.GetString(spec.Config, "tenant_id", "") != "" {
+		return nil, nil, 0, "", fmt.Errorf("azure: 'client_id'/'tenant_id' apply to mint_method=secret_read only over auth_method=oidc_federation; a static source reads as itself")
+	}
+
+	token, err := d.getSourceToken(ctx, keyVaultResource)
+	if err != nil {
+		return nil, nil, 0, "", fmt.Errorf("failed to acquire Key Vault token: %w", err)
+	}
+	return d.readKeyVaultSecret(ctx, token, spec, nil, nil)
 }
 
 // MintCredentialWithExchange mints a bearer token via Azure AD Workload Identity
@@ -536,8 +596,23 @@ func (d *AzureDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	switch mintMethod {
 	case "bearer_token":
 		return d.mintBearerToken(ctx, spec, inputs.SubjectToken)
+	case "secret_read":
+		// The credential is the stored secret, not the token that reads it: the
+		// token is used for this one read and discarded. The caller's claims travel
+		// with the read, so a templated secret name resolves from them and scopes the
+		// read to the principals on this request.
+		tenantID := credential.GetString(spec.Config, "tenant_id", "")
+		clientID := credential.GetString(spec.Config, "client_id", "")
+		if tenantID == "" || clientID == "" {
+			return nil, nil, 0, "", fmt.Errorf("spec config must contain 'client_id' and 'tenant_id' for a federated secret_read")
+		}
+		token, _, err := d.acquireTokenWithAssertion(ctx, tenantID, clientID, inputs.SubjectToken, keyVaultResource)
+		if err != nil {
+			return nil, nil, 0, "", fmt.Errorf("failed to acquire Key Vault token: %w", err)
+		}
+		return d.readKeyVaultSecret(ctx, token, spec, inputs.UserClaims, inputs.AgentClaims)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("azure: mint_method %q is not supported over auth_method=oidc_federation (supported: bearer_token)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("azure: mint_method %q is not supported over auth_method=oidc_federation (supported: bearer_token, secret_read)", mintMethod)
 	}
 }
 
@@ -558,15 +633,33 @@ func azureAssertionAudience(sourceCfg credential.Config) (string, bool) {
 
 // azureAssertionResource reports the canonical downstream resource an Azure
 // federation spec targets, for the warden_resource assertion claim. Pure: reads
-// spec config only. Only bearer_token is federated; the resource is the target
-// API (resource_uri), which is coarser than a single secret — it names the API,
-// not one item behind it. Mirrors the resource_uri read in mintBearerToken.
+// spec config only.
+//
+// For bearer_token the resource is the target API (resource_uri), which is coarser
+// than a single item — it names the API, not one thing behind it. Mirrors the
+// resource_uri read in mintBearerToken.
+//
+// For secret_read it is the secret: vault and name. A templated secret name is
+// carried unresolved, as every templated coordinate is here: this runs before the
+// exchange that produces the claims it would resolve from. A policy conditioning on
+// this claim therefore pins the spec, not the individual secret — per-principal
+// scoping is enforced where the resolved read happens, by the permissions on the
+// identity doing it.
 func azureAssertionResource(specCfg credential.Config) (string, bool) {
-	if credential.GetString(specCfg, "mint_method", "bearer_token") != "bearer_token" {
+	switch credential.GetString(specCfg, "mint_method", "bearer_token") {
+	case "bearer_token":
+		uri := credential.GetString(specCfg, "resource_uri", armResource)
+		return "azure:" + uri, true
+	case "secret_read":
+		vault := credential.GetString(specCfg, "vault_name", "")
+		name := credential.GetString(specCfg, "secret_name", "")
+		if vault == "" || name == "" {
+			return "", false
+		}
+		return "azure-keyvault:" + vault + "/" + name, true
+	default:
 		return "", false
 	}
-	uri := credential.GetString(specCfg, "resource_uri", armResource)
-	return "azure:" + uri, true
 }
 
 // mintBearerToken exchanges the spec's SP identity for an Azure AD bearer token.

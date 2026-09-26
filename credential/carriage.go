@@ -131,6 +131,7 @@ var reservedSpecConfigKeys = map[string]struct{}{
 	"secret_path":     {},
 	"secret_id":       {},
 	"secret_name":     {},
+	"vault_name":      {},
 	"role_arn":        {},
 	"version_stage":   {},
 	"version_id":      {},
@@ -146,7 +147,9 @@ var reservedSpecConfigKeys = map[string]struct{}{
 // being carried, silently, on mounts that have nothing to do with GCP. Same reasoning
 // as mintParameterFields above: a name that is a locator for one source and a
 // credential field for another cannot be settled globally. `secret_name` is listed
-// because it is already Key Vault's locator too, and is nobody's credential field.
+// because it is Key Vault's locator too, and is nobody's credential field; so is
+// `vault_name`. The Key Vault read's `client_id` and `tenant_id` are left out on the
+// same grounds as `project`: both are plausible credential field names elsewhere.
 
 // reservedRawDataPrefix marks keys that belong to the mint pipeline rather than
 // to the credential — RawAdjunctFieldsKey and the rotated-refresh-token keys. No
