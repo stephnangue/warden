@@ -94,7 +94,7 @@ func (d *VaultDriver) mintTransitSigner(
 	// that will sign, so it always names the public half the authorization server has
 	// to hold. Derived after resolution, so a templated key yields a per-caller id.
 	if payload["kid"] == "" {
-		payload["kid"] = fmt.Sprintf("%s-v%d", info.Ref.KeyName, info.Ref.Version)
+		payload["kid"] = fmt.Sprintf("%s-v%s", info.Ref.KeyName, info.Ref.Version)
 	}
 
 	if loginTTL <= 0 {
@@ -112,7 +112,7 @@ func (d *VaultDriver) mintTransitSigner(
 		"vault_address":       credential.GetString(d.credSource.Config, "vault_address", ""),
 		"transit_mount":       mount,
 		"transit_key":         info.Ref.KeyName,
-		"transit_key_version": strconv.Itoa(info.Ref.Version),
+		"transit_key_version": info.Ref.Version,
 		"signing_alg":         alg,
 		// Lets the consumer skip a round trip it already knows will fail, and tell a
 		// spent capability apart from a broken one.
@@ -147,7 +147,7 @@ func (d *VaultDriver) mintTransitSigner(
 		"role":                d.effectiveJWTRole(spec),
 		"policies":            strings.Join(loginAuth.Policies, ","),
 		"transit_key":         info.Ref.KeyName,
-		"transit_key_version": strconv.Itoa(info.Ref.Version),
+		"transit_key_version": info.Ref.Version,
 		"tracked_token":       strconv.FormatBool(!batch),
 	}
 	if loginAuth.Accessor != "" {
@@ -166,7 +166,7 @@ func (d *VaultDriver) mintTransitSigner(
 			logger.String("spec", spec.Name),
 			logger.String("jwt_role", d.effectiveJWTRole(spec)),
 			logger.String("transit_key", info.Ref.KeyName),
-			logger.Int("key_version", info.Ref.Version),
+			logger.String("key_version", info.Ref.Version),
 			logger.Bool("batch_token", batch),
 			logger.String("ttl", loginTTL.String()),
 		)
@@ -175,20 +175,21 @@ func (d *VaultDriver) mintTransitSigner(
 	return rawData, metadata, loginTTL, "", nil
 }
 
-// transitSignerVersion reads an optional pinned key version. Absent means "resolve the
-// latest at mint time"; either way the resolved number is what travels, never "latest",
-// so a held capability keeps signing with the version it was checked against instead of
-// whatever happens to be newest when it eventually signs.
-func transitSignerVersion(config credential.Config) (int, error) {
+// transitSignerVersion reads an optional pinned key version. Absent (empty) means
+// "resolve the latest at mint time"; either way the resolved number is what travels,
+// never "latest", so a held capability keeps signing with the version it was checked
+// against instead of whatever happens to be newest when it eventually signs.
+func transitSignerVersion(config credential.Config) (string, error) {
 	raw := strings.TrimSpace(credential.GetString(config, "transit_key_version", ""))
 	if raw == "" {
-		return 0, nil
+		return "", nil
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil || v < 1 {
-		return 0, fmt.Errorf("vault: transit_key_version must be a positive integer, got %q", raw)
+		return "", fmt.Errorf("vault: transit_key_version must be a positive integer, got %q", raw)
 	}
-	return v, nil
+	// Normalized, so "007" pins the same version as "7" and derives the same kid.
+	return strconv.Itoa(v), nil
 }
 
 // validateTransitSignerSpec checks what must hold before a login is attempted. It is a

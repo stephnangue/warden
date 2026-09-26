@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func (f *fakeSignBackend) infoLocked(alg string) remotesign.KeyInfo {
 	vers := f.versions[alg]
 	ver := len(vers)
 	return remotesign.KeyInfo{
-		Ref:       remotesign.KeyRef{KeyName: "fake-" + alg, Version: ver, Alg: alg},
+		Ref:       remotesign.KeyRef{KeyName: "fake-" + alg, Version: strconv.Itoa(ver), Alg: alg},
 		Public:    vers[ver-1].Public(),
 		CreatedAt: time.Now().Add(time.Duration(ver) * time.Second),
 	}
@@ -90,17 +91,24 @@ func (f *fakeSignBackend) NewVersion(_ context.Context, alg string) (remotesign.
 func (f *fakeSignBackend) PublicKey(_ context.Context, ref remotesign.KeyRef) (crypto.PublicKey, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.versions[ref.Alg][ref.Version-1].Public(), nil
+	return f.versions[ref.Alg][fakeVersionIndex(f.t, ref)].Public(), nil
 }
 
 func (f *fakeSignBackend) Sign(_ context.Context, ref remotesign.KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	f.mu.Lock()
-	signer := f.versions[ref.Alg][ref.Version-1]
+	signer := f.versions[ref.Alg][fakeVersionIndex(f.t, ref)]
 	f.mu.Unlock()
 	return signer.Sign(rand.Reader, digest, opts)
 }
 
 func (f *fakeSignBackend) Close() { f.closed = true }
+
+// fakeVersionIndex maps a ref's decimal version to its slot in the fake's version list.
+func fakeVersionIndex(t *testing.T, ref remotesign.KeyRef) int {
+	v, err := strconv.Atoi(ref.Version)
+	require.NoError(t, err, "fake backend: non-numeric version %q", ref.Version)
+	return v - 1
+}
 
 func TestRemoteKeySource_BootstrapAndNext(t *testing.T) {
 	fake := newFakeSignBackend(t)
@@ -159,6 +167,99 @@ func TestStorageV4_RemoteRoundTrip(t *testing.T) {
 	_, err = fromStored(bad, fake, time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kid mismatch")
+}
+
+// TestStoredKeyVersion_ReleasedFormat: releases before the version became a string
+// persisted it as a JSON number. A keyset they wrote must still load here, and one
+// written here must still load there — a standby that cannot decode the keyset cannot
+// unseal, so a rolling upgrade depends on both directions.
+func TestStoredKeyVersion_ReleasedFormat(t *testing.T) {
+	fake := newFakeSignBackend(t)
+	info, err := fake.EnsureKey(context.Background(), oidcAlgRS256)
+	require.NoError(t, err)
+	_, err = fake.NewVersion(context.Background(), oidcAlgRS256)
+	require.NoError(t, err)
+	info.Ref.Version = "2"
+	info.Public = fake.versions[oidcAlgRS256][1].Public()
+	kid, err := signingKeyID(info.Public)
+	require.NoError(t, err)
+	pemStr, err := remotesign.MarshalPublicKeyPEM(info.Public)
+	require.NoError(t, err)
+
+	t.Run("a keyset an older release wrote loads and signs", func(t *testing.T) {
+		legacy := []byte(`{"kid":"` + kid + `","alg":"RS256","remote":{"backend":"transit","key_name":"` +
+			info.Ref.KeyName + `","key_version":2,"public_key_pem":` + jsonString(t, pemStr) +
+			`},"created_at":"2026-01-01T00:00:00Z"}`)
+		var stored storedSigningKey
+		require.NoError(t, json.Unmarshal(legacy, &stored))
+		assert.Equal(t, storedKeyVersion("2"), stored.Remote.KeyVersion)
+
+		back, err := fromStored(stored, fake, time.Second)
+		require.NoError(t, err)
+		rs := back.key.(*remotesign.Signer)
+		assert.Equal(t, "2", rs.Ref().Version)
+		d := make([]byte, crypto.SHA256.Size())
+		sig, err := rs.Sign(rand.Reader, d, crypto.SHA256)
+		require.NoError(t, err)
+		require.NoError(t, rsa.VerifyPKCS1v15(info.Public.(*rsa.PublicKey), crypto.SHA256, d, sig))
+	})
+
+	t.Run("a keyset written here loads in an older release", func(t *testing.T) {
+		sk := &signingKey{key: remotesign.NewSigner(fake, info.Ref, info.Public, time.Second),
+			alg: oidcAlgRS256, kid: kid, createdAt: info.CreatedAt}
+		stored, err := toStored(sk)
+		require.NoError(t, err)
+		buf, err := json.Marshal(stored)
+		require.NoError(t, err)
+
+		// The shape the released storedRemoteKey decodes into.
+		var old struct {
+			Remote struct {
+				KeyVersion int `json:"key_version"`
+			} `json:"remote"`
+		}
+		require.NoError(t, json.Unmarshal(buf, &old), "an older node must decode this keyset: %s", buf)
+		assert.Equal(t, 2, old.Remote.KeyVersion)
+	})
+
+	t.Run("a version that is not a number round-trips as a string", func(t *testing.T) {
+		buf, err := json.Marshal(storedRemoteKey{Backend: "other", KeyName: "k", KeyVersion: "a1b2"})
+		require.NoError(t, err)
+		assert.Contains(t, string(buf), `"key_version":"a1b2"`)
+		var back storedRemoteKey
+		require.NoError(t, json.Unmarshal(buf, &back))
+		assert.Equal(t, storedKeyVersion("a1b2"), back.KeyVersion)
+
+		// So does one that merely looks numeric but is not canonical, and none.
+		for _, v := range []storedKeyVersion{"007", ""} {
+			buf, err := json.Marshal(storedRemoteKey{KeyVersion: v})
+			require.NoError(t, err)
+			var back storedRemoteKey
+			require.NoError(t, json.Unmarshal(buf, &back))
+			assert.Equal(t, v, back.KeyVersion, "version %q", v)
+		}
+	})
+
+	t.Run("a number no release ever wrote is refused", func(t *testing.T) {
+		for _, raw := range []string{`1e2`, `1.0`, `-3`, `true`, `null`} {
+			var back storedRemoteKey
+			err := json.Unmarshal([]byte(`{"key_version":`+raw+`}`), &back)
+			if raw == `null` {
+				// null leaves the field unset, as for any JSON field.
+				require.NoError(t, err)
+				assert.Empty(t, back.KeyVersion)
+				continue
+			}
+			require.Error(t, err, "key_version %s", raw)
+		}
+	})
+}
+
+func jsonString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	require.NoError(t, err)
+	return string(b)
 }
 
 func TestOIDCKeySetSourceMismatch_and_Cutover(t *testing.T) {

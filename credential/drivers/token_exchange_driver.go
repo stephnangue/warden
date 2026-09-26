@@ -104,7 +104,7 @@ type kmsSignerMaterial struct {
 	namespace  string
 	mount      string
 	keyName    string
-	keyVersion int
+	keyVersion string
 	alg        string
 	kid        string
 	// expiresAt is the capability token's expiry, when the producer reported one. It
@@ -507,9 +507,10 @@ func kmsSignerFromMaterial(material credential.SecretMaterial) (*kmsSignerMateri
 	}
 	// The producer always writes a concrete version, so an unusable one means a stale or
 	// foreign payload — something a refetch can fix.
-	if m.keyVersion, err = strconv.Atoi(rawVersion); err != nil || m.keyVersion < 1 {
+	if v, perr := strconv.Atoi(rawVersion); perr != nil || v < 1 {
 		return nil, fmt.Errorf("token_exchange: the fetched signing capability has an unusable key version %q: %w", rawVersion, credential.ErrChainedSecretIncomplete)
 	}
+	m.keyVersion = rawVersion
 
 	// Optional: without it the expiry preflight is simply skipped, and a spent
 	// capability is discovered by the store refusing to sign with it instead.
