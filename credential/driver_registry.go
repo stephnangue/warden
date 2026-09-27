@@ -28,6 +28,13 @@ type DriverRegistry struct {
 	// the caller re-reads. Checking at install rather than on lookup keeps the
 	// hot path a single map read, and keeps driver teardown off the mint path.
 	generations map[string]uint64
+
+	// epoch invalidates every key at once, including keys with no generation
+	// entry yet. CloseAll bumps it: a build that read its source before the
+	// node stopped being active must be refused even for a source it had never
+	// built a driver for. A key's effective generation is generations[key] +
+	// epoch; both only grow, so any bump changes the sum.
+	epoch uint64
 }
 
 // NewDriverRegistry creates a new driver registry
@@ -78,7 +85,7 @@ func (r *DriverRegistry) Generation(ctx context.Context, sourceName string) (uin
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.generations[qualifiedName], nil
+	return r.generations[qualifiedName] + r.epoch, nil
 }
 
 // CreateDriver creates a driver instance for the given source
@@ -105,7 +112,7 @@ func (r *DriverRegistry) CreateDriver(ctx context.Context, sourceName string, so
 		return driver, false, nil
 	}
 
-	if r.generations[qualifiedName] != observedGeneration {
+	if r.generations[qualifiedName]+r.epoch != observedGeneration {
 		return nil, false, ErrDriverConfigChanged
 	}
 
@@ -218,6 +225,40 @@ func (r *DriverRegistry) CloseDriver(ctx context.Context, sourceName string) err
 		logger.String("qualified_key", qualifiedName))
 
 	return nil
+}
+
+// CloseAll closes and removes every driver instance, in every namespace, and
+// invalidates each one's generation. It returns how many were closed.
+//
+// The registry outlives the node's active term: it is built once per process,
+// while the config cache and the credential manager are rebuilt on each
+// promotion. A source changed on another node while this one was standby only
+// reaches this node's storage, never its registry, so an instance kept across a
+// step-down would go on minting with the config it was built from — an old
+// secret, after a rotation or a move to keyless — until the process restarted.
+// Closing everything when the node stops being active makes the next promotion
+// build each driver from what storage holds then.
+//
+// The epoch is bumped rather than each instance's generation, so a build that
+// read its source before the close is refused for every key, including one
+// that had no instance to close. Instances are detached under the lock and
+// cleaned up after it is released, so a slow Cleanup never holds the registry.
+func (r *DriverRegistry) CloseAll(ctx context.Context) int {
+	r.mu.Lock()
+	r.epoch++
+	closing := r.instances
+	r.instances = make(map[string]SourceDriver)
+	r.mu.Unlock()
+
+	for key, driver := range closing {
+		if err := driver.Cleanup(ctx); err != nil {
+			r.log.Warn("driver cleanup failed while closing all drivers",
+				logger.String("qualified_key", key),
+				logger.Err(err))
+		}
+		r.log.Debug("driver closed", logger.String("qualified_key", key))
+	}
+	return len(closing)
 }
 
 // CloseAllForNamespace closes and removes all driver instances for a given namespace.
