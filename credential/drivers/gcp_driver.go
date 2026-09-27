@@ -98,6 +98,7 @@ const gcpRotationVerifyTimeout = 60 * time.Second
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*GCPDriver)(nil)
 var _ credential.Rotatable = (*GCPDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*GCPDriver)(nil)
 var _ credential.ExchangeMinter = (*GCPDriver)(nil)
 
 // serviceAccountKey represents the parsed structure of a GCP service account JSON key file
@@ -1256,6 +1257,23 @@ func (d *GCPDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	}
 
 	return nil
+}
+
+// StagedCleanupConfig names the SA key a staged PrepareRotation created. It
+// carries that key as old_service_account_key too, so CleanupRotation deletes it
+// authenticated as itself — the same way it retires an old key.
+func (d *GCPDriver) StagedCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	keyJSON := newConfig["service_account_key"]
+	saKey, err := parseServiceAccountKeyJSON([]byte(keyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("staged service_account_key: %w", err)
+	}
+	return map[string]string{
+		"old_key_id":              saKey.PrivateKeyID,
+		"service_account_email":   saKey.ClientEmail,
+		"project_id":              saKey.ProjectID,
+		"old_service_account_key": keyJSON,
+	}, nil
 }
 
 // CleanupRotation deletes the old SA key

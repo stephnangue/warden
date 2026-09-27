@@ -1,8 +1,12 @@
 package credential
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"iter"
 	"maps"
+	"slices"
 	"strings"
 )
 
@@ -99,6 +103,21 @@ func (c Config) Prefixed(prefix string) map[string]string {
 		}
 	}
 	return out
+}
+
+// Hash returns a stable digest of the keys and values, for detecting that a
+// config changed between two points without keeping a copy of it (and of any
+// secret it holds). Equal configs hash equal; the empty and zero configs hash
+// equal too.
+func (c Config) Hash() string {
+	keys := slices.Sorted(maps.Keys(c.m))
+	h := sha256.New()
+	for _, k := range keys {
+		// Length-prefixed, so no choice of key or value can make two different
+		// configs serialize to the same bytes.
+		fmt.Fprintf(h, "%d:%s%d:%s", len(k), k, len(c.m[k]), c.m[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Map returns a copy of the underlying map.

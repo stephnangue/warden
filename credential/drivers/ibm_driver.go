@@ -55,6 +55,7 @@ const defaultIBMAccessKeysChainTTL = 30 * time.Minute
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*IBMDriver)(nil)
 var _ credential.Rotatable = (*IBMDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*IBMDriver)(nil)
 var _ credential.SpecVerifier = (*IBMDriver)(nil)
 var _ credential.ChainedSecretMinter = (*IBMDriver)(nil)
 var _ credential.RotationConfigValidator = (*IBMDriverFactory)(nil)
@@ -670,6 +671,28 @@ func (d *IBMDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	return nil
 }
 
+// StagedCleanupConfig names the API key a staged PrepareRotation created. The
+// staged config carries only the key itself, so its id is looked up with a token
+// from the key the driver still holds — the same lookup CommitRotation does.
+func (d *IBMDriver) StagedCleanupConfig(ctx context.Context, newConfig map[string]string) (map[string]string, error) {
+	newKey := newConfig["api_key"]
+	if newKey == "" {
+		return nil, fmt.Errorf("staged config carries no api_key")
+	}
+	iamToken, _, err := d.getIAMToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get IAM token: %w", err)
+	}
+	details, err := d.lookupAPIKeyDetails(ctx, iamToken, newKey)
+	if err != nil {
+		return nil, err
+	}
+	if details.ID == "" {
+		return nil, fmt.Errorf("API key details response missing id")
+	}
+	return map[string]string{"api_key_id": details.ID}, nil
+}
+
 // CleanupRotation deletes the old API key
 func (d *IBMDriver) CleanupRotation(ctx context.Context, cleanupConfig map[string]string) error {
 	oldAPIKeyID := cleanupConfig["api_key_id"]
@@ -832,43 +855,9 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 		return fmt.Errorf("failed to get IAM token: %w", err)
 	}
 
-	iamEndpoint := d.getIAMEndpoint()
-	apiKey := d.getAPIKey()
-
-	// Use POST with API key in request body (more secure than GET with IAM-Apikey header)
-	reqBody, err := json.Marshal(map[string]string{
-		"apikey": apiKey,
-	})
+	detailsResp, err := d.lookupAPIKeyDetails(ctx, iamToken, d.getAPIKey())
 	if err != nil {
-		return fmt.Errorf("failed to marshal API key details request: %w", err)
-	}
-
-	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
-		Method: "POST",
-		URL:    iamEndpoint + "/v1/apikeys/details",
-		Body:   reqBody,
-		Headers: map[string]string{
-			"Authorization": "Bearer " + iamToken,
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-		},
-	}, defaultIBMRetryConfig())
-	if err != nil {
-		return fmt.Errorf("failed to get API key details: %w", err)
-	}
-
-	var detailsResp struct {
-		ID        string `json:"id"`
-		IamID     string `json:"iam_id"`
-		AccountID string `json:"account_id"`
-		Name      string `json:"name"`
-	}
-	if err := json.Unmarshal(respBody, &detailsResp); err != nil {
-		return fmt.Errorf("failed to decode API key details: %w", err)
-	}
-
-	if detailsResp.IamID == "" {
-		return fmt.Errorf("API key details response missing iam_id")
+		return err
 	}
 
 	d.iamID = detailsResp.IamID
@@ -886,6 +875,50 @@ func (d *IBMDriver) discoverAPIKeyDetailsLocked(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ibmAPIKeyDetails is the part of an /v1/apikeys/details response the driver reads.
+type ibmAPIKeyDetails struct {
+	ID        string `json:"id"`
+	IamID     string `json:"iam_id"`
+	AccountID string `json:"account_id"`
+	Name      string `json:"name"`
+}
+
+// lookupAPIKeyDetails asks IAM which key apiKey is, authorized by iamToken. The
+// key travels in the request body rather than an IAM-Apikey header. The token
+// need not belong to apiKey: discarding a staged rotation looks up the new key
+// with a token minted from the old one.
+func (d *IBMDriver) lookupAPIKeyDetails(ctx context.Context, iamToken, apiKey string) (*ibmAPIKeyDetails, error) {
+	reqBody, err := json.Marshal(map[string]string{
+		"apikey": apiKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal API key details request: %w", err)
+	}
+
+	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httputil.HTTPRequest{
+		Method: "POST",
+		URL:    d.getIAMEndpoint() + "/v1/apikeys/details",
+		Body:   reqBody,
+		Headers: map[string]string{
+			"Authorization": "Bearer " + iamToken,
+			"Content-Type":  "application/json",
+			"Accept":        "application/json",
+		},
+	}, defaultIBMRetryConfig())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get API key details: %w", err)
+	}
+
+	var details ibmAPIKeyDetails
+	if err := json.Unmarshal(respBody, &details); err != nil {
+		return nil, fmt.Errorf("failed to decode API key details: %w", err)
+	}
+	if details.IamID == "" {
+		return nil, fmt.Errorf("API key details response missing iam_id")
+	}
+	return &details, nil
 }
 
 // createAPIKey creates a new API key for the same IAM identity, stamped with the

@@ -399,6 +399,15 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 
 	b.logger.Info("updating credential source", logger.String("name", name))
 
+	// Serialize with rotation of this source: without it a rotation completing
+	// between this read and the write below would be undone by the write, and
+	// the source left pointing at the key that rotation just deleted.
+	unlock, errResp := b.lockSource(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
+
 	// Get existing source
 	existingSource, err := b.core.credConfigStore.GetSource(ctx, name)
 	if err != nil {
@@ -452,8 +461,30 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 		RotationPeriod: rotationPeriod,
 	}
 
+	// A staged rotation holds a snapshot of the config being replaced, and a
+	// credential created upstream to go with it. Discard it now, while the
+	// driver still authenticates with the current config: after the write it
+	// may not be able to, and the snapshot must never be written over this edit.
+	//
+	// This runs before validation, so an edit that is then rejected still
+	// costs the staged rotation. That is safe — the entry goes back to idle and
+	// prepares again — and cheaper than validating twice, since validation
+	// opens a connection to the provider.
+	if !existingSource.Config.Equal(updatedSource.Config) && b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSource(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before source update",
+				logger.String("name", name), logger.Err(err))
+		}
+	}
+
 	// Update via credential config store (validates and tests connection before persisting)
-	if err := b.core.credConfigStore.UpdateSource(ctx, updatedSource); err != nil {
+	if err := b.core.credConfigStore.UpdateSource(ctx, updatedSource, UpdateSourceOptions{
+		ExpectedConfigHash: existingSource.Config.Hash(),
+	}); err != nil {
+		if errors.Is(err, ErrConfigChanged) {
+			return logical.ErrorResponse(logical.ErrConflictf(
+				"credential source %q changed while this update was in progress; read it again and retry", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -468,6 +499,12 @@ func (b *SystemBackend) handleCredentialSourceDelete(ctx context.Context, req *l
 	name := d.Get("name").(string)
 
 	b.logger.Info("deleting credential source", logger.String("name", name))
+
+	unlock, errResp := b.lockSource(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
 
 	// Check for references before deletion
 	references, err := b.core.credConfigStore.CheckSourceReferences(ctx, name)
@@ -485,6 +522,15 @@ func (b *SystemBackend) handleCredentialSourceDelete(ctx context.Context, req *l
 		return logical.ErrorResponse(logical.ErrConflictf(
 			"cannot delete credential source %s: still referenced by %d credential spec(s)",
 			name, len(references))), nil
+	}
+
+	// Discard a staged rotation while the source, and the driver that can
+	// delete its staged credential, still exist.
+	if b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSource(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before source delete",
+				logger.String("name", name), logger.Err(err))
+		}
 	}
 
 	// Delete via credential config store
@@ -764,11 +810,25 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 	// For a connected connect-gated spec (e.g. OAuth2 authorization_code), skip the
 	// validation test-mint: it would consume/rotate the sealed refresh token on an
 	// unrelated edit. Re-run `cred spec connect` to re-verify.
-	var opts []UpdateSpecOptions
+	opts := UpdateSpecOptions{ExpectedConfigHash: spec.Config.Hash()}
 	if b.specRequiresConnect(updatedSpec) && b.specIsConnected(updatedSpec) {
-		opts = append(opts, UpdateSpecOptions{SkipVerification: true})
+		opts.SkipVerification = true
 	}
-	if err := b.core.credConfigStore.UpdateSpec(ctx, updatedSpec, opts...); err != nil {
+
+	// Discard a staged spec rotation first, as the source path does: its
+	// snapshot of this config must never be written over the edit.
+	if !spec.Config.Equal(updatedSpec.Config) && b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSpec(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before spec update",
+				logger.String("name", name), logger.Err(err))
+		}
+	}
+
+	if err := b.core.credConfigStore.UpdateSpec(ctx, updatedSpec, opts); err != nil {
+		if errors.Is(err, ErrConfigChanged) {
+			return logical.ErrorResponse(logical.ErrConflictf(
+				"credential spec %q changed while this update was in progress; read it again and retry", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
@@ -879,6 +939,26 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 	}), nil
 }
 
+// lockSource takes the per-source mutation lock shared with the rotation
+// manager's source jobs, keyed by ns.UUID, returning the unlock func. It
+// returns an error response if the credential manager is unavailable, the
+// namespace is missing, or the context is cancelled while waiting.
+func (b *SystemBackend) lockSource(ctx context.Context, name string) (func(), *logical.Response) {
+	if b.core.credentialManager == nil {
+		return nil, logical.ErrorResponse(logical.ErrInternal("credential manager not initialized"))
+	}
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, logical.ErrorResponse(err)
+	}
+	unlock, err := b.core.credentialManager.LockSource(ctx, ns.UUID, name)
+	if err != nil {
+		return nil, logical.ErrorResponse(logical.ErrServiceUnavailablef(
+			"credential source %q is busy (a rotation is in progress); retry: %v", name, err))
+	}
+	return unlock, nil
+}
+
 // lockSpec takes the per-spec mutation lock (shared with the minting layer's
 // refresh-token write-back), keyed by ns.UUID, returning the unlock func. It
 // returns an error response if the credential manager is unavailable, the
@@ -984,6 +1064,20 @@ func (b *SystemBackend) handleCredentialSpecDelete(ctx context.Context, req *log
 	name := d.Get("name").(string)
 
 	b.logger.Info("deleting credential spec", logger.String("name", name))
+
+	unlock, errResp := b.lockSpec(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
+
+	// Discard a staged spec rotation while the spec still exists.
+	if b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSpec(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before spec delete",
+				logger.String("name", name), logger.Err(err))
+		}
+	}
 
 	// Delete via credential config store
 	if err := b.core.credConfigStore.DeleteSpec(ctx, name); err != nil {
