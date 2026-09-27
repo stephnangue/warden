@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -581,16 +582,24 @@ func TestChaining_AzureKeyVaultSecretReadBacksAnAPIKeyConsumer(t *testing.T) {
 
 // Concurrent static reads share the source token while a rotation commits; run under
 // -race.
+//
+// Rotations are paced: the next one commits only once every reader has finished a read
+// since the last. A read then spans at most one rotation and retries its token fetch at
+// most once. Unpaced, a slow runner can let one read span three back-to-back rotations,
+// and the driver gives up then by design — the bound that stops rotations from looping
+// a caller forever — which is not what this test is about.
 func TestAzureDriver_SecretRead_ConcurrentWithCommitRotation(t *testing.T) {
 	stub := newKVStub(t)
 	stub.put("/secrets/datadog-keys", testKVPayload, nil)
 	d := newKVStaticDriver(stub)
 
+	const readers = 4
+	var reads [readers]atomic.Int64
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for i := 0; i < readers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
 			for {
 				select {
@@ -600,14 +609,27 @@ func TestAzureDriver_SecretRead_ConcurrentWithCommitRotation(t *testing.T) {
 				}
 				_, _, _, _, err := d.MintCredential(context.Background(), kvSpec(nil))
 				assert.NoError(t, err)
+				reads[i].Add(1)
 			}
-		}()
+		}(i)
 	}
 	for gen := 0; gen < 20; gen++ {
 		require.NoError(t, d.CommitRotation(context.Background(), map[string]string{
 			"tenant_id": testAzureTenant, "client_id": testAzureClient,
 			"client_secret": "rotated", "secret_id": "k",
 		}))
+		var since [readers]int64
+		for i := range reads {
+			since[i] = reads[i].Load()
+		}
+		require.Eventually(t, func() bool {
+			for i := range reads {
+				if reads[i].Load() == since[i] {
+					return false
+				}
+			}
+			return true
+		}, 10*time.Second, time.Millisecond, "every reader finishes a read before the next rotation")
 	}
 	close(stop)
 	wg.Wait()
