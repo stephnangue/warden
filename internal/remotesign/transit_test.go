@@ -183,7 +183,7 @@ func TestTransit_EnsureKey_and_Sign_RSA(t *testing.T) {
 	info, err := b.EnsureKey(ctx, "RS256")
 	require.NoError(t, err)
 	assert.Equal(t, "warden-oidc-rs256", info.Ref.KeyName)
-	assert.Equal(t, 1, info.Ref.Version)
+	assert.Equal(t, "1", info.Ref.Version)
 	assert.Equal(t, "RS256", info.Ref.Alg)
 	rsaPub, ok := info.Public.(*rsa.PublicKey)
 	require.True(t, ok)
@@ -236,12 +236,12 @@ func TestTransit_NewVersion_PinsActiveVersion(t *testing.T) {
 
 	active, err := b.EnsureKey(ctx, "RS256") // v1
 	require.NoError(t, err)
-	require.Equal(t, 1, active.Ref.Version)
+	require.Equal(t, "1", active.Ref.Version)
 	activePub := active.Public.(*rsa.PublicKey)
 
 	next, err := b.NewVersion(ctx, "RS256") // v2 (latest)
 	require.NoError(t, err)
-	require.Equal(t, 2, next.Ref.Version)
+	require.Equal(t, "2", next.Ref.Version)
 
 	// Signing with the ACTIVE ref (v1) must pin v1 and verify against v1's key,
 	// even though v2 is now latest — proving we never default to latest.
@@ -304,7 +304,7 @@ func TestDecodeTransitSignature(t *testing.T) {
 func TestSigner_NilBackend_And_Context(t *testing.T) {
 	// Verification-only signer (nil backend) fails closed on Sign but exposes Public.
 	pub := genKey(t, "rsa-2048").Public()
-	s := NewVerifyingSigner("transit", KeyRef{KeyName: "k", Version: 1, Alg: "RS256"}, pub)
+	s := NewVerifyingSigner("transit", KeyRef{KeyName: "k", Version: "1", Alg: "RS256"}, pub)
 	assert.False(t, s.CanSign())
 	assert.Equal(t, pub, s.Public())
 	_, err := s.Sign(rand.Reader, []byte("d"), crypto.SHA256)
@@ -370,12 +370,18 @@ func TestTransit_Sign_Rejects(t *testing.T) {
 	_, err = b.Sign(ctx, info.Ref, d384, crypto.SHA384)
 	require.Error(t, err)
 
-	// A zero/negative version resolves to "latest" server-side; reject it up front.
-	_, err = b.Sign(ctx, KeyRef{KeyName: info.Ref.KeyName, Version: 0, Alg: "RS256"}, d[:], crypto.SHA256)
-	require.Error(t, err)
+	// A zero version resolves to "latest" server-side, and an absent or non-numeric
+	// one names nothing transit can pin; all are refused before any round trip.
+	f.lastSign = nil
+	for _, v := range []string{"0", "-1", "", "x", "1.0"} {
+		_, err = b.Sign(ctx, KeyRef{KeyName: info.Ref.KeyName, Version: v, Alg: "RS256"}, d[:], crypto.SHA256)
+		require.Error(t, err, "version %q", v)
+		assert.Contains(t, err.Error(), "positive integer", "version %q", v)
+	}
+	assert.Nil(t, f.lastSign, "a refused version never reaches transit")
 
 	// Unknown alg.
-	_, err = b.Sign(ctx, KeyRef{KeyName: "k", Version: 1, Alg: "HS256"}, d[:], crypto.SHA256)
+	_, err = b.Sign(ctx, KeyRef{KeyName: "k", Version: "1", Alg: "HS256"}, d[:], crypto.SHA256)
 	require.Error(t, err)
 }
 
@@ -475,31 +481,69 @@ func TestTransitClientBackend_PrefixlessOpsRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "explicit name")
 }
 
-// TestNamedKeyInfo_ResolvesLatestAndPinned: version 0 resolves to a concrete latest, and
-// an explicit version is honoured. Resolving to a number is what lets a caller keep
-// signing with the version it validated instead of whatever is newest later.
+// TestNamedKeyInfo_ResolvesLatestAndPinned: an empty version resolves to a concrete
+// latest, and an explicit version is honoured. Resolving to a number is what lets a
+// caller keep signing with the version it validated instead of whatever is newest later.
 func TestNamedKeyInfo_ResolvesLatestAndPinned(t *testing.T) {
 	f := newFakeTransit(t)
 	f.keys["client-assertion"] = &fakeKey{keyType: "rsa-2048",
 		versions: []crypto.Signer{genKey(t, "rsa-2048"), genKey(t, "rsa-2048")}}
 	b := newClientTestBackend(t, f)
 
-	latest, err := b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", 0)
+	latest, err := b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", "")
 	require.NoError(t, err)
-	assert.Equal(t, 2, latest.Ref.Version, "0 resolves to the concrete latest version")
+	assert.Equal(t, "2", latest.Ref.Version, "empty resolves to the concrete latest version")
 	assert.Equal(t, "client-assertion", latest.Ref.KeyName)
 	assert.NotNil(t, latest.Public)
 
-	pinned, err := b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", 1)
+	pinned, err := b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", "1")
 	require.NoError(t, err)
-	assert.Equal(t, 1, pinned.Ref.Version)
+	assert.Equal(t, "1", pinned.Ref.Version)
 
-	_, err = b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", 99)
+	_, err = b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", "99")
 	require.Error(t, err, "a version that does not exist is refused at validation time")
 
-	_, err = b.NamedKeyInfo(context.Background(), "", "RS256", 0)
+	// Zero no longer means "latest" (empty does), and nothing non-numeric is a
+	// transit version.
+	for _, v := range []string{"0", "-1", "abc", "latest"} {
+		_, err = b.NamedKeyInfo(context.Background(), "client-assertion", "RS256", v)
+		require.Error(t, err, "version %q", v)
+		assert.Contains(t, err.Error(), "positive integer", "version %q", v)
+	}
+
+	_, err = b.NamedKeyInfo(context.Background(), "", "RS256", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "key name is required")
+}
+
+// TestTransit_Sign_SendsVersionAsNumber: KeyRef carries the version as a string, but
+// transit's key_version is a number. The fake reads either, so assert the wire type
+// itself — a string here would pass the fake and fail against a real server.
+func TestTransit_Sign_SendsVersionAsNumber(t *testing.T) {
+	f := newFakeTransit(t)
+	b := newTestBackend(t, f)
+	ctx := context.Background()
+
+	info, err := b.EnsureKey(ctx, "RS256")
+	require.NoError(t, err)
+	d := sha256.Sum256([]byte("wire"))
+	_, err = b.Sign(ctx, info.Ref, d[:], crypto.SHA256)
+	require.NoError(t, err)
+
+	assert.IsType(t, float64(0), f.lastSign["key_version"], "key_version must be a JSON number")
+	assert.Equal(t, float64(1), f.lastSign["key_version"])
+}
+
+// TestTransitAlgs_MatchNeutralTable: every alg the neutral table offers must be one
+// transit can create and sign, and transit must not offer one the rest of the package
+// cannot hash or encode.
+func TestTransitAlgs_MatchNeutralTable(t *testing.T) {
+	require.Equal(t, len(algParamsByAlg), len(transitAlgs))
+	for alg, p := range algParamsByAlg {
+		ta, ok := transitAlgs[alg]
+		require.True(t, ok, "transit has no entry for %s", alg)
+		assert.Equal(t, p.isRSA, strings.HasPrefix(ta.keyType, "rsa-"), alg)
+	}
 }
 
 // TestNamedKeyInfo_RelaxedRSASizeButExactCurve: the operator provisions this key, so any
@@ -514,14 +558,14 @@ func TestNamedKeyInfo_RelaxedRSASizeButExactCurve(t *testing.T) {
 		versions: []crypto.Signer{genKey(t, "rsa-2048")}}
 	b := newClientTestBackend(t, f)
 
-	_, err := b.NamedKeyInfo(context.Background(), "big-rsa", "RS256", 0)
+	_, err := b.NamedKeyInfo(context.Background(), "big-rsa", "RS256", "")
 	require.NoError(t, err, "any RSA size signs any RS* alg")
 
-	_, err = b.NamedKeyInfo(context.Background(), "p384", "ES256", 0)
+	_, err = b.NamedKeyInfo(context.Background(), "p384", "ES256", "")
 	require.Error(t, err, "the curve must match the alg exactly")
 	assert.Contains(t, err.Error(), "expected")
 
-	_, err = b.NamedKeyInfo(context.Background(), "exportable", "RS256", 0)
+	_, err = b.NamedKeyInfo(context.Background(), "exportable", "RS256", "")
 	require.Error(t, err, "non-exportability is the premise of remote signing")
 	assert.Contains(t, err.Error(), "exportable")
 }

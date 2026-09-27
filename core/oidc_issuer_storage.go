@@ -41,10 +41,60 @@ type storedSigningKey struct {
 // cached PKIX PEM public key, so unseal and JWKS never need a KMS round-trip. No
 // private key material is stored.
 type storedRemoteKey struct {
-	Backend      string `json:"backend"` // e.g. "transit"
-	KeyName      string `json:"key_name"`
-	KeyVersion   int    `json:"key_version"`
-	PublicKeyPEM string `json:"public_key_pem"`
+	Backend      string           `json:"backend"` // e.g. "transit"
+	KeyName      string           `json:"key_name"`
+	KeyVersion   storedKeyVersion `json:"key_version"`
+	PublicKeyPEM string           `json:"public_key_pem"`
+}
+
+// storedKeyVersion is a remote key's version as persisted. Versions are opaque
+// strings in memory, but releases up to v0.20.0 stored them as JSON numbers, and a
+// node still running one must keep reading a keyset this one writes — a standby that
+// cannot decode the keyset cannot unseal. So a decimal version is written as a number, which
+// every release reads, and only a version that is not a number is written as a string.
+// Reading accepts both.
+type storedKeyVersion string
+
+func (v storedKeyVersion) MarshalJSON() ([]byte, error) {
+	if isCanonicalUint(string(v)) {
+		return []byte(v), nil
+	}
+	return json.Marshal(string(v))
+}
+
+func (v *storedKeyVersion) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*v = storedKeyVersion(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("oidc issuer: stored key_version is neither a string nor a number: %s", b)
+	}
+	// Only the plain decimal form an older release wrote. Anything else (1e2, 1.0, -3)
+	// was never written by any release, and reading it as some other version would
+	// point the key at the wrong half.
+	if !isCanonicalUint(n.String()) {
+		return fmt.Errorf("oidc issuer: stored key_version %s is not a plain non-negative integer", n)
+	}
+	*v = storedKeyVersion(n.String())
+	return nil
+}
+
+// isCanonicalUint reports whether s is a non-negative decimal integer with no sign,
+// no leading zeros (other than "0" itself), and nothing else — the exact text a JSON
+// encoder produces for such a number, so writing s bare yields valid JSON.
+func isCanonicalUint(s string) bool {
+	if s == "" || len(s) > 1 && s[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // storedAlgKeyset is one algorithm's stored active + pre-published next + retired
@@ -75,7 +125,7 @@ func toStored(sk *signingKey) (storedSigningKey, error) {
 		out.Remote = &storedRemoteKey{
 			Backend:      rs.BackendType(),
 			KeyName:      ref.KeyName,
-			KeyVersion:   ref.Version,
+			KeyVersion:   storedKeyVersion(ref.Version),
 			PublicKeyPEM: pemStr,
 		}
 		return out, nil
@@ -109,7 +159,7 @@ func fromStored(s storedSigningKey, backend remotesign.Backend, timeout time.Dur
 		if kid != s.Kid {
 			return nil, fmt.Errorf("oidc issuer: stored remote key kid mismatch (stored %q, computed %q)", s.Kid, kid)
 		}
-		ref := remotesign.KeyRef{KeyName: s.Remote.KeyName, Version: s.Remote.KeyVersion, Alg: s.Alg}
+		ref := remotesign.KeyRef{KeyName: s.Remote.KeyName, Version: string(s.Remote.KeyVersion), Alg: s.Alg}
 		var signer crypto.Signer
 		if backend != nil && backend.Type() == s.Remote.Backend {
 			signer = remotesign.NewSigner(backend, ref, pub, timeout)

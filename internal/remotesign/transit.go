@@ -54,6 +54,33 @@ type TransitBackend struct {
 
 var _ Backend = (*TransitBackend)(nil)
 
+// transitAlg is what transit calls a JWS alg's key type and hash.
+type transitAlg struct {
+	keyType  string // transit key type, e.g. "rsa-2048"
+	hashName string // transit hash_algorithm, e.g. "sha2-256"
+}
+
+// transitAlgs covers exactly the algs in algParamsByAlg; a test keeps the two in step.
+var transitAlgs = map[string]transitAlg{
+	"RS256": {keyType: "rsa-2048", hashName: "sha2-256"},
+	"RS384": {keyType: "rsa-3072", hashName: "sha2-384"},
+	"ES256": {keyType: "ecdsa-p256", hashName: "sha2-256"},
+	"ES384": {keyType: "ecdsa-p384", hashName: "sha2-384"},
+}
+
+// transitVersion reads a transit key version, which is a positive decimal counter.
+// Zero is refused along with everything else that is not positive: transit resolves
+// zero to "latest" server-side, so letting it through would sign with whatever
+// version happens to be newest — the pre-published next key included — rather than
+// the one the caller named.
+func transitVersion(version string) (int, error) {
+	v, err := strconv.Atoi(version)
+	if err != nil || v < 1 {
+		return 0, fmt.Errorf("remotesign: transit key version must be a positive integer, got %q", version)
+	}
+	return v, nil
+}
+
 // NewTransitBackend builds a transit-backed signer client. A construction failure
 // (bad TLS material, malformed address) is a config error and is returned here;
 // transit being unreachable is not detected until a key operation. log may be nil.
@@ -193,7 +220,7 @@ func (b *TransitBackend) keyNameFor(alg string) (string, error) {
 
 // EnsureKey creates alg's key if absent (idempotent) and returns its latest version.
 func (b *TransitBackend) EnsureKey(ctx context.Context, alg string) (KeyInfo, error) {
-	p, ok := algParamsByAlg[alg]
+	ta, ok := transitAlgs[alg]
 	if !ok {
 		return KeyInfo{}, fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
 	}
@@ -204,7 +231,7 @@ func (b *TransitBackend) EnsureKey(ctx context.Context, alg string) (KeyInfo, er
 	ctx, cancel := b.withTimeout(ctx)
 	defer cancel()
 	if _, err := b.client.Logical().WriteWithContext(ctx, b.keysPath(name), map[string]interface{}{
-		"type": p.transitKeyType,
+		"type": ta.keyType,
 	}); err != nil {
 		return KeyInfo{}, fmt.Errorf("remotesign: ensure transit key %q: %w", name, err)
 	}
@@ -213,7 +240,7 @@ func (b *TransitBackend) EnsureKey(ctx context.Context, alg string) (KeyInfo, er
 
 // NewVersion rotates alg's key and returns the new latest version.
 func (b *TransitBackend) NewVersion(ctx context.Context, alg string) (KeyInfo, error) {
-	if _, ok := algParamsByAlg[alg]; !ok {
+	if _, ok := transitAlgs[alg]; !ok {
 		return KeyInfo{}, fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
 	}
 	name, err := b.keyNameFor(alg)
@@ -232,6 +259,10 @@ func (b *TransitBackend) NewVersion(ctx context.Context, alg string) (KeyInfo, e
 // and non-exportability (transit allows flipping a key to exportable after
 // creation, so this rarer path cheaply re-checks the invariant).
 func (b *TransitBackend) PublicKey(ctx context.Context, ref KeyRef) (crypto.PublicKey, error) {
+	version, err := transitVersion(ref.Version)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := b.withTimeout(ctx)
 	defer cancel()
 	kd, err := b.readKey(ctx, ref.KeyName)
@@ -241,19 +272,19 @@ func (b *TransitBackend) PublicKey(ctx context.Context, ref KeyRef) (crypto.Publ
 	if err := validateTransitKey(kd, ref.KeyName, ref.Alg); err != nil {
 		return nil, err
 	}
-	return kd.publicKeyForVersion(ref.Version)
+	return kd.publicKeyForVersion(version)
 }
 
 // validateTransitKey enforces the two invariants a signing key must hold: it is
 // the type the alg expects, and it is non-exportable (the whole point of remote
 // signing).
 func validateTransitKey(kd *transitKeyData, name, alg string) error {
-	p, ok := algParamsByAlg[alg]
+	ta, ok := transitAlgs[alg]
 	if !ok {
 		return fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
 	}
-	if kd.Type != p.transitKeyType {
-		return fmt.Errorf("remotesign: transit key %q has type %q, expected %q for %s", name, kd.Type, p.transitKeyType, alg)
+	if kd.Type != ta.keyType {
+		return fmt.Errorf("remotesign: transit key %q has type %q, expected %q for %s", name, kd.Type, ta.keyType, alg)
 	}
 	if kd.Exportable {
 		return fmt.Errorf("remotesign: transit key %q is exportable; the OIDC issuer key must be non-exportable (recreate with exportable=false)", name)
@@ -262,19 +293,24 @@ func validateTransitKey(kd *transitKeyData, name, alg string) error {
 }
 
 // NamedKeyInfo reads a key by explicit name and returns the requested version, or the
-// latest when version is 0. Unlike latestKeyInfo it applies the relaxed compatibility
-// rules below, because the key was provisioned by an operator rather than created by
-// this package.
+// latest when version is empty. Unlike latestKeyInfo it applies the relaxed
+// compatibility rules below, because the key was provisioned by an operator rather than
+// created by this package.
 //
 // Resolving "latest" to a concrete number here is deliberate: a caller that carries the
 // resolved version forward keeps signing with the version it validated, instead of
 // whatever is newest whenever the signature is eventually produced.
-func (b *TransitBackend) NamedKeyInfo(ctx context.Context, name, alg string, version int) (KeyInfo, error) {
+func (b *TransitBackend) NamedKeyInfo(ctx context.Context, name, alg, version string) (KeyInfo, error) {
 	if strings.TrimSpace(name) == "" {
 		return KeyInfo{}, fmt.Errorf("remotesign: a key name is required")
 	}
-	if version < 0 {
-		return KeyInfo{}, fmt.Errorf("remotesign: key version must be 0 (latest) or positive, got %d", version)
+	want := 0
+	if version != "" {
+		v, err := transitVersion(version)
+		if err != nil {
+			return KeyInfo{}, err
+		}
+		want = v
 	}
 	ctx, cancel := b.withTimeout(ctx)
 	defer cancel()
@@ -285,7 +321,6 @@ func (b *TransitBackend) NamedKeyInfo(ctx context.Context, name, alg string, ver
 	if err := validateKeyForAlg(kd, name, alg); err != nil {
 		return KeyInfo{}, err
 	}
-	want := version
 	if want == 0 {
 		want = kd.LatestVersion
 	}
@@ -298,7 +333,7 @@ func (b *TransitBackend) NamedKeyInfo(ctx context.Context, name, alg string, ver
 		return KeyInfo{}, err
 	}
 	return KeyInfo{
-		Ref:       KeyRef{KeyName: name, Version: want, Alg: alg},
+		Ref:       KeyRef{KeyName: name, Version: strconv.Itoa(want), Alg: alg},
 		Public:    pub,
 		CreatedAt: created,
 	}, nil
@@ -314,15 +349,16 @@ func (b *TransitBackend) NamedKeyInfo(ctx context.Context, name, alg string, ver
 // remote service to sign rather than fetching the key.
 func validateKeyForAlg(kd *transitKeyData, name, alg string) error {
 	p, ok := algParamsByAlg[alg]
-	if !ok {
+	ta, tok := transitAlgs[alg]
+	if !ok || !tok {
 		return fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
 	}
 	if p.isRSA {
 		if !strings.HasPrefix(kd.Type, "rsa-") {
 			return fmt.Errorf("remotesign: key %q has type %q and cannot sign %s; an RSA key is required", name, kd.Type, alg)
 		}
-	} else if kd.Type != p.transitKeyType {
-		return fmt.Errorf("remotesign: key %q has type %q, expected %q for %s", name, kd.Type, p.transitKeyType, alg)
+	} else if kd.Type != ta.keyType {
+		return fmt.Errorf("remotesign: key %q has type %q, expected %q for %s", name, kd.Type, ta.keyType, alg)
 	}
 	if kd.Exportable {
 		return fmt.Errorf("remotesign: key %q is exportable; a remotely signed key must be non-exportable (recreate it with exportable=false)", name)
@@ -338,13 +374,13 @@ func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, op
 		return nil, fmt.Errorf("remotesign: RSA-PSS is not supported by the transit signer")
 	}
 	p, ok := algParamsByAlg[ref.Alg]
-	if !ok {
+	ta, tok := transitAlgs[ref.Alg]
+	if !ok || !tok {
 		return nil, fmt.Errorf("remotesign: unsupported signing algorithm %q", ref.Alg)
 	}
-	if ref.Version < 1 {
-		// A zero version resolves to "latest" server-side, so refuse it up front
-		// rather than sign with the wrong (pre-published next) key.
-		return nil, fmt.Errorf("remotesign: key version must be >= 1, got %d", ref.Version)
+	version, err := transitVersion(ref.Version)
+	if err != nil {
+		return nil, err
 	}
 	// Guard the digest against an alg/hash mismatch. For ECDSA transit signs
 	// whatever prehashed bytes arrive, so a wrong-hash digest would produce a
@@ -359,8 +395,8 @@ func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, op
 	data := map[string]interface{}{
 		"input":                base64.StdEncoding.EncodeToString(digest),
 		"prehashed":            true,
-		"hash_algorithm":       p.hashName,
-		"key_version":          ref.Version,
+		"hash_algorithm":       ta.hashName,
+		"key_version":          version,
 		"marshaling_algorithm": "asn1",
 	}
 	if p.isRSA {
@@ -377,8 +413,8 @@ func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, op
 	}
 	// The response's key_version is the authoritative, template-independent proof
 	// of which version signed; verify it pinned to the version we asked for.
-	if signedVer, err := asInt(secret.Data["key_version"]); err == nil && signedVer != ref.Version {
-		return nil, fmt.Errorf("remotesign: transit signed with key version %d, expected %d", signedVer, ref.Version)
+	if signedVer, err := asInt(secret.Data["key_version"]); err == nil && signedVer != version {
+		return nil, fmt.Errorf("remotesign: transit signed with key version %d, expected %d", signedVer, version)
 	}
 	raw, _ := secret.Data["signature"].(string)
 	return decodeTransitSignature(raw)
@@ -406,7 +442,7 @@ func (b *TransitBackend) latestKeyInfo(ctx context.Context, alg string) (KeyInfo
 		return KeyInfo{}, err
 	}
 	return KeyInfo{
-		Ref:       KeyRef{KeyName: name, Version: kd.LatestVersion, Alg: alg},
+		Ref:       KeyRef{KeyName: name, Version: strconv.Itoa(kd.LatestVersion), Alg: alg},
 		Public:    pub,
 		CreatedAt: created,
 	}, nil

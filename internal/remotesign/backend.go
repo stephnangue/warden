@@ -30,9 +30,13 @@ var ErrRotationUnsupported = errors.New("remotesign: backend does not support pr
 // KeyRef names one immutable key version in the backend. Alg is carried so a
 // stateless Sign call can select the signing parameters (hash, and PKCS#1 v1.5
 // vs the KMS default) without inspecting key material.
+//
+// Version is opaque and backend-defined: a decimal counter for transit, an
+// identifier string for stores that name their versions, and empty for a backend
+// whose keys have no versions. Each backend parses its own form at its edge.
 type KeyRef struct {
 	KeyName string
-	Version int
+	Version string
 	Alg     string // JWS alg, e.g. "RS256" / "ES256"
 }
 
@@ -43,19 +47,12 @@ type KeyInfo struct {
 	CreatedAt time.Time        // KMS-side creation time; anchors rotation scheduling
 }
 
-// Backend provisions and signs with keys whose private half never leaves the KMS.
-//
-// Create/rotate are optional capabilities: a backend whose keys are provisioned
-// out-of-band (HSM/KMIP) implements EnsureKey as "adopt an existing key by
-// reference" and may return ErrRotationUnsupported from NewVersion.
-type Backend interface {
+// SigningBackend signs with keys whose private half never leaves the KMS. It is
+// all a holder of someone else's key needs: a consumer signing with a key it was
+// handed a capability for never creates or rotates that key.
+type SigningBackend interface {
 	// Type is the persisted discriminator, e.g. "transit".
 	Type() string
-	// EnsureKey ensures alg's key exists (idempotent) and returns its latest version.
-	EnsureKey(ctx context.Context, alg string) (KeyInfo, error)
-	// NewVersion rotates alg's key and returns the new latest version, or
-	// ErrRotationUnsupported for out-of-band-managed backends.
-	NewVersion(ctx context.Context, alg string) (KeyInfo, error)
 	// PublicKey fetches one specific version's public key.
 	PublicKey(ctx context.Context, ref KeyRef) (crypto.PublicKey, error)
 	// Sign signs an already-hashed digest with the exact version in ref, honoring
@@ -65,22 +62,36 @@ type Backend interface {
 	Close()
 }
 
+// Backend is a SigningBackend that also provisions and rotates its own keys, as
+// the OIDC issuer needs.
+//
+// Create/rotate are optional capabilities: a backend whose keys are provisioned
+// out-of-band (HSM/KMIP) implements EnsureKey as "adopt an existing key by
+// reference" and may return ErrRotationUnsupported from NewVersion.
+type Backend interface {
+	SigningBackend
+	// EnsureKey ensures alg's key exists (idempotent) and returns its latest version.
+	EnsureKey(ctx context.Context, alg string) (KeyInfo, error)
+	// NewVersion rotates alg's key and returns the new latest version, or
+	// ErrRotationUnsupported for out-of-band-managed backends.
+	NewVersion(ctx context.Context, alg string) (KeyInfo, error)
+}
+
 // algParams maps a JWS alg to the backend-neutral signing parameters. Duplicated
 // from the core alg table by value (these are standard wire constants) to keep
-// this package free of a core import.
+// this package free of a core import. What a particular store calls a key type
+// or a hash lives with that store's backend.
 type algParams struct {
-	transitKeyType string         // transit key type, e.g. "rsa-2048"
-	hashName       string         // transit hash_algorithm, e.g. "sha2-256"
-	hash           crypto.Hash    // the digest the caller must have used
-	isRSA          bool           //
-	curve          elliptic.Curve // nil for RSA; the curve whose width an ES* signature is padded to
+	hash  crypto.Hash    // the digest the caller must have used
+	isRSA bool           //
+	curve elliptic.Curve // nil for RSA; the curve whose width an ES* signature is padded to
 }
 
 var algParamsByAlg = map[string]algParams{
-	"RS256": {transitKeyType: "rsa-2048", hashName: "sha2-256", hash: crypto.SHA256, isRSA: true},
-	"RS384": {transitKeyType: "rsa-3072", hashName: "sha2-384", hash: crypto.SHA384, isRSA: true},
-	"ES256": {transitKeyType: "ecdsa-p256", hashName: "sha2-256", hash: crypto.SHA256, isRSA: false, curve: elliptic.P256()},
-	"ES384": {transitKeyType: "ecdsa-p384", hashName: "sha2-384", hash: crypto.SHA384, isRSA: false, curve: elliptic.P384()},
+	"RS256": {hash: crypto.SHA256, isRSA: true},
+	"RS384": {hash: crypto.SHA384, isRSA: true},
+	"ES256": {hash: crypto.SHA256, isRSA: false, curve: elliptic.P256()},
+	"ES384": {hash: crypto.SHA384, isRSA: false, curve: elliptic.P384()},
 }
 
 // Signer adapts one (Backend, KeyRef) pair to crypto.Signer, so it drops into the
@@ -89,7 +100,7 @@ var algParamsByAlg = map[string]algParams{
 // closed), used for retired remote keys after a cutover or once the stanza is
 // removed.
 type Signer struct {
-	backend     Backend
+	backend     SigningBackend
 	backendType string // persisted discriminator, retained even when backend is nil
 	ref         KeyRef
 	pub         crypto.PublicKey
@@ -98,7 +109,7 @@ type Signer struct {
 }
 
 // NewSigner builds a signing-capable Signer bound to a live backend.
-func NewSigner(backend Backend, ref KeyRef, pub crypto.PublicKey, timeout time.Duration) *Signer {
+func NewSigner(backend SigningBackend, ref KeyRef, pub crypto.PublicKey, timeout time.Duration) *Signer {
 	bt := ""
 	if backend != nil {
 		bt = backend.Type()
