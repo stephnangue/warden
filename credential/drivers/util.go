@@ -4,6 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
+
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/internal/remotesign"
 )
 
 // parseSecretPayload turns raw secret bytes into the credential's fields. It is shared
@@ -51,4 +55,65 @@ func parseSecretPayload(decoded []byte) (map[string]interface{}, error) {
 		}
 	}
 	return out, nil
+}
+
+// signingCapabilityPayloadPrefix marks spec-config keys carried verbatim into a minted
+// signing capability. What travels there means something only to the consumer — the
+// OAuth client the key is registered to, a key id an authorization server selects on —
+// so a producer copies it without interpreting it, rather than growing config keys for
+// a protocol it does not speak.
+const signingCapabilityPayloadPrefix = "payload."
+
+// signingCapabilityPayloadFields collects the payload.* passthrough bag with its prefix
+// stripped, for a capability on backend. It is shared by every driver that mints a
+// signing capability. Values may be claim-templated, so one spec can front a different
+// client and a different key per caller.
+//
+// A name the capability is built from is refused rather than dropped. Stripped of its
+// prefix, it would land on the same key as the coordinate and, merged after it, replace
+// it — sending the capability somewhere else, or spending a credential that is not the
+// one the mint obtained. Silently ignoring it instead would leave an operator with a
+// spec that reads as though it set something.
+//
+// client_id is required: the consumer names the client its assertion is for, and a
+// producer only carries that name.
+func signingCapabilityPayloadFields(config credential.Config, backend string, userClaims, agentClaims map[string]string, errPrefix string) (map[string]string, error) {
+	reserved := remotesign.ReservedCapabilityKeys(backend)
+	if reserved == nil {
+		// Without the codec there is nothing to check the bag against, and letting it
+		// through would let it overwrite coordinates unchecked.
+		return nil, fmt.Errorf("%s: no signing capability codec for backend %q", errPrefix, backend)
+	}
+	out := map[string]string{}
+	for k, v := range credential.GetPrefixed(config, signingCapabilityPayloadPrefix) {
+		if _, ok := reserved[k]; ok {
+			return nil, fmt.Errorf(
+				"%s: %s%s is not allowed: %q is part of the signing capability this mint writes, and carrying one here would replace it",
+				errPrefix, signingCapabilityPayloadPrefix, k, k)
+		}
+		resolved, err := resolveClaimTemplate(v, userClaims, agentClaims, signingCapabilityPayloadPrefix+k)
+		if err != nil {
+			return nil, err
+		}
+		out[k] = resolved
+	}
+	if out["client_id"] == "" {
+		return nil, fmt.Errorf(
+			"%s: a signing capability requires %sclient_id on the spec: the consumer names the client its assertion is for, and this driver only carries that name",
+			errPrefix, signingCapabilityPayloadPrefix)
+	}
+	return out, nil
+}
+
+// signingCapabilityTTL is how long a capability whose credential lasts credTTL is
+// cached. A credential issued with no expiry still gets a positive lifetime, since a
+// zero would read as "static" and never refresh; and none outlives the spec's MaxTTL.
+func signingCapabilityTTL(credTTL time.Duration, spec *credential.CredSpec) time.Duration {
+	if credTTL <= 0 {
+		credTTL = 1 * time.Hour
+	}
+	if spec.MaxTTL > 0 && credTTL > spec.MaxTTL {
+		credTTL = spec.MaxTTL
+	}
+	return credTTL
 }
