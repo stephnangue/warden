@@ -55,8 +55,12 @@ func TestBuildHTTPClient_NoTLSConfig(t *testing.T) {
 	if client.Timeout != 30*time.Second {
 		t.Errorf("expected timeout 30s, got %v", client.Timeout)
 	}
-	if client.Transport != nil {
-		t.Error("expected nil transport when no TLS config set")
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected the client to own an *http.Transport, not fall back to the default one")
+	}
+	if transport.TLSClientConfig.RootCAs != nil || transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("expected system roots and verification when no TLS config set")
 	}
 }
 

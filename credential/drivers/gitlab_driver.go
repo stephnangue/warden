@@ -250,6 +250,7 @@ func (f *GitLabDriverFactory) Create(config credential.Config, log *logger.Gated
 	defer cancel()
 
 	if err := driver.verifyAuth(ctx, nil); err != nil {
+		_ = driver.Cleanup(context.Background())
 		return nil, fmt.Errorf("GitLab authentication failed: %w", err)
 	}
 

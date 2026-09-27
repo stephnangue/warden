@@ -396,6 +396,7 @@ func (f *GCPDriverFactory) Create(config credential.Config, log *logger.GatedLog
 	defer cancel()
 
 	if _, _, err := driver.acquireToken(ctx, []string{gcpCloudPlatformScope}); err != nil {
+		_ = driver.Cleanup(context.Background())
 		return nil, fmt.Errorf("GCP authentication failed: %w", err)
 	}
 

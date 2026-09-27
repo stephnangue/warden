@@ -106,6 +106,17 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		},
 	}
 
+	// Release the TokenReview client's pooled connections on unmount/seal. The
+	// config stays: closing idle connections only costs a later request a dial.
+	b.Backend.Clean = func(context.Context) {
+		b.configMu.RLock()
+		cfg := b.config
+		b.configMu.RUnlock()
+		if cfg != nil && cfg.httpClient != nil {
+			cfg.httpClient.CloseIdleConnections()
+		}
+	}
+
 	if err := b.Backend.Setup(ctx, conf); err != nil {
 		return nil, err
 	}
@@ -131,10 +142,18 @@ func (b *kubernetesAuthBackend) setupConfig(ctx context.Context, conf map[string
 }
 
 // installConfig makes cfg the live configuration. It cannot fail.
+//
+// Each config carries its own TokenReview client, so the one replaced is closed:
+// its idle connections are released, while a login still using the old config
+// keeps the connection it holds.
 func (b *kubernetesAuthBackend) installConfig(cfg *KubernetesAuthConfig) {
 	b.configMu.Lock()
+	outgoing := b.config
 	b.config = cfg
 	b.configMu.Unlock()
+	if outgoing != nil && outgoing.httpClient != nil && outgoing.httpClient != cfg.httpClient {
+		outgoing.httpClient.CloseIdleConnections()
+	}
 }
 
 // buildConfig parses the operator-supplied config map, validates required
