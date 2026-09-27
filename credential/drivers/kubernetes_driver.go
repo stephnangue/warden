@@ -225,6 +225,7 @@ func (f *KubernetesDriverFactory) Create(config credential.Config, log *logger.G
 
 	// Verify source credentials by checking API server connectivity
 	if err := driver.verifyConnection(ctx); err != nil {
+		_ = driver.Cleanup(context.Background())
 		return nil, fmt.Errorf("Kubernetes API server connection failed: %w", err)
 	}
 
@@ -592,8 +593,14 @@ func (d *KubernetesDriver) CommitRotation(ctx context.Context, newConfig map[str
 			return fmt.Errorf("failed to rebuild HTTP client after rotation: %w", err)
 		}
 		d.clientMu.Lock()
+		outgoing := d.httpClient
 		d.httpClient = httpClient
 		d.clientMu.Unlock()
+		// Release the replaced client's idle connections. Requests still in flight
+		// on it keep the connections they hold.
+		if outgoing != nil {
+			outgoing.CloseIdleConnections()
+		}
 	}
 
 	if d.logger != nil {
@@ -657,9 +664,9 @@ func (d *KubernetesDriver) getAuthMethod() string {
 // every dev cluster.
 //
 // Known limitation: it dials the host directly and so ignores HTTPS_PROXY, which
-// the client's own transport would honour. A deployment reaching the API server
-// only through a proxy therefore fails source creation here even though its mints
-// would succeed.
+// the client's own transport honours whatever its TLS settings. A deployment
+// reaching the API server only through a proxy therefore fails source creation
+// here even though its mints would succeed.
 func (d *KubernetesDriver) probeTLS(ctx context.Context) error {
 	k8sURL, _ := d.configSnapshot()
 
@@ -676,9 +683,10 @@ func (d *KubernetesDriver) probeTLS(ctx context.Context) error {
 		port = defaultK8sTLSPort
 	}
 
-	// The client carries the CA pool and skip-verify flag built from config. Its
-	// Transport is nil when neither is set (BuildHTTPClient returns a bare client
-	// then), which leaves a nil config and the system roots — the right default.
+	// The client's transport carries the CA pool and skip-verify flag built from
+	// config; with neither set it verifies against the system roots, the right
+	// default. The dialer clones the config (it sets no ServerName), so the
+	// transport's own is left untouched.
 	var tlsConfig *tls.Config
 	if transport, ok := d.httpClientSnapshot().Transport.(*http.Transport); ok && transport != nil {
 		tlsConfig = transport.TLSClientConfig

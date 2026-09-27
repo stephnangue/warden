@@ -271,6 +271,7 @@ func (f *IBMDriverFactory) Create(config credential.Config, log *logger.GatedLog
 	defer cancel()
 
 	if _, _, err := driver.acquireIAMToken(ctx); err != nil {
+		_ = driver.Cleanup(context.Background())
 		return nil, fmt.Errorf("IBM Cloud authentication failed: %w", err)
 	}
 
@@ -490,6 +491,9 @@ func (d *IBMDriver) Type() string {
 
 // Cleanup releases resources
 func (d *IBMDriver) Cleanup(ctx context.Context) error {
+	if d.httpClient != nil {
+		d.httpClient.CloseIdleConnections()
+	}
 	return nil
 }
 

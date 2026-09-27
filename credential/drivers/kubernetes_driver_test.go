@@ -1101,9 +1101,9 @@ func TestKubernetesDriverFactory_Create_Federation(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("survives a nil transport", func(t *testing.T) {
-		// With neither ca_data nor tls_skip_verify, BuildHTTPClient returns a bare
-		// client whose Transport is nil — the probe must not panic reaching for it.
+	t.Run("probes with the system roots", func(t *testing.T) {
+		// With neither ca_data nor tls_skip_verify, the probe reads the transport's
+		// TLS config — system roots — and fails on a host that cannot be reached.
 		_, err := f.Create(credential.NewConfig(map[string]string{
 			"kubernetes_url": "https://127.0.0.1:1",
 			"auth_method":    kubernetesAuthMethodOIDCFederation,

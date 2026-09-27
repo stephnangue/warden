@@ -355,6 +355,7 @@ func (f *AWSDriverFactory) Create(config credential.Config, log *logger.GatedLog
 	probeCtx, cancel := context.WithTimeout(context.Background(), awsCreateProbeTimeout)
 	defer cancel()
 	if _, err := driver.authenticate(probeCtx); err != nil {
+		_ = driver.Cleanup(context.Background())
 		return nil, fmt.Errorf("AWS authentication failed: %w", err)
 	}
 
@@ -1207,6 +1208,9 @@ func (d *AWSDriver) Type() string {
 
 // Cleanup releases resources
 func (d *AWSDriver) Cleanup(ctx context.Context) error {
+	if d.httpClient != nil {
+		d.httpClient.CloseIdleConnections()
+	}
 	return nil
 }
 

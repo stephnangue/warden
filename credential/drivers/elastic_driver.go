@@ -260,6 +260,7 @@ func (f *ElasticDriverFactory) Create(config credential.Config, log *logger.Gate
 	// reach this driver until Create returns it.
 	identity, err := driver.verifyAuthenticationWith(ctx, driver.authSnapshotLocked())
 	if err != nil {
+		_ = driver.Cleanup(context.Background())
 		return nil, fmt.Errorf("Elasticsearch authentication failed: %w", err)
 	}
 
@@ -268,6 +269,7 @@ func (f *ElasticDriverFactory) Create(config credential.Config, log *logger.Gate
 	// that agrees with a stale api_key, both of them naming a key this source no
 	// longer authenticates as.
 	if identity.APIKey.ID != "" && apiKeyID != identity.APIKey.ID {
+		_ = driver.Cleanup(context.Background())
 		return nil, fmt.Errorf("configured api_key_id %q is not the key the cluster authenticated (%q)",
 			truncateID(apiKeyID, 8), truncateID(identity.APIKey.ID, 8))
 	}

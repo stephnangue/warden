@@ -103,6 +103,7 @@ func (f *VaultDriverFactory) Create(config credential.Config, logger *logger.Gat
 	// Perform initial authentication
 	if authMethod != "" {
 		if err := driver.authenticate(context.Background()); err != nil {
+			_ = driver.Cleanup(context.Background())
 			return nil, fmt.Errorf("Vault authentication failed: %w", err)
 		}
 	}
@@ -115,9 +116,11 @@ func (f *VaultDriverFactory) Create(config credential.Config, logger *logger.Gat
 			rolePath := fmt.Sprintf("auth/%s/role/%s", approleMount, roleName)
 			secret, err := apiClient.Logical().ReadWithContext(context.Background(), rolePath)
 			if err != nil {
+				_ = driver.Cleanup(context.Background())
 				return nil, fmt.Errorf("failed to verify AppRole role '%s': %w", roleName, err)
 			}
 			if secret == nil || secret.Data == nil {
+				_ = driver.Cleanup(context.Background())
 				return nil, fmt.Errorf("AppRole role '%s' does not exist at path '%s'", roleName, rolePath)
 			}
 		}
@@ -1157,7 +1160,16 @@ func (d *VaultDriver) Type() string {
 
 // Cleanup releases resources
 func (d *VaultDriver) Cleanup(ctx context.Context) error {
-	// Vault client doesn't need explicit cleanup
+	if d.httpClient != nil {
+		d.httpClient.CloseIdleConnections()
+	}
+	// The API client pools its own connections. CloneConfig copies its http.Client
+	// but shares the transport, so this closes the pool the client itself uses.
+	if d.vault != nil {
+		if hc := d.vault.CloneConfig().HttpClient; hc != nil {
+			hc.CloseIdleConnections()
+		}
+	}
 	return nil
 }
 
