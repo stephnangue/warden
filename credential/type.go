@@ -87,6 +87,17 @@ type Type interface {
 	// masked in output (e.g., "client_secret", "secret_id").
 	SensitiveConfigFields() []string
 
+	// StoredSecrets returns the long-lived secrets this spec config makes Warden
+	// hold: the secret config keys present with a non-empty value, or a
+	// description of one the server will seal (such as the token a connect-gated
+	// flow stores). Nil means the spec holds no secret of its own. Locators,
+	// identifiers and adjunct fields are not secrets.
+	//
+	// It judges the spec config alone. Whether the spec's source holds a secret,
+	// and the rule that a local-source spec is itself the credential, are decided
+	// by the caller.
+	StoredSecrets(config Config) []string
+
 	// FieldSchemas returns metadata about the credential's data fields
 	// Used for masking sensitive fields in responses
 	FieldSchemas() map[string]*CredentialFieldSchema

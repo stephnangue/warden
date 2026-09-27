@@ -232,6 +232,11 @@ func (t *IBMCloudKeysCredType) SensitiveConfigFields() []string {
 	return []string{"secret_access_key", "access_token"}
 }
 
+// StoredSecrets reports the secret config keys this spec holds.
+func (t *IBMCloudKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("secret_access_key", "access_token")
+}
+
 // FieldSchemas returns metadata about the credential's data fields
 func (t *IBMCloudKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{

@@ -46,6 +46,9 @@ type CredentialSpecInfo struct {
 	// authorization_code) has a sealed credential. Always false for spec types
 	// that don't use a connect flow.
 	Connected bool `json:"connected,omitempty"`
+	// StoredSecrets names the long-lived secrets the spec holds in its own
+	// config; nil when it holds none.
+	StoredSecrets []string `json:"stored_secrets,omitempty"`
 }
 
 // UpdateCredentialSpecInput represents the input for updating a credential spec
@@ -194,6 +197,7 @@ func (c *Sys) GetCredentialSpecWithContext(ctx context.Context, name string) (*C
 	if v, ok := resource.Data["connected"].(bool); ok {
 		spec.Connected = v
 	}
+	spec.StoredSecrets = parseStringList(resource.Data["stored_secrets"])
 
 	return spec, nil
 }
@@ -260,6 +264,7 @@ func (c *Sys) ListCredentialSpecsWithContext(ctx context.Context) ([]*Credential
 		if v, ok := specMap["rotation_period"]; ok {
 			spec.RotationPeriod = parseDurationFromSeconds(v)
 		}
+		spec.StoredSecrets = parseStringList(specMap["stored_secrets"])
 
 		specs = append(specs, spec)
 	}

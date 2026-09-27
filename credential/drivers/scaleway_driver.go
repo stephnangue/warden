@@ -180,6 +180,11 @@ func (f *ScalewayDriverFactory) SensitiveConfigFields() []string {
 	return []string{"management_secret_key", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *ScalewayDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("management_secret_key")
+}
+
 // InferCredentialType always returns scaleway_keys for Scaleway sources.
 func (f *ScalewayDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeScalewayKeys, nil

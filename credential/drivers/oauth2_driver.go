@@ -244,6 +244,11 @@ func (f *OAuth2DriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *OAuth2DriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("client_secret")
+}
+
 // InferCredentialType returns the credential type for OAuth2 sources.
 func (f *OAuth2DriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeOAuthBearerToken, nil

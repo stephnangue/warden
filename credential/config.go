@@ -120,6 +120,19 @@ func (c Config) Hash() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// Present returns those of keys whose value is non-empty, in the order given, or
+// nil when none is. An empty value is not reported: it is how an update clears a
+// field, and every validator reads it as unset.
+func (c Config) Present(keys ...string) []string {
+	var out []string
+	for _, k := range keys {
+		if c.m[k] != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // Map returns a copy of the underlying map.
 //
 // It is a boundary escape hatch and allocates on every call, so it belongs only

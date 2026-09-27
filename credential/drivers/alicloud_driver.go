@@ -194,6 +194,11 @@ func (f *AlicloudDriverFactory) SensitiveConfigFields() []string {
 	return []string{"access_key_secret", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *AlicloudDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("access_key_secret")
+}
+
 // InferCredentialType always returns alicloud_keys for Alicloud sources.
 func (f *AlicloudDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAlicloudKeys, nil

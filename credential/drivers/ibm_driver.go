@@ -203,6 +203,11 @@ func (f *IBMDriverFactory) SensitiveConfigFields() []string {
 	return []string{"api_key", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *IBMDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("api_key")
+}
+
 // ValidateRotationConfig rejects a rotation_period on a source that could never
 // rotate, so the operator hears about it at write time rather than never.
 //

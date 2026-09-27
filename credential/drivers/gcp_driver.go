@@ -339,6 +339,11 @@ func (f *GCPDriverFactory) SensitiveConfigFields() []string {
 	return []string{"service_account_key", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *GCPDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("service_account_key")
+}
+
 // InferCredentialType infers the credential type from the spec's mint_method.
 func (f *GCPDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
 	mintMethod := specConfig.Get("mint_method")

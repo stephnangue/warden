@@ -362,6 +362,12 @@ func (t *AWSIAMAccessKeysCredType) SensitiveConfigFields() []string {
 	return nil
 }
 
+// StoredSecrets reports the secret config keys this spec holds. access_key_id is
+// an identifier, and secret_id on a secrets_manager spec is a locator.
+func (t *AWSIAMAccessKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("secret_access_key")
+}
+
 // FieldSchemas returns metadata about the credential's data fields
 func (t *AWSIAMAccessKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{

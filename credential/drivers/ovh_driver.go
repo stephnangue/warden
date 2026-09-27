@@ -190,6 +190,11 @@ func (f *OVHDriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *OVHDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("client_secret")
+}
+
 // InferCredentialType always returns ovh_keys for OVH sources.
 func (f *OVHDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeOVHKeys, nil

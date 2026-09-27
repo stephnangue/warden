@@ -176,6 +176,11 @@ func (f *GrafanaDriverFactory) SensitiveConfigFields() []string {
 	return []string{"admin_token", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *GrafanaDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("admin_token")
+}
+
 // ValidateRotationConfig refuses a rotation_period on a grafana source.
 //
 // The driver holds one long-lived privileged token that it never re-issues: it has

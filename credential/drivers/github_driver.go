@@ -137,6 +137,11 @@ func (f *GitHubDriverFactory) SensitiveConfigFields() []string {
 	return []string{"ca_data"}
 }
 
+// StoredSecrets reports nothing. The source holds only the API URL; a PAT or App key lives on the spec.
+func (f *GitHubDriverFactory) StoredSecrets(_ credential.Config) []string {
+	return nil
+}
+
 // InferCredentialType always returns github_token for GitHub sources.
 func (f *GitHubDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeGitHubToken, nil

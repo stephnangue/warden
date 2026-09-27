@@ -216,6 +216,11 @@ func (f *GitLabDriverFactory) SensitiveConfigFields() []string {
 	return []string{"personal_access_token", "application_secret", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *GitLabDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("personal_access_token", "application_secret")
+}
+
 // InferCredentialType always returns gitlab_access_token for GitLab sources.
 func (f *GitLabDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeGitLabAccessToken, nil

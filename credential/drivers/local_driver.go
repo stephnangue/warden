@@ -40,6 +40,11 @@ func (f *LocalDriverFactory) SensitiveConfigFields() []string {
 	return []string{} // Local driver has no sensitive config fields
 }
 
+// StoredSecrets reports nothing. The source itself holds nothing; a local spec's config is the credential, which the caller judges.
+func (f *LocalDriverFactory) StoredSecrets(_ credential.Config) []string {
+	return nil
+}
+
 // InferCredentialType cannot infer the type for local sources — it must be specified explicitly.
 func (f *LocalDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("local source supports multiple credential types; specify type explicitly")

@@ -149,3 +149,8 @@ func (t *GCPAccessTokenCredType) RequiresSpecRotation() bool {
 func (t *GCPAccessTokenCredType) SensitiveConfigFields() []string {
 	return []string{}
 }
+
+// StoredSecrets reports nothing: its config holds only scopes, roles and locators.
+func (t *GCPAccessTokenCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}

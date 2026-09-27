@@ -256,6 +256,17 @@ func (t *OAuthBearerTokenCredType) SensitiveConfigFields() []string {
 	return []string{"client_secret", "refresh_token", "access_token"}
 }
 
+// StoredSecrets reports the secret config keys this spec holds. An
+// authorization_code spec that has not been connected yet still reports the
+// token connect will seal: creating it commits the server to storing one.
+func (t *OAuthBearerTokenCredType) StoredSecrets(config credential.Config) []string {
+	held := config.Present("client_secret", "refresh_token", "access_token")
+	if t.RequiresConnect(config) && !t.IsConnected(config) {
+		held = append(held, "refresh_token (sealed by connect)")
+	}
+	return held
+}
+
 // Compile-time assertion that the type is connect-gated for authorization_code.
 var _ credential.ConnectGated = (*OAuthBearerTokenCredType)(nil)
 

@@ -3,6 +3,7 @@ package spec
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/helpers"
@@ -43,6 +44,9 @@ func runRead(cmd *cobra.Command, args []string) error {
 	if sp.RotationPeriod > 0 {
 		data["rotation_period"] = sp.RotationPeriod.String()
 	}
+	if len(sp.StoredSecrets) > 0 {
+		data["stored_secrets"] = sp.StoredSecrets
+	}
 	if len(sp.Config) > 0 {
 		cfg := make(map[string]any, len(sp.Config))
 		for k, v := range sp.Config {
@@ -64,6 +68,9 @@ func runRead(cmd *cobra.Command, args []string) error {
 			rows = append(rows, []any{"Rotation Period", sp.RotationPeriod})
 		} else {
 			rows = append(rows, []any{"Rotation Period", "disabled"})
+		}
+		if len(sp.StoredSecrets) > 0 {
+			rows = append(rows, []any{"Stored Secrets", strings.Join(sp.StoredSecrets, ", ")})
 		}
 		if len(sp.Config) > 0 {
 			rows = append(rows, []any{"Config", ""})
