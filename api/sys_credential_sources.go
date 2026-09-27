@@ -36,6 +36,9 @@ type CreateCredentialSourceOutput struct {
 	Config         map[string]string `json:"config,omitempty"`
 	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
 	Message        string            `json:"message"`
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CredentialSourceInfo represents credential source metadata
@@ -60,6 +63,9 @@ type UpdateCredentialSourceInput struct {
 type UpdateCredentialSourceOutput struct {
 	Name    string `json:"name"`
 	Message string `json:"message"`
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CreateCredentialSource creates a new credential source
@@ -112,6 +118,7 @@ func (c *Sys) CreateCredentialSourceWithContext(ctx context.Context, name string
 	if rp, ok := resource.Data["rotation_period"]; ok {
 		output.RotationPeriod = parseDurationFromSeconds(rp)
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }
@@ -268,6 +275,7 @@ func (c *Sys) UpdateCredentialSourceWithContext(ctx context.Context, name string
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }

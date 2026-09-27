@@ -3,6 +3,7 @@
 package helpers
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +88,24 @@ func WardenCLI(t *testing.T, env map[string]string, args ...string) (string, err
 
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// WardenCLISplitWithPort runs the warden CLI against a node and returns stdout
+// and stderr separately. Use it where stdout is parsed: the CLI writes warnings
+// to stderr so `-o json` output stays machine-readable, and combined output
+// would put them in front of the JSON.
+func WardenCLISplitWithPort(t *testing.T, port int, env map[string]string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := exec.Command(WardenBin(), args...)
+	cmd.Env = append(cmd.Environ(), "WARDEN_SKIP_VERIFY=true", "WARDEN_ADDR="+NodeURL(port))
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	return outBuf.String(), errBuf.String(), err
 }
 
 // WardenCLIWithPort runs the warden CLI binary pointing at a specific node.

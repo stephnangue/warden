@@ -151,6 +151,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 		data["config"] = cfg
 	}
+	if len(output.Warnings) > 0 {
+		data["warnings"] = output.Warnings
+	}
+	helpers.PrintWarnings(output.Warnings)
 
 	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Created credential source: %s\n", output.Name)
@@ -188,6 +192,7 @@ func runCreateWithJSON(c *api.Client, name string, payload map[string]any) error
 		"name":    name,
 		"created": true,
 	})
+	helpers.PrintWarnings(helpers.WarningsFromData(resData))
 	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Created credential source: %s\n", name)
 	})

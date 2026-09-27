@@ -71,6 +71,9 @@ func mergeConfig(dst, src *Config) {
 	if src.IPBindingPolicy != "" {
 		dst.IPBindingPolicy = src.IPBindingPolicy
 	}
+	if src.KeylessEnforcementLevel != "" {
+		dst.KeylessEnforcementLevel = src.KeylessEnforcementLevel
+	}
 	if src.GoroutineShutdownTimeout != "" {
 		dst.GoroutineShutdownTimeout = src.GoroutineShutdownTimeout
 	}

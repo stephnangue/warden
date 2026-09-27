@@ -49,11 +49,17 @@ func TestJSON_CreateCredSourceWithJSONFile(t *testing.T) {
 		t.Fatalf("write payload file: %v", err)
 	}
 
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
+	out, stderr, err := h.WardenCLISplitWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
 	}, "cred", "source", "create", name, "--json", "@"+tmp, "-o", "json")
 	if err != nil {
-		t.Fatalf("warden cred source create --json failed: %v\nOutput:\n%s", err, out)
+		t.Fatalf("warden cred source create --json failed: %v\nOutput:\n%s%s", err, stderr, out)
+	}
+	// An AppRole source stores a secret_id, so under the cluster's default
+	// keyless_enforcement_level (warn) the CLI reports it — on stderr, which
+	// keeps the JSON on stdout parseable.
+	if !strings.Contains(stderr, "warning:") || !strings.Contains(stderr, "keyless_enforcement_level") {
+		t.Errorf("expected a keyless warning on stderr; got %q", stderr)
 	}
 
 	var resp map[string]any
@@ -167,13 +173,13 @@ func TestJSON_UpdateCredSourceWithJSON(t *testing.T) {
 	})
 
 	// Update only the rotation_period via --json.
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
+	out, stderr, err := h.WardenCLISplitWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
 	}, "cred", "source", "update", name,
 		"--json", `{"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role","tls_skip_verify":true}}`,
 		"-o", "json")
 	if err != nil {
-		t.Fatalf("update --json failed: %v\nOutput:\n%s", err, out)
+		t.Fatalf("update --json failed: %v\nOutput:\n%s%s", err, stderr, out)
 	}
 
 	var resp map[string]any
@@ -197,11 +203,11 @@ func TestJSON_CreateCredSpecWithJSON(t *testing.T) {
 	})
 
 	payload := `{"type":"vault_token","source":"vault-e2e","min_ttl":3600,"max_ttl":86400,"config":{"mint_method":"vault_token","token_role":"e2e-secrets-reader"}}`
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
+	out, stderr, err := h.WardenCLISplitWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
 	}, "cred", "spec", "create", name, "--json", payload, "-o", "json")
 	if err != nil {
-		t.Fatalf("spec create --json failed: %v\nOutput:\n%s", err, out)
+		t.Fatalf("spec create --json failed: %v\nOutput:\n%s%s", err, stderr, out)
 	}
 
 	var resp map[string]any

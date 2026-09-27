@@ -371,6 +371,10 @@ type AuthorizeCredentialSpecOutput struct {
 	// response because the comparison happens at the callback, before the
 	// code is sent back to be redeemed.
 	Issuer string `json:"issuer,omitempty"`
+
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ConnectCredentialSpecInput is the input for completing the connect flow.
@@ -386,6 +390,9 @@ type ConnectCredentialSpecOutput struct {
 	Connected   bool   `json:"connected"`
 	Reconnected bool   `json:"reconnected"`
 	Message     string `json:"message"`
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // AuthorizeCredentialSpec builds the provider authorize URL for a spec's connect flow.
@@ -431,6 +438,7 @@ func (c *Sys) AuthorizeCredentialSpecWithContext(ctx context.Context, name strin
 	if v, ok := resource.Data["issuer"].(string); ok {
 		output.Issuer = v
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 	return output, nil
 }
 
@@ -480,5 +488,6 @@ func (c *Sys) ConnectCredentialSpecWithContext(ctx context.Context, name string,
 	if v, ok := resource.Data["message"].(string); ok {
 		output.Message = v
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 	return output, nil
 }

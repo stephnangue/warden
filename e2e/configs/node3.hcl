@@ -9,6 +9,10 @@ min_cred_spec_rotation_period   = "5m"
 
 ip_binding_policy = "disabled"
 
+# Rewritten by SetKeylessEnforcementLevel for the enforcement test; every other
+# suite creates keyed sources, so the shared default must not refuse them.
+keyless_enforcement_level = "warn"
+
 api_addr     = "https://127.0.0.1:8520"
 cluster_addr = "https://127.0.0.1:8521"
 

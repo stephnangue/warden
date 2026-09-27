@@ -415,3 +415,50 @@ service_registration "consul" {
 		assert.Contains(t, joined, want, "expected warning for %s", want)
 	}
 }
+
+func TestLoadConfigDir_KeylessEnforcementLevel(t *testing.T) {
+	base := `
+storage "postgres" {
+  connection_url = "postgres://x/db"
+}
+
+listener "tcp" {
+  address     = ":8400"
+  tls_disable = true
+}
+`
+	t.Run("absent defaults to empty", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00-base.hcl", base)
+		cfg, err := LoadConfigDir(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "", cfg.KeylessEnforcementLevel, "core reads an empty level as warn")
+	})
+
+	for _, level := range []string{"off", "warn", "enforce"} {
+		t.Run(level, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "00-base.hcl", base+"\nkeyless_enforcement_level = \""+level+"\"\n")
+			cfg, err := LoadConfigDir(dir)
+			require.NoError(t, err)
+			assert.Equal(t, level, cfg.KeylessEnforcementLevel)
+		})
+	}
+
+	t.Run("invalid", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00-base.hcl", base+"\nkeyless_enforcement_level = \"strict\"\n")
+		_, err := LoadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "keyless_enforcement_level")
+	})
+
+	t.Run("last file wins", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00-base.hcl", base+"\nkeyless_enforcement_level = \"warn\"\n")
+		writeFile(t, dir, "10-overlay.hcl", "keyless_enforcement_level = \"enforce\"\n")
+		cfg, err := LoadConfigDir(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "enforce", cfg.KeylessEnforcementLevel)
+	})
+}

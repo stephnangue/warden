@@ -57,6 +57,13 @@ type Config struct {
 	// Defaults to "optional" if not specified.
 	IPBindingPolicy string `hcl:"ip_binding_policy,optional"`
 
+	// KeylessEnforcementLevel controls operator writes to credential sources and
+	// specs that would leave a long-lived secret stored on the server.
+	// Valid values: "off" (accept), "warn" (accept with a warning), "enforce"
+	// (refuse). Defaults to "warn". Existing sources and specs keep serving at
+	// every level.
+	KeylessEnforcementLevel string `hcl:"keyless_enforcement_level,optional"`
+
 	// HA cluster tuning — all values are Go duration strings (e.g., "30s", "1h").
 	// Omitted values use built-in defaults from core.DefaultClusterConfig().
 
@@ -675,6 +682,16 @@ func validateConfig(config *Config) error {
 			// valid
 		default:
 			return fmt.Errorf("invalid ip_binding_policy %q: must be one of: disabled, optional, required", config.IPBindingPolicy)
+		}
+	}
+
+	// Validate keyless_enforcement_level if set
+	if config.KeylessEnforcementLevel != "" {
+		switch config.KeylessEnforcementLevel {
+		case "off", "warn", "enforce":
+			// valid
+		default:
+			return fmt.Errorf("invalid keyless_enforcement_level %q: must be one of: off, warn, enforce", config.KeylessEnforcementLevel)
 		}
 	}
 
