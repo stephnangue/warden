@@ -34,6 +34,7 @@ const elasticSweepPageSize = 100
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*ElasticDriver)(nil)
 var _ credential.Rotatable = (*ElasticDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*ElasticDriver)(nil)
 var _ credential.SpecVerifier = (*ElasticDriver)(nil)
 var _ credential.ChainedSecretMinter = (*ElasticDriver)(nil)
 
@@ -630,6 +631,16 @@ func (d *ElasticDriver) CommitRotation(ctx context.Context, newConfig map[string
 	}
 
 	return nil
+}
+
+// StagedCleanupConfig names the API key a staged PrepareRotation created, so
+// CleanupRotation — still authenticating with the old key — invalidates it.
+func (d *ElasticDriver) StagedCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	id := newConfig["api_key_id"]
+	if id == "" {
+		return nil, fmt.Errorf("staged config carries no api_key_id")
+	}
+	return map[string]string{"api_key_id": id}, nil
 }
 
 // CleanupRotation invalidates the old API key

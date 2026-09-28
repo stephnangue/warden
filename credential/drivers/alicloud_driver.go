@@ -62,6 +62,7 @@ const alicloudTimestampFormat = "2006-01-02T15:04:05Z"
 var _ credential.SourceDriver = (*AlicloudDriver)(nil)
 var _ credential.SpecVerifier = (*AlicloudDriver)(nil)
 var _ credential.Rotatable = (*AlicloudDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*AlicloudDriver)(nil)
 var _ credential.ExchangeMinter = (*AlicloudDriver)(nil)
 var _ credential.RotationConfigValidator = (*AlicloudDriverFactory)(nil)
 
@@ -1117,6 +1118,17 @@ func (d *AlicloudDriver) CommitRotation(_ context.Context, newConfig map[string]
 		logger.String("new_key_id", truncateID(newConfig["access_key_id"], 8)),
 	)
 	return nil
+}
+
+// StagedCleanupConfig names the management key a staged PrepareRotation created.
+// CleanupRotation's current-key guard compares against the key it signs with,
+// which is still the old one here, so it lets the staged key through.
+func (d *AlicloudDriver) StagedCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	id, user := newConfig["access_key_id"], newConfig["management_user_name"]
+	if id == "" || user == "" {
+		return nil, fmt.Errorf("staged config carries no access_key_id or management_user_name")
+	}
+	return map[string]string{"access_key_id": id, "management_user_name": user}, nil
 }
 
 // CleanupRotation retires the old management access key via two RAM calls:

@@ -73,6 +73,11 @@ type Manager struct {
 	// the /connect seal) per namespace+spec. Key: "{ns.UUID}:{specName}".
 	specLocks sync.Map
 
+	// sourceLocks serializes source-config mutations — operator updates and
+	// deletes, and the rotation jobs that prepare and activate new source
+	// credentials — per namespace+source. Key: "{ns.UUID}:{sourceName}".
+	sourceLocks sync.Map
+
 	// Optional expiration registrar for timer-based TTL enforcement
 	// When set, newly issued credentials are registered for expiration
 	expirationRegistrar ExpirationRegistrar
@@ -1254,6 +1259,27 @@ func needsRefreshTokenWriteBack(spec *CredSpec) bool {
 func (m *Manager) LockSpec(ctx context.Context, nsUUID, specName string) (unlock func(), err error) {
 	key := nsUUID + ":" + specName
 	v, _ := m.specLocks.LoadOrStore(key, make(chan struct{}, 1))
+	ch := v.(chan struct{})
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// LockSource serializes source-config mutations for one namespace+source: an
+// operator update or delete, and a rotation job preparing or activating new
+// credentials. Without it a rotation could write back a config snapshot taken
+// before an operator's edit, or an operator's stale read could overwrite a
+// rotation that had just deleted the key the read still held.
+//
+// It is never taken on the mint path. Like LockSpec it is context-aware and its
+// map is not pruned. Callers that also take spec locks take every LockSpec
+// first, in name order, then LockSource.
+func (m *Manager) LockSource(ctx context.Context, nsUUID, sourceName string) (unlock func(), err error) {
+	key := nsUUID + ":" + sourceName
+	v, _ := m.sourceLocks.LoadOrStore(key, make(chan struct{}, 1))
 	ch := v.(chan struct{})
 	select {
 	case ch <- struct{}{}:

@@ -4,9 +4,12 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -28,12 +31,25 @@ func (j *prepareJob) Execute() error {
 	m := j.manager
 	entry := j.entry
 
-	var staged *stagedRotation
-	var err error
+	// The target's lock is held for the whole job, the bookkeeping below
+	// included, so an operator's edit or delete of the same source or spec
+	// either lands before this job reads the config or waits until it is done.
+	unlock, err := m.lockEntryTarget(entry)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
-	// Business logic — no lock held (these do I/O). They return the staged data
-	// rather than writing it onto the entry, so every write below happens under
-	// the lock the tick loop and persistEntry read against.
+	if entry.isRemoved() {
+		atomic.StoreInt32(&entry.inflight, 0)
+		return nil
+	}
+
+	var staged *stagedRotation
+
+	// Business logic — no entry lock held (these do I/O). They return the staged
+	// data rather than writing it onto the entry, so every write below happens
+	// under the lock the tick loop and persistEntry read against.
 	switch entry.EntryType {
 	case EntryTypeSpec:
 		staged, err = m.prepareSpec(entry)
@@ -41,6 +57,10 @@ func (j *prepareJob) Execute() error {
 		staged, err = m.prepareSource(entry)
 	}
 
+	if errors.Is(err, errEntryRemoved) {
+		atomic.StoreInt32(&entry.inflight, 0)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -111,6 +131,14 @@ func (j *prepareJob) OnFailure(err error) {
 	m := j.manager
 	entry := j.entry
 
+	// OnFailure runs after Execute released the target lock, so an unregister
+	// may have landed in between. A removed entry is no longer counted; moving
+	// it to failed would count it again and leave the counters skewed.
+	if entry.isRemoved() {
+		atomic.StoreInt32(&entry.inflight, 0)
+		return
+	}
+
 	entry.mu.Lock()
 	entry.Attempts++
 	entry.LastError = truncateError(err, 256)
@@ -174,8 +202,19 @@ func (j *activateJob) Execute() error {
 	m := j.manager
 	entry := j.entry
 
-	// Business logic — no lock held (these do I/O)
-	var err error
+	// Held for the whole job; see prepareJob.Execute.
+	unlock, err := m.lockEntryTarget(entry)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if entry.isRemoved() {
+		atomic.StoreInt32(&entry.inflight, 0)
+		return nil
+	}
+
+	// Business logic — no entry lock held (these do I/O)
 	switch entry.EntryType {
 	case EntryTypeSpec:
 		err = m.activateSpec(entry)
@@ -183,7 +222,34 @@ func (j *activateJob) Execute() error {
 		err = m.activateSource(entry)
 	}
 
-	if err != nil {
+	switch {
+	case errors.Is(err, errNothingStaged):
+		// An operator's edit discarded the staged rotation after this job was
+		// queued, and reset the entry itself.
+		atomic.StoreInt32(&entry.inflight, 0)
+		return nil
+
+	case errors.Is(err, errStagedDiscarded):
+		// The config changed since the prepare, so the staged credential was
+		// discarded rather than written. Re-prepare against the current config.
+		entry.mu.Lock()
+		entry.clearStagedFields()
+		entry.State = StateIdle
+		entry.Attempts = 0
+		entry.LastError = ""
+		entry.NextAction = time.Now()
+		if m.storage != nil {
+			if err := m.persistEntryIfCurrent(entry); err != nil {
+				m.log.Error("failed to persist entry after discarding a stale activation",
+					logger.String("key", j.key),
+					logger.Err(err))
+			}
+		}
+		entry.mu.Unlock()
+		atomic.StoreInt32(&entry.inflight, 0)
+		return nil
+
+	case err != nil:
 		return err
 	}
 
@@ -227,6 +293,12 @@ func (j *activateJob) Execute() error {
 func (j *activateJob) OnFailure(err error) {
 	m := j.manager
 	entry := j.entry
+
+	// See prepareJob.OnFailure.
+	if entry.isRemoved() {
+		atomic.StoreInt32(&entry.inflight, 0)
+		return
+	}
 
 	entry.mu.Lock()
 	entry.Attempts++
@@ -274,4 +346,47 @@ func (j *activateJob) OnFailure(err error) {
 	entry.mu.Unlock()
 
 	atomic.StoreInt32(&entry.inflight, 0)
+}
+
+// discardJob drops an entry found at restore whose source or spec no longer
+// rotates, discarding the credential it had staged first. It runs from the tick
+// loop rather than from Restore so the upstream call stays off the unseal path.
+type discardJob struct {
+	manager *RotationManager
+	entry   *RotationEntry
+	key     string
+}
+
+// Execute implements fairshare.Job.Execute
+func (j *discardJob) Execute() error {
+	m := j.manager
+	entry := j.entry
+
+	unlock, err := m.lockEntryTarget(entry)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(m.quitCtx, StageTimeout)
+	defer cancel()
+	if ns, err := m.getNamespaceFromEntry(ctx, entry); err == nil {
+		m.discardEntryStaged(namespace.ContextWithNamespace(ctx, ns), entry)
+	} else {
+		m.logUndiscarded(entry, entry.GetNewConfig(), err.Error())
+	}
+
+	m.dropEntry(j.key, entry)
+	atomic.StoreInt32(&entry.inflight, 0)
+	return nil
+}
+
+// OnFailure implements fairshare.Job.OnFailure. The entry is dropped either
+// way: it no longer describes a rotation, and retrying on every tick a discard
+// that cannot get its lock would only repeat the failure.
+func (j *discardJob) OnFailure(err error) {
+	m := j.manager
+	m.logUndiscarded(j.entry, j.entry.GetNewConfig(), err.Error())
+	m.dropEntry(j.key, j.entry)
+	atomic.StoreInt32(&j.entry.inflight, 0)
 }

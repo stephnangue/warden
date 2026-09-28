@@ -215,6 +215,8 @@ func (d *AzureDriver) doAzureRequest(ctx context.Context, apiReq azureAPIRequest
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*AzureDriver)(nil)
 var _ credential.Rotatable = (*AzureDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*AzureDriver)(nil)
+var _ credential.StagedSpecRotationDiscarder = (*AzureDriver)(nil)
 var _ credential.SpecRotatable = (*AzureDriver)(nil)
 var _ credential.ExchangeMinter = (*AzureDriver)(nil)
 var _ credential.RotationConfigValidator = (*AzureDriverFactory)(nil)
@@ -851,6 +853,30 @@ func (d *AzureDriver) CommitRotation(ctx context.Context, newConfig map[string]s
 	}
 
 	return nil
+}
+
+// StagedCleanupConfig names the password credential a staged PrepareRotation
+// added, so CleanupRotation — still authenticating with the old secret —
+// removes it.
+func (d *AzureDriver) StagedCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	return azureStagedCleanupConfig(newConfig)
+}
+
+// StagedSpecCleanupConfig names the workload password credential a staged
+// PrepareSpecRotation added, for CleanupSpecRotation.
+func (d *AzureDriver) StagedSpecCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	return azureStagedCleanupConfig(newConfig)
+}
+
+// azureStagedCleanupConfig builds the cleanup config both CleanupRotation and
+// CleanupSpecRotation read, from a staged config: its app and the secret id the
+// prepare minted.
+func azureStagedCleanupConfig(newConfig map[string]string) (map[string]string, error) {
+	appID, secretID := newConfig["client_id"], newConfig["secret_id"]
+	if appID == "" || secretID == "" {
+		return nil, fmt.Errorf("staged config carries no client_id or secret_id")
+	}
+	return map[string]string{"client_id": appID, "old_secret_id": secretID}, nil
 }
 
 // CleanupRotation deletes old client_secret

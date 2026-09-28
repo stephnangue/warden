@@ -34,6 +34,11 @@ var (
 	ErrSourceInUse           = errors.New("credential source is referenced by specs")
 	ErrSpecInUse             = errors.New("credential spec is referenced via secret_spec")
 	ErrNamespaceNotInContext = errors.New("namespace not found in context")
+
+	// ErrConfigChanged is returned by UpdateSource and UpdateSpec when the caller
+	// passed ExpectedConfigHash and the stored config no longer matches it: some
+	// other writer got there first, and applying this write would undo theirs.
+	ErrConfigChanged = errors.New("credential config changed concurrently")
 )
 
 // CredentialConfigStoreConfig holds configuration for the credential config store
@@ -519,6 +524,13 @@ type UpdateSpecOptions struct {
 	// Used by the connect seal and refresh-token write-back, which persist a
 	// known-good token and must not re-mint (which would consume/rotate it).
 	SkipVerification bool
+
+	// ExpectedConfigHash, when set, makes the write conditional: it is refused
+	// with ErrConfigChanged unless the stored config still hashes to this value
+	// (credential.Config.Hash). A writer that computed its config from an
+	// earlier read passes that read's hash, so it cannot overwrite a change made
+	// since.
+	ExpectedConfigHash string
 }
 
 // PersistRotatedSpec persists a spec without re-running verification, satisfying
@@ -541,6 +553,17 @@ func (s *CredentialConfigStore) ReloadSpec(ctx context.Context, name string) (*c
 	return s.GetSpec(ctx, name)
 }
 
+// ReloadSource is ReloadSpec for sources: it evicts the node-local cache entry
+// and re-reads the source from shared storage.
+func (s *CredentialConfigStore) ReloadSource(ctx context.Context, name string) (*credential.CredSource, error) {
+	ns, err := s.getNamespaceFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.sourcesByID.Del(s.buildSourceCacheKey(ns.UUID, name))
+	return s.GetSource(ctx, name)
+}
+
 // UpdateSpec updates an existing spec
 func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential.CredSpec, opts ...UpdateSpecOptions) error {
 	if s.isClosed() {
@@ -554,8 +577,10 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 
 	// Phase 1: validate, holding no lock.
 	var skipVerification bool
+	var expectedHash string
 	if len(opts) > 0 {
 		skipVerification = opts[0].SkipVerification
+		expectedHash = opts[0].ExpectedConfigHash
 	}
 	if err := s.validateSpec(ctx, spec, skipVerification); err != nil {
 		return err
@@ -577,6 +602,15 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 			return ErrSpecNotFound
 		}
 		return fmt.Errorf("failed to read spec %q: %w", spec.Name, err)
+	}
+
+	if expectedHash != "" && existing.Config.Hash() != expectedHash {
+		// Refresh the cache from what storage holds, so the caller's re-read
+		// sees the change it lost to rather than the stale entry.
+		s.specsByID.Set(s.buildSpecCacheKey(ns.UUID, spec.Name), existing, 1)
+		s.specsByID.Wait()
+		s.mu.Unlock()
+		return ErrConfigChanged
 	}
 
 	if err := s.persistSpec(ns.UUID, spec); err != nil {
@@ -874,6 +908,13 @@ type UpdateSourceOptions struct {
 	// Used by the rotation manager where new credentials are known-good but may
 	// not yet be propagated at the provider (e.g., AWS IAM key propagation delay).
 	SkipConnectionTest bool
+
+	// ExpectedConfigHash, when set, makes the write conditional: it is refused
+	// with ErrConfigChanged unless the stored config still hashes to this value
+	// (credential.Config.Hash). Rotation passes the hash of the config it
+	// prepared against, and the operator update the hash of the config it read,
+	// so neither can overwrite a change the other made in between.
+	ExpectedConfigHash string
 }
 
 // UpdateSource updates an existing source
@@ -895,8 +936,10 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// Phase 1: validate, holding no lock. Unless the caller skips it, this opens a
 	// connection to the provider.
 	var skipConnectionTest bool
+	var expectedHash string
 	if len(opts) > 0 {
 		skipConnectionTest = opts[0].SkipConnectionTest
+		expectedHash = opts[0].ExpectedConfigHash
 	}
 	if err := s.validateSource(ctx, source, skipConnectionTest); err != nil {
 		return err
@@ -927,6 +970,14 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	if source.Type != existing.Type {
 		s.mu.Unlock()
 		return logical.ErrBadRequestf("cannot change the type of source %q (%s → %s); source type is immutable", source.Name, existing.Type, source.Type)
+	}
+	if expectedHash != "" && existing.Config.Hash() != expectedHash {
+		// Refresh the cache from what storage holds, so the caller's re-read
+		// sees the change it lost to rather than the stale entry.
+		s.sourcesByID.Set(s.buildSourceCacheKey(ns.UUID, source.Name), existing, 1)
+		s.sourcesByID.Wait()
+		s.mu.Unlock()
+		return ErrConfigChanged
 	}
 
 	// Narrowing credential_fields strands the specs that relied on it. The
@@ -1007,9 +1058,7 @@ func (s *CredentialConfigStore) reconcileSourceRotation(ctx context.Context, sou
 		return
 	}
 
-	eligible := source.RotationPeriod > 0 &&
-		!isFederationSource(source.Config) &&
-		source.Config.Get(credential.ConfigSecretSpec) == ""
+	eligible := sourceRotationEligible(source)
 
 	switch {
 	case !eligible && oldPeriod > 0:
@@ -1034,6 +1083,15 @@ func (s *CredentialConfigStore) reconcileSourceRotation(ctx context.Context, sou
 				logger.String("source_name", source.Name), logger.Err(err))
 		}
 	}
+}
+
+// sourceRotationEligible reports whether a source belongs on the rotation
+// schedule: it has a period, and it holds a secret of its own to rotate —
+// neither a federated nor a chained source does.
+func sourceRotationEligible(source *credential.CredSource) bool {
+	return source.RotationPeriod > 0 &&
+		!isFederationSource(source.Config) &&
+		source.Config.Get(credential.ConfigSecretSpec) == ""
 }
 
 // DeleteSource removes a source by name

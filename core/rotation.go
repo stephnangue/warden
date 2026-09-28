@@ -6,6 +6,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/rand"
@@ -67,6 +68,29 @@ type PendingCleanup struct {
 	Attempts      int               `json:"attempts"`
 	CreatedAt     time.Time         `json:"created_at"`
 	LastAttempt   time.Time         `json:"last_attempt"`
+
+	// Kind is cleanupKindCleanup or cleanupKindDiscard. Empty on records
+	// written before discards existed, which were all cleanups.
+	Kind string `json:"kind,omitempty"`
+
+	// SpecName is set for a spec rotation's cleanup, which is retried through
+	// CleanupSpecRotation. Records written before this field carried the name
+	// as "_spec_name" inside CleanupConfig.
+	SpecName string `json:"spec_name,omitempty"`
+
+	// AuthConfigHash, set for a discard, is the hash of the source config the
+	// deleting driver authenticated with. The retry runs only while the source
+	// still holds that config; once it changes, the driver that could delete
+	// the credential is gone.
+	AuthConfigHash string `json:"auth_config_hash,omitempty"`
+}
+
+// cleanupStoragePath is where a pending cleanup is persisted: one record per
+// credential, keyed by target, kind and a digest of the cleanup config. One
+// record per source used to mean a second failure overwrote the first, and the
+// credential the first one named was never deleted.
+func cleanupStoragePath(namespaceID, target, kind string, cleanupConfig map[string]string) string {
+	return rotationCleanupPath + namespaceID + "/" + target + "." + kind + "." + credential.NewConfig(cleanupConfig).Hash()[:16]
 }
 
 // EntryType constants for rotation entries
@@ -111,17 +135,46 @@ type RotationEntry struct {
 	State    EntryState `json:"state"`
 	Attempts int        `json:"attempts"`
 
-	// Staged fields (populated only when State == StateStaged)
+	// Staged fields (populated only when State == StateStaged, and kept when an
+	// activation that exhausted its attempts moves the entry to StateFailed)
 	NewConfig       map[string]string `json:"new_config,omitempty"`
 	CleanupConfig   map[string]string `json:"cleanup_config,omitempty"`
 	ActivationDelay time.Duration     `json:"activation_delay,omitempty"`
 	PreparedAt      time.Time         `json:"prepared_at,omitempty"`
+
+	// BaseConfigHash is credential.Config.Hash of the config the prepare ran
+	// against. Activation persists NewConfig — a full snapshot of that config
+	// with new credentials — only while the stored config still hashes to it,
+	// so a snapshot never overwrites an edit made after the prepare. A hash, not
+	// a copy, so the entry does not hold a second copy of the old secret.
+	BaseConfigHash string `json:"base_config_hash,omitempty"`
 
 	// Failure tracking
 	LastError string `json:"last_error,omitempty"`
 
 	// In-flight guard (not persisted) — prevents tick from re-queuing while a job is executing
 	inflight int32 // atomic: 0 = available, 1 = job in worker pool
+
+	// removed (not persisted) is set once the entry leaves the registry. A job
+	// already holding the entry checks it before writing anything, so an
+	// unregistered source or spec is not rotated after the fact.
+	removed int32 // atomic
+
+	// discardPending (not persisted, guarded by mu) marks an entry found at
+	// restore whose source or spec no longer rotates. The tick loop queues a job
+	// that discards its staged credential and drops it, keeping upstream calls
+	// off the unseal path.
+	discardPending bool
+}
+
+// isRemoved reports whether the entry has left the registry.
+func (e *RotationEntry) isRemoved() bool {
+	return atomic.LoadInt32(&e.removed) == 1
+}
+
+// markRemoved records that the entry has left the registry.
+func (e *RotationEntry) markRemoved() {
+	atomic.StoreInt32(&e.removed, 1)
 }
 
 // clearStagedFields resets the staged-only fields after activation completes.
@@ -131,6 +184,7 @@ func (e *RotationEntry) clearStagedFields() {
 	e.CleanupConfig = nil
 	e.ActivationDelay = 0
 	e.PreparedAt = time.Time{}
+	e.BaseConfigHash = ""
 }
 
 // stagedRotation is the outcome of a slow-path prepare: credentials generated
@@ -145,6 +199,7 @@ type stagedRotation struct {
 	CleanupConfig   map[string]string
 	ActivationDelay time.Duration
 	PreparedAt      time.Time
+	BaseConfigHash  string
 }
 
 // applyStaged copies a completed prepare onto the entry. Caller must hold e.mu.
@@ -153,7 +208,16 @@ func (e *RotationEntry) applyStaged(s *stagedRotation) {
 	e.CleanupConfig = s.CleanupConfig
 	e.ActivationDelay = s.ActivationDelay
 	e.PreparedAt = s.PreparedAt
+	e.BaseConfigHash = s.BaseConfigHash
 }
+
+// errEntryRemoved and errNothingStaged tell a job that the work it was queued
+// for is gone: the entry left the registry, or an operator's edit discarded the
+// staged rotation before the activation ran. The job completes as a no-op.
+var (
+	errEntryRemoved  = errors.New("rotation entry was removed")
+	errNothingStaged = errors.New("rotation entry has no staged rotation")
+)
 
 // GetState returns the entry's current state in a thread-safe manner.
 func (e *RotationEntry) GetState() EntryState {
@@ -326,6 +390,13 @@ func (m *RotationManager) tick() {
 		}
 
 		entry.mu.Lock()
+		if entry.discardPending {
+			atomic.StoreInt32(&entry.inflight, 1)
+			entry.mu.Unlock()
+			m.queueDiscardJob(key.(string), entry)
+			return true
+		}
+
 		// Skip if not yet due
 		if now.Before(entry.NextAction) {
 			entry.mu.Unlock()
@@ -345,10 +416,22 @@ func (m *RotationManager) tick() {
 
 		case StateFailed:
 			atomic.StoreInt32(&entry.inflight, 1)
-			entry.State = StateIdle
 			entry.Attempts = 0
-			entry.mu.Unlock()
 			atomic.AddInt64(&m.failedCount, -1)
+			if entry.NewConfig != nil {
+				// An activation that ran out of attempts still holds a staged
+				// credential. Retry the activation rather than preparing over
+				// it: a fresh prepare would overwrite the staged data and leave
+				// that credential live upstream with nothing tracking it.
+				// Activation resumes, persists or discards as the stored config
+				// requires.
+				entry.State = StateStaged
+				entry.mu.Unlock()
+				m.queueActivateJob(key.(string), entry)
+				return true
+			}
+			entry.State = StateIdle
+			entry.mu.Unlock()
 			m.queuePrepareJob(key.(string), entry)
 
 		default:
@@ -369,6 +452,45 @@ func (m *RotationManager) queuePrepareJob(key string, entry *RotationEntry) {
 func (m *RotationManager) queueActivateJob(key string, entry *RotationEntry) {
 	job := &activateJob{manager: m, entry: entry, key: key}
 	m.jobManager.AddJob(job, entry.Namespace)
+}
+
+// queueDiscardJob adds a job that discards an orphaned entry's staged
+// credential and drops the entry.
+func (m *RotationManager) queueDiscardJob(key string, entry *RotationEntry) {
+	job := &discardJob{manager: m, entry: entry, key: key}
+	m.jobManager.AddJob(job, entry.Namespace)
+}
+
+// lockEntryTarget takes the lock that serializes config writes to the entry's
+// target: LockSource for a source entry, LockSpec for a spec entry. Every
+// writer of that config — the operator's update and delete handlers, and these
+// jobs — takes the same lock, so a job's read, prepare and write of a config
+// cannot interleave with an operator's.
+//
+// Acquisition is bounded by StageTimeout. A job that cannot get the lock fails
+// and retries with backoff like any other stage failure.
+func (m *RotationManager) lockEntryTarget(entry *RotationEntry) (func(), error) {
+	if m.core == nil || m.core.credentialManager == nil {
+		return func() {}, nil
+	}
+	ctx, cancel := context.WithTimeout(m.quitCtx, StageTimeout)
+	defer cancel()
+
+	ns, err := m.getNamespaceFromEntry(ctx, entry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get namespace for entry: %w", err)
+	}
+
+	var unlock func()
+	if entry.EntryType == EntryTypeSpec {
+		unlock, err = m.core.credentialManager.LockSpec(ctx, ns.UUID, entry.SpecName)
+	} else {
+		unlock, err = m.core.credentialManager.LockSource(ctx, ns.UUID, entry.SourceName)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to lock rotation target: %w", err)
+	}
+	return unlock, nil
 }
 
 // ============================================================================
@@ -392,7 +514,7 @@ func (m *RotationManager) RegisterSource(ctx context.Context, sourceName, source
 		State:          StateIdle,
 	}
 
-	return m.register(entry)
+	return m.register(ctx, entry)
 }
 
 // RegisterSpec registers a credential spec for periodic rotation.
@@ -412,11 +534,11 @@ func (m *RotationManager) RegisterSpec(ctx context.Context, specName, sourceName
 		State:          StateIdle,
 	}
 
-	return m.register(entry)
+	return m.register(ctx, entry)
 }
 
 // register is the internal registration method.
-func (m *RotationManager) register(entry *RotationEntry) error {
+func (m *RotationManager) register(ctx context.Context, entry *RotationEntry) error {
 	key := m.buildEntryKey(entry)
 
 	// Persist entry to storage FIRST (durability)
@@ -435,6 +557,14 @@ func (m *RotationManager) register(entry *RotationEntry) error {
 			atomic.AddInt64(&m.failedCount, -1)
 		}
 		m.entries.Store(key, entry)
+		old.markRemoved()
+
+		// Replacing an entry drops its staged data, and with it the only record
+		// of a credential the prepare already created upstream. Discard it
+		// first. A spec re-registers after its own update has persisted, but
+		// the discard authenticates through the source's driver, which that
+		// update left untouched.
+		m.discardEntryStaged(ctx, old)
 
 		if entry.EntryType == EntryTypeSpec {
 			m.log.Debug("replaced existing rotation entry",
@@ -475,10 +605,13 @@ func (m *RotationManager) UnregisterSource(ctx context.Context, sourceName strin
 	key := buildRotationKey(ns.UUID, sourceName)
 	if existing, loaded := m.entries.LoadAndDelete(key); loaded {
 		entry := existing.(*RotationEntry)
+		entry.markRemoved()
 		atomic.AddInt64(&m.entryCount, -1)
-		if entry.State == StateFailed {
+		if entry.GetState() == StateFailed {
 			atomic.AddInt64(&m.failedCount, -1)
 		}
+
+		m.discardEntryStaged(ctx, entry)
 
 		if m.storage != nil {
 			m.deleteEntry(entry)
@@ -501,10 +634,13 @@ func (m *RotationManager) UnregisterSpec(ctx context.Context, specName string) e
 	key := buildSpecKey(ns.UUID, specName)
 	if existing, loaded := m.entries.LoadAndDelete(key); loaded {
 		entry := existing.(*RotationEntry)
+		entry.markRemoved()
 		atomic.AddInt64(&m.entryCount, -1)
-		if entry.State == StateFailed {
+		if entry.GetState() == StateFailed {
 			atomic.AddInt64(&m.failedCount, -1)
 		}
+
+		m.discardEntryStaged(ctx, entry)
 
 		if m.storage != nil {
 			m.deleteEntry(entry)
@@ -532,10 +668,19 @@ func (m *RotationManager) UnregisterByNamespace(namespaceID string) error {
 
 		entry := value.(*RotationEntry)
 		m.entries.Delete(key)
+		entry.markRemoved()
 		atomic.AddInt64(&m.entryCount, -1)
-		if entry.State == StateFailed {
+		if entry.GetState() == StateFailed {
 			atomic.AddInt64(&m.failedCount, -1)
 		}
+
+		// Namespace deletion unregisters before it clears the sources, so the
+		// driver that prepared a staged credential can still discard it.
+		ctx, cancel := context.WithTimeout(m.quitCtx, StageTimeout)
+		if ns, err := m.getNamespaceFromEntry(ctx, entry); err == nil {
+			m.discardEntryStaged(namespace.ContextWithNamespace(ctx, ns), entry)
+		}
+		cancel()
 
 		if m.storage != nil {
 			m.deleteEntry(entry)
@@ -545,12 +690,22 @@ func (m *RotationManager) UnregisterByNamespace(namespaceID string) error {
 		return true
 	})
 
-	// Delete cleanup entries from storage (entire namespace directory)
+	// Delete cleanup entries from storage (entire namespace directory). The
+	// namespace's sources go next, so nothing could ever run these; each names
+	// a credential still live upstream, so say which before dropping it.
 	if m.storage != nil {
 		cleanupPath := rotationCleanupPath + namespaceID + "/"
 		entries, err := m.storage.List(context.Background(), cleanupPath)
 		if err == nil {
 			for _, entryName := range entries {
+				if raw, err := m.storage.Get(context.Background(), cleanupPath+entryName); err == nil && raw != nil {
+					var pending PendingCleanup
+					if json.Unmarshal(raw.Value, &pending) == nil {
+						m.log.Error("pending rotation cleanup abandoned with its namespace; delete the credential at the provider",
+							logger.String("source", pending.SourceName),
+							logger.String("credential", credentialHint(pending.CleanupConfig)))
+					}
+				}
 				m.storage.Delete(context.Background(), cleanupPath+entryName)
 			}
 		}
@@ -584,7 +739,15 @@ func (m *RotationManager) UpdateRotationPeriod(ctx context.Context, sourceName s
 	entry := existing.(*RotationEntry)
 	entry.mu.Lock()
 	entry.RotationPeriod = newPeriod
-	entry.NextAction = time.Now().Add(newPeriod)
+	// A staged entry's NextAction is its activation time, which the period does
+	// not govern. Rescheduling it would postpone the activation by a whole
+	// period, with both the old and the staged credential live throughout. The
+	// same holds for a failed entry still holding staged data: its next action
+	// is that activation's retry. The new period takes effect when the
+	// activation completes.
+	if entry.State != StateStaged && entry.NewConfig == nil {
+		entry.NextAction = time.Now().Add(newPeriod)
+	}
 	nextAction := entry.NextAction
 
 	var persistErr error
@@ -639,16 +802,37 @@ func (m *RotationManager) persistEntry(entry *RotationEntry) error {
 // entry's state over the live one's record — invisible until a restart restored
 // the stale copy.
 //
+// It equally skips an entry that is no longer registered at all. A job still
+// running against an unregistered entry would otherwise write it back to
+// storage after the unregister deleted it, and the next restore would bring
+// back a rotation for a source that left the schedule, or no longer exists.
+//
 // Only the job paths use it. register() itself persists before storing, by
 // design, so its own write must not be filtered out.
 func (m *RotationManager) persistEntryIfCurrent(entry *RotationEntry) error {
 	key := m.buildEntryKey(entry)
-	if current, ok := m.entries.Load(key); ok && current.(*RotationEntry) != entry {
-		m.log.Debug("skipping persist for a superseded rotation entry",
+	if current, ok := m.entries.Load(key); !ok || current.(*RotationEntry) != entry {
+		m.log.Debug("skipping persist for a superseded or unregistered rotation entry",
 			logger.String("key", key))
 		return nil
 	}
 	return m.persistEntry(entry)
+}
+
+// dropEntry removes entry from the registry and from storage, provided it is
+// still the entry registered under key.
+func (m *RotationManager) dropEntry(key string, entry *RotationEntry) {
+	if !m.entries.CompareAndDelete(key, entry) {
+		return
+	}
+	entry.markRemoved()
+	atomic.AddInt64(&m.entryCount, -1)
+	if entry.GetState() == StateFailed {
+		atomic.AddInt64(&m.failedCount, -1)
+	}
+	if m.storage != nil {
+		m.deleteEntry(entry)
+	}
 }
 
 // deleteEntry removes an entry from storage
@@ -703,6 +887,10 @@ func (m *RotationManager) prepareSource(entry *RotationEntry) (staged *stagedRot
 		return nil, fmt.Errorf("source %s configuration does not support rotation", entry.SourceName)
 	}
 
+	// The config this prepare runs against. newConfig is a snapshot of it with
+	// new credentials, so it may only ever be written over this exact config.
+	baseHash := source.Config.Hash()
+
 	// PREPARE: Generate new credentials (old still valid)
 	newConfig, cleanupConfig, delay, err := rotatable.PrepareRotation(ctx)
 	if err != nil {
@@ -711,10 +899,20 @@ func (m *RotationManager) prepareSource(entry *RotationEntry) (staged *stagedRot
 
 	// Fast path: immediate activation
 	if delay == 0 {
-		if err := m.activateSourceInline(ctx, entry, source, rotatable, newConfig, cleanupConfig); err != nil {
+		if err := m.activateSourceInline(ctx, entry, source, rotatable, newConfig, cleanupConfig, baseHash); err != nil {
 			return nil, err
 		}
 		return nil, nil
+	}
+
+	// The job holds the source lock, so every unregister made through an
+	// operator path waits for it. Namespace deletion does not take that lock: if
+	// it removed the entry while PrepareRotation ran, the credential just
+	// created has no entry left to activate it. Discard it now, while this
+	// driver still authenticates with the old credential.
+	if entry.isRemoved() {
+		m.discardStaged(ctx, entry, driver, newConfig)
+		return nil, errEntryRemoved
 	}
 
 	// Slow path: hand the staged data back for the caller to apply under the lock.
@@ -727,6 +925,7 @@ func (m *RotationManager) prepareSource(entry *RotationEntry) (staged *stagedRot
 		CleanupConfig:   cleanupConfig,
 		ActivationDelay: delay,
 		PreparedAt:      time.Now(),
+		BaseConfigHash:  baseHash,
 	}, nil
 }
 
@@ -757,11 +956,22 @@ func specWithConfig(spec *credential.CredSpec, config map[string]string) *creden
 // activateSourceInline runs persist + commit + cleanup synchronously (fast path for activateAfter == 0).
 func (m *RotationManager) activateSourceInline(ctx context.Context, entry *RotationEntry,
 	source *credential.CredSource, rotatable credential.Rotatable,
-	newConfig, cleanupConfig map[string]string) error {
+	newConfig, cleanupConfig map[string]string, baseHash string) error {
 
-	// PERSIST
+	// PERSIST, only over the config the prepare ran against.
 	updated := sourceWithConfig(source, newConfig)
-	if err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{SkipConnectionTest: true}); err != nil {
+	if err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{
+		SkipConnectionTest: true,
+		ExpectedConfigHash: baseHash,
+	}); err != nil {
+		// Someone else wrote the config since the prepare. Nothing will
+		// activate the credential just created, so discard it while this
+		// driver still holds the one it was meant to replace.
+		if errors.Is(err, ErrConfigChanged) {
+			if driver, ok := rotatable.(credential.SourceDriver); ok {
+				m.discardStaged(ctx, entry, driver, newConfig)
+			}
+		}
 		return fmt.Errorf("failed to persist rotated config for source %s: %w", entry.SourceName, err)
 	}
 
@@ -781,10 +991,39 @@ func (m *RotationManager) activateSourceInline(ctx context.Context, entry *Rotat
 	return nil
 }
 
+// stagedSnapshot copies the staged fields out under the entry's lock, so an
+// activation works from a consistent view while an operator's discard or the
+// tick loop may touch the entry.
+func (e *RotationEntry) stagedSnapshot() (newConfig, cleanupConfig map[string]string, baseHash string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return maps.Clone(e.NewConfig), maps.Clone(e.CleanupConfig), e.BaseConfigHash
+}
+
+// errStagedDiscarded reports that activation found the stored config changed
+// since the prepare and discarded the staged credential instead of writing it.
+// The job returns the entry to idle and re-prepares against the current config.
+var errStagedDiscarded = errors.New("staged rotation discarded: config changed since prepare")
+
 // activateSource runs the ACTIVATE stage for a staged source rotation.
+//
+// NewConfig is a snapshot of the whole config the prepare ran against, so what
+// activation does depends on what is stored now:
+//
+//   - The stored config equals NewConfig: an earlier attempt persisted it and
+//     then failed at commit. The staged credential is already the live one, so
+//     resume at commit; discarding it here would delete the key in use.
+//   - The stored config is still the one the prepare ran against: persist.
+//   - Anything else: someone else changed the config since. Writing the snapshot
+//     would undo their change, so discard the staged credential instead.
 func (m *RotationManager) activateSource(entry *RotationEntry) error {
 	ctx, cancel := context.WithTimeout(m.quitCtx, StageTimeout)
 	defer cancel()
+
+	newConfig, cleanupConfig, baseHash := entry.stagedSnapshot()
+	if newConfig == nil {
+		return errNothingStaged
+	}
 
 	ns, err := m.getNamespaceFromEntry(ctx, entry)
 	if err != nil {
@@ -807,21 +1046,44 @@ func (m *RotationManager) activateSource(entry *RotationEntry) error {
 		return fmt.Errorf("driver for source %s does not support rotation", entry.SourceName)
 	}
 
-	// PERSIST
-	updated := sourceWithConfig(source, entry.NewConfig)
-	if err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{SkipConnectionTest: true}); err != nil {
-		return fmt.Errorf("failed to persist rotated config for source %s: %w", entry.SourceName, err)
+	storedHash := source.Config.Hash()
+	switch {
+	case source.Config.Equal(credential.NewConfig(newConfig)):
+		m.log.Info("resuming a source activation that persisted but did not commit",
+			logger.String("source", entry.SourceName))
+
+	// An entry staged before BaseConfigHash existed carries none; it keeps the
+	// unconditional write it was prepared under.
+	case baseHash == "" || storedHash == baseHash:
+		updated := sourceWithConfig(source, newConfig)
+		err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{
+			SkipConnectionTest: true,
+			ExpectedConfigHash: storedHash,
+		})
+		if errors.Is(err, ErrConfigChanged) {
+			m.discardStaged(ctx, entry, driver, newConfig)
+			return errStagedDiscarded
+		}
+		if err != nil {
+			return fmt.Errorf("failed to persist rotated config for source %s: %w", entry.SourceName, err)
+		}
+
+	default:
+		m.log.Warn("source config changed since the rotation was prepared; discarding the staged credential",
+			logger.String("source", entry.SourceName))
+		m.discardStaged(ctx, entry, driver, newConfig)
+		return errStagedDiscarded
 	}
 
 	// COMMIT
-	if err := rotatable.CommitRotation(ctx, entry.NewConfig); err != nil {
+	if err := rotatable.CommitRotation(ctx, newConfig); err != nil {
 		return fmt.Errorf("commit rotation failed for source %s: %w", entry.SourceName, err)
 	}
 
 	// CLEANUP (non-fatal)
 	cleanupCtx, cleanupCancel := context.WithTimeout(m.quitCtx, StageTimeout)
 	defer cleanupCancel()
-	m.performCleanupWithRetry(cleanupCtx, entry, rotatable, entry.CleanupConfig)
+	m.performCleanupWithRetry(cleanupCtx, entry, rotatable, cleanupConfig)
 
 	m.log.Debug("successfully activated rotated credentials",
 		logger.String("source", entry.SourceName))
@@ -870,6 +1132,9 @@ func (m *RotationManager) prepareSpec(entry *RotationEntry) (staged *stagedRotat
 		return nil, fmt.Errorf("source %s configuration does not support spec rotation", entry.SourceName)
 	}
 
+	// The spec config this prepare runs against; see prepareSource.
+	baseHash := spec.Config.Hash()
+
 	// PREPARE
 	newConfig, cleanupConfig, delay, err := specRotatable.PrepareSpecRotation(ctx, spec)
 	if err != nil {
@@ -878,10 +1143,17 @@ func (m *RotationManager) prepareSpec(entry *RotationEntry) (staged *stagedRotat
 
 	// Fast path
 	if delay == 0 {
-		if err := m.activateSpecInline(ctx, entry, spec, specRotatable, newConfig, cleanupConfig); err != nil {
+		if err := m.activateSpecInline(ctx, entry, spec, specRotatable, newConfig, cleanupConfig, baseHash); err != nil {
 			return nil, err
 		}
 		return nil, nil
+	}
+
+	// See prepareSource: an entry removed while the prepare ran has nothing left
+	// to activate the credential it created.
+	if entry.isRemoved() {
+		m.discardStaged(ctx, entry, driver, newConfig)
+		return nil, errEntryRemoved
 	}
 
 	// Slow path: hand the staged data back for the caller to apply under the lock.
@@ -894,17 +1166,24 @@ func (m *RotationManager) prepareSpec(entry *RotationEntry) (staged *stagedRotat
 		CleanupConfig:   cleanupConfig,
 		ActivationDelay: delay,
 		PreparedAt:      time.Now(),
+		BaseConfigHash:  baseHash,
 	}, nil
 }
 
 // activateSpecInline runs persist + commit + cleanup synchronously (fast path).
 func (m *RotationManager) activateSpecInline(ctx context.Context, entry *RotationEntry,
 	spec *credential.CredSpec, specRotatable credential.SpecRotatable,
-	newConfig, cleanupConfig map[string]string) error {
+	newConfig, cleanupConfig map[string]string, baseHash string) error {
 
-	// PERSIST
+	// PERSIST, only over the config the prepare ran against.
 	updated := specWithConfig(spec, newConfig)
-	if err := m.core.credConfigStore.UpdateSpec(ctx, updated); err != nil {
+	if err := m.core.credConfigStore.UpdateSpec(ctx, updated, UpdateSpecOptions{ExpectedConfigHash: baseHash}); err != nil {
+		// See activateSourceInline.
+		if errors.Is(err, ErrConfigChanged) {
+			if driver, ok := specRotatable.(credential.SourceDriver); ok {
+				m.discardStaged(ctx, entry, driver, newConfig)
+			}
+		}
 		return fmt.Errorf("failed to persist rotated config for spec %s: %w", entry.SpecName, err)
 	}
 
@@ -924,10 +1203,16 @@ func (m *RotationManager) activateSpecInline(ctx context.Context, entry *Rotatio
 	return nil
 }
 
-// activateSpec runs the ACTIVATE stage for a staged spec rotation.
+// activateSpec runs the ACTIVATE stage for a staged spec rotation. It resolves
+// the stored spec config the same three ways activateSource does.
 func (m *RotationManager) activateSpec(entry *RotationEntry) error {
 	ctx, cancel := context.WithTimeout(m.quitCtx, StageTimeout)
 	defer cancel()
+
+	newConfig, cleanupConfig, baseHash := entry.stagedSnapshot()
+	if newConfig == nil {
+		return errNothingStaged
+	}
 
 	ns, err := m.getNamespaceFromEntry(ctx, entry)
 	if err != nil {
@@ -950,21 +1235,39 @@ func (m *RotationManager) activateSpec(entry *RotationEntry) error {
 		return fmt.Errorf("driver for source %s does not support spec rotation", entry.SourceName)
 	}
 
-	// PERSIST
-	updated := specWithConfig(spec, entry.NewConfig)
-	if err := m.core.credConfigStore.UpdateSpec(ctx, updated); err != nil {
-		return fmt.Errorf("failed to persist rotated config for spec %s: %w", entry.SpecName, err)
+	updated := specWithConfig(spec, newConfig)
+	storedHash := spec.Config.Hash()
+	switch {
+	case spec.Config.Equal(credential.NewConfig(newConfig)):
+		m.log.Info("resuming a spec activation that persisted but did not commit",
+			logger.String("spec", entry.SpecName))
+
+	case baseHash == "" || storedHash == baseHash:
+		err := m.core.credConfigStore.UpdateSpec(ctx, updated, UpdateSpecOptions{ExpectedConfigHash: storedHash})
+		if errors.Is(err, ErrConfigChanged) {
+			m.discardStaged(ctx, entry, driver, newConfig)
+			return errStagedDiscarded
+		}
+		if err != nil {
+			return fmt.Errorf("failed to persist rotated config for spec %s: %w", entry.SpecName, err)
+		}
+
+	default:
+		m.log.Warn("spec config changed since the rotation was prepared; discarding the staged credential",
+			logger.String("spec", entry.SpecName))
+		m.discardStaged(ctx, entry, driver, newConfig)
+		return errStagedDiscarded
 	}
 
 	// COMMIT
-	if err := specRotatable.CommitSpecRotation(ctx, updated, entry.NewConfig); err != nil {
+	if err := specRotatable.CommitSpecRotation(ctx, updated, newConfig); err != nil {
 		return fmt.Errorf("commit spec rotation failed for spec %s: %w", entry.SpecName, err)
 	}
 
 	// CLEANUP (non-fatal)
 	cleanupCtx, cleanupCancel := context.WithTimeout(m.quitCtx, StageTimeout)
 	defer cleanupCancel()
-	m.performSpecCleanupWithRetry(cleanupCtx, entry, specRotatable, entry.CleanupConfig)
+	m.performSpecCleanupWithRetry(cleanupCtx, entry, specRotatable, cleanupConfig)
 
 	m.log.Debug("successfully activated rotated spec credentials",
 		logger.String("spec", entry.SpecName))
@@ -976,147 +1279,318 @@ func (m *RotationManager) activateSpec(entry *RotationEntry) error {
 // Cleanup With Retry
 // ============================================================================
 
+// Kinds of pending cleanup. A cleanup retires the credential a rotation
+// replaced; a discard deletes the credential a staged rotation created and
+// never activated.
+const (
+	cleanupKindCleanup = "cleanup"
+	cleanupKindDiscard = "discard"
+)
+
 // performCleanupWithRetry attempts source cleanup with immediate retries, then persists for daily retry.
 func (m *RotationManager) performCleanupWithRetry(ctx context.Context, entry *RotationEntry,
 	rotatable credential.Rotatable, cleanupConfig map[string]string) {
-
-	if len(cleanupConfig) == 0 {
-		return
-	}
-
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				m.persistFailedCleanup(entry, cleanupConfig)
-				return
-			case <-time.After(time.Duration(attempt) * time.Second):
-			}
-		}
-
-		err = rotatable.CleanupRotation(ctx, cleanupConfig)
-		if err == nil {
-			return
-		}
-
-		m.log.Warn("cleanup attempt failed",
-			logger.String("source", entry.SourceName),
-			logger.Int("attempt", attempt+1),
-			logger.Err(err))
-	}
-
-	m.persistFailedCleanup(entry, cleanupConfig)
+	_ = m.cleanupWithRetry(ctx, entry, cleanupKindCleanup, cleanupConfig, "", rotatable.CleanupRotation)
 }
 
 // performSpecCleanupWithRetry attempts spec cleanup with immediate retries, then persists for daily retry.
 func (m *RotationManager) performSpecCleanupWithRetry(ctx context.Context, entry *RotationEntry,
 	specRotatable credential.SpecRotatable, cleanupConfig map[string]string) {
+	_ = m.cleanupWithRetry(ctx, entry, cleanupKindCleanup, cleanupConfig, "", specRotatable.CleanupSpecRotation)
+}
+
+// cleanupWithRetry runs cleanup with immediate retries, then persists the
+// cleanup for the daily retry. authHash, set for a discard, is the hash of the
+// source config the deleting driver authenticated with: the daily retry only
+// runs while the source still holds that config. It reports whether the
+// cleanup succeeded now, as opposed to being left for the retry.
+func (m *RotationManager) cleanupWithRetry(ctx context.Context, entry *RotationEntry, kind string,
+	cleanupConfig map[string]string, authHash string, cleanup func(context.Context, map[string]string) error) bool {
 
 	if len(cleanupConfig) == 0 {
-		return
+		return true
 	}
 
-	var err error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				m.persistFailedSpecCleanup(entry, cleanupConfig)
-				return
+				m.persistFailedCleanup(entry, kind, cleanupConfig, authHash)
+				return false
 			case <-time.After(time.Duration(attempt) * time.Second):
 			}
 		}
 
-		err = specRotatable.CleanupSpecRotation(ctx, cleanupConfig)
+		err := cleanup(ctx, cleanupConfig)
 		if err == nil {
-			return
+			return true
 		}
 
-		m.log.Warn("spec cleanup attempt failed",
-			logger.String("spec", entry.SpecName),
+		m.log.Warn(kind+" attempt failed",
+			logger.String("target", entryLabel(entry)),
 			logger.Int("attempt", attempt+1),
 			logger.Err(err))
 	}
 
-	m.persistFailedSpecCleanup(entry, cleanupConfig)
+	m.persistFailedCleanup(entry, kind, cleanupConfig, authHash)
+	return false
 }
 
-// persistFailedCleanup stores a failed cleanup to storage for daily retry
-func (m *RotationManager) persistFailedCleanup(entry *RotationEntry, cleanupConfig map[string]string) {
+// discardStaged deletes the credential a staged prepare created, through a
+// driver that must still authenticate with the credential that prepare meant
+// to replace. It is best-effort: a failure is retried daily, and a credential
+// it cannot identify is logged for manual deletion.
+func (m *RotationManager) discardStaged(ctx context.Context, entry *RotationEntry,
+	driver credential.SourceDriver, newConfig map[string]string) {
+
+	var target map[string]string
+	var cleanup func(context.Context, map[string]string) error
+	var err error
+
+	if entry.EntryType == EntryTypeSpec {
+		discarder, ok1 := driver.(credential.StagedSpecRotationDiscarder)
+		specRotatable, ok2 := driver.(credential.SpecRotatable)
+		if !ok1 || !ok2 {
+			m.logUndiscarded(entry, newConfig, "the driver cannot discard a staged spec rotation")
+			return
+		}
+		target, err = discarder.StagedSpecCleanupConfig(ctx, newConfig)
+		cleanup = specRotatable.CleanupSpecRotation
+	} else {
+		discarder, ok1 := driver.(credential.StagedRotationDiscarder)
+		rotatable, ok2 := driver.(credential.Rotatable)
+		if !ok1 || !ok2 {
+			m.logUndiscarded(entry, newConfig, "the driver cannot discard a staged rotation")
+			return
+		}
+		target, err = discarder.StagedCleanupConfig(ctx, newConfig)
+		cleanup = rotatable.CleanupRotation
+	}
+	if err != nil {
+		m.logUndiscarded(entry, newConfig, err.Error())
+		return
+	}
+
+	// The daily retry only runs while the source still hashes to this. If the
+	// source cannot be read now the hash is left empty, which skips that check
+	// and lets the retry simply try.
+	authHash, _ := m.sourceConfigHash(ctx, entry.SourceName)
+	if m.cleanupWithRetry(ctx, entry, cleanupKindDiscard, target, authHash, cleanup) {
+		m.log.Info("discarded staged rotation credential",
+			logger.String("target", entryLabel(entry)),
+			logger.String("credential", credentialHint(target)))
+	}
+}
+
+// discardEntryStaged abandons whatever an entry has staged, clearing the staged
+// fields. It is called when the entry is leaving the registry, being replaced,
+// or being reset by an operator's edit. The caller holds the target's lock,
+// except on namespace deletion, which unregisters before it clears anything.
+//
+// When the stored config already equals the staged one, an activation persisted
+// it and then failed at commit: the staged credential is the live one. It is
+// kept, and the credential it replaced is retired instead.
+func (m *RotationManager) discardEntryStaged(ctx context.Context, entry *RotationEntry) {
+	entry.mu.Lock()
+	newConfig := maps.Clone(entry.NewConfig)
+	cleanupConfig := maps.Clone(entry.CleanupConfig)
+	entry.clearStagedFields()
+	entry.mu.Unlock()
+
+	if newConfig == nil {
+		return
+	}
+	if m.core == nil || m.core.credConfigStore == nil || m.core.credentialManager == nil {
+		m.logUndiscarded(entry, newConfig, "credential subsystem not available")
+		return
+	}
+
+	stored, err := m.targetConfig(ctx, entry)
+	if err != nil {
+		m.logUndiscarded(entry, newConfig, err.Error())
+		return
+	}
+	driver, err := m.core.credentialManager.GetOrCreateDriver(ctx, entry.SourceName)
+	if err != nil {
+		m.logUndiscarded(entry, newConfig, err.Error())
+		return
+	}
+
+	if stored.Equal(credential.NewConfig(newConfig)) {
+		if entry.EntryType == EntryTypeSpec {
+			if specRotatable, ok := driver.(credential.SpecRotatable); ok {
+				m.performSpecCleanupWithRetry(ctx, entry, specRotatable, cleanupConfig)
+			}
+		} else if rotatable, ok := driver.(credential.Rotatable); ok {
+			m.performCleanupWithRetry(ctx, entry, rotatable, cleanupConfig)
+		}
+		return
+	}
+
+	m.discardStaged(ctx, entry, driver, newConfig)
+}
+
+// DiscardStagedSource abandons a source's staged rotation before an operator's
+// edit or delete lands. The caller holds the source's lock and has not yet
+// written: the driver still authenticates with the credential the staged one
+// was to replace, which is the only credential that can delete it. The entry
+// goes back to idle and re-prepares against whatever config is then stored.
+func (m *RotationManager) DiscardStagedSource(ctx context.Context, sourceName string) error {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get namespace from context: %w", err)
+	}
+	m.resetStaged(ctx, buildRotationKey(ns.UUID, sourceName))
+	return nil
+}
+
+// DiscardStagedSpec is DiscardStagedSource for a spec entry. The caller holds
+// the spec's lock.
+func (m *RotationManager) DiscardStagedSpec(ctx context.Context, specName string) error {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get namespace from context: %w", err)
+	}
+	m.resetStaged(ctx, buildSpecKey(ns.UUID, specName))
+	return nil
+}
+
+// resetStaged discards the staged rotation of the entry under key, if any, and
+// returns the entry to idle, due now.
+func (m *RotationManager) resetStaged(ctx context.Context, key string) {
+	v, ok := m.entries.Load(key)
+	if !ok {
+		return
+	}
+	entry := v.(*RotationEntry)
+
+	entry.mu.Lock()
+	staged := entry.NewConfig != nil
+	entry.mu.Unlock()
+	if !staged {
+		return
+	}
+
+	m.discardEntryStaged(ctx, entry)
+
+	entry.mu.Lock()
+	if entry.State == StateFailed {
+		atomic.AddInt64(&m.failedCount, -1)
+	}
+	entry.State = StateIdle
+	entry.Attempts = 0
+	entry.LastError = ""
+	entry.NextAction = time.Now()
+	if m.storage != nil {
+		if err := m.persistEntryIfCurrent(entry); err != nil {
+			m.log.Error("failed to persist entry after discarding its staged rotation",
+				logger.String("key", key), logger.Err(err))
+		}
+	}
+	entry.mu.Unlock()
+}
+
+// targetConfig returns the stored config of the entry's target: the spec's for
+// a spec entry, the source's otherwise.
+func (m *RotationManager) targetConfig(ctx context.Context, entry *RotationEntry) (credential.Config, error) {
+	if entry.EntryType == EntryTypeSpec {
+		spec, err := m.core.credConfigStore.GetSpec(ctx, entry.SpecName)
+		if err != nil {
+			return credential.Config{}, fmt.Errorf("failed to get spec %s: %w", entry.SpecName, err)
+		}
+		return spec.Config, nil
+	}
+	source, err := m.core.credConfigStore.GetSource(ctx, entry.SourceName)
+	if err != nil {
+		return credential.Config{}, fmt.Errorf("failed to get source %s: %w", entry.SourceName, err)
+	}
+	return source.Config, nil
+}
+
+// sourceConfigHash returns the hash of a source's stored config.
+func (m *RotationManager) sourceConfigHash(ctx context.Context, sourceName string) (string, error) {
+	if m.core == nil || m.core.credConfigStore == nil {
+		return "", fmt.Errorf("credential config store not available")
+	}
+	source, err := m.core.credConfigStore.GetSource(ctx, sourceName)
+	if err != nil {
+		return "", err
+	}
+	return source.Config.Hash(), nil
+}
+
+// logUndiscarded reports a staged credential that could not be discarded. It
+// is live upstream with nothing tracking it, so the log carries what an
+// operator needs to find it: the target, when it was prepared, and its id.
+func (m *RotationManager) logUndiscarded(entry *RotationEntry, newConfig map[string]string, reason string) {
+	m.log.Error("staged rotation credential could not be discarded; delete it at the provider",
+		logger.String("target", entryLabel(entry)),
+		logger.String("credential", credentialHint(newConfig)),
+		logger.String("reason", reason))
+}
+
+// entryLabel names an entry's target for logs.
+func entryLabel(entry *RotationEntry) string {
+	if entry.EntryType == EntryTypeSpec {
+		return "spec:" + entry.SpecName
+	}
+	return "source:" + entry.SourceName
+}
+
+// credentialHint picks the identifier of a credential out of a config or
+// cleanup config, for logs. Only identifier fields are read, never secrets —
+// which is why secret_id is not on the list: for some sources it is the secret.
+func credentialHint(config map[string]string) string {
+	for _, k := range []string{"access_key_id", "api_key_id", "old_secret_id", "management_access_key", "access_key", "old_key_id"} {
+		if v := config[k]; v != "" {
+			return k + "=" + v
+		}
+	}
+	return "unknown (see the provider for credentials created around the prepare time)"
+}
+
+// persistFailedCleanup stores a failed cleanup or discard for the daily retry.
+func (m *RotationManager) persistFailedCleanup(entry *RotationEntry, kind string, cleanupConfig map[string]string, authHash string) {
 	pending := &PendingCleanup{
-		SourceName:    entry.SourceName,
-		SourceType:    entry.SourceType,
-		Namespace:     entry.Namespace,
-		CleanupConfig: cleanupConfig,
-		Attempts:      3,
-		CreatedAt:     time.Now(),
-		LastAttempt:   time.Now(),
+		SourceName:     entry.SourceName,
+		SourceType:     entry.SourceType,
+		Namespace:      entry.Namespace,
+		CleanupConfig:  cleanupConfig,
+		Attempts:       3,
+		CreatedAt:      time.Now(),
+		LastAttempt:    time.Now(),
+		Kind:           kind,
+		AuthConfigHash: authHash,
+	}
+	target := entry.SourceName
+	if entry.EntryType == EntryTypeSpec {
+		pending.SourceType = EntryTypeSpec
+		pending.SpecName = entry.SpecName
+		target = "spec:" + entry.SpecName
 	}
 
 	if m.storage != nil {
-		path := rotationCleanupPath + entry.Namespace + "/" + entry.SourceName
 		data, err := json.Marshal(pending)
 		if err != nil {
 			m.log.Error("failed to marshal pending cleanup",
-				logger.String("source", entry.SourceName),
+				logger.String("target", entryLabel(entry)),
 				logger.Err(err))
 			return
 		}
 		if err := m.storage.Put(context.Background(), &sdklogical.StorageEntry{
-			Key:   path,
+			Key:   cleanupStoragePath(entry.Namespace, target, kind, cleanupConfig),
 			Value: data,
 		}); err != nil {
 			m.log.Error("failed to persist pending cleanup",
-				logger.String("source", entry.SourceName),
+				logger.String("target", entryLabel(entry)),
 				logger.Err(err))
 			return
 		}
 	}
 
-	m.log.Warn("cleanup persisted for daily retry",
-		logger.String("source", entry.SourceName))
-}
-
-// persistFailedSpecCleanup stores a failed spec cleanup to storage for daily retry
-func (m *RotationManager) persistFailedSpecCleanup(entry *RotationEntry, cleanupConfig map[string]string) {
-	pending := &PendingCleanup{
-		SourceName:    entry.SourceName,
-		SourceType:    EntryTypeSpec,
-		Namespace:     entry.Namespace,
-		CleanupConfig: cleanupConfig,
-		Attempts:      3,
-		CreatedAt:     time.Now(),
-		LastAttempt:   time.Now(),
-	}
-
-	if pending.CleanupConfig == nil {
-		pending.CleanupConfig = make(map[string]string)
-	}
-	pending.CleanupConfig["_spec_name"] = entry.SpecName
-
-	if m.storage != nil {
-		path := rotationCleanupPath + entry.Namespace + "/spec:" + entry.SpecName
-		data, err := json.Marshal(pending)
-		if err != nil {
-			m.log.Error("failed to marshal pending spec cleanup",
-				logger.String("spec", entry.SpecName),
-				logger.Err(err))
-			return
-		}
-		if err := m.storage.Put(context.Background(), &sdklogical.StorageEntry{
-			Key:   path,
-			Value: data,
-		}); err != nil {
-			m.log.Error("failed to persist pending spec cleanup",
-				logger.String("spec", entry.SpecName),
-				logger.Err(err))
-			return
-		}
-	}
-
-	m.log.Warn("spec cleanup persisted for daily retry",
-		logger.String("spec", entry.SpecName))
+	m.log.Warn(kind+" persisted for daily retry",
+		logger.String("target", entryLabel(entry)),
+		logger.String("credential", credentialHint(cleanupConfig)))
 }
 
 // retryFailedCleanups is called daily to retry persisted failed cleanups.
@@ -1171,6 +1645,28 @@ func (m *RotationManager) retryFailedCleanups() {
 			nsObj := &namespace.Namespace{UUID: pending.Namespace}
 			ctx = namespace.ContextWithNamespace(ctx, nsObj)
 
+			// A discard can only be done by a driver still holding the
+			// credential the staged one was to replace. Once the source's
+			// config has moved on, no driver can, so hand it to the operator.
+			if pending.Kind == cleanupKindDiscard && pending.AuthConfigHash != "" {
+				hash, err := m.sourceConfigHash(ctx, pending.SourceName)
+				switch {
+				case errors.Is(err, ErrSourceNotFound):
+					// Handled below, with every other kind.
+				case err != nil:
+					// A read that failed says nothing about the config; try
+					// again at the next retry rather than give up for good.
+					continue
+				case hash != pending.AuthConfigHash:
+					m.storage.Delete(context.Background(), path)
+					abandoned++
+					m.log.Error("staged rotation credential could not be discarded and the source has changed since; delete it at the provider",
+						logger.String("source", pending.SourceName),
+						logger.String("credential", credentialHint(pending.CleanupConfig)))
+					continue
+				}
+			}
+
 			driver, err := m.core.credentialManager.GetOrCreateDriver(ctx, pending.SourceName)
 			if err != nil {
 				// Source was deleted — cleanup is no longer possible or needed
@@ -1182,16 +1678,36 @@ func (m *RotationManager) retryFailedCleanups() {
 				continue
 			}
 
-			rotatable, ok := driver.(credential.Rotatable)
-			if !ok {
-				m.storage.Delete(context.Background(), path)
-				continue
+			// Records from before SpecName existed carry the spec in the config.
+			if pending.SpecName == "" && pending.SourceType == EntryTypeSpec {
+				pending.SpecName = pending.CleanupConfig["_spec_name"]
+				delete(pending.CleanupConfig, "_spec_name")
+			}
+
+			// A spec's credential is cleaned through the spec method. The source
+			// method takes a different config, and for a spec cleanup it would
+			// act on the source's own credential.
+			var cleanup func(context.Context, map[string]string) error
+			if pending.SpecName != "" {
+				specRotatable, ok := driver.(credential.SpecRotatable)
+				if !ok {
+					m.storage.Delete(context.Background(), path)
+					continue
+				}
+				cleanup = specRotatable.CleanupSpecRotation
+			} else {
+				rotatable, ok := driver.(credential.Rotatable)
+				if !ok {
+					m.storage.Delete(context.Background(), path)
+					continue
+				}
+				cleanup = rotatable.CleanupRotation
 			}
 
 			pending.Attempts++
 			pending.LastAttempt = time.Now()
 
-			if err := rotatable.CleanupRotation(ctx, pending.CleanupConfig); err == nil {
+			if err := cleanup(ctx, pending.CleanupConfig); err == nil {
 				m.storage.Delete(context.Background(), path)
 				succeeded++
 				m.log.Info("pending cleanup succeeded",
@@ -1244,6 +1760,8 @@ func (m *RotationManager) Restore(ctx context.Context) error {
 		}
 	}
 
+	m.reconcileRestoredEntries(ctx)
+
 	var entryCount, failedCount int64
 	m.entries.Range(func(key, value any) bool {
 		entryCount++
@@ -1260,6 +1778,85 @@ func (m *RotationManager) Restore(ctx context.Context) error {
 		logger.Int64("failed", failedCount))
 
 	return nil
+}
+
+// reconcileRestoredEntries checks every restored entry against the config it
+// rotates. An entry is only as current as the last write that reached storage,
+// and an unregister and a job's write-back used to race, so a restore could
+// bring back rotations for sources and specs that are gone or no longer rotate.
+//
+//   - Target gone: the entry is dropped. A staged credential cannot be discarded
+//     without the driver that created it, so it is logged for manual deletion.
+//   - Target no longer eligible: an entry with nothing staged is dropped; one with
+//     a staged credential is marked for the tick loop to discard and drop.
+//
+// Only config-store reads happen here; the upstream calls a discard needs run
+// later, from the tick loop, so unseal does no network I/O.
+func (m *RotationManager) reconcileRestoredEntries(ctx context.Context) {
+	if m.core == nil || m.core.credConfigStore == nil {
+		return
+	}
+
+	m.entries.Range(func(key, value any) bool {
+		entry := value.(*RotationEntry)
+
+		ns, err := m.getNamespaceFromEntry(ctx, entry)
+		if err != nil {
+			// A transient lookup failure must not drop a live rotation.
+			return true
+		}
+		nsCtx := namespace.ContextWithNamespace(ctx, ns)
+
+		var eligible bool
+		if entry.EntryType == EntryTypeSpec {
+			spec, err := m.core.credConfigStore.GetSpec(nsCtx, entry.SpecName)
+			if errors.Is(err, ErrSpecNotFound) {
+				m.dropRestoredEntry(key.(string), entry, "spec no longer exists")
+				return true
+			}
+			if err != nil {
+				return true
+			}
+			eligible = spec.RotationPeriod > 0
+		} else {
+			source, err := m.core.credConfigStore.GetSource(nsCtx, entry.SourceName)
+			if errors.Is(err, ErrSourceNotFound) {
+				m.dropRestoredEntry(key.(string), entry, "source no longer exists")
+				return true
+			}
+			if err != nil {
+				return true
+			}
+			eligible = sourceRotationEligible(source)
+		}
+		if eligible {
+			return true
+		}
+
+		entry.mu.Lock()
+		staged := entry.NewConfig != nil
+		if staged {
+			entry.discardPending = true
+		}
+		entry.mu.Unlock()
+		if !staged {
+			m.dropRestoredEntry(key.(string), entry, "")
+		}
+		return true
+	})
+}
+
+// dropRestoredEntry drops a restored entry at unseal, logging any staged
+// credential it held since nothing can discard it any more.
+func (m *RotationManager) dropRestoredEntry(key string, entry *RotationEntry, reason string) {
+	if newConfig := entry.GetNewConfig(); newConfig != nil {
+		m.logUndiscarded(entry, newConfig, reason)
+	}
+	m.entries.Delete(key)
+	entry.markRemoved()
+	if m.storage != nil {
+		m.deleteEntry(entry)
+	}
 }
 
 // collectEntryPaths collects all entry paths from storage

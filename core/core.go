@@ -849,13 +849,15 @@ func (c *Core) setupRotationManager(ctx context.Context) error {
 		c.logger.WithSubsystem("rotation"),
 		rotationStorage,
 	)
-	c.rotationManager.Start()
 
-	// Restore persisted rotation entries from storage
+	// Restore persisted rotation entries from storage before starting the tick
+	// loop: restore reconciles each entry against the config it rotates, and a
+	// tick running first could rotate a source that has left the schedule.
 	if err := c.rotationManager.Restore(ctx); err != nil {
 		c.logger.Warn("failed to restore rotation entries", logger.Err(err))
 		// Don't fail startup for restoration errors
 	}
+	c.rotationManager.Start()
 
 	c.logger.Info("rotation manager setup complete")
 

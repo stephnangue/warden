@@ -841,8 +841,9 @@ func TestRotation_CleanupRetryAndPersist(t *testing.T) {
 	assert.Equal(t, 1, driver.GetCommitCount())
 	assert.Equal(t, 3, driver.GetCleanupCount(), "cleanup should be retried 3 times")
 
-	// Verify cleanup was persisted to storage
-	path := rotationCleanupPath + namespace.RootNamespace.UUID + "/test-source"
+	// Verify cleanup was persisted to storage, keyed by the credential it names
+	path := cleanupStoragePath(namespace.RootNamespace.UUID, "test-source", cleanupKindCleanup,
+		map[string]string{"secret_id_accessor": "old-accessor"})
 	raw, err := rm.storage.Get(context.Background(), path)
 	require.NoError(t, err)
 	require.NotNil(t, raw, "cleanup should be persisted to storage")

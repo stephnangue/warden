@@ -158,3 +158,17 @@ func TestConfig_Prefixed(t *testing.T) {
 	assert.Equal(t, "read", got["scope"])
 	assert.NotContains(t, got, "unrelated")
 }
+
+func TestConfigHash(t *testing.T) {
+	a := NewConfig(map[string]string{"x": "1", "y": "2"})
+	b := NewConfig(map[string]string{"y": "2", "x": "1"})
+	assert.Equal(t, a.Hash(), b.Hash(), "equal configs hash equal, whatever the insertion order")
+	assert.NotEqual(t, a.Hash(), a.With("y", "3").Hash())
+	assert.NotEqual(t, a.Hash(), a.With("z", "").Hash(), "a present empty key is a change")
+	assert.Equal(t, Config{}.Hash(), NewConfig(map[string]string{}).Hash())
+
+	// Length prefixes keep boundary-shifted pairs apart.
+	assert.NotEqual(t,
+		NewConfig(map[string]string{"ab": "c"}).Hash(),
+		NewConfig(map[string]string{"a": "bc"}).Hash())
+}

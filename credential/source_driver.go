@@ -184,6 +184,26 @@ type Rotatable interface {
 	CleanupRotation(ctx context.Context, cleanupConfig map[string]string) error
 }
 
+// StagedRotationDiscarder is implemented by a Rotatable driver whose
+// PrepareRotation can stage (return activateAfter > 0). It turns the newConfig a
+// PrepareRotation returned into a cleanup config naming the credential that
+// prepare created, so that CleanupRotation — called on an instance that still
+// authenticates with the old credential — deletes the staged one instead.
+//
+// The rotation manager uses it when a staged rotation must be abandoned: an
+// operator edited or deleted the source first, the source left the schedule, or
+// the entry was found orphaned at restore. Without it the staged credential
+// stays live upstream with nothing left that knows about it.
+type StagedRotationDiscarder interface {
+	StagedCleanupConfig(ctx context.Context, newConfig map[string]string) (map[string]string, error)
+}
+
+// StagedSpecRotationDiscarder is StagedRotationDiscarder for SpecRotatable: it
+// names the credential PrepareSpecRotation created, for CleanupSpecRotation.
+type StagedSpecRotationDiscarder interface {
+	StagedSpecCleanupConfig(ctx context.Context, newConfig map[string]string) (map[string]string, error)
+}
+
 // SpecRotatable is an optional interface for drivers that can rotate credentials
 // stored in credential specs. This is used when specs contain embedded credentials
 // that need periodic rotation (e.g., Azure pre-provisioned service principal credentials).

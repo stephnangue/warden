@@ -35,6 +35,7 @@ const DefaultAWSActivationDelay = 5 * time.Minute
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*AWSDriver)(nil)
 var _ credential.Rotatable = (*AWSDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*AWSDriver)(nil)
 var _ credential.ExchangeMinter = (*AWSDriver)(nil)
 
 // AWSDriver fetches credentials from AWS (STS AssumeRole, Secrets Manager)
@@ -1485,6 +1486,16 @@ func (d *AWSDriver) CommitRotation(ctx context.Context, newConfig map[string]str
 	}
 
 	return nil
+}
+
+// StagedCleanupConfig names the access key a staged PrepareRotation created, so
+// CleanupRotation — still signing with the old key — deletes it instead.
+func (d *AWSDriver) StagedCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	id := newConfig["access_key_id"]
+	if id == "" {
+		return nil, fmt.Errorf("staged config carries no access_key_id")
+	}
+	return map[string]string{"access_key_id": id}, nil
 }
 
 // CleanupRotation destroys the old IAM access key.

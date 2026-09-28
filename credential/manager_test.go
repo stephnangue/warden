@@ -1025,6 +1025,47 @@ func TestManager_LockSpec_ContextCancel(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestManager_LockSource(t *testing.T) {
+	manager, _, _ := createTestManager(t)
+	defer manager.Stop()
+
+	unlock, err := manager.LockSource(context.Background(), "ns-uuid", "aws")
+	require.NoError(t, err)
+
+	// A second lock for the same source blocks until unlock.
+	locked := make(chan struct{})
+	go func() {
+		u2, e := manager.LockSource(context.Background(), "ns-uuid", "aws")
+		if e == nil {
+			close(locked)
+			u2()
+		}
+	}()
+	select {
+	case <-locked:
+		t.Fatal("second LockSource acquired while the first was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// A spec lock of the same name is a different lock.
+	u3, err := manager.LockSpec(context.Background(), "ns-uuid", "aws")
+	require.NoError(t, err)
+	u3()
+
+	// A waiter whose context ends returns an error rather than blocking.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = manager.LockSource(ctx, "ns-uuid", "aws")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	unlock()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("second LockSource did not acquire after unlock")
+	}
+}
+
 // ============================================================================
 // Token-exchange input tests
 // ============================================================================

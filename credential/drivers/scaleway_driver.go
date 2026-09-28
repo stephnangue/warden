@@ -48,6 +48,7 @@ const defaultScalewayStaticChainTTL = 30 * time.Minute
 var _ credential.SourceDriver = (*ScalewayDriver)(nil)
 var _ credential.SpecVerifier = (*ScalewayDriver)(nil)
 var _ credential.Rotatable = (*ScalewayDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*ScalewayDriver)(nil)
 var _ credential.ChainedSecretMinter = (*ScalewayDriver)(nil)
 
 // scalewayChainedAuth carries the management secret key fetched through credential
@@ -898,6 +899,16 @@ func (d *ScalewayDriver) CommitRotation(ctx context.Context, newConfig map[strin
 	)
 
 	return nil
+}
+
+// StagedCleanupConfig names the management key a staged PrepareRotation created,
+// so CleanupRotation — still using the old management secret — deletes it.
+func (d *ScalewayDriver) StagedCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	id := newConfig["management_access_key"]
+	if id == "" {
+		return nil, fmt.Errorf("staged config carries no management_access_key")
+	}
+	return map[string]string{"access_key": id}, nil
 }
 
 // CleanupRotation deletes the old management key via the IAM API.
