@@ -274,6 +274,12 @@ func stripControlChars(s string) string {
 // RFC 8693 §4.1), so there is no unverified variant.
 type ActorRef struct {
 	Subject string
+	// Issuer is the "iss" member of this act layer, copied only when the inbound
+	// layer carried one — never filled in from the token's own iss. It names the
+	// context Subject is to be interpreted in, and an assertion that re-emits the
+	// chain must pass it through unchanged rather than invent one. omitempty keeps
+	// entries stored before this field byte-identical.
+	Issuer string `json:",omitempty"`
 }
 
 // AuthData contains the authentication data used to generate a token.

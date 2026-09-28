@@ -115,7 +115,8 @@ func resolveAudience(role *SPIFFERole) []string {
 
 // extractActChain walks the RFC 8693 §4.1 "act" delegation chain in a JWT-SVID's
 // claims into a flat verified actor list. Returns nil when no "act" claim is
-// present; terminates without erroring on malformed layers.
+// present; terminates without erroring on malformed layers. A layer's "iss" is
+// kept only when it is a non-empty string, never defaulted to the SVID's own iss.
 func extractActChain(claims map[string]interface{}) []logical.ActorRef {
 	var actors []logical.ActorRef
 	current := claims
@@ -132,7 +133,8 @@ func extractActChain(claims map[string]interface{}) []logical.ActorRef {
 		if !ok || sub == "" {
 			break
 		}
-		actors = append(actors, logical.ActorRef{Subject: sub})
+		iss, _ := act["iss"].(string)
+		actors = append(actors, logical.ActorRef{Subject: sub, Issuer: iss})
 		current = act
 	}
 	return actors

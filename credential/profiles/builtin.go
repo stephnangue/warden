@@ -34,5 +34,11 @@ func RegisterBuiltinProfiles(registry *credential.AssertionProfileRegistry) erro
 		return err
 	}
 
+	// Register the RFC 8693 delegation shape (user as sub, agent as act; not
+	// source-pinned)
+	if err := registry.Register(&ActorProfile{}); err != nil {
+		return err
+	}
+
 	return nil
 }

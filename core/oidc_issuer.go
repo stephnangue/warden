@@ -384,9 +384,15 @@ type AssertionClaims struct {
 	// registered or warden_* claim, and the assertion `sub` stays the AGENT — a
 	// verifier's templated policy scopes the authorized path on warden_user,
 	// keeping the agent binding. How the two principals are arranged is the
-	// PROFILE's decision, not this struct's: a profile may instead promote the user
-	// to `sub` and move the agent to an RFC 8693 `act` claim.
+	// PROFILE's decision, not this struct's: the actor profile instead promotes the
+	// user to `sub` and moves the agent to an RFC 8693 `act` claim.
 	UserClaims map[string]string
+	// User is the user principal's identity (namespace, mount, principal and its own
+	// verified act chain), set under the same assertion_user_claims opt-in as
+	// UserClaims and nil otherwise. Projected once per request, off the signing
+	// path; a profile that renders the user as a principal rather than as
+	// attributes reads it from here.
+	User *credential.AssertionIdentity
 	// Profile selects the claim SHAPE. A nil Profile selects the default profile,
 	// which reproduces the historical claim set exactly.
 	//
@@ -482,6 +488,7 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 		Metadata:   c.Metadata,
 		Resource:   c.Resource,
 		UserClaims: c.UserClaims,
+		User:       c.User,
 	}
 
 	claims, err := profile.Claims(req)
@@ -500,13 +507,25 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 // identityFromTokenEntry projects a token entry onto the plain identity struct a
 // profile renders. It exists because package credential cannot import logical
 // (logical imports credential), so the profile interface must not name TokenEntry.
+//
+// The act chain is COPIED, so a profile can never alias the token entry's slice,
+// which the token cache shares across requests. The copy is made only when a chain
+// exists, so the common path allocates nothing.
 func identityFromTokenEntry(te *logical.TokenEntry) credential.AssertionIdentity {
+	var actors []credential.AssertionActor
+	if len(te.Actors) > 0 {
+		actors = make([]credential.AssertionActor, len(te.Actors))
+		for i, a := range te.Actors {
+			actors[i] = credential.AssertionActor{Subject: a.Subject, Issuer: a.Issuer}
+		}
+	}
 	return credential.AssertionIdentity{
 		PrincipalID:   te.PrincipalID,
 		RoleName:      te.RoleName,
 		NamespaceID:   te.NamespaceID,
 		NamespacePath: te.NamespacePath,
 		MountAccessor: te.MountAccessor,
+		Actors:        actors,
 	}
 }
 

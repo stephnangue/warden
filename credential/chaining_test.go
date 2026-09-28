@@ -2,6 +2,7 @@ package credential
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -521,6 +522,58 @@ func TestChaining_MaterializesSubjectAndActor(t *testing.T) {
 	assert.Equal(t, "resolved-subject", env.exchangeDriver.gotSubject, "subject token materialized before referenced mint")
 	assert.Equal(t, "resolved-actor", env.exchangeDriver.gotActor, "actor token materialized before referenced mint")
 	assert.Equal(t, "SECRET-resolved-subject", env.consumerDriver.lastMaterial.Secret())
+}
+
+// TestChaining_RefusedInputsNeverReachSharedCache pins the ordering an assertion
+// profile's per-request refusal relies on (AssertionProfileIdentityChecker, run while
+// the caller's inputs are resolved). The chained-secret cache is keyed on identity,
+// not session, so two sessions of one agent share an entry by design. A session whose
+// inputs are refused must therefore be refused even after another session of the
+// same agent filled that entry — which holds only because chainPreamble resolves the
+// inputs before resolveAndMintChained computes a key or reads the cache.
+func TestChaining_RefusedInputsNeverReachSharedCache(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "exchange-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "exchange-secret", ConfigSecretCacheTTL: "30m"})})
+
+	// Every session of the agent resolves the same identity, so they share one entry.
+	sameAgent := func(tokenID string) Caller {
+		return Caller{
+			TokenID:  tokenID,
+			TokenTTL: time.Hour,
+			ResolveInputs: func(_ context.Context, _ string) (*ExchangeInputs, error) {
+				return &ExchangeInputs{
+					SubjectCacheIdentity: "wid:ns1:auth_jwt_1:agent-checkout-7",
+					ResolveSubjectToken:  func(_ context.Context) (string, error) { return "assertion", nil },
+				}, nil
+			},
+		}
+	}
+	errRefused := errors.New("the agent token carries an RFC 8693 act chain")
+	refused := Caller{
+		TokenID:  "session-b",
+		TokenTTL: time.Hour,
+		ResolveInputs: func(_ context.Context, _ string) (*ExchangeInputs, error) {
+			return nil, errRefused
+		},
+	}
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, sameAgent("session-a"), "consumer", nil)
+	require.NoError(t, err)
+	env.manager.secretCache.Wait()
+	require.Equal(t, int32(1), env.exchangeDriver.mintCalls.Load(), "precondition: session A fetched the secret")
+
+	_, err = env.manager.IssueCredential(ctx, refused, "consumer", nil)
+	require.ErrorIs(t, err, errRefused, "a refused session is refused, not served the shared entry")
+
+	// The entry WAS warm and shared: a third session of the same agent is served
+	// from it without a fetch. So the refusal above came before the cache, not
+	// from a miss.
+	_, err = env.manager.IssueCredential(ctx, sameAgent("session-c"), "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.exchangeDriver.mintCalls.Load(), "session C was served the entry session A cached")
 }
 
 // TestChaining_RequiresCallerContext: a nil ResolveInputs (non-request path) fails

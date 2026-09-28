@@ -185,14 +185,22 @@ func TestJWTSVIDLogin_GroupsAndActChain(t *testing.T) {
 
 	token := auth.sign(t, "spiffe://"+testTD+"/sa/api", []string{"warden"}, time.Now().Add(time.Hour), map[string]any{
 		"groups": []any{"admins", "ops"},
-		"act":    map[string]any{"sub": "broker-beta"},
+		"act": map[string]any{
+			"sub": "broker-beta",
+			"iss": "https://idp.example.com",
+			"act": map[string]any{"sub": "agents/alpha"},
+		},
 	})
 	resp := jwtLogin(t, b, ctx, "api", token)
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Subset(t, resp.Auth.Policies, []string{"base", "group-admins", "group-ops"})
-	require.Len(t, resp.Auth.Actors, 1)
-	assert.Equal(t, "broker-beta", resp.Auth.Actors[0].Subject)
+	// A layer's iss is carried only when the SVID's act layer had one; it is never
+	// defaulted from the SVID's own iss.
+	assert.Equal(t, []logical.ActorRef{
+		{Subject: "broker-beta", Issuer: "https://idp.example.com"},
+		{Subject: "agents/alpha"},
+	}, resp.Auth.Actors)
 }
 
 // --- precedence + isolation ---

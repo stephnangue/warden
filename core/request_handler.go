@@ -1834,7 +1834,13 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// principal, as warden_sub does for the agent — never the Warden composite).
 	// Per-user cache isolation is the manager's ":u:" token-id dimension, so the
 	// user does not enter cacheIdentity here.
+	//
+	// The same opt-in also hands the profile the user's IDENTITY (userIdentity) —
+	// namespace, mount, principal and the user token's own verified act chain — for
+	// a profile that renders the user as a principal rather than as attributes. It
+	// is projected once, here, and snapshotted into the mint closure.
 	var userClaims map[string]string
+	var userIdentity *credential.AssertionIdentity
 	if userKeys := credential.AssertionUserClaimKeys(spec.Config); len(userKeys) > 0 {
 		if userTE == nil {
 			return nil, fmt.Errorf("spec %q sets assertion_user_claims: %w", specName, credential.ErrUserRequired)
@@ -1861,6 +1867,19 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 			userClaims[k] = v
 		}
 		userClaims["sub"] = userTE.PrincipalID
+		uid := identityFromTokenEntry(userTE)
+		userIdentity = &uid
+	}
+
+	// A profile that cannot truthfully render this pair of principals refuses it
+	// here, before cacheIdentity exists and so before any cache lookup. Refusing
+	// only at mint would be skipped on a cache hit: the chained-secret cache is
+	// identity-keyed and shared across an agent's sessions, so a session the
+	// profile must refuse could be served what an acceptable session cached.
+	if checker, ok := profile.(credential.AssertionProfileIdentityChecker); ok {
+		if err := checker.CheckIdentities(identityFromTokenEntry(te), userIdentity); err != nil {
+			return nil, fmt.Errorf("spec %q: assertion profile %q: %w", specName, profile.Name(), err)
+		}
 	}
 
 	// Key the credential cache on the stable identity + audience, NOT the
@@ -1901,11 +1920,15 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// ONE fragment is enough, and it is worth saying why. Every input a profile can
 	// read is already fingerprinted: identity and audience directly, role via
 	// "role=", resource via "res=", projected metadata via mdFingerprint, and the
-	// user via the Manager's ":u:" token-id dimension. A profile only changes how
-	// those are RENDERED, so its name is the single new degree of freedom. Should a
-	// later profile ever read something outside that set, it needs a fragment of its
-	// own — that is the moment to give the interface a CacheFragment method, not
-	// before.
+	// user via the Manager's ":u:" token-id dimension. That last one covers the
+	// user's whole IDENTITY, not just its claims: namespace, mount, principal and
+	// act chain are all fixed for the life of the user's token entry, and a
+	// transparent user token's id hashes the very credential the act chain was read
+	// from. (The agent's own act chain is read only to refuse, never rendered, so it
+	// keys nothing.) A profile only changes how those are RENDERED, so its name is
+	// the single new degree of freedom. Should a later profile ever read something
+	// outside that set, it needs a fragment of its own — that is the moment to give
+	// the interface a CacheFragment method, not before.
 	//
 	// This reaches every cache mechanically, with nothing further to remember:
 	// cacheIdentity becomes inputs.Subject/ActorCacheIdentity, which
@@ -1966,6 +1989,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 				Metadata:   projected,
 				Resource:   resource,
 				UserClaims: userClaims,
+				User:       userIdentity,
 				Profile:    profile,
 			})
 		},

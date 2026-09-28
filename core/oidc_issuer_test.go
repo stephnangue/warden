@@ -1187,6 +1187,37 @@ var assertionRosters = map[string]profileRoster{
 			"aud": "cacheIdentity's second fragment",
 		},
 	},
+	profiles.ActorProfileName: {
+		// No warden_sub or warden_auth_mount: the agent's composite sits in act.sub.
+		claims: []string{
+			"act", "aud", "exp", "iat", "iss", "jti", "nbf", "sub",
+			"warden_metadata", "warden_namespace", "warden_resource", "warden_role",
+			"warden_user",
+		},
+		coverage: map[string]string{
+			"iss": "volatile/constant by design",
+			"iat": "volatile/constant by design",
+			"nbf": "volatile/constant by design",
+			"exp": "volatile/constant by design",
+			"jti": "volatile/constant by design",
+
+			// The USER's composite. Its namespace, mount and principal are fixed for
+			// the life of the user's token entry, so the user token id keys it.
+			"sub": "the \":u:\" token-id dimension on the manager's cache keys (the user's identity)",
+			"aud": "cacheIdentity's second fragment",
+			// The agent's composite (wardenSubject), the issuer URL (constant), and
+			// the user token's own act chain — read from the same credential the user
+			// token id hashes, so fixed per user token.
+			"act": "the agent via cacheIdentity's first fragment (wardenSubject), the nested " +
+				"user chain via the \":u:\" token-id dimension",
+			"warden_namespace": "inside wardenSubject (ID, not path — safe only while namespaces cannot be renamed)",
+			"warden_role":      "cacheIdentity's \"role=\" fragment",
+			"warden_resource":  "cacheIdentity's \"res=\" fragment",
+			"warden_metadata":  "cacheIdentity's metadata fingerprint",
+			"warden_user": "the \":u:\" token-id dimension on the manager's cache keys, " +
+				"deliberately not in cacheIdentity (see buildAssertionSetup)",
+		},
+	},
 }
 
 func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {
@@ -1236,8 +1267,12 @@ func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {
 				Alg:        oidcAlgRS256,
 				Metadata:   map[string]string{"team": "payments"},
 				Resource:   "https://api.example/db",
-				UserClaims: map[string]string{"sub": "alice"},
-				Profile:    profile,
+				UserClaims: map[string]string{"sub": "alice", "username": "alice"},
+				User: &credential.AssertionIdentity{
+					PrincipalID: "alice", NamespaceID: "ns-1234", MountAccessor: "auth_oidc_def",
+					Actors: []credential.AssertionActor{{Subject: "broker-beta", Issuer: "https://idp.example"}},
+				},
+				Profile: profile,
 			})
 			require.NoError(t, err)
 
@@ -1643,4 +1678,24 @@ func TestIdentityFromTokenEntry(t *testing.T) {
 	// wardenSubject is now a thin wrapper over the moved method; the two must agree,
 	// because cacheIdentity uses the wrapper while the default profile uses the method.
 	assert.Equal(t, id.WardenSubject(), wardenSubject(te))
+}
+
+// identityFromTokenEntry must COPY the act chain: the token entry is shared across
+// requests by the token cache, so a profile must never hold its slice. And no chain
+// means a nil slice, so the common path allocates nothing.
+func TestIdentityFromTokenEntry_CopiesActors(t *testing.T) {
+	te := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2",
+		Actors: []logical.ActorRef{{Subject: "broker-beta", Issuer: "https://idp.example"}, {Subject: "agents/alpha"}},
+	}
+	id := identityFromTokenEntry(te)
+	assert.Equal(t, []credential.AssertionActor{
+		{Subject: "broker-beta", Issuer: "https://idp.example"},
+		{Subject: "agents/alpha"},
+	}, id.Actors)
+
+	te.Actors[0].Subject = "tampered"
+	assert.Equal(t, "broker-beta", id.Actors[0].Subject, "the identity aliases the token entry's chain")
+
+	assert.Nil(t, identityFromTokenEntry(&logical.TokenEntry{PrincipalID: "p"}).Actors)
 }

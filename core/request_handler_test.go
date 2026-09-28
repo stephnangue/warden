@@ -3528,6 +3528,141 @@ func TestResolveExchangeInputs_AWSProfile(t *testing.T) {
 	assert.Equal(t, "JWT", header["typ"])
 }
 
+// TestResolveExchangeInputs_ActorProfile drives the actor profile through the real
+// setup and issuer: the user's composite as sub (built from the USER's mount), the
+// agent's composite as act.sub, and the user token's own act chain nested beneath.
+func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "as-user", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://orders.example/aud",
+		credential.ConfigAssertionProfile:    profiles.ActorProfileName,
+		credential.ConfigAssertionUserClaims: "sub,username",
+	})
+
+	agentTE := &logical.TokenEntry{
+		CredentialSpec: "as-user", PrincipalID: "agent-checkout-7", NamespaceID: "ns1",
+		NamespacePath: "team-payments/", MountAccessor: "auth_jwt_1", RoleName: "orders-reader",
+	}
+	userTE := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2",
+		Metadata: map[string]string{"username": "alice"},
+		Actors: []logical.ActorRef{
+			{Subject: "broker-beta", Issuer: "https://idp.example"},
+			{Subject: "agents/alpha"},
+		},
+	}
+
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: userTE}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(inputs.SubjectCacheIdentity, "\x00prof=actor"),
+		"the actor profile keys its own cache dimension: %q", inputs.SubjectCacheIdentity)
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+
+	assert.Equal(t, "wid:ns1:auth_oidc_2:alice", claims["sub"], "sub is the USER's composite, on the user's mount")
+	assert.Equal(t, map[string]any{
+		"sub": "wid:ns1:auth_jwt_1:agent-checkout-7",
+		"iss": "https://warden-oidc.example",
+		"act": map[string]any{
+			"sub": "broker-beta",
+			"iss": "https://idp.example",
+			"act": map[string]any{"sub": "agents/alpha"},
+		},
+	}, claims["act"])
+	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_user"])
+	assert.Equal(t, "orders-reader", claims["warden_role"])
+	assert.NotContains(t, claims, "warden_sub")
+	assert.NotContains(t, claims, "warden_auth_mount")
+
+	// The token entry's chain was copied, not aliased, into the assertion request.
+	assert.Equal(t, "broker-beta", userTE.Actors[0].Subject)
+}
+
+// TestResolveExchangeInputs_ActorProfile_RefusesActedAgentBeforeCache pins where the
+// agent-chain refusal happens: in setup, so resolveExchangeInputs returns no inputs,
+// and with no inputs there is no fingerprint to key a cache with. The other half —
+// that the manager resolves inputs before touching the shared chained-secret cache,
+// so a refused session is refused even when another session of the same agent has
+// filled the entry — is TestChaining_RefusedInputsNeverReachSharedCache.
+//
+// The no-user sub-test is refused by the assertion_user_claims opt-in before the
+// profile's own check runs; it pins the end-to-end outcome, not which gate fires.
+func TestResolveExchangeInputs_ActorProfile_RefusesActedAgentBeforeCache(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "as-user", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://orders.example/aud",
+		credential.ConfigAssertionProfile:    profiles.ActorProfileName,
+		credential.ConfigAssertionUserClaims: "sub",
+	})
+	userTE := &logical.TokenEntry{PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2"}
+	agent := func(actors []logical.ActorRef) *logical.TokenEntry {
+		return &logical.TokenEntry{
+			CredentialSpec: "as-user", PrincipalID: "agent-checkout-7", NamespaceID: "ns1",
+			MountAccessor: "auth_jwt_1", RoleName: "orders-reader", Actors: actors,
+		}
+	}
+	withUser := func() *logical.Request {
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE}
+		return req
+	}
+
+	t.Run("act-free agent session resolves", func(t *testing.T) {
+		_, err := resolveExchangeInputsForTest(c, ctx, withUser(), agent(nil))
+		require.NoError(t, err)
+	})
+
+	t.Run("same agent carrying act is refused before any cache key exists", func(t *testing.T) {
+		inputs, err := resolveExchangeInputsForTest(c, ctx, withUser(), agent([]logical.ActorRef{{Subject: "broker-x"}}))
+		require.Error(t, err)
+		assert.Nil(t, inputs, "no inputs means no fingerprint, so no cache lookup can happen")
+		assert.Contains(t, err.Error(), "act chain")
+		assert.Contains(t, err.Error(), `"actor"`)
+	})
+
+	t.Run("no user principal fails closed", func(t *testing.T) {
+		_, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque-session", nil), agent(nil))
+		assert.ErrorIs(t, err, credential.ErrUserRequired)
+	})
+}
+
+// The actor profile fills the SUBJECT slot; spec-create refuses it in the two-token
+// shape's actor slot and without a disclosed user.
+func TestCreateSpec_ActorProfileValidation(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+
+	err := c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "bad-slot", Type: "vault_token", Source: "sts-src",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+			credential.ConfigActorTokenSource:   credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "https://sts.example/aud",
+			credential.ConfigAssertionProfile:   profiles.ActorProfileName,
+		}),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mints the subject token")
+
+	err = c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "no-user", Type: "vault_token", Source: "local-src",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "https://orders.example/aud",
+			credential.ConfigAssertionProfile:   profiles.ActorProfileName,
+		}),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), credential.ConfigAssertionUserClaims)
+}
+
 // TestResolveExchangeInputs_LegacyAWSSpecMintsDefault is the upgrade guarantee at
 // mint: an AWS federated spec stored before the create-time default existed carries
 // no assertion_profile, and unset still means default at mint — so it keeps emitting
@@ -3591,7 +3726,7 @@ func TestResolveAssertionProfile_UnknownName(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown assertion profile: nope")
 	// Every builtin, sorted.
-	assert.Contains(t, err.Error(), "available profiles: [aws default minimal]")
+	assert.Contains(t, err.Error(), "available profiles: [actor aws default minimal]")
 }
 
 // A spec naming a profile this build lacks must fail BEFORE any cache interaction,
