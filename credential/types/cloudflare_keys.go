@@ -43,6 +43,14 @@ func (t *CloudflareKeysCredType) ConfigSchema() []*credential.FieldValidator {
 			OneOf("static_keys").
 			Describe("Mint method for credential minting").
 			Example("static_keys"),
+
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Name of a credential spec that yields the credential (api_token and/or access_key_id + secret_access_key); required on a cloudflare source").
+			Example("cloudflare-from-vault"),
+
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Which key of the referenced secret_spec's data holds the API token, when it is not stored as api_token").
+			Example("token"),
 	}
 }
 
@@ -51,13 +59,27 @@ func (t *CloudflareKeysCredType) ValidateConfig(config credential.Config, source
 	// A vault source is not supported: it would need a static_cloudflare mint
 	// method, which the Vault driver has never implemented. It used to be accepted
 	// here and then failed at the first mint.
-	if sourceType != credential.SourceTypeLocal {
-		return fmt.Errorf("cloudflare_keys credentials require a local source, got: %s", sourceType)
+	switch sourceType {
+	case credential.SourceTypeLocal, credential.SourceTypeCloudflare:
+		// Supported
+	default:
+		return fmt.Errorf("cloudflare_keys credentials require a local or cloudflare source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
 	if err := credential.ValidateSchema(config, schema...); err != nil {
 		return err
+	}
+
+	if sourceType == credential.SourceTypeCloudflare {
+		return validateChainedCloudflareKeys(config)
+	}
+
+	// A local source copies the spec config into the credential and cannot
+	// chain, so a reference here would be accepted and then fail at the first
+	// mint.
+	if config.Get(credential.ConfigSecretSpec) != "" {
+		return fmt.Errorf("secret_spec (credential chaining) is not supported with a local source; use a cloudflare source")
 	}
 
 	hasAPI := config.Get("api_token") != ""
@@ -73,6 +95,32 @@ func (t *CloudflareKeysCredType) ValidateConfig(config credential.Config, source
 		return fmt.Errorf("'access_key_id' is required when 'secret_access_key' is set")
 	}
 
+	return nil
+}
+
+// validateChainedCloudflareKeys checks a spec on a cloudflare source, whose
+// credential always comes from the spec its secret_spec names.
+func validateChainedCloudflareKeys(config credential.Config) error {
+	if config.Get(credential.ConfigSecretSpec) == "" {
+		return fmt.Errorf("a cloudflare source requires '%s' naming a spec that yields api_token and/or access_key_id + secret_access_key",
+			credential.ConfigSecretSpec)
+	}
+	// Refuse an inline credential rather than quietly preferring one side: a
+	// secret sitting in spec config is the standing secret this source exists to
+	// avoid, and an inline half would be presented against a fetched other half.
+	for _, key := range []string{"api_token", "access_key_id", "secret_access_key"} {
+		if config.Get(key) != "" {
+			return fmt.Errorf("'%s' must be omitted on a cloudflare source; the referenced %s supplies the credential",
+				key, credential.ConfigSecretSpec)
+		}
+	}
+	// secret_field selects the API token. The R2 pair is read by name, both
+	// halves together, so naming one half here could only mislead.
+	switch field := config.Get(credential.ConfigSecretField); field {
+	case "access_key_id", "secret_access_key":
+		return fmt.Errorf("'%s' selects the API token and cannot name '%s': the R2 pair is read from the referenced payload by name",
+			credential.ConfigSecretField, field)
+	}
 	return nil
 }
 
@@ -118,10 +166,9 @@ func (t *CloudflareKeysCredType) Parse(rawData, metadata map[string]interface{},
 		LeaseID:  leaseID,
 		IssuedAt: time.Now(),
 		// Revoking means releasing a lease at the source, which needs a handle to
-		// release. Cloudflare keys only come from a local source, which returns
-		// neither a TTL nor a leaseID, so the second condition changes nothing
-		// today — it states the invariant rather than leaving the next mint path to
-		// rediscover it.
+		// release. Neither source hands one out: a local source returns no TTL, and
+		// a cloudflare source returns an advisory TTL with no leaseID, since it
+		// serves a credential that already exists rather than creating one.
 		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,

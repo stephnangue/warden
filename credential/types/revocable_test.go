@@ -89,8 +89,9 @@ func TestRevocableRequiresLeaseID(t *testing.T) {
 			leaseID: "SCWXXXXXXXXXXXXXXXXX",
 		},
 		{
-			// Cloudflare keys only come from a local source, which returns neither
-			// a TTL nor a leaseID.
+			// Neither source of Cloudflare keys returns a leaseID: a local source
+			// returns no TTL either, and a cloudflare source serves a credential
+			// that already exists, with an advisory TTL and nothing to release.
 			name:      "cloudflare_keys",
 			reachable: false,
 			credType:  &CloudflareKeysCredType{},

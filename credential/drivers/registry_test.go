@@ -33,6 +33,7 @@ func TestRegisterBuiltinDrivers(t *testing.T) {
 		credential.SourceTypeScaleway,
 		credential.SourceTypeTokenExchange,
 		credential.SourceTypeAnthropic,
+		credential.SourceTypeCloudflare,
 	}
 	for _, typeName := range expectedTypes {
 		factory, err := registry.GetFactory(typeName)

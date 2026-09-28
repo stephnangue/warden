@@ -1790,9 +1790,10 @@ const authMethodOIDCFederation = "oidc_federation"
 // kubernetes, alicloud, anthropic — spells it the same way, so one predicate covers
 // them all and covers a new one the day it lands.
 //
-// Not every keyless source federates: ibm, ovh and scaleway have no assertion grant
-// to exchange against, so they remove their stored secret by chaining instead and
-// are gated by the secret_spec rules rather than by this predicate.
+// Not every keyless source federates: ibm, ovh, scaleway and cloudflare have no
+// assertion grant to exchange against, so they remove their stored secret by
+// chaining instead and are gated by the secret_spec rules rather than by this
+// predicate.
 //
 // This is narrower than "holds no secret", which also describes a chained source
 // or spec (secret_spec), whose secret lives in the spec it references. Those are

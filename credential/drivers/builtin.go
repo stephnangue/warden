@@ -94,5 +94,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register Cloudflare driver factory (credential served via secret_spec)
+	if err := registry.RegisterFactory(&CloudflareDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

@@ -100,6 +100,9 @@ var storedSecretsCases = map[string][]storedSecretsCase{
 	credential.SourceTypeAPIKey: {
 		{name: "url only", config: map[string]string{"api_url": "https://api.example.com", "ca_data": "pem"}, want: nil},
 	},
+	credential.SourceTypeCloudflare: {
+		{name: "empty", config: map[string]string{}, want: nil},
+	},
 }
 
 func TestSourceStoredSecrets(t *testing.T) {

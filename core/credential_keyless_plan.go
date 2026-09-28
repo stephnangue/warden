@@ -257,9 +257,13 @@ func (c *Core) PlanKeylessSpec(ctx context.Context, name string, in KeylessPlanI
 	plan := &KeylessPlan{Specs: []KeylessObject{}}
 	switch {
 	case source.Type == credential.SourceTypeLocal:
+		where := "a keyless source"
+		if homes := c.keylessSourceTypesFor(spec); len(homes) > 0 {
+			where = fmt.Sprintf("a keyless source (for %s, a source of type %s)", spec.Type, strings.Join(homes, " or "))
+		}
 		plan.Blockers = append(plan.Blockers, fmt.Sprintf(
-			"spec %q is on the local source, whose spec config is the credential itself. Plan it on a keyless source instead: "+
-				"create a spec of the same type there, with secret_spec naming the spec that reads the stored secret", spec.Name))
+			"spec %q is on the local source, whose spec config is the credential itself. Plan it on %s instead: "+
+				"create a spec of the same type there, with secret_spec naming the spec that reads the stored secret", spec.Name, where))
 		return plan, nil
 	case spec.Type == credential.TypeAzureBearerToken:
 		plan.Blockers = append(plan.Blockers, fmt.Sprintf(
@@ -346,6 +350,57 @@ func (c *Core) checkProposedSpec(ctx context.Context, plan *KeylessPlan, spec *c
 		plan.Blockers = append(plan.Blockers, fmt.Sprintf("spec %q would still store %s", spec.Name, strings.Join(left, ", ")))
 	}
 	return nil
+}
+
+// keylessSourceTypesFor names the source types a local spec can move to: those
+// whose specs are of its type by default, which hold nothing of their own, and
+// on which the type accepts the spec in chained form — its stored secrets
+// removed and a secret_spec set. The last condition is what keeps out a source
+// that serves the type by minting rather than by fetching (an elastic source
+// mints api_key credentials but refuses a spec-level secret_spec). A source that
+// needs more than that, such as a mint_method a local spec never carries, is
+// left out too: the message then stays generic rather than pointing somewhere
+// the spec cannot go as it is. Sorted, so the message is stable.
+func (c *Core) keylessSourceTypesFor(spec *credential.CredSpec) []string {
+	if c.credentialDriverRegistry == nil || c.credentialTypeRegistry == nil {
+		return nil
+	}
+	credType, err := c.credentialTypeRegistry.GetByName(spec.Type)
+	if err != nil {
+		return nil
+	}
+	// The chained form carries none of the credential itself: not the secrets,
+	// and not the identifiers beside them (an R2 access_key_id, a Scaleway
+	// access_key), which a chained spec gets from the referenced one too.
+	chained := spec.Config
+	for _, field := range credType.StoredSecrets(spec.Config) {
+		chained = chained.With(field, "")
+	}
+	for field := range credType.FieldSchemas() {
+		chained = chained.With(field, "")
+	}
+	chained = freshConfig(chained.With(credential.ConfigSecretSpec, "the-spec-that-reads-it"))
+
+	var homes []string
+	for _, sourceType := range c.credentialDriverRegistry.ListFactories() {
+		if sourceType == credential.SourceTypeLocal {
+			continue
+		}
+		factory, err := c.credentialDriverRegistry.GetFactory(sourceType)
+		if err != nil {
+			continue
+		}
+		inferred, err := factory.InferCredentialType(credential.Config{})
+		if err != nil || inferred != spec.Type || len(factory.StoredSecrets(credential.Config{})) > 0 {
+			continue
+		}
+		if credType.ValidateConfig(chained, sourceType) != nil {
+			continue
+		}
+		homes = append(homes, sourceType)
+	}
+	sort.Strings(homes)
+	return homes
 }
 
 // credentialNameRE is the name the create routes accept.

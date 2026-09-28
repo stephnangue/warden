@@ -11,6 +11,7 @@ import (
 
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -385,4 +386,69 @@ func TestKeylessEnforcement_StoreWritesAreNotGated(t *testing.T) {
 	stored, err := backend.core.credConfigStore.GetSource(ctx, "legacy")
 	require.NoError(t, err)
 	assert.Equal(t, "rotated-secret-id", stored.Config.Get("secret_id"))
+}
+
+// Cloudflare keys have a keyless form: a cloudflare source holds nothing, and each
+// spec fetches its credential through its own secret_spec. Under enforce that is
+// accepted without a warning. An inline token on the same source is refused
+// either way: by enforcement under enforce, and by the credential type below it.
+func TestKeylessEnforcement_ChainedCloudflareSpec(t *testing.T) {
+	backend, ctx, c := setupTestSystemBackend(t)
+	backend.core.keylessEnforcement = KeylessEnforcementEnforce
+
+	seedSource(t, c, ctx, &credential.CredSource{
+		Name: "vault-wif", Type: credential.SourceTypeVault,
+		Config: credential.NewConfig(map[string]string{
+			"vault_address": "http://localhost:8200", "auth_method": "oidc_federation", "jwt_role": "agents", "audience": "vault",
+		}),
+	})
+	ns, err := namespace.FromContext(ctx)
+	require.NoError(t, err)
+	require.NoError(t, c.credConfigStore.persistSpec(ns.UUID, &credential.CredSpec{
+		Name: "cf-from-vault", Type: credential.TypeKeyValue, Source: "vault-wif",
+		Config: credential.NewConfig(map[string]string{
+			"kv2_mount": "secret", "secret_path": "cloudflare/api", "subject_token_source": "warden_identity",
+		}),
+	}))
+
+	resp := sourceWrite(t, backend, ctx, logical.CreateOperation, map[string]interface{}{
+		"name": "cloudflare", "type": "cloudflare", "config": map[string]interface{}{},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%+v %v", resp.Data, resp.Err)
+	assert.Empty(t, keylessWarnings(resp))
+
+	resp = specWrite(t, backend, ctx, logical.CreateOperation, map[string]interface{}{
+		"name": "cf-api", "source": "cloudflare",
+		"config": map[string]interface{}{"secret_spec": "cf-from-vault", "secret_cache_ttl": "10m"},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%+v %v", resp.Data, resp.Err)
+	assert.Empty(t, keylessWarnings(resp))
+	stored, err := c.credConfigStore.GetSpec(ctx, "cf-api")
+	require.NoError(t, err)
+	assert.Equal(t, credential.TypeCloudflareKeys, stored.Type, "the type is inferred from the source")
+
+	inline := map[string]interface{}{
+		"name": "cf-inline", "type": "cloudflare_keys", "source": "cloudflare",
+		"config": map[string]interface{}{"secret_spec": "cf-from-vault", "api_token": "inline"},
+	}
+	requireKeylessRefusal(t, specWrite(t, backend, ctx, logical.CreateOperation, inline))
+
+	backend.core.keylessEnforcement = KeylessEnforcementOff
+	resp = specWrite(t, backend, ctx, logical.CreateOperation, inline)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), "'api_token' must be omitted on a cloudflare source")
+
+	// An update is judged on the merged config by the same type rules, so the
+	// chained spec cannot be turned into an inline one, even with enforcement off.
+	for what, config := range map[string]map[string]interface{}{
+		"adding an inline token": {"api_token": "inline"},
+		"dropping the reference": {"secret_spec": ""},
+	} {
+		resp = specWrite(t, backend, ctx, logical.UpdateOperation, map[string]interface{}{"name": "cf-api", "config": config})
+		assert.Equalf(t, http.StatusBadRequest, resp.StatusCode, "%s: %+v", what, resp.Data)
+	}
+	stored, err = c.credConfigStore.GetSpec(ctx, "cf-api")
+	require.NoError(t, err)
+	assert.Equal(t, "cf-from-vault", stored.Config.Get("secret_spec"))
+	assert.Empty(t, stored.Config.Get("api_token"))
 }
