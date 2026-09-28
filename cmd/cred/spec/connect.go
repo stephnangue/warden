@@ -138,6 +138,9 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error building authorize URL: %w", err)
 	}
+	// Printed before the browser opens; the connect response repeats the same
+	// warning, so only its copy in the output data is kept below.
+	helpers.PrintWarnings(authzOut.Warnings)
 
 	if connectNoBrowser {
 		fmt.Fprintf(os.Stderr, "Open this URL to authorize:\n\n  %s\n\n", authzOut.AuthorizeURL)
@@ -166,6 +169,9 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		"name":        connectOut.Name,
 		"connected":   connectOut.Connected,
 		"reconnected": connectOut.Reconnected,
+	}
+	if len(connectOut.Warnings) > 0 {
+		data["warnings"] = connectOut.Warnings
 	}
 	return helpers.RenderMap(data, func() {
 		if connectOut.Reconnected {

@@ -331,6 +331,13 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 		RotationPeriod: time.Duration(rotationPeriodSec) * time.Second,
 	}
 
+	// Checked before the store call, so a refused write has no side effect.
+	keylessWarnings, err := b.core.checkKeyless(keylessKindSource, name,
+		b.core.sourceStoredSecrets(sourceType, source.Config))
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	// Store via credential config store
 	if err := b.core.credConfigStore.CreateSource(ctx, source); err != nil {
 		// Check if it's a conflict error (source already exists)
@@ -343,14 +350,17 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 	b.logger.Info("credential source created",
 		logger.String("name", name),
 		logger.String("type", sourceType))
+	b.core.logKeylessWarnings(keylessKindSource, name, keylessWarnings)
 
-	return b.respondCreated(map[string]any{
+	data := map[string]any{
 		"name":            source.Name,
 		"type":            source.Type,
 		"config":          source.Config,
 		"rotation_period": int64(source.RotationPeriod.Seconds()),
 		"message":         fmt.Sprintf("Successfully created credential source %s", name),
-	}), nil
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondCreated(data), nil
 }
 
 // handleCredentialSourceRead handles GET /sys/cred/sources/{name}
@@ -463,6 +473,18 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 		RotationPeriod: rotationPeriod,
 	}
 
+	// The resulting config is judged, not the fields sent: a write that moves the
+	// source to a keyless mode and clears its secret passes, and an edit that
+	// leaves a stored secret in place does not. A mask sentinel was skipped in the
+	// merge above, so resending a read-back config keeps the secret and is judged
+	// as keeping it. Checked before the discard below, so a refused write costs
+	// nothing.
+	keylessWarnings, err := b.core.checkKeyless(keylessKindSource, name,
+		b.core.sourceStoredSecrets(updatedSource.Type, updatedSource.Config))
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	// A staged rotation holds a snapshot of the config being replaced, and a
 	// credential created upstream to go with it. Discard it now, while the
 	// driver still authenticates with the current config: after the write it
@@ -489,11 +511,14 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 		}
 		return logical.ErrorResponse(err), nil
 	}
+	b.core.logKeylessWarnings(keylessKindSource, name, keylessWarnings)
 
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"name":    updatedSource.Name,
 		"message": fmt.Sprintf("Successfully updated credential source %s", name),
-	}), nil
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondSuccess(data), nil
 }
 
 // handleCredentialSourceDelete handles DELETE /sys/cred/sources/{name}
@@ -638,6 +663,13 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		RotationPeriod: time.Duration(rotationPeriod) * time.Second,
 	}
 
+	// Checked before the store call, so a refused write has no side effect. On
+	// create the source's own secrets count too: a new spec widens their use.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, spec, true)
+	if errResp != nil {
+		return errResp, nil
+	}
+
 	// Store via credential config store
 	if err := b.core.credConfigStore.CreateSpec(ctx, spec); err != nil {
 		// Check if it's a conflict error (spec already exists)
@@ -657,9 +689,9 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		"rotation_period": int64(spec.RotationPeriod.Seconds()),
 		"message":         fmt.Sprintf("Successfully created credential spec %s", name),
 	}
-	if w := b.core.assertionTTLWarnings(spec.Config); len(w) > 0 {
-		data["warnings"] = w
-	}
+	appendWarnings(data, b.core.assertionTTLWarnings(spec.Config)...)
+	appendWarnings(data, keylessWarnings...)
+	b.core.logKeylessWarnings(keylessKindSpec, name, keylessWarnings)
 	return b.respondCreated(data), nil
 }
 
@@ -817,6 +849,15 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		opts.SkipVerification = true
 	}
 
+	// The resulting config is judged, as on the source path, so an edit to a spec
+	// that still holds a secret is refused under enforce until the secret moves
+	// out. The source is not re-judged: its secret is judged on its own writes.
+	// Checked before the discard below, so a refused write costs nothing.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, updatedSpec, false)
+	if errResp != nil {
+		return errResp, nil
+	}
+
 	// Discard a staged spec rotation first, as the source path does: its
 	// snapshot of this config must never be written over the edit.
 	if !spec.Config.Equal(updatedSpec.Config) && b.core.rotationManager != nil {
@@ -838,9 +879,9 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		"name":    updatedSpec.Name,
 		"message": fmt.Sprintf("Successfully updated credential spec %s", name),
 	}
-	if w := b.core.assertionTTLWarnings(updatedSpec.Config); len(w) > 0 {
-		data["warnings"] = w
-	}
+	appendWarnings(data, b.core.assertionTTLWarnings(updatedSpec.Config)...)
+	appendWarnings(data, keylessWarnings...)
+	b.core.logKeylessWarnings(keylessKindSpec, name, keylessWarnings)
 	return b.respondSuccess(data), nil
 }
 
@@ -860,6 +901,14 @@ func (b *SystemBackend) handleCredentialSpecAuthorize(ctx context.Context, req *
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
 	}
 
+	// Connect would seal a token into the spec, so under enforce the flow is
+	// refused here, before the operator is sent to the provider to approve a
+	// grant the server would then refuse to store.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, spec, false)
+	if errResp != nil {
+		return errResp, nil
+	}
+
 	authorizeURL, err := authorizer.BuildAuthorizeURL(spec, redirectURI, state, codeChallenge)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
@@ -868,11 +917,13 @@ func (b *SystemBackend) handleCredentialSpecAuthorize(ctx context.Context, req *
 	// The issuer travels with the authorize URL because the check it enables
 	// belongs at the callback, in the CLI, before the code comes back here to
 	// be redeemed. Empty when the source records none.
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"name":          name,
 		"authorize_url": authorizeURL,
 		"issuer":        authorizer.AuthorizationIssuer(),
-	}), nil
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondSuccess(data), nil
 }
 
 // handleCredentialSpecConnect handles POST /sys/cred/specs/{name}/connect. It
@@ -907,6 +958,13 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 
 	reconnected := b.specIsConnected(spec)
 
+	// Checked before the code is exchanged: a refused connect must not consume
+	// the code, or rotate a refresh token at the provider, only to discard it.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, spec, false)
+	if errResp != nil {
+		return errResp, nil
+	}
+
 	sealed, err := authorizer.ExchangeAuthorizationCode(ctx, spec, code, redirectURI, codeVerifier)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
@@ -933,12 +991,15 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 	if reconnected {
 		msg = fmt.Sprintf("Successfully re-connected credential spec %s (replaced the existing authorization)", name)
 	}
-	return b.respondSuccess(map[string]any{
+	b.core.logKeylessWarnings(keylessKindSpec, name, keylessWarnings)
+	data := map[string]any{
 		"name":        name,
 		"connected":   true,
 		"reconnected": reconnected,
 		"message":     msg,
-	}), nil
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondSuccess(data), nil
 }
 
 // lockSource takes the per-source mutation lock shared with the rotation

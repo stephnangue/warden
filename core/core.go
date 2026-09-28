@@ -188,6 +188,11 @@ type Core struct {
 	// rawConfig stores the config as-is from the provided server configuration.
 	rawConfig *atomic.Value
 
+	// keylessEnforcement is keyless_enforcement_level, resolved once in NewCore.
+	// It is never written after construction, so it is read without
+	// synchronization.
+	keylessEnforcement KeylessEnforcementLevel
+
 	logger *logger.GatedLogger
 
 	// tokenStore manages namespace-aware tokens with pluggable types
@@ -596,6 +601,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 
 	c.SetConfig(conf.RawConfig)
 	c.clusterConfig = parseClusterConfig(conf.RawConfig)
+	c.keylessEnforcement = parseKeylessEnforcementLevel(conf.RawConfig)
 
 	// Load seal information.
 	if c.seal == nil {

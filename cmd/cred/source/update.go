@@ -82,6 +82,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			"name":    name,
 			"updated": true,
 		})
+		helpers.PrintWarnings(helpers.WarningsFromData(resData))
 		return helpers.RenderMap(data, func() {
 			fmt.Printf("Success! Updated credential source: %s\n", name)
 		})
@@ -113,7 +114,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error updating credential source: %w", err)
 	}
 
-	return helpers.RenderMap(map[string]any{"name": output.Name, "updated": true}, func() {
+	data := map[string]any{"name": output.Name, "updated": true}
+	if len(output.Warnings) > 0 {
+		data["warnings"] = output.Warnings
+	}
+	helpers.PrintWarnings(output.Warnings)
+
+	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Updated credential source: %s\n", output.Name)
 	})
 }
