@@ -1348,6 +1348,13 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		return fmt.Errorf("failed to validate source reference: %w", err)
 	}
 
+	return s.validateSpecWithSource(ctx, spec, source, skipVerification)
+}
+
+// validateSpecWithSource is validateSpec against a given source rather than the
+// stored one. A keyless plan validates each spec it proposes against the
+// keyless source it proposes, neither of which exists yet.
+func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec *credential.CredSpec, source *credential.CredSource, skipVerification bool) error {
 	// Validate TTL constraints
 	if spec.MinTTL > spec.MaxTTL && spec.MaxTTL != 0 {
 		return logical.ErrBadRequest("min_ttl cannot be greater than max_ttl")

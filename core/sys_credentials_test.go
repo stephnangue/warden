@@ -45,7 +45,7 @@ func TestSystemBackend_PathCredentials(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
 
 	paths := backend.pathCredentials()
-	require.Len(t, paths, 6) // sources CRUD, sources list, specs CRUD, specs list, specs authorize, specs connect
+	require.Len(t, paths, 8) // sources CRUD, sources list, specs CRUD, specs list, specs authorize, specs connect, keyless plans
 
 	// Check sources/{name} path
 	assert.Equal(t, "cred/sources/"+framework.GenericNameRegex("name"), paths[0].Pattern)
@@ -62,6 +62,10 @@ func TestSystemBackend_PathCredentials(t *testing.T) {
 	// Check specs connect-flow paths
 	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/authorize", paths[4].Pattern)
 	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/connect", paths[5].Pattern)
+
+	// Check keyless-plan paths
+	assert.Equal(t, "cred/sources/"+framework.GenericNameRegex("name")+"/keyless-plan", paths[6].Pattern)
+	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/keyless-plan", paths[7].Pattern)
 }
 
 func TestSystemBackend_HandleCredentialSourceCreate(t *testing.T) {

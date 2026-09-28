@@ -15,4 +15,5 @@ func init() {
 	SpecCmd.AddCommand(UpdateCmd)
 	SpecCmd.AddCommand(DeleteCmd)
 	SpecCmd.AddCommand(ConnectCmd)
+	SpecCmd.AddCommand(KeylessPlanCmd)
 }

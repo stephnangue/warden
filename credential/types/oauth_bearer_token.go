@@ -262,7 +262,7 @@ func (t *OAuthBearerTokenCredType) SensitiveConfigFields() []string {
 func (t *OAuthBearerTokenCredType) StoredSecrets(config credential.Config) []string {
 	held := config.Present("client_secret", "refresh_token", "access_token")
 	if t.RequiresConnect(config) && !t.IsConnected(config) {
-		held = append(held, "refresh_token (sealed by connect)")
+		held = append(held, credential.StoredSecretSealedRefreshToken)
 	}
 	return held
 }
