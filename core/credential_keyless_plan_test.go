@@ -397,6 +397,35 @@ func TestPlanKeylessSpec(t *testing.T) {
 		plan := planFromResponse(t, keylessPlanRequest(t, backend, ctx, "spec", "static-key", nil))
 		require.Len(t, plan.Blockers, 1)
 		assert.Contains(t, plan.Blockers[0], "local source")
+		assert.Contains(t, plan.Blockers[0], "for api_key, a source of type apikey)",
+			"only the source that serves the key chained is named, not elastic or grafana, which mint it")
 		assert.Empty(t, plan.Specs)
+	})
+
+	t.Run("a local cloudflare spec is pointed at the cloudflare source", func(t *testing.T) {
+		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+			Name: "cf-local", Type: credential.TypeCloudflareKeys, Source: builtinLocalSourceName,
+			Config: credential.NewConfig(map[string]string{"api_token": "cf_stored"}),
+		}))
+		plan := planFromResponse(t, keylessPlanRequest(t, backend, ctx, "spec", "cf-local", nil))
+		require.Len(t, plan.Blockers, 1)
+		assert.Contains(t, plan.Blockers[0], "for cloudflare_keys, a source of type cloudflare)")
+
+		// The R2 access key id is no secret, but a chained spec carries it no more
+		// than the secret beside it, so an R2 spec is pointed there too.
+		for name, cfg := range map[string]map[string]string{
+			"cf-local-r2":   {"access_key_id": "ak", "secret_access_key": "sk"},
+			"cf-local-both": {"api_token": "t", "access_key_id": "ak", "secret_access_key": "sk"},
+		} {
+			assert.Equal(t, []string{credential.SourceTypeCloudflare}, c.keylessSourceTypesFor(&credential.CredSpec{
+				Name: name, Type: credential.TypeCloudflareKeys, Config: credential.NewConfig(cfg),
+			}), name)
+		}
+	})
+
+	t.Run("no home keeps the generic wording", func(t *testing.T) {
+		assert.Empty(t, c.keylessSourceTypesFor(&credential.CredSpec{
+			Type: credential.TypeAWSAccessKeys, Config: credential.NewConfig(map[string]string{"access_key_id": "a", "secret_access_key": "s"}),
+		}), "an aws source serves aws_access_keys by federation, not by fetching a stored pair")
 	})
 }

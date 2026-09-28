@@ -24,9 +24,10 @@ import (
 )
 
 // ovh is the dual-mode gateway whose credential is minted rather than held.
-// scaleway and cloudflare both sit on a local source, so their rows prove the
-// injection but not the mint; this one exchanges a service account for a bearer
-// token on every request.
+// scaleway's and cloudflare's base rows sit on a local source, and their chained
+// rows serve a credential that already exists, so they prove the injection but
+// not a mint; this one exchanges a service account for a bearer token on every
+// request.
 //
 // The exchange is a plain OAuth2 client_credentials grant, so Hydra can issue
 // it — reached through the source's token_url, which exists because a

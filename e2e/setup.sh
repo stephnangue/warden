@@ -390,6 +390,13 @@ vault_api POST "secret/data/e2e/ovh-client-credential" \
 vault_api POST "secret/data/e2e/ovh-access-keys" \
   '{"data":{"access_key":"E2EOVHACCESSKEY00000","secret_key":"e2e-ovh-access-not-a-real-secret"}}'
 
+# The API token a keyless cloudflare source serves, for the chain that hangs off
+# a SPEC: the source holds nothing, and each spec names where its credential is.
+# Deliberately not the token the local cloudflare row holds inline, so the row
+# can tell the chain from a routing regression that fell back to that spec.
+vault_api POST "secret/data/e2e/cloudflare-token" \
+  '{"data":{"api_token":"fc-cloudflare-chained-not-a-real-api-token"}}'
+
 # The IBM api key an ibm source fetches per request instead of storing. IBM has no
 # assertion grant to federate against, so this SOURCE-level chain is what keyless
 # means there. Stored under a name that is neither of the driver's conventional

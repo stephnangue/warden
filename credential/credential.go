@@ -44,6 +44,7 @@ const (
 	SourceTypeAlicloud      = "alicloud"
 	SourceTypeTokenExchange = "token_exchange"
 	SourceTypeAnthropic     = "anthropic"
+	SourceTypeCloudflare    = "cloudflare"
 )
 
 // Category constants for credential categorization

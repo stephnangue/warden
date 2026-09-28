@@ -99,7 +99,7 @@ func TestCloudflareKeysCredType_ValidateConfig_VaultSourceRejected(t *testing.T)
 		"secret_path": "cloudflare/prod/keys",
 	}), credential.SourceTypeVault)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "local source")
+	assert.Contains(t, err.Error(), "local or cloudflare source")
 }
 
 func TestCloudflareKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
@@ -110,7 +110,50 @@ func TestCloudflareKeysCredType_ValidateConfig_UnsupportedSource(t *testing.T) {
 		"api_token":         "test-api-token",
 	}), credential.SourceTypeAWS)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "local source")
+	assert.Contains(t, err.Error(), "local or cloudflare source")
+}
+
+// A local source copies the spec config into the credential and cannot chain, so
+// a reference there used to be accepted and then fail at the first mint.
+func TestCloudflareKeysCredType_ValidateConfig_LocalRefusesSecretSpec(t *testing.T) {
+	ct := &CloudflareKeysCredType{}
+	err := ct.ValidateConfig(credential.NewConfig(map[string]string{
+		"api_token":   "test-api-token",
+		"secret_spec": "cf-from-vault",
+	}), credential.SourceTypeLocal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported with a local source")
+}
+
+// On a cloudflare source the credential always comes from the referenced spec:
+// nothing inline, and secret_field can only point at the API token.
+func TestCloudflareKeysCredType_ValidateConfig_CloudflareSource(t *testing.T) {
+	ct := &CloudflareKeysCredType{}
+	for _, tc := range []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{name: "chained", config: map[string]string{"mint_method": "static_keys", "secret_spec": "cf-from-vault"}},
+		{name: "chained with token field", config: map[string]string{"secret_spec": "cf-from-vault", "secret_field": "token"}},
+		{name: "chained with cache ttl", config: map[string]string{"secret_spec": "cf-from-vault", "secret_cache_ttl": "10m"}},
+		{name: "no secret_spec", config: map[string]string{"mint_method": "static_keys"}, wantErr: "requires 'secret_spec'"},
+		{name: "inline api_token", config: map[string]string{"secret_spec": "cf-from-vault", "api_token": "t"}, wantErr: "'api_token' must be omitted"},
+		{name: "inline access key id", config: map[string]string{"secret_spec": "cf-from-vault", "access_key_id": "id"}, wantErr: "'access_key_id' must be omitted"},
+		{name: "inline secret access key", config: map[string]string{"secret_spec": "cf-from-vault", "secret_access_key": "s"}, wantErr: "'secret_access_key' must be omitted"},
+		{name: "field names an R2 half", config: map[string]string{"secret_spec": "cf-from-vault", "secret_field": "access_key_id"}, wantErr: "selects the API token"},
+		{name: "unknown mint method", config: map[string]string{"secret_spec": "cf-from-vault", "mint_method": "dynamic"}, wantErr: "mint_method"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ct.ValidateConfig(credential.NewConfig(tc.config), credential.SourceTypeCloudflare)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }
 
 func TestCloudflareKeysCredType_Parse(t *testing.T) {

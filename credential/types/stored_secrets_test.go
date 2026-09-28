@@ -39,6 +39,7 @@ var specStoredSecretsCases = map[string][]specStoredSecretsCase{
 	credential.TypeCloudflareKeys: {
 		{name: "api token", config: map[string]string{"api_token": "t"}, want: []string{"api_token"}},
 		{name: "r2", config: map[string]string{"access_key_id": "id", "secret_access_key": "s"}, want: []string{"secret_access_key"}},
+		{name: "chained", config: map[string]string{"secret_spec": "ref", "secret_field": "token"}, want: nil},
 	},
 	credential.TypeScalewayKeys: {
 		{name: "chained", config: map[string]string{"secret_spec": "ref"}, want: nil},

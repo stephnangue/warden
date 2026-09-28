@@ -81,10 +81,11 @@ var keylessCases = map[string]keylessCase{
 // A source that can hold a secret must know how to stop holding it. These
 // hold none of their own, so their sources have nothing to plan.
 var noSourceSecret = map[string]bool{
-	credential.SourceTypeLocal:     true,
-	credential.SourceTypeAPIKey:    true,
-	credential.SourceTypeGitHub:    true,
-	credential.SourceTypeAnthropic: true,
+	credential.SourceTypeLocal:      true,
+	credential.SourceTypeAPIKey:     true,
+	credential.SourceTypeGitHub:     true,
+	credential.SourceTypeAnthropic:  true,
+	credential.SourceTypeCloudflare: true,
 }
 
 func TestKeylessPlanners_Completeness(t *testing.T) {
