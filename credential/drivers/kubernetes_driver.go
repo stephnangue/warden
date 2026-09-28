@@ -187,6 +187,11 @@ func (f *KubernetesDriverFactory) SensitiveConfigFields() []string {
 	return []string{"token", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *KubernetesDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("token")
+}
+
 // InferCredentialType returns the credential type for Kubernetes sources.
 func (f *KubernetesDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeKubernetesToken, nil

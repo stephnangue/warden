@@ -160,3 +160,9 @@ func (t *AzureBearerTokenCredType) RequiresSpecRotation() bool {
 func (t *AzureBearerTokenCredType) SensitiveConfigFields() []string {
 	return []string{"client_secret", "secret_id"}
 }
+
+// StoredSecrets reports the secret config keys this spec holds. secret_id is the
+// password credential's id, not the secret.
+func (t *AzureBearerTokenCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("client_secret")
+}

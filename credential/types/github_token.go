@@ -189,3 +189,8 @@ func (t *GitHubTokenCredType) RequiresSpecRotation() bool {
 func (t *GitHubTokenCredType) SensitiveConfigFields() []string {
 	return []string{"token", "private_key"}
 }
+
+// StoredSecrets reports the secret config keys this spec holds.
+func (t *GitHubTokenCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("token", "private_key")
+}

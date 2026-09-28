@@ -48,6 +48,7 @@ func (f *mockChainedFactory) Create(_ Config, _ *logger.GatedLogger) (SourceDriv
 }
 func (f *mockChainedFactory) ValidateConfig(_ Config) error   { return nil }
 func (f *mockChainedFactory) SensitiveConfigFields() []string { return nil }
+func (f *mockChainedFactory) StoredSecrets(Config) []string   { return nil }
 func (f *mockChainedFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("n/a")
 }
@@ -83,6 +84,7 @@ func (f *mockExchangeSecretFactory) Create(_ Config, _ *logger.GatedLogger) (Sou
 }
 func (f *mockExchangeSecretFactory) ValidateConfig(_ Config) error   { return nil }
 func (f *mockExchangeSecretFactory) SensitiveConfigFields() []string { return nil }
+func (f *mockExchangeSecretFactory) StoredSecrets(Config) []string   { return nil }
 func (f *mockExchangeSecretFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("n/a")
 }
@@ -129,6 +131,7 @@ func (f *mockChainedExchangeFactory) Create(_ Config, _ *logger.GatedLogger) (So
 }
 func (f *mockChainedExchangeFactory) ValidateConfig(_ Config) error   { return nil }
 func (f *mockChainedExchangeFactory) SensitiveConfigFields() []string { return nil }
+func (f *mockChainedExchangeFactory) StoredSecrets(Config) []string   { return nil }
 func (f *mockChainedExchangeFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("n/a")
 }

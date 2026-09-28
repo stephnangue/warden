@@ -542,5 +542,10 @@ func (t *KeyValueCredType) RequiresSpecRotation() bool { return false }
 // in persisted spec config (every key here is a non-secret locator).
 func (t *KeyValueCredType) SensitiveConfigFields() []string { return nil }
 
+// StoredSecrets reports nothing: every config key is a locator.
+func (t *KeyValueCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}
+
 // FieldSchemas returns nil — the field set is arbitrary and unknown at type level.
 func (t *KeyValueCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema { return nil }

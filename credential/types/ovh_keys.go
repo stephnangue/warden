@@ -184,6 +184,11 @@ func (t *OVHKeysCredType) SensitiveConfigFields() []string {
 	return nil
 }
 
+// StoredSecrets reports nothing: an access_keys pair is always fetched through secret_spec.
+func (t *OVHKeysCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}
+
 // FieldSchemas returns metadata about the credential's data fields
 func (t *OVHKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{

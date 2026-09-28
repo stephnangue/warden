@@ -173,6 +173,11 @@ func (t *CloudflareKeysCredType) SensitiveConfigFields() []string {
 	return []string{"secret_access_key", "api_token"}
 }
 
+// StoredSecrets reports the secret config keys this spec holds.
+func (t *CloudflareKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("api_token", "secret_access_key")
+}
+
 // FieldSchemas returns metadata about the credential's data fields
 func (t *CloudflareKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{

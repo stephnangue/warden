@@ -222,10 +222,11 @@ func (b *SystemBackend) maskSourceConfig(sourceType string, config map[string]st
 		sensitive[f] = true
 	}
 
-	// Mask sensitive values
+	// Mask sensitive values. An empty value is left as is: it is a field an
+	// update cleared, and masking it would read back as a secret still held.
 	masked := make(map[string]string, len(config))
 	for k, v := range config {
-		if sensitive[k] {
+		if sensitive[k] && v != "" {
 			masked[k] = maskValue
 		} else {
 			masked[k] = v
@@ -300,10 +301,11 @@ func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string
 		sensitive[f] = true
 	}
 
-	// Mask sensitive values
+	// Mask sensitive values. An empty value is left as is: it is a field an
+	// update cleared, and masking it would read back as a secret still held.
 	masked := make(map[string]string, len(config))
 	for k, v := range config {
-		if sensitive[k] {
+		if sensitive[k] && v != "" {
 			masked[k] = maskValue
 		} else {
 			masked[k] = v
@@ -367,12 +369,12 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 	// Mask sensitive config fields
 	maskedConfig := b.maskSourceConfig(source.Type, source.Config.Map())
 
-	data := map[string]any{
+	data := withStoredSecrets(map[string]any{
 		"name":            source.Name,
 		"type":            source.Type,
 		"config":          maskedConfig,
 		"rotation_period": int64(source.RotationPeriod.Seconds()),
-	}
+	}, b.core.sourceStoredSecrets(source.Type, source.Config))
 
 	// Include rotation schedule info if available
 	if b.core.rotationManager != nil {
@@ -558,12 +560,12 @@ func (b *SystemBackend) handleCredentialSourceList(ctx context.Context, req *log
 	sourceInfos := make([]map[string]any, 0, len(sources))
 	for _, source := range sources {
 		maskedConfig := b.maskSourceConfig(source.Type, source.Config.Map())
-		sourceInfos = append(sourceInfos, map[string]any{
+		sourceInfos = append(sourceInfos, withStoredSecrets(map[string]any{
 			"name":            source.Name,
 			"type":            source.Type,
 			"config":          maskedConfig,
 			"rotation_period": int64(source.RotationPeriod.Seconds()),
-		})
+		}, b.core.sourceStoredSecrets(source.Type, source.Config)))
 	}
 
 	return b.respondSuccess(map[string]any{
@@ -706,7 +708,7 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 	// Mask sensitive config fields
 	maskedConfig := b.maskSpecConfig(spec.Type, spec.Config.Map())
 
-	return b.respondSuccess(map[string]any{
+	return b.respondSuccess(withStoredSecrets(map[string]any{
 		"name":            spec.Name,
 		"type":            spec.Type,
 		"source":          spec.Source,
@@ -715,7 +717,7 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 		"max_ttl":         int64(spec.MaxTTL.Seconds()),
 		"rotation_period": int64(spec.RotationPeriod.Seconds()),
 		"connected":       b.specIsConnected(spec),
-	}), nil
+	}, b.core.specStoredSecrets(spec.Type, spec.Config))), nil
 }
 
 // handleCredentialSpecUpdate handles PUT /sys/cred/specs/{name}
@@ -1104,7 +1106,7 @@ func (b *SystemBackend) handleCredentialSpecList(ctx context.Context, req *logic
 	specInfos := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
 		maskedConfig := b.maskSpecConfig(spec.Type, spec.Config.Map())
-		specInfos = append(specInfos, map[string]any{
+		specInfos = append(specInfos, withStoredSecrets(map[string]any{
 			"name":            spec.Name,
 			"type":            spec.Type,
 			"source":          spec.Source,
@@ -1112,7 +1114,7 @@ func (b *SystemBackend) handleCredentialSpecList(ctx context.Context, req *logic
 			"min_ttl":         int64(spec.MinTTL.Seconds()),
 			"max_ttl":         int64(spec.MaxTTL.Seconds()),
 			"rotation_period": int64(spec.RotationPeriod.Seconds()),
-		})
+		}, b.core.specStoredSecrets(spec.Type, spec.Config)))
 	}
 
 	return b.respondSuccess(map[string]any{

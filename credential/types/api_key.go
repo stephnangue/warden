@@ -465,6 +465,13 @@ func (t *APIKeyCredType) SensitiveConfigFields() []string {
 	return []string{"api_key", "application_key"}
 }
 
+// StoredSecrets reports the secret config keys this spec holds. Operator-
+// declared adjuncts are not reported: an unknown key may be a second secret, but
+// reporting every one would count ids such as organization_id as secrets too.
+func (t *APIKeyCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("api_key", "application_key")
+}
+
 // SensitiveConfigFieldsFor masks the known secrets plus every spec-config key the
 // type does not recognise (credential.ConfigSensitivity).
 //

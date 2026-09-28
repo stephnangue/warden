@@ -243,6 +243,11 @@ func (t *ScalewayKeysCredType) SensitiveConfigFields() []string {
 	return []string{"secret_key"}
 }
 
+// StoredSecrets reports the secret config keys this spec holds.
+func (t *ScalewayKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("secret_key")
+}
+
 // FieldSchemas returns metadata about the credential's data fields
 func (t *ScalewayKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{

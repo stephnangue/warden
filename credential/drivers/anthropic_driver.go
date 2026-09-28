@@ -153,6 +153,11 @@ func (f *AnthropicDriverFactory) SensitiveConfigFields() []string {
 	return []string{"ca_data"}
 }
 
+// StoredSecrets reports nothing. It has no secret-bearing config: the only mode is federation.
+func (f *AnthropicDriverFactory) StoredSecrets(_ credential.Config) []string {
+	return nil
+}
+
 // InferCredentialType returns oauth_bearer_token: the exchange yields exactly one
 // kind of credential, so there is nothing in the spec to infer it from.
 func (f *AnthropicDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {

@@ -205,6 +205,11 @@ func (f *ElasticDriverFactory) SensitiveConfigFields() []string {
 	return []string{"api_key", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *ElasticDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("api_key")
+}
+
 // InferCredentialType returns the credential type for Elasticsearch sources.
 func (f *ElasticDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil

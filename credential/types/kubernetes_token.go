@@ -112,3 +112,8 @@ func (t *KubernetesTokenCredType) RequiresSpecRotation() bool {
 func (t *KubernetesTokenCredType) SensitiveConfigFields() []string {
 	return []string{}
 }
+
+// StoredSecrets reports nothing: its config holds only service account and audience fields.
+func (t *KubernetesTokenCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}

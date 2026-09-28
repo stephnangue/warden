@@ -469,6 +469,11 @@ func (f *AzureDriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *AzureDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("client_secret")
+}
+
 // InferCredentialType infers the credential type from the spec's mint_method.
 func (f *AzureDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
 	mintMethod := specConfig.Get("mint_method")

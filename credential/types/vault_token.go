@@ -108,3 +108,8 @@ func (t *VaultTokenCredType) RequiresSpecRotation() bool {
 func (t *VaultTokenCredType) SensitiveConfigFields() []string {
 	return nil
 }
+
+// StoredSecrets reports nothing: its config holds only role and policy fields.
+func (t *VaultTokenCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}

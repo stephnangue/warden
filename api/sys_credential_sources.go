@@ -46,6 +46,9 @@ type CredentialSourceInfo struct {
 	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
 	NextRotation   string            `json:"next_rotation,omitempty"`
 	LastRotation   string            `json:"last_rotation,omitempty"`
+	// StoredSecrets names the long-lived secrets the source holds; nil when it
+	// is keyless.
+	StoredSecrets []string `json:"stored_secrets,omitempty"`
 }
 
 // UpdateCredentialSourceInput represents the input for updating a credential source
@@ -158,6 +161,7 @@ func (c *Sys) GetCredentialSourceWithContext(ctx context.Context, name string) (
 	if lr, ok := resource.Data["last_rotation"].(string); ok {
 		source.LastRotation = lr
 	}
+	source.StoredSecrets = parseStringList(resource.Data["stored_secrets"])
 
 	return source, nil
 }
@@ -215,6 +219,7 @@ func (c *Sys) ListCredentialSourcesWithContext(ctx context.Context) ([]*Credenti
 		if rp, ok := sourceMap["rotation_period"]; ok {
 			source.RotationPeriod = parseDurationFromSeconds(rp)
 		}
+		source.StoredSecrets = parseStringList(sourceMap["stored_secrets"])
 
 		sources = append(sources, source)
 	}

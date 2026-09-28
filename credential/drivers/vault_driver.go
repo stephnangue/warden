@@ -242,6 +242,19 @@ func (f *VaultDriverFactory) SensitiveConfigFields() []string {
 	return []string{"token", "secret_id", "secret_id_accessor"}
 }
 
+// StoredSecrets reports the secrets this source holds. secret_id_accessor is
+// masked but is only a handle, so it is not reported. A source with no
+// auth_method logs in with no stored secret of its own: its client takes the
+// token from the server's environment (api.DefaultConfig in Create), which is a
+// long-lived secret all the same.
+func (f *VaultDriverFactory) StoredSecrets(config credential.Config) []string {
+	held := config.Present("secret_id", "token")
+	if len(held) == 0 && credential.GetString(config, "auth_method", "") == "" {
+		return []string{"vault token from the server environment"}
+	}
+	return held
+}
+
 // InferCredentialType infers the credential type from the spec's mint_method.
 func (f *VaultDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
 	mintMethod := specConfig.Get("mint_method")

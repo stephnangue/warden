@@ -232,6 +232,7 @@ func (f *mockSourceDriverFactory) ValidateConfig(config Config) error {
 func (f *mockSourceDriverFactory) SensitiveConfigFields() []string {
 	return []string{"password", "secret"}
 }
+func (f *mockSourceDriverFactory) StoredSecrets(Config) []string { return nil }
 
 func (f *mockSourceDriverFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("mock driver cannot infer type")
@@ -298,6 +299,7 @@ func (t *mockCredentialType) RequiresSpecRotation() bool {
 }
 
 func (t *mockCredentialType) SensitiveConfigFields() []string { return nil }
+func (t *mockCredentialType) StoredSecrets(Config) []string   { return nil }
 
 func (t *mockCredentialType) FieldSchemas() map[string]*CredentialFieldSchema {
 	return map[string]*CredentialFieldSchema{
@@ -1082,6 +1084,7 @@ func (f *exchangeDriverFactory) Create(config Config, log *logger.GatedLogger) (
 }
 func (f *exchangeDriverFactory) ValidateConfig(config Config) error { return nil }
 func (f *exchangeDriverFactory) SensitiveConfigFields() []string    { return nil }
+func (f *exchangeDriverFactory) StoredSecrets(Config) []string      { return nil }
 func (f *exchangeDriverFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("mock exchange driver cannot infer type")
 }

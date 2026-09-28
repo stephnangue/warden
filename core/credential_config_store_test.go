@@ -868,6 +868,7 @@ func (f *testDriverFactory) ValidateConfig(config credential.Config) error {
 func (f *testDriverFactory) SensitiveConfigFields() []string {
 	return []string{}
 }
+func (f *testDriverFactory) StoredSecrets(credential.Config) []string { return nil }
 
 func (f *testDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("test driver cannot infer type")
@@ -1289,7 +1290,8 @@ func (t *testCredentialType) RequiresSpecRotation() bool {
 	return t.requiresRotation
 }
 
-func (t *testCredentialType) SensitiveConfigFields() []string { return nil }
+func (t *testCredentialType) SensitiveConfigFields() []string          { return nil }
+func (t *testCredentialType) StoredSecrets(credential.Config) []string { return nil }
 
 func (t *testCredentialType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{}
@@ -1377,6 +1379,7 @@ func (f *validatingDriverFactory) ValidateConfig(config credential.Config) error
 func (f *validatingDriverFactory) SensitiveConfigFields() []string {
 	return []string{}
 }
+func (f *validatingDriverFactory) StoredSecrets(credential.Config) []string { return nil }
 
 func (f *validatingDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("validating driver cannot infer type")
@@ -1511,7 +1514,8 @@ func (t *validatingCredentialType) RequiresSpecRotation() bool {
 	return false
 }
 
-func (t *validatingCredentialType) SensitiveConfigFields() []string { return nil }
+func (t *validatingCredentialType) SensitiveConfigFields() []string          { return nil }
+func (t *validatingCredentialType) StoredSecrets(credential.Config) []string { return nil }
 
 func (t *validatingCredentialType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{}
@@ -1747,6 +1751,7 @@ func (f *connectGatedDriverFactory) Create(config credential.Config, log *logger
 }
 func (f *connectGatedDriverFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *connectGatedDriverFactory) SensitiveConfigFields() []string               { return nil }
+func (f *connectGatedDriverFactory) StoredSecrets(credential.Config) []string      { return nil }
 func (f *connectGatedDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "connect_cred", nil
 }
@@ -1836,6 +1841,7 @@ func (f *fakeHvaultFactory) Create(config credential.Config, log *logger.GatedLo
 }
 func (f *fakeHvaultFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *fakeHvaultFactory) SensitiveConfigFields() []string               { return nil }
+func (f *fakeHvaultFactory) StoredSecrets(credential.Config) []string      { return nil }
 func (f *fakeHvaultFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeVaultToken, nil
 }
@@ -1904,6 +1910,7 @@ func (f *fakeFederationFactory) Create(config credential.Config, log *logger.Gat
 }
 func (f *fakeFederationFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *fakeFederationFactory) SensitiveConfigFields() []string               { return nil }
+func (f *fakeFederationFactory) StoredSecrets(credential.Config) []string      { return nil }
 func (f *fakeFederationFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil
 }
@@ -1990,6 +1997,7 @@ func (f *unrotatableFactory) Create(config credential.Config, log *logger.GatedL
 }
 func (f *unrotatableFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *unrotatableFactory) SensitiveConfigFields() []string               { return nil }
+func (f *unrotatableFactory) StoredSecrets(credential.Config) []string      { return nil }
 func (f *unrotatableFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil
 }
@@ -2368,6 +2376,7 @@ func (f *leasingDriverFactory) Create(config credential.Config, log *logger.Gate
 }
 func (f *leasingDriverFactory) ValidateConfig(config credential.Config) error { return nil }
 func (f *leasingDriverFactory) SensitiveConfigFields() []string               { return nil }
+func (f *leasingDriverFactory) StoredSecrets(credential.Config) []string      { return nil }
 func (f *leasingDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "leasing_cred", nil
 }

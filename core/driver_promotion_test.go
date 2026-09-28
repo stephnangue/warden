@@ -26,6 +26,7 @@ type versionFactory struct{}
 func (versionFactory) Type() string                                          { return "versioned" }
 func (versionFactory) ValidateConfig(credential.Config) error                { return nil }
 func (versionFactory) SensitiveConfigFields() []string                       { return nil }
+func (versionFactory) StoredSecrets(credential.Config) []string              { return nil }
 func (versionFactory) InferCredentialType(credential.Config) (string, error) { return "", nil }
 func (versionFactory) Create(config credential.Config, _ *logger.GatedLogger) (credential.SourceDriver, error) {
 	return &versionDriver{version: config.Get("version")}, nil

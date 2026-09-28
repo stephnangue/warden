@@ -131,3 +131,8 @@ func (t *GitLabAccessTokenCredType) RequiresSpecRotation() bool {
 func (t *GitLabAccessTokenCredType) SensitiveConfigFields() []string {
 	return nil
 }
+
+// StoredSecrets reports nothing: its config holds only scopes and token settings.
+func (t *GitLabAccessTokenCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}

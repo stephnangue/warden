@@ -565,7 +565,8 @@ func (f *mockDriverFactory) ValidateConfig(config credential.Config) error {
 	}
 	return nil
 }
-func (f *mockDriverFactory) SensitiveConfigFields() []string { return nil }
+func (f *mockDriverFactory) SensitiveConfigFields() []string          { return nil }
+func (f *mockDriverFactory) StoredSecrets(credential.Config) []string { return nil }
 func (f *mockDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("mock driver cannot infer type")
 }

@@ -142,6 +142,11 @@ func (f *StaticAPIKeyDriverFactory) SensitiveConfigFields() []string {
 	return []string{"ca_data"}
 }
 
+// StoredSecrets reports nothing. The source holds no key; it lives on the spec or is fetched through secret_spec.
+func (f *StaticAPIKeyDriverFactory) StoredSecrets(_ credential.Config) []string {
+	return nil
+}
+
 // InferCredentialType returns the credential type for API key sources.
 func (f *StaticAPIKeyDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeAPIKey, nil

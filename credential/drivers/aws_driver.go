@@ -271,6 +271,11 @@ func (f *AWSDriverFactory) SensitiveConfigFields() []string {
 	return []string{"secret_access_key", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *AWSDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("secret_access_key")
+}
+
 // InferCredentialType infers the credential type from the spec's mint_method.
 func (f *AWSDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
 	mintMethod := specConfig.Get("mint_method")

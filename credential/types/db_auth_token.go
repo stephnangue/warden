@@ -223,3 +223,8 @@ func (t *DBAuthTokenCredType) RequiresSpecRotation() bool {
 func (t *DBAuthTokenCredType) SensitiveConfigFields() []string {
 	return nil
 }
+
+// StoredSecrets reports nothing: its config holds only connection and role fields.
+func (t *DBAuthTokenCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}

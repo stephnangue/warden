@@ -168,6 +168,12 @@ func (t *AlicloudKeysCredType) SensitiveConfigFields() []string {
 	return []string{"access_key_secret", "security_token"}
 }
 
+// StoredSecrets reports the secret config keys this spec holds. Neither is
+// required by any mint method, but a stored value is still a secret held.
+func (t *AlicloudKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("access_key_secret", "security_token")
+}
+
 // FieldSchemas returns metadata about the credential's data fields
 func (t *AlicloudKeysCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema {
 	return map[string]*credential.CredentialFieldSchema{

@@ -73,6 +73,12 @@ func parseConfigMap(v any) map[string]string {
 // that is not a non-empty string. Returns nil when absent or not an array, so a
 // response without warnings decodes to a nil slice.
 func parseWarnings(v any) []string {
+	return parseStringList(v)
+}
+
+// parseStringList converts a JSON array of strings to []string, skipping any
+// entry that is not a non-empty string. Returns nil when absent or not an array.
+func parseStringList(v any) []string {
 	items, ok := v.([]interface{})
 	if !ok {
 		return nil

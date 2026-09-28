@@ -43,6 +43,17 @@ type SourceDriverFactory interface {
 	// SensitiveConfigFields returns the list of config keys that should be masked in output
 	SensitiveConfigFields() []string
 
+	// StoredSecrets returns the long-lived secrets this source config makes Warden
+	// hold: the secret config keys present with a non-empty value, plus a
+	// description of any held outside config (such as a token inherited from the
+	// server's environment). Nil means the source is keyless.
+	//
+	// It is decided from the fields present, never from auth_method or
+	// secret_spec, so a config that names a keyless mode while still carrying a
+	// secret is reported. It is not a masking list: it leaves out keys such as
+	// ca_data that are masked for tidiness but are not secret.
+	StoredSecrets(config Config) []string
+
 	// InferCredentialType determines the credential type from the spec config.
 	// Simple sources return a fixed type (ignoring specConfig).
 	// Multi-type sources inspect specConfig (e.g., mint_method) to disambiguate.

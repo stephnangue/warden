@@ -33,6 +33,7 @@ type recordingFactory struct {
 func (f *recordingFactory) Type() string                    { return "recording" }
 func (f *recordingFactory) ValidateConfig(Config) error     { return nil }
 func (f *recordingFactory) SensitiveConfigFields() []string { return nil }
+func (f *recordingFactory) StoredSecrets(Config) []string   { return nil }
 func (f *recordingFactory) InferCredentialType(Config) (string, error) {
 	return "", nil
 }

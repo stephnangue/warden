@@ -303,6 +303,11 @@ func (f *TokenExchangeDriverFactory) SensitiveConfigFields() []string {
 	return []string{"client_secret", "private_key", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *TokenExchangeDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("client_secret", "private_key")
+}
+
 // InferCredentialType returns the credential type for token_exchange sources.
 func (f *TokenExchangeDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeOAuthBearerToken, nil

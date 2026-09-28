@@ -172,3 +172,11 @@ func TestConfigHash(t *testing.T) {
 		NewConfig(map[string]string{"ab": "c"}).Hash(),
 		NewConfig(map[string]string{"a": "bc"}).Hash())
 }
+
+func TestConfigPresent(t *testing.T) {
+	c := NewConfig(map[string]string{"a": "1", "b": "", "c": "3"})
+
+	assert.Equal(t, []string{"c", "a"}, c.Present("c", "b", "a", "missing"), "order follows the arguments; empty and absent keys are skipped")
+	assert.Nil(t, c.Present("b", "missing"))
+	assert.Nil(t, Config{}.Present("a"), "the zero value is usable")
+}
