@@ -180,6 +180,31 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 			HelpSynopsis:    "Complete cred spec connect by exchanging the authorization code",
 			HelpDescription: "Exchanges the authorization code for tokens using the client secret the server holds, then seals the result into the spec.",
 		},
+		// Keyless plans: read-only, so they write nothing whatever the operation.
+		{
+			Pattern: "cred/sources/" + framework.GenericNameRegex("name") + "/keyless-plan",
+			Fields:  keylessPlanFields("The credential source to plan a keyless replacement for"),
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.handleCredentialSourceKeylessPlan,
+					Summary:  "Plan a keyless replacement for a credential source and its specs",
+				},
+			},
+			HelpSynopsis:    "Plan a keyless credential source",
+			HelpDescription: "Returns the keyless source and specs to create next to the keyed ones, the upstream trust they need, and the stored credentials to delete once roles use them. Writes nothing.",
+		},
+		{
+			Pattern: "cred/specs/" + framework.GenericNameRegex("name") + "/keyless-plan",
+			Fields:  keylessPlanFields("The credential spec to plan a keyless replacement for"),
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.handleCredentialSpecKeylessPlan,
+					Summary:  "Plan a keyless replacement for a credential spec",
+				},
+			},
+			HelpSynopsis:    "Plan a keyless credential spec",
+			HelpDescription: "Returns the spec to create next to the keyed one, fetching its secret through credential chaining, and the stored secret to revoke once roles use it. Writes nothing.",
+		},
 	}
 }
 
