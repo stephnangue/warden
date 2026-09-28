@@ -2123,8 +2123,29 @@ func (c *Core) teardownCredentialManager() error {
 		c.credentialManager = nil
 	}
 
+	// The driver registry survives the manager: it is built once per process
+	// and handed to each new manager on promotion. Close its instances too, so
+	// a node that becomes active again rebuilds every driver from storage
+	// instead of minting with config another node has since replaced.
+	//
+	// No new mint can start here: this runs in preSeal, after the active
+	// context was cancelled and expiration and rotation stopped. A mint already
+	// in flight keeps the driver it holds and finishes or fails on its own; a
+	// closed instance stays usable to it.
+	if c.credentialDriverRegistry != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), driverCloseTimeout)
+		defer cancel()
+		if closed := c.credentialDriverRegistry.CloseAll(ctx); closed > 0 {
+			c.logger.Info("credential drivers closed", logger.Int("count", closed))
+		}
+	}
+
 	return nil
 }
+
+// driverCloseTimeout bounds the driver cleanups run when the node stops being
+// active. Cleanup is best-effort; a hung one must not stall the step-down.
+const driverCloseTimeout = 10 * time.Second
 
 // GetCredentialManager returns the global credential manager
 // The manager uses namespace-aware cache keys and storage paths for isolation
