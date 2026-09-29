@@ -82,10 +82,9 @@ type Caller struct {
 	// nil for an agent-only request. It is identity for scoping only — never an
 	// authorizer — and carries just the user token id, the one datum the manager
 	// (this package) needs and cannot reach across the import boundary. The user's
-	// identity (AssertionIdentity.WardenSubject) and login-derived metadata are NOT
-	// duplicated here: core reads them from the request's user token entry at the
-	// point of use (the warden_user assertion claim and the audit stamp). Built by
-	// core.
+	// identity and login-derived metadata are NOT duplicated here: core reads them
+	// from the request's user token entry at the point of use (the assertion's user
+	// level and the audit stamp). Built by core.
 	User *UserContext
 }
 
@@ -95,7 +94,7 @@ type Caller struct {
 // *credential.Credential), so a token entry on a credential type would form a
 // credential→logical→credential import cycle. Anything richer about the user
 // (identity subject, metadata) is read by core from the request's user token entry
-// where it is consumed (the warden_user assertion claim), not projected here.
+// where it is consumed (the assertion's user level), not projected here.
 type UserContext struct {
 	// TokenID is the user token's ID — the per-user credential-cache dimension,
 	// mirroring the agent's Caller.TokenID (both principals keyed by token id, not

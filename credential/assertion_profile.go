@@ -34,8 +34,23 @@ import (
 const ConfigAssertionProfile = "assertion_profile"
 
 // DefaultAssertionProfileName is the profile an unset ConfigAssertionProfile
-// selects. It reproduces the historical claim set exactly.
+// selects.
 const DefaultAssertionProfileName = "default"
+
+// RootNamespaceClaim is the value an assertion claim carries for the root
+// namespace, whose path is the empty string. It cannot collide with any other
+// namespace: every non-root path ends in "/". A claim renders it rather than "" so a
+// verifier binds a value, and never mistakes the root namespace for an absent claim.
+const RootNamespaceClaim = "root"
+
+// NamespaceClaim renders a namespace path as an assertion claim value: the path
+// verbatim, or RootNamespaceClaim for the root namespace.
+func NamespaceClaim(path string) string {
+	if path == "" {
+		return RootNamespaceClaim
+	}
+	return path
+}
 
 // reservedAssertionProfileNames are names that can never be registered as a
 // profile: sibling values, in spec or source config, that already name an assertion

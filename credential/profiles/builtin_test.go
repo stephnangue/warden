@@ -14,5 +14,5 @@ import (
 func TestRegisterBuiltinProfiles_ExactSet(t *testing.T) {
 	reg := credential.NewAssertionProfileRegistry()
 	require.NoError(t, RegisterBuiltinProfiles(reg))
-	assert.Equal(t, []string{"actor", "aws", "default", "minimal"}, reg.ListProfiles())
+	assert.Equal(t, []string{"aws", "default", "minimal"}, reg.ListProfiles())
 }

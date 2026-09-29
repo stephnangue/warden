@@ -18,7 +18,8 @@ func Default() credential.AssertionProfile { return defaultProfile }
 
 // RegisterBuiltinProfiles registers all built-in assertion profiles
 func RegisterBuiltinProfiles(registry *credential.AssertionProfileRegistry) error {
-	// Register the default (historical) claim shape
+	// Register the default claim shape (the agent; the user and agent as an RFC 8693
+	// delegation when a user is disclosed)
 	if err := registry.Register(defaultProfile); err != nil {
 		return err
 	}
@@ -31,12 +32,6 @@ func RegisterBuiltinProfiles(registry *credential.AssertionProfileRegistry) erro
 	// Register the registered-claims-only shape (for verifiers that bind iss/sub/aud
 	// exactly, such as Entra ID; not source-pinned)
 	if err := registry.Register(&MinimalProfile{}); err != nil {
-		return err
-	}
-
-	// Register the RFC 8693 delegation shape (user as sub, agent as act; not
-	// source-pinned)
-	if err := registry.Register(&ActorProfile{}); err != nil {
 		return err
 	}
 

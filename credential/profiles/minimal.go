@@ -19,8 +19,8 @@ const MinimalProfileName = "minimal"
 // it is and not pinned to a source: any verifier that binds only iss/sub/aud fits.
 //
 // sub stays the composite "wid:{nsID}:{mountAccessor}:{principalID}", identical to
-// the default profile's, so a trust written against a default-profile subject still
-// matches when a spec moves to this profile.
+// the agent's sub in the default profile, so a trust written against a default-
+// profile agent subject still matches when a spec moves to this profile.
 //
 // The rule is the aws profile's: emit only what the verifier can bind. So
 // warden_resource is dropped with the rest, and an explicit assertion_resource is
@@ -44,7 +44,7 @@ func (MinimalProfile) Typ() string { return "JWT" }
 // profile simply ignores the derived value.
 //
 // It never rejects assertion_user_claims or assertion_metadata_claims: this profile
-// renders neither warden_user nor warden_metadata, but both keys also drive
+// renders neither the user nor any metadata, but both keys also drive
 // {{user.<claim>}} / {{agent.<claim>}} request templating.
 func (MinimalProfile) ValidateSpec(config credential.Config) error {
 	return rejectExplicitResource(MinimalProfileName, config)

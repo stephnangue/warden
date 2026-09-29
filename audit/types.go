@@ -123,7 +123,8 @@ type Auth struct {
 // carries identity only — the raw user credential is never logged.
 type UserAttribution struct {
 	// Subject is the user's raw principal (their auth-method subject, e.g. the
-	// JWT sub) — the same value carried as warden_user.sub in the assertion.
+	// JWT sub) — the same value a default-profile delegation assertion carries as
+	// its top-level sub.
 	Subject string `json:"subject,omitempty"`
 	// TokenID is the user token's hash-based ID (safe to log).
 	TokenID string `json:"token_id,omitempty"`

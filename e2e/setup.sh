@@ -750,11 +750,12 @@ vault_api POST "auth/jwt-warden/config" "$WARDEN_JWT_CONFIG" >/dev/null
 
 # bound_audiences is mandatory here where the Hydra role binds sub instead: a
 # Warden assertion always carries an aud, and Vault refuses a JWT whose aud the
-# role does not bind. The subject is bound on warden_sub — the raw principal —
-# rather than sub, whose composite form embeds a mount accessor regenerated on
-# every setup run. Same closed client list as the Hydra role.
+# role does not bind. The subject is the agent's composite
+# wid:<namespace>:<mount_accessor>:<principal>; the accessor is regenerated on
+# every setup run, so it is globbed, while the namespace and the closed client
+# list (the same as the Hydra role's) are pinned.
 vault_api POST "auth/jwt-warden/role/warden-e2e-warden-fed" \
-  '{"role_type":"jwt","bound_audiences":["https://vault.e2e.warden"],"bound_claims":{"warden_sub":["e2e-agent","e2e-pipeline"]},"user_claim":"warden_sub","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}' >/dev/null
+  '{"role_type":"jwt","bound_audiences":["https://vault.e2e.warden"],"bound_claims_type":"glob","bound_claims":{"sub":["wid:root:*:e2e-agent","wid:root:*:e2e-pipeline"]},"user_claim":"sub","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}' >/dev/null
 
 # The federation source that logs in there. audience sits on the SOURCE so a
 # spec need not repeat assertion_audience: the driver derives it from here.

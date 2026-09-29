@@ -86,7 +86,7 @@ type Request struct {
 	// request header when the provider/namespace configures user_auth_path. It is
 	// IDENTITY-ONLY: it never authorizes the request (the primary/agent token entry
 	// alone does that) and is never SetTokenEntry'd. It scopes per-user credential
-	// chaining: the warden_user assertion claim, the per-user credential-cache
+	// chaining: the assertion's user level, the per-user credential-cache
 	// dimension, and audit attribution. Nil when the feature is unconfigured, which
 	// keeps the request byte-identical to before.
 	User *UserPrincipal `json:"-"`

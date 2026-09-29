@@ -501,15 +501,16 @@ func (c *Core) trustEnv(ctx context.Context, keyless credential.Config) (env *cr
 	if issuer == nil || issuer.IssuerURL() == "" {
 		return nil, federated
 	}
-	nsID := namespace.RootNamespaceID
+	nsID, nsPath := namespace.RootNamespaceID, ""
 	if ns, err := namespace.FromContext(ctx); err == nil {
-		nsID = ns.ID
+		nsID, nsPath = ns.ID, ns.Path
 	}
 	issuerURL := strings.TrimRight(issuer.IssuerURL(), "/")
 	return &credential.TrustEnv{
-		IssuerURL:     issuerURL,
-		JWKSURL:       issuerOrigin(issuerURL) + "/oidc/jwks",
-		SubjectPrefix: "wid:" + nsID + ":",
+		IssuerURL:      issuerURL,
+		JWKSURL:        issuerOrigin(issuerURL) + "/oidc/jwks",
+		SubjectPrefix:  "wid:" + nsID + ":",
+		NamespaceClaim: credential.NamespaceClaim(nsPath),
 	}, federated
 }
 

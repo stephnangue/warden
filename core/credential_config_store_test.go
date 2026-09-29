@@ -3667,7 +3667,7 @@ func TestCredentialConfigStore_CreateSpec_DefaultsAzureMinimal(t *testing.T) {
 		"a spec that forwards the agent's token mints no Warden assertion, so gets no profile")
 
 	// Claim projection keys are still accepted under the defaulted profile: minimal
-	// never renders warden_user, but the keys also drive {{user.*}} templating, and
+	// never renders the user, but the keys also drive {{user.*}} templating, and
 	// Entra could not have conditioned on the projected claims anyway — it matches
 	// iss/sub/aud and reads nothing else.
 	assert.Equal(t, profiles.MinimalProfileName,

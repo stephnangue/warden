@@ -330,6 +330,20 @@ var createTimeAssertionProfiles = map[string]string{
 	credential.SourceTypeAzure: profiles.MinimalProfileName,
 }
 
+// subOnlyVerifierSources are the source types whose verifier can bind only iss, sub
+// and aud: AWS STS for a custom issuer (plus session tags), Entra ID federated
+// credentials, and Alibaba Cloud RAM (oidc:iss, oidc:aud, oidc:sub). An assertion
+// minted for one of them is never given a disclosed user: the delegation shape would
+// put the user's raw id in sub, and such a verifier cannot also bind the
+// warden_namespace that qualifies it, so any namespace could mint that id. The
+// assertion keeps the agent's composite sub instead, which carries the tenant
+// boundary itself; assertion_user_claims still drives request templating.
+var subOnlyVerifierSources = map[string]bool{
+	credential.SourceTypeAWS:      true,
+	credential.SourceTypeAzure:    true,
+	credential.SourceTypeAlicloud: true,
+}
+
 // applyCreateTimeAssertionProfile writes the source type's default assertion profile
 // into a new spec's config when the spec mints a Warden assertion and sets none.
 //

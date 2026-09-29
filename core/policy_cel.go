@@ -143,7 +143,7 @@ type celPrincipalInput struct {
 	Principal     string
 	Role          string
 	Type          string
-	NamespacePath string
+	NamespacePath string // "" for root; the warden_namespace assertion claim renders it "root"
 	Policies      []string
 	Metadata      map[string]string
 	Actors        []logical.ActorRef

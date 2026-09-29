@@ -246,7 +246,7 @@ func TestStampUserAttribution(t *testing.T) {
 		require.NotNil(t, entry.Auth)
 		require.NotNil(t, entry.Auth.User)
 		// Subject is the user's raw principal (JWT sub), not the wid composite —
-		// it matches warden_user.sub in the minted assertion.
+		// it matches the sub of a default-profile delegation assertion.
 		assert.Equal(t, userTE.PrincipalID, entry.Auth.User.Subject)
 		assert.NotContains(t, entry.Auth.User.Subject, "wid:", "user attribution must be the raw sub, not the wid composite")
 		assert.Equal(t, userTE.ID, entry.Auth.User.TokenID)
@@ -335,7 +335,7 @@ func TestProjectAgentClaims(t *testing.T) {
 		got, err := projectAgentClaims(shadowed, []string{"sub"})
 		require.NoError(t, err)
 		assert.Equal(t, "build-runner", got["sub"],
-			"{{agent.sub}} must mean the principal, which is what the assertion's warden_sub carries")
+			"{{agent.sub}} must mean the principal, the trailing segment of the agent's composite sub")
 	})
 	t.Run("oversized projection fails closed", func(t *testing.T) {
 		big := &logical.TokenEntry{
