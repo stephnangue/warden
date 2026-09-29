@@ -1188,11 +1188,12 @@ var assertionRosters = map[string]profileRoster{
 		},
 	},
 	profiles.ActorProfileName: {
-		// No warden_sub (it is act.sub), and none of the Warden wiring the raw ids
-		// leave out: no warden_namespace or warden_auth_mount.
+		// No warden_sub (it is act.sub), no warden_user (it is the top-level
+		// warden_metadata) and no warden_auth_mount (Warden wiring the raw ids leave
+		// out). The agent's role, namespace and metadata are inside act.
 		claims: []string{
 			"act", "aud", "exp", "iat", "iss", "jti", "nbf", "sub",
-			"warden_metadata", "warden_resource", "warden_role", "warden_user",
+			"warden_metadata", "warden_namespace", "warden_resource",
 		},
 		coverage: map[string]string{
 			"iss": "volatile/constant by design",
@@ -1205,16 +1206,20 @@ var assertionRosters = map[string]profileRoster{
 			// so the user token id keys it.
 			"sub": "the \":u:\" token-id dimension on the manager's cache keys (the user's principal)",
 			"aud": "cacheIdentity's second fragment",
-			// The agent's raw principal — the trailing segment of wardenSubject, which
-			// keys finer than what is rendered — the issuer URL (constant), and the
-			// user token's own act chain, read from the same credential the user
-			// token id hashes, so fixed per user token.
-			"act": "the agent via cacheIdentity's first fragment (wardenSubject), the nested " +
-				"user chain via the \":u:\" token-id dimension",
-			"warden_role":     "cacheIdentity's \"role=\" fragment",
-			"warden_resource": "cacheIdentity's \"res=\" fragment",
-			"warden_metadata": "cacheIdentity's metadata fingerprint",
-			"warden_user": "the \":u:\" token-id dimension on the manager's cache keys, " +
+			// The agent's raw principal and namespace — both inside wardenSubject,
+			// which keys finer than what is rendered (namespace by ID, not path: safe
+			// only while namespaces cannot be renamed) — its role and projected
+			// metadata, the issuer URL (constant), and the user token's own act chain,
+			// read from the same credential the user token id hashes, so fixed per
+			// user token.
+			"act": "the agent's principal and namespace via cacheIdentity's first fragment " +
+				"(wardenSubject), its role via the \"role=\" fragment, its metadata via the " +
+				"metadata fingerprint, the nested user chain via the \":u:\" token-id dimension",
+			// The USER's namespace, fixed for the life of the user's token entry.
+			"warden_namespace": "the \":u:\" token-id dimension on the manager's cache keys (the user's namespace)",
+			"warden_resource":  "cacheIdentity's \"res=\" fragment",
+			// The USER's projected claims, as warden_user carries them in default.
+			"warden_metadata": "the \":u:\" token-id dimension on the manager's cache keys, " +
 				"deliberately not in cacheIdentity (see buildAssertionSetup)",
 		},
 	},

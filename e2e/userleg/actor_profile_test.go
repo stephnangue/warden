@@ -26,8 +26,9 @@ import (
 // role here:
 //   - binds /act/iss to Warden's issuer URL, so the login fails unless Vault
 //     finds the nested act object where the profile puts it;
-//   - takes the Vault alias from sub, and maps sub and /act/sub into token
-//     metadata, which lookup-self returns — the observable proof of what Vault read.
+//   - takes the Vault alias from sub, and maps sub, /act/sub and the claims that
+//     qualify them into token metadata, which lookup-self returns — the observable
+//     proof of what Vault read.
 //
 // Hydra issues no act claim, so the user token's own chain (nested beneath the
 // agent) and the refusal of an agent token carrying act stay unit-covered.
@@ -56,7 +57,10 @@ func setupActorProfile(t *testing.T) {
 		"bound_audiences":["https://vault.e2e.warden"],
 		"bound_claims":{"/act/iss":%q},
 		"user_claim":"sub",
-		"claim_mappings":{"sub":"delegated_subject","/act/sub":"current_actor"},
+		"claim_mappings":{
+			"sub":"delegated_subject","warden_namespace":"subject_namespace",
+			"/act/sub":"current_actor","/act/warden_namespace":"actor_namespace",
+			"/act/warden_role":"actor_role"},
 		"token_policies":["e2e-secrets-reader"],
 		"token_type":"batch",
 		"token_ttl":"120s"}`, wardenIssuerURL),
@@ -125,6 +129,21 @@ func TestActorProfile_VaultBindsUserAsSubAndAgentAsAct(t *testing.T) {
 	}
 	if got := h.JSONString(t, body, "data.meta.current_actor"); got != wantActor {
 		t.Errorf("Vault read /act/sub = %q, want the agent's raw principal %q", got, wantActor)
+	}
+	if got := h.JSONString(t, body, "data.meta.actor_role"); got != actorAgentRole {
+		t.Errorf("Vault read /act/warden_role = %q, want the agent's role %q", got, actorAgentRole)
+	}
+
+	// Both principals are in the root namespace, whose path is the empty string. It
+	// must reach the verifier as a value to bind, not vanish as an absent claim.
+	data := h.ParseJSON(t, body)
+	for _, key := range []string{"subject_namespace", "actor_namespace"} {
+		got, ok := h.JSONPath(data, "data.meta."+key).(string)
+		if !ok {
+			t.Errorf("Vault read no %s: the namespace claim was not rendered", key)
+		} else if got != "" {
+			t.Errorf("Vault read %s = %q, want the root namespace's path \"\"", key, got)
+		}
 	}
 }
 

@@ -11,17 +11,18 @@ import (
 )
 
 // actorRequest is fixedRequest with the user principal disclosed: alice, whose token
-// the agent presented and a DIFFERENT auth mount than the agent's validated. The
-// user's namespace and mount are populated so the exact-set test would catch either
-// leaking into the assertion.
+// the agent presented and a DIFFERENT auth mount than the agent's validated — in a
+// CHILD of the agent's namespace, the case where a parent-namespace agent acts in a
+// child. The two namespaces differ so the exact-set test catches one qualifying the
+// other's id; the user's mount is populated so it would catch that leaking too.
 func actorRequest() credential.AssertionRequest {
 	req := fixedRequest()
 	req.Audience = "https://orders.internal.example.com"
 	req.User = &credential.AssertionIdentity{
 		PrincipalID:   "alice@example.com",
 		RoleName:      "users",
-		NamespaceID:   "ns-3f2a1b",
-		NamespacePath: "team-payments/",
+		NamespaceID:   "ns-77c0d4",
+		NamespacePath: "team-payments/orders/",
 		MountAccessor: "auth_oidc_77aa",
 	}
 	return req
@@ -38,9 +39,10 @@ func TestActorProfile_Metadata(t *testing.T) {
 }
 
 // TestActorProfile_Claims_ExactSet pins the exact frozen shape with no prior actors:
-// both principals by their raw ids — no Warden namespace or mount anywhere, though
-// the request carries both for each — Warden's iss in act, and warden_user without
-// sub.
+// both principals by their raw ids, each paired with its OWN namespace path (the
+// user's at the top level, the agent's in act), the agent's role and metadata in
+// act, no auth mount anywhere, Warden's iss in act, and the user's claims without
+// sub as the top-level warden_metadata.
 func TestActorProfile_Claims_ExactSet(t *testing.T) {
 	claims, err := ActorProfile{}.Claims(actorRequest())
 	require.NoError(t, err)
@@ -54,13 +56,15 @@ func TestActorProfile_Claims_ExactSet(t *testing.T) {
 		"exp": int64(1755248700),
 		"jti": "a3d9f0c2-8b41-4e77-9f2a-1c6b5e0d4a88",
 		"act": map[string]any{
-			"sub": "agent-checkout-7",
-			"iss": "https://warden.example.com",
+			"sub":              "agent-checkout-7",
+			"iss":              "https://warden.example.com",
+			"warden_namespace": "team-payments/",
+			"warden_role":      "orders-reader",
+			"warden_metadata":  map[string]string{"team": "payments", "env": "prod"},
 		},
-		"warden_role":     "orders-reader",
-		"warden_metadata": map[string]string{"team": "payments", "env": "prod"},
-		"warden_user":     map[string]string{"username": "alice"},
-		"warden_resource": "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
+		"warden_namespace": "team-payments/orders/",
+		"warden_metadata":  map[string]string{"username": "alice"},
+		"warden_resource":  "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
 	}, claims)
 }
 
@@ -77,8 +81,11 @@ func TestActorProfile_Claims_NestsUserChain(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, map[string]any{
-		"sub": "agent-checkout-7",
-		"iss": "https://warden.example.com",
+		"sub":              "agent-checkout-7",
+		"iss":              "https://warden.example.com",
+		"warden_namespace": "team-payments/",
+		"warden_role":      "orders-reader",
+		"warden_metadata":  map[string]string{"team": "payments", "env": "prod"},
 		"act": map[string]any{
 			"sub": "broker-beta",
 			"iss": "https://idp.example.com",
@@ -109,7 +116,7 @@ func TestActorProfile_Claims_MaxDepth(t *testing.T) {
 	assert.Equal(t, []string{"agent-checkout-7", "l1", "l2", "l3", "l4"}, subs)
 }
 
-// sub moves to the top level, so listing only sub leaves nothing for warden_user;
+// sub moves to the top level, so listing only sub leaves no user metadata;
 // the claim is omitted rather than emitted empty. Metadata and resource stay opt-in.
 func TestActorProfile_Claims_OptInClaimsAbsent(t *testing.T) {
 	req := actorRequest()
@@ -121,20 +128,42 @@ func TestActorProfile_Claims_OptInClaimsAbsent(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, claims, "warden_user")
 	assert.NotContains(t, claims, "warden_metadata")
+	assert.NotContains(t, claims["act"], "warden_metadata", "absent, not emitted empty")
 	assert.NotContains(t, claims, "warden_resource")
 	assert.NotContains(t, claims, "warden_sub")
 	assert.NotContains(t, claims, "warden_auth_mount")
-	assert.NotContains(t, claims, "warden_namespace")
 }
 
-// A role-less agent (a root token) renders an empty warden_role, as default does.
+// The root namespace's path is the empty string. It is still rendered — a value a
+// verifier binds — never dropped as if the claim were absent: a verifier that read
+// a missing claim as "any namespace" would fail open.
+func TestActorProfile_Claims_RootNamespaceIsRendered(t *testing.T) {
+	req := actorRequest()
+	req.Identity.NamespacePath = ""
+	req.User.NamespacePath = ""
+
+	claims, err := ActorProfile{}.Claims(req)
+	require.NoError(t, err)
+	require.Contains(t, claims, "warden_namespace")
+	assert.Equal(t, "", claims["warden_namespace"])
+	act := claims["act"].(map[string]any)
+	require.Contains(t, act, "warden_namespace")
+	assert.Equal(t, "", act["warden_namespace"])
+}
+
+// A role-less agent (a root token) renders an empty act.warden_role, as default
+// does. The role is the agent's, so it never appears at the top level, where it
+// would read as the subject's.
 func TestActorProfile_Claims_RoleLessAgent(t *testing.T) {
 	req := actorRequest()
 	req.Identity.RoleName = ""
 
 	claims, err := ActorProfile{}.Claims(req)
 	require.NoError(t, err)
-	assert.Equal(t, "", claims["warden_role"])
+	act := claims["act"].(map[string]any)
+	require.Contains(t, act, "warden_role")
+	assert.Equal(t, "", act["warden_role"])
+	assert.NotContains(t, claims, "warden_role")
 }
 
 // Claims re-runs the identity checks, so a caller that skipped the setup-time
@@ -187,7 +216,7 @@ func TestActorProfile_Claims_Pure(t *testing.T) {
 	firstAct := first["act"].(map[string]any)
 	firstAct["sub"] = "tampered"
 	firstAct["act"].(map[string]any)["sub"] = "tampered"
-	first["warden_user"].(map[string]string)["username"] = "tampered"
+	first["warden_metadata"].(map[string]string)["username"] = "tampered"
 
 	assert.NotContains(t, second, "injected")
 	assert.Equal(t, "agent-checkout-7", second["act"].(map[string]any)["sub"])

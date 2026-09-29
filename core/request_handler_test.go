@@ -3529,8 +3529,8 @@ func TestResolveExchangeInputs_AWSProfile(t *testing.T) {
 }
 
 // TestResolveExchangeInputs_ActorProfile drives the actor profile through the real
-// setup and issuer: both principals by their raw ids (no Warden namespace or mount
-// anywhere), and the user token's own act chain nested beneath the agent.
+// setup and issuer: both principals by their raw ids, each with its own namespace
+// path and no auth mount, and the user token's own act chain nested beneath the agent.
 func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
@@ -3546,7 +3546,7 @@ func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 		NamespacePath: "team-payments/", MountAccessor: "auth_jwt_1", RoleName: "orders-reader",
 	}
 	userTE := &logical.TokenEntry{
-		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2",
+		PrincipalID: "alice", NamespaceID: "ns1", NamespacePath: "team-payments/", MountAccessor: "auth_oidc_2",
 		Metadata: map[string]string{"username": "alice"},
 		Actors: []logical.ActorRef{
 			{Subject: "broker-beta", Issuer: "https://idp.example"},
@@ -3567,19 +3567,22 @@ func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 
 	assert.Equal(t, "alice", claims["sub"], "sub is the USER's raw principal, with no Warden namespace or mount")
 	assert.Equal(t, map[string]any{
-		"sub": "agent-checkout-7",
-		"iss": "https://warden-oidc.example",
+		"sub":              "agent-checkout-7",
+		"iss":              "https://warden-oidc.example",
+		"warden_namespace": "team-payments/",
+		"warden_role":      "orders-reader",
 		"act": map[string]any{
 			"sub": "broker-beta",
 			"iss": "https://idp.example",
 			"act": map[string]any{"sub": "agents/alpha"},
 		},
 	}, claims["act"])
-	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_user"])
-	assert.Equal(t, "orders-reader", claims["warden_role"])
+	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_metadata"], "the user's claims, without sub")
+	assert.NotContains(t, claims, "warden_user", "renamed to warden_metadata at the user's level")
+	assert.NotContains(t, claims, "warden_role", "the role is the agent's, so it is in act")
 	assert.NotContains(t, claims, "warden_sub")
 	assert.NotContains(t, claims, "warden_auth_mount")
-	assert.NotContains(t, claims, "warden_namespace")
+	assert.Equal(t, "team-payments/", claims["warden_namespace"], "the user's namespace qualifies sub")
 
 	// The token entry's chain was copied, not aliased, into the assertion request.
 	assert.Equal(t, "broker-beta", userTE.Actors[0].Subject)
