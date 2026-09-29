@@ -16,32 +16,49 @@ const ActorProfileName = "actor"
 // Every other profile names the agent as sub and, at most, describes the user in
 // warden_user. A verifier that expects the RFC 8693 form (whose authority is used in
 // sub, who is exercising it in act) could only get that from a real token exchange.
-// Warden already authenticates both principals on one request, so this profile lets
-// its own assertion carry the delegation directly. The name follows the IETF Actor
-// Profile draft (draft-mcguinness-oauth-actor-profile), which specifies this act
-// structure.
+// Warden already authenticates both principals on one request — the agent's own
+// credential, and the user token the agent presents, validated by the mount's user
+// auth method — so this profile lets its own assertion carry the delegation
+// directly. The name follows the IETF Actor Profile draft
+// (draft-mcguinness-oauth-actor-profile), which specifies this act structure.
 //
-//   - sub is the USER's composite "wid:{nsID}:{mountAccessor}:{principalID}".
-//     Composite, not the raw principal, because the user can log in through a
-//     different auth mount than the agent: a raw id is unique only within its mount,
-//     and an issuer's sub must be unique within the issuer. The composite also gives a
-//     verifier a mount-pinnable prefix.
-//   - act.sub is the AGENT's composite, and act.iss is Warden's issuer URL — the
-//     context act.sub is interpreted in. RFC 8693 permits the member; the Actor
-//     Profile draft requires it.
-//   - When the user's own token carried a verified act chain, that chain is nested
-//     under the agent as PRIOR actors, oldest innermost (RFC 8693 §4.1). Each layer is
-//     re-emitted as the IdP attested it at login — sub, plus iss only when that layer
-//     had one — never rewritten or filled in. These subs are the IdP's own ids, not
-//     Warden composites. Per RFC 8693, a verifier applies access control only to the
-//     top-level claims and the current actor; nested actors are informational.
-//   - warden_role (the agent's role), warden_namespace, and the opt-in
-//     warden_metadata (the agent's) and warden_resource render as in default.
-//     warden_user renders the projected user claims WITHOUT sub (sub is now the
-//     top-level claim) and is omitted when sub was the only key listed.
-//   - Dropped relative to default: warden_sub (it is inside act.sub) and
-//     warden_auth_mount (each subject already carries its own mount, and one claim
-//     would be ambiguous about whose mount it names).
+// Both principals are named by their RAW ids, never by Warden's composite
+// "wid:{nsID}:{mountAccessor}:{principalID}". Neither is an identity Warden issues:
+// each presented a credential its own IdP or trust root issued, and a Warden auth
+// mount validated it. Which namespace and mount did the validating is Warden's own
+// wiring, of no concern to the upstream, which knows each party by the id its IdP
+// issued. The consequence is that each id is unique only as far as the operator
+// makes it: an audience reachable by principals validated against different IdPs
+// needs a claim unique across them (the auth role's user_claim), or the audiences
+// kept apart. Cache keys are unaffected: they are built from the composite, which is
+// finer than what is rendered.
+//
+//   - sub is the USER's principal: the id the user's IdP asserted in the token the
+//     agent presented, as the auth role's user_claim selects it — the same value
+//     {{user.sub}} templates.
+//   - act.sub is the AGENT's principal, and act.iss is Warden's issuer URL: the
+//     context both ids are vouched for in, as the top-level iss is for sub. RFC 8693
+//     permits act.iss; the Actor Profile draft requires it.
+//   - When the user token carried a verified act chain, that chain is nested under
+//     the agent as PRIOR actors, oldest innermost (RFC 8693 §4.1). Each layer is
+//     re-emitted as the IdP attested it — sub, plus iss only when that layer had one
+//     — never rewritten or filled in. Per RFC 8693, a verifier applies access control
+//     only to the top-level claims and the current actor; nested actors are
+//     informational.
+//   - warden_role, the agent's role, renders as in default: it is the authorization
+//     context the request was admitted under, which an upstream may bind. So do the
+//     opt-in warden_metadata (the agent's) and warden_resource. warden_user renders
+//     the projected user claims WITHOUT sub (it would repeat the top-level sub) and is
+//     omitted when sub was the only key listed.
+//   - Dropped relative to default: warden_sub (it is act.sub), and the Warden wiring
+//     the raw ids leave out — warden_namespace and warden_auth_mount.
+//
+// The delegation act asserts is established by the POLICY LAYER, not by this
+// profile: the agent's policies are evaluated before the assertion is minted, and a
+// CEL condition there is what binds the agent to the user (IdP-attested, via a
+// mapped act.sub on the user token, or operator-decided). This profile renders the
+// pair that policy admitted; without a binding condition, any agent the policy
+// authorizes may pair with any valid user token.
 //
 // Two refusals, in CheckIdentities, which the core runs while it resolves the
 // request's assertion — before any cache lookup:
@@ -54,7 +71,8 @@ const ActorProfileName = "actor"
 //     and that opt-in already requires a user — so this check is the backstop for
 //     a caller that bypassed that gate.
 //
-// The deepest act this renders is 1 + the login-time chain bound (4).
+// The deepest act this renders is 1 + the chain bound applied when a token is
+// authenticated (4).
 //
 // THIS SHAPE IS FROZEN once shipped, like every profile's: verifiers bind to it. A
 // different delegation shape ships as a new profile name.
@@ -121,16 +139,15 @@ func (p ActorProfile) Claims(req credential.AssertionRequest) (map[string]any, e
 	}
 
 	claims := map[string]any{
-		"iss":              req.Issuer,
-		"sub":              req.User.WardenSubject(),
-		"aud":              req.Audience,
-		"iat":              req.IssuedAt.Unix(),
-		"nbf":              req.NotBefore.Unix(),
-		"exp":              req.ExpiresAt.Unix(),
-		"jti":              req.JTI,
-		"act":              actClaim(req.Issuer, req.Identity, req.User.Actors),
-		"warden_role":      req.Identity.RoleName,
-		"warden_namespace": req.Identity.NamespacePath,
+		"iss":         req.Issuer,
+		"sub":         req.User.PrincipalID,
+		"aud":         req.Audience,
+		"iat":         req.IssuedAt.Unix(),
+		"nbf":         req.NotBefore.Unix(),
+		"exp":         req.ExpiresAt.Unix(),
+		"jti":         req.JTI,
+		"act":         actClaim(req.Issuer, req.Identity.PrincipalID, req.User.Actors),
+		"warden_role": req.Identity.RoleName,
 	}
 	if len(req.Metadata) > 0 {
 		claims["warden_metadata"] = req.Metadata
@@ -147,7 +164,7 @@ func (p ActorProfile) Claims(req credential.AssertionRequest) (map[string]any, e
 // actClaim builds the act claim: the agent as current actor, with the user token's
 // chain nested beneath it as prior actors. prior is outermost-first, so the nesting
 // is built innermost-out.
-func actClaim(issuer string, agent credential.AssertionIdentity, prior []credential.AssertionActor) map[string]any {
+func actClaim(issuer, agent string, prior []credential.AssertionActor) map[string]any {
 	var inner map[string]any
 	for i := len(prior) - 1; i >= 0; i-- {
 		layer := map[string]any{"sub": prior[i].Subject}
@@ -161,7 +178,7 @@ func actClaim(issuer string, agent credential.AssertionIdentity, prior []credent
 	}
 
 	act := map[string]any{
-		"sub": agent.WardenSubject(),
+		"sub": agent,
 		"iss": issuer,
 	}
 	if inner != nil {

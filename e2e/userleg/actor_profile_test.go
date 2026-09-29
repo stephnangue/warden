@@ -97,28 +97,17 @@ func setupActorProfile(t *testing.T) {
 	t.Cleanup(func() { restoreEnv(t) })
 }
 
-// authAccessor reads an auth mount's accessor, the third segment of a Warden
-// composite subject. Read live: setup regenerates accessors on every run.
-func authAccessor(t *testing.T, mount string) string {
-	t.Helper()
-	status, body := h.APIRequest(t, "GET", "sys/auth/"+mount, leaderPort, "")
-	if status != http.StatusOK {
-		t.Fatalf("read sys/auth/%s: status %d: %s", mount, status, body)
-	}
-	return h.JSONString(t, body, "data.accessor")
-}
-
 // TestActorProfile_VaultBindsUserAsSubAndAgentAsAct: Vault accepts the login only
 // because /act/iss is where the profile puts it, and the token it issues records
-// the USER's composite (on the user's own mount) as sub and the AGENT's composite
-// as the current actor.
+// the USER's raw principal as sub and the AGENT's as the current actor — each the id
+// Hydra put in the token that party presented, with no Warden namespace or mount.
 func TestActorProfile_VaultBindsUserAsSubAndAgentAsAct(t *testing.T) {
 	setupActorProfile(t)
 
 	agentJWT := h.GetDefaultJWT(t)
 	userJWT := h.UserJWT(t)
-	wantSubject := fmt.Sprintf("wid:root:%s:%s", authAccessor(t, "user-jwt"), h.JWTSubject(t, userJWT))
-	wantActor := fmt.Sprintf("wid:root:%s:%s", authAccessor(t, "jwt"), h.JWTSubject(t, agentJWT))
+	wantSubject := h.JWTSubject(t, userJWT)
+	wantActor := h.JWTSubject(t, agentJWT)
 
 	status, body := h.DoRequest(t, "GET",
 		h.NodeURL(leaderPort)+"/v1/"+h.UserLegMount+"/gateway/v1/auth/token/lookup-self",
@@ -132,10 +121,10 @@ func TestActorProfile_VaultBindsUserAsSubAndAgentAsAct(t *testing.T) {
 	}
 
 	if got := h.JSONString(t, body, "data.meta.delegated_subject"); got != wantSubject {
-		t.Errorf("Vault read sub = %q, want the user's composite %q", got, wantSubject)
+		t.Errorf("Vault read sub = %q, want the user's raw principal %q", got, wantSubject)
 	}
 	if got := h.JSONString(t, body, "data.meta.current_actor"); got != wantActor {
-		t.Errorf("Vault read /act/sub = %q, want the agent's composite %q", got, wantActor)
+		t.Errorf("Vault read /act/sub = %q, want the agent's raw principal %q", got, wantActor)
 	}
 }
 

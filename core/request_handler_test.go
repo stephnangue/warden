@@ -3529,8 +3529,8 @@ func TestResolveExchangeInputs_AWSProfile(t *testing.T) {
 }
 
 // TestResolveExchangeInputs_ActorProfile drives the actor profile through the real
-// setup and issuer: the user's composite as sub (built from the USER's mount), the
-// agent's composite as act.sub, and the user token's own act chain nested beneath.
+// setup and issuer: both principals by their raw ids (no Warden namespace or mount
+// anywhere), and the user token's own act chain nested beneath the agent.
 func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
@@ -3565,9 +3565,9 @@ func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 	require.NoError(t, err)
 	claims := decodeAssertionClaims(t, tok)
 
-	assert.Equal(t, "wid:ns1:auth_oidc_2:alice", claims["sub"], "sub is the USER's composite, on the user's mount")
+	assert.Equal(t, "alice", claims["sub"], "sub is the USER's raw principal, with no Warden namespace or mount")
 	assert.Equal(t, map[string]any{
-		"sub": "wid:ns1:auth_jwt_1:agent-checkout-7",
+		"sub": "agent-checkout-7",
 		"iss": "https://warden-oidc.example",
 		"act": map[string]any{
 			"sub": "broker-beta",
@@ -3579,6 +3579,7 @@ func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 	assert.Equal(t, "orders-reader", claims["warden_role"])
 	assert.NotContains(t, claims, "warden_sub")
 	assert.NotContains(t, claims, "warden_auth_mount")
+	assert.NotContains(t, claims, "warden_namespace")
 
 	// The token entry's chain was copied, not aliased, into the assertion request.
 	assert.Equal(t, "broker-beta", userTE.Actors[0].Subject)

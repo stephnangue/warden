@@ -10,9 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// actorRequest is fixedRequest with the user principal disclosed: alice, logged in
-// through a DIFFERENT auth mount than the agent, so the test would catch a sub built
-// from the agent's mount.
+// actorRequest is fixedRequest with the user principal disclosed: alice, whose token
+// the agent presented and a DIFFERENT auth mount than the agent's validated. The
+// user's namespace and mount are populated so the exact-set test would catch either
+// leaking into the assertion.
 func actorRequest() credential.AssertionRequest {
 	req := fixedRequest()
 	req.Audience = "https://orders.internal.example.com"
@@ -37,29 +38,29 @@ func TestActorProfile_Metadata(t *testing.T) {
 }
 
 // TestActorProfile_Claims_ExactSet pins the exact frozen shape with no prior actors:
-// the user's composite as sub, the agent's composite + Warden's iss as act, and
-// warden_user without sub.
+// both principals by their raw ids — no Warden namespace or mount anywhere, though
+// the request carries both for each — Warden's iss in act, and warden_user without
+// sub.
 func TestActorProfile_Claims_ExactSet(t *testing.T) {
 	claims, err := ActorProfile{}.Claims(actorRequest())
 	require.NoError(t, err)
 
 	assert.Equal(t, map[string]any{
 		"iss": "https://warden.example.com",
-		"sub": "wid:ns-3f2a1b:auth_oidc_77aa:alice@example.com",
+		"sub": "alice@example.com",
 		"aud": "https://orders.internal.example.com",
 		"iat": int64(1755248400),
 		"nbf": int64(1755248370),
 		"exp": int64(1755248700),
 		"jti": "a3d9f0c2-8b41-4e77-9f2a-1c6b5e0d4a88",
 		"act": map[string]any{
-			"sub": "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7",
+			"sub": "agent-checkout-7",
 			"iss": "https://warden.example.com",
 		},
-		"warden_role":      "orders-reader",
-		"warden_namespace": "team-payments/",
-		"warden_metadata":  map[string]string{"team": "payments", "env": "prod"},
-		"warden_user":      map[string]string{"username": "alice"},
-		"warden_resource":  "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
+		"warden_role":     "orders-reader",
+		"warden_metadata": map[string]string{"team": "payments", "env": "prod"},
+		"warden_user":     map[string]string{"username": "alice"},
+		"warden_resource": "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
 	}, claims)
 }
 
@@ -76,7 +77,7 @@ func TestActorProfile_Claims_NestsUserChain(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, map[string]any{
-		"sub": "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7",
+		"sub": "agent-checkout-7",
 		"iss": "https://warden.example.com",
 		"act": map[string]any{
 			"sub": "broker-beta",
@@ -88,7 +89,8 @@ func TestActorProfile_Claims_NestsUserChain(t *testing.T) {
 	}, claims["act"])
 }
 
-// The deepest chain login keeps (4 layers) renders 5 act objects, in order.
+// The deepest chain kept when a token is authenticated (4 layers) renders 5 act
+// objects, in order.
 func TestActorProfile_Claims_MaxDepth(t *testing.T) {
 	req := actorRequest()
 	req.User.Actors = []credential.AssertionActor{
@@ -104,7 +106,7 @@ func TestActorProfile_Claims_MaxDepth(t *testing.T) {
 		subs = append(subs, layer["sub"].(string))
 		layer, _ = layer["act"].(map[string]any)
 	}
-	assert.Equal(t, []string{"wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7", "l1", "l2", "l3", "l4"}, subs)
+	assert.Equal(t, []string{"agent-checkout-7", "l1", "l2", "l3", "l4"}, subs)
 }
 
 // sub moves to the top level, so listing only sub leaves nothing for warden_user;
@@ -122,6 +124,7 @@ func TestActorProfile_Claims_OptInClaimsAbsent(t *testing.T) {
 	assert.NotContains(t, claims, "warden_resource")
 	assert.NotContains(t, claims, "warden_sub")
 	assert.NotContains(t, claims, "warden_auth_mount")
+	assert.NotContains(t, claims, "warden_namespace")
 }
 
 // A role-less agent (a root token) renders an empty warden_role, as default does.
@@ -187,7 +190,7 @@ func TestActorProfile_Claims_Pure(t *testing.T) {
 	first["warden_user"].(map[string]string)["username"] = "tampered"
 
 	assert.NotContains(t, second, "injected")
-	assert.Equal(t, "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7", second["act"].(map[string]any)["sub"])
+	assert.Equal(t, "agent-checkout-7", second["act"].(map[string]any)["sub"])
 	assert.Equal(t, "broker-beta", second["act"].(map[string]any)["act"].(map[string]any)["sub"])
 
 	// Inputs are untouched: sub is stripped from a COPY of the user claims.
