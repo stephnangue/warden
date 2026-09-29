@@ -58,7 +58,7 @@ func setupActorProfile(t *testing.T) {
 		"bound_claims":{"/act/iss":%q},
 		"user_claim":"sub",
 		"claim_mappings":{
-			"sub":"delegated_subject","warden_namespace":"subject_namespace",
+			"sub":"delegated_subject","warden_namespace":"subject_namespace","warden_role":"subject_role",
 			"/act/sub":"current_actor","/act/warden_namespace":"actor_namespace",
 			"/act/warden_role":"actor_role"},
 		"token_policies":["e2e-secrets-reader"],
@@ -132,6 +132,9 @@ func TestActorProfile_VaultBindsUserAsSubAndAgentAsAct(t *testing.T) {
 	}
 	if got := h.JSONString(t, body, "data.meta.actor_role"); got != actorAgentRole {
 		t.Errorf("Vault read /act/warden_role = %q, want the agent's role %q", got, actorAgentRole)
+	}
+	if got := h.JSONString(t, body, "data.meta.subject_role"); got != h.UserLegAuthRole {
+		t.Errorf("Vault read warden_role = %q, want the user auth role %q", got, h.UserLegAuthRole)
 	}
 
 	// Both principals are in the root namespace, whose path is the empty string. It

@@ -40,9 +40,9 @@ func TestActorProfile_Metadata(t *testing.T) {
 
 // TestActorProfile_Claims_ExactSet pins the exact frozen shape with no prior actors:
 // both principals by their raw ids, each paired with its OWN namespace path (the
-// user's at the top level, the agent's in act), the agent's role and metadata in
-// act, no auth mount anywhere, Warden's iss in act, and the user's claims without
-// sub as the top-level warden_metadata.
+// user's at the top level, the agent's in act), each with its own role, the agent's
+// metadata in act and the user's claims without sub as the top-level
+// warden_metadata, no auth mount anywhere, and Warden's iss in act.
 func TestActorProfile_Claims_ExactSet(t *testing.T) {
 	claims, err := ActorProfile{}.Claims(actorRequest())
 	require.NoError(t, err)
@@ -63,6 +63,7 @@ func TestActorProfile_Claims_ExactSet(t *testing.T) {
 			"warden_metadata":  map[string]string{"team": "payments", "env": "prod"},
 		},
 		"warden_namespace": "team-payments/orders/",
+		"warden_role":      "users",
 		"warden_metadata":  map[string]string{"username": "alice"},
 		"warden_resource":  "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
 	}, claims)
@@ -152,8 +153,7 @@ func TestActorProfile_Claims_RootNamespaceIsRendered(t *testing.T) {
 }
 
 // A role-less agent (a root token) renders an empty act.warden_role, as default
-// does. The role is the agent's, so it never appears at the top level, where it
-// would read as the subject's.
+// does — and the top-level warden_role stays the USER's, never the agent's.
 func TestActorProfile_Claims_RoleLessAgent(t *testing.T) {
 	req := actorRequest()
 	req.Identity.RoleName = ""
@@ -163,7 +163,7 @@ func TestActorProfile_Claims_RoleLessAgent(t *testing.T) {
 	act := claims["act"].(map[string]any)
 	require.Contains(t, act, "warden_role")
 	assert.Equal(t, "", act["warden_role"])
-	assert.NotContains(t, claims, "warden_role")
+	assert.Equal(t, "users", claims["warden_role"])
 }
 
 // Claims re-runs the identity checks, so a caller that skipped the setup-time

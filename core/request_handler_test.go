@@ -3547,6 +3547,7 @@ func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 	}
 	userTE := &logical.TokenEntry{
 		PrincipalID: "alice", NamespaceID: "ns1", NamespacePath: "team-payments/", MountAccessor: "auth_oidc_2",
+		RoleName: "users",
 		Metadata: map[string]string{"username": "alice"},
 		Actors: []logical.ActorRef{
 			{Subject: "broker-beta", Issuer: "https://idp.example"},
@@ -3579,7 +3580,7 @@ func TestResolveExchangeInputs_ActorProfile(t *testing.T) {
 	}, claims["act"])
 	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_metadata"], "the user's claims, without sub")
 	assert.NotContains(t, claims, "warden_user", "renamed to warden_metadata at the user's level")
-	assert.NotContains(t, claims, "warden_role", "the role is the agent's, so it is in act")
+	assert.Equal(t, "users", claims["warden_role"], "the top-level role is the user's; the agent's is in act")
 	assert.NotContains(t, claims, "warden_sub")
 	assert.NotContains(t, claims, "warden_auth_mount")
 	assert.Equal(t, "team-payments/", claims["warden_namespace"], "the user's namespace qualifies sub")

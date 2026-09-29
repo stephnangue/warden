@@ -1190,10 +1190,10 @@ var assertionRosters = map[string]profileRoster{
 	profiles.ActorProfileName: {
 		// No warden_sub (it is act.sub), no warden_user (it is the top-level
 		// warden_metadata) and no warden_auth_mount (Warden wiring the raw ids leave
-		// out). The agent's role, namespace and metadata are inside act.
+		// out). The agent's own role, namespace and metadata are inside act.
 		claims: []string{
 			"act", "aud", "exp", "iat", "iss", "jti", "nbf", "sub",
-			"warden_metadata", "warden_namespace", "warden_resource",
+			"warden_metadata", "warden_namespace", "warden_resource", "warden_role",
 		},
 		coverage: map[string]string{
 			"iss": "volatile/constant by design",
@@ -1215,6 +1215,9 @@ var assertionRosters = map[string]profileRoster{
 			"act": "the agent's principal and namespace via cacheIdentity's first fragment " +
 				"(wardenSubject), its role via the \"role=\" fragment, its metadata via the " +
 				"metadata fingerprint, the nested user chain via the \":u:\" token-id dimension",
+			// The USER's role, fixed for the life of the user's token entry — a
+			// transparent user token's id hashes the role name.
+			"warden_role": "the \":u:\" token-id dimension on the manager's cache keys (the user's role)",
 			// The USER's namespace, fixed for the life of the user's token entry.
 			"warden_namespace": "the \":u:\" token-id dimension on the manager's cache keys (the user's namespace)",
 			"warden_resource":  "cacheIdentity's \"res=\" fragment",

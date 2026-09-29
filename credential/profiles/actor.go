@@ -49,18 +49,22 @@ const ActorProfileName = "actor"
 //     agent presented, as the auth role's user_claim selects it — the same value
 //     {{user.sub}} templates.
 //   - warden_namespace is the USER's namespace — the request's — which qualifies sub.
+//   - warden_role is the USER's role: the auth role the presented user token was
+//     validated under (the mount's user auth role). It is not an authorization role
+//     — the user grants the request no permissions — but it names which population
+//     of users the id belongs to, which an upstream may bind.
 //   - warden_metadata is the USER's projected claims (assertion_user_claims) WITHOUT
 //     sub, which would repeat the top-level sub; omitted when sub was the only key
 //     listed. The name is the one the agent's metadata carries in act: each level of
 //     the token describes its own principal with the same claims — sub,
-//     warden_namespace, warden_metadata — so the top level is the user and act is the
-//     agent. (In default, where the agent is the subject, the user's claims are
+//     warden_namespace, warden_role, warden_metadata — so the top level is the user
+//     and act is the agent. (In default, where the agent is the subject, the user's claims are
 //     warden_user instead.)
 //   - act.sub is the AGENT's principal, act.warden_namespace the agent's namespace,
 //     which qualifies it, and act.iss is Warden's issuer URL: the context both ids
 //     are vouched for in, as the top-level iss is for sub. act.warden_role is the
 //     role the agent was admitted under — the authorization context an upstream may
-//     bind — and it sits in act because it is the agent's, not the subject's. A
+//     bind — and it sits in act because it is the agent's. A
 //     role-less agent (a root token) renders it empty, as default does.
 //     act.warden_metadata is the agent's projected login metadata, opt-in as in
 //     default — in act for the same reason. RFC 8693 permits identity members such
@@ -171,6 +175,7 @@ func (p ActorProfile) Claims(req credential.AssertionRequest) (map[string]any, e
 		"jti":              req.JTI,
 		"act":              actClaim(req.Issuer, req.Identity, req.Metadata, req.User.Actors),
 		"warden_namespace": req.User.NamespacePath,
+		"warden_role":      req.User.RoleName,
 	}
 	if user := userClaimsWithoutSub(req.UserClaims); len(user) > 0 {
 		claims["warden_metadata"] = user
