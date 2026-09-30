@@ -101,8 +101,11 @@ curl -H "Authorization: Bearer <jwt>" \
 - **Default 120s timeout.** Long generations close to the limit may
   fail at the proxy level; chunk requests with smaller `max_tokens`.
 - **`OpenAI-Organization` / `OpenAI-Project` headers** are injected
-  only when the operator configured them on the credential. You can
-  also override per-request.
+  only when the operator configured them on the credential. Any you
+  send are stripped, so you cannot override them per request.
+- **Keyless roles send neither header.** A role backed by workload
+  identity federation injects a short-lived token bound to one service
+  account, whose organization and project are fixed by that binding.
 - **Streaming responses (SSE)** pass through unchanged — usable from
   the OpenAI SDK's `stream=true` mode.
 

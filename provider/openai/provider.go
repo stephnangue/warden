@@ -9,28 +9,49 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
-// openaiCredentialExtractor extracts api_key (as Bearer), organization_id, and project_id.
+// openaiCredentialExtractor injects the credential as an Authorization bearer.
+//
+// An API key (api_key) carries the organization and project it should bill to, and
+// sends them as OpenAI-Organization / OpenAI-Project when set. A federated token
+// (oauth_bearer_token) sends the bearer alone: it is issued for one service
+// account, which already belongs to one project in one organization, so a header
+// naming another would assert the binding twice and let the two disagree. Both
+// headers are stripped from the client's request either way.
 func openaiCredentialExtractor(req *logical.Request) (map[string]string, error) {
 	if req.Credential == nil {
 		return nil, fmt.Errorf("no credential available")
 	}
-	if req.Credential.Type != credential.TypeAPIKey {
+
+	switch req.Credential.Type {
+	case credential.TypeAPIKey:
+		apiKey := req.Credential.Data["api_key"]
+		if apiKey == "" {
+			return nil, fmt.Errorf("credential missing api_key field")
+		}
+		headers := map[string]string{
+			"Authorization": "Bearer " + apiKey,
+		}
+		if orgID := req.Credential.Data["organization_id"]; orgID != "" {
+			headers["OpenAI-Organization"] = orgID
+		}
+		if projectID := req.Credential.Data["project_id"]; projectID != "" {
+			headers["OpenAI-Project"] = projectID
+		}
+		return headers, nil
+
+	case credential.TypeOAuthBearerToken:
+		// api_key is this type's primary field too. A source that returns the
+		// token as access_token is normalised onto api_key when the credential
+		// is parsed, so there is only ever the one name to read here.
+		token := req.Credential.Data["api_key"]
+		if token == "" {
+			return nil, fmt.Errorf("credential missing bearer token (api_key, or access_token as the source returned it)")
+		}
+		return map[string]string{"Authorization": "Bearer " + token}, nil
+
+	default:
 		return nil, fmt.Errorf("unsupported credential type: %s", req.Credential.Type)
 	}
-	apiKey := req.Credential.Data["api_key"]
-	if apiKey == "" {
-		return nil, fmt.Errorf("credential missing api_key field")
-	}
-	headers := map[string]string{
-		"Authorization": "Bearer " + apiKey,
-	}
-	if orgID := req.Credential.Data["organization_id"]; orgID != "" {
-		headers["OpenAI-Organization"] = orgID
-	}
-	if projectID := req.Credential.Data["project_id"]; projectID != "" {
-		headers["OpenAI-Project"] = projectID
-	}
-	return headers, nil
 }
 
 // DefaultOpenAIURL is the default OpenAI API base URL
@@ -63,6 +84,13 @@ Warden performs implicit authentication on every request and obtains an
 OpenAI API key from the credential manager, injecting it into the proxied
 request's Authorization header. This allows Warden to broker OpenAI access
 without exposing API keys to clients.
+
+For keyless access, bind the role to a spec on an openai credential source:
+Warden then exchanges a Warden-signed identity assertion for a short-lived
+OpenAI access token through workload identity federation, and injects that
+token instead. No OpenAI key is stored. A federated token is bound to its
+service account's organization and project, so no OpenAI-Organization or
+OpenAI-Project header is sent with it.
 
 The gateway path format is:
   /openai/gateway/{api-path}
