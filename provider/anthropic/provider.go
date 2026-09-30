@@ -135,6 +135,7 @@ var Spec = &httpproxy.ProviderSpec{
 	OnConfigRead:        onConfigRead,
 	OnInitialize:        onInitialize,
 	ValidateExtraConfig: validateExtraConfig,
+	RenderGatewayError:  renderAnthropicError,
 }
 
 // Factory creates a new Anthropic provider backend.
