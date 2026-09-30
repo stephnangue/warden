@@ -71,3 +71,12 @@ func TestRegisteredProviderSpecsValid(t *testing.T) {
 		})
 	}
 }
+
+// TestMCPKeepsWardenGatewayErrors pins that the mcp spec does not render gateway
+// failures. Its policy-deny and header-mismatch answers are shaped by the HTTP
+// layer from the error core returns, and a rendered response would replace that
+// error — so they survive only while mcp declines. Rendering MCP failures as
+// JSON-RPC errors would be its own decision, made here.
+func TestMCPKeepsWardenGatewayErrors(t *testing.T) {
+	assert.Nil(t, mcp.Spec.RenderGatewayError)
+}

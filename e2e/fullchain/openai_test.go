@@ -576,6 +576,35 @@ func TestOpenAI_WIFRejectedExchangeFailsClosed(t *testing.T) {
 	if assertion := grants[0]["subject_token"]; assertion != "" && strings.Contains(string(body), assertion) {
 		t.Error("the error returned to the caller carries the assertion")
 	}
+	// In OpenAI's error shape, so the caller's SDK surfaces the reason.
+	assertOpenAIError(t, body, "warden_credential_refused")
+}
+
+// assertOpenAIError checks a gateway failure came back in OpenAI's error shape,
+// with Warden's code and a message marked as Warden's — what an OpenAI SDK
+// decodes and shows its caller.
+func assertOpenAIError(t *testing.T, body []byte, wantCode string) {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Message string  `json:"message"`
+			Type    string  `json:"type"`
+			Param   *string `json:"param"`
+			Code    string  `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("body is not OpenAI's error shape: %v: %s", err, body)
+	}
+	if env.Error.Code != wantCode {
+		t.Errorf("error.code = %q, want %q: %s", env.Error.Code, wantCode, body)
+	}
+	if env.Error.Type == "" {
+		t.Errorf("error.type is empty: %s", body)
+	}
+	if !strings.HasPrefix(env.Error.Message, "Warden: ") {
+		t.Errorf("error.message = %q, want it marked as Warden's", env.Error.Message)
+	}
 }
 
 // TestOpenAI_WIFBearerRidesAStreamedCompletion drives the call the mount exists
