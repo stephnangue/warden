@@ -98,6 +98,9 @@ func TestMain(m *testing.M) {
 	if anthropicOAuth != nil {
 		anthropicOAuth.Close()
 	}
+	if openaiOAuth != nil {
+		openaiOAuth.Close()
+	}
 	if ovhS3 != nil {
 		ovhS3.Close()
 	}
