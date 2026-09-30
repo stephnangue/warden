@@ -34,8 +34,23 @@ import (
 const ConfigAssertionProfile = "assertion_profile"
 
 // DefaultAssertionProfileName is the profile an unset ConfigAssertionProfile
-// selects. It reproduces the historical claim set exactly.
+// selects.
 const DefaultAssertionProfileName = "default"
+
+// RootNamespaceClaim is the value an assertion claim carries for the root
+// namespace, whose path is the empty string. It cannot collide with any other
+// namespace: every non-root path ends in "/". A claim renders it rather than "" so a
+// verifier binds a value, and never mistakes the root namespace for an absent claim.
+const RootNamespaceClaim = "root"
+
+// NamespaceClaim renders a namespace path as an assertion claim value: the path
+// verbatim, or RootNamespaceClaim for the root namespace.
+func NamespaceClaim(path string) string {
+	if path == "" {
+		return RootNamespaceClaim
+	}
+	return path
+}
 
 // reservedAssertionProfileNames are names that can never be registered as a
 // profile: sibling values, in spec or source config, that already name an assertion
@@ -119,6 +134,21 @@ type AssertionIdentity struct {
 	NamespacePath string
 	// MountAccessor identifies the auth mount, Warden-generated and delimiter-free.
 	MountAccessor string
+	// Actors is the verified RFC 8693 "act" chain the principal's own token carried
+	// at login, outermost (current) actor first; nil when it carried none. A fresh
+	// copy per request, but READ-ONLY to the profile all the same, since one request
+	// can mint concurrently.
+	Actors []AssertionActor
+}
+
+// AssertionActor is one layer of a principal's RFC 8693 "act" chain, as its IdP
+// attested it at login.
+type AssertionActor struct {
+	// Subject is the layer's "sub", in the IdP's namespace — never a Warden composite.
+	Subject string
+	// Issuer is the layer's "iss" when the inbound layer carried one, else empty. A
+	// profile re-emitting the chain passes it through as-is and never fills it in.
+	Issuer string
 }
 
 // WardenSubject builds the globally-unique subject of a minted assertion:
@@ -160,6 +190,11 @@ type AssertionRequest struct {
 	// UserClaims is the projected user claim map, always carrying "sub" when
 	// non-empty. READ-ONLY to the profile, for the same reason as Metadata.
 	UserClaims map[string]string
+	// User is the secondary (user) principal the agent acts for. It is set under the
+	// same opt-in as UserClaims — the spec lists assertion_user_claims — and is nil
+	// otherwise, so a spec that discloses no user never exposes one to a profile.
+	// READ-ONLY to the profile, for the same reason as Metadata.
+	User *AssertionIdentity
 }
 
 // AssertionProfile renders an AssertionRequest into the claim set of a
@@ -194,6 +229,11 @@ type AssertionProfile interface {
 	// assertion_metadata_claims even when the profile drops those claims: both also
 	// drive {{user.*}} / {{agent.*}} request templating, so rejecting them would
 	// break specs that do not care about the assertion at all.
+	//
+	// It may also REQUIRE configuration the shape cannot exist without — which
+	// token slot the assertion fills (subject vs actor), or an opt-in such as
+	// assertion_user_claims that supplies an input the profile renders. Requiring a
+	// key is not rejecting it: the spec stays free to use it for templating.
 	ValidateSpec(config Config) error
 }
 
@@ -207,6 +247,22 @@ type AssertionProfile interface {
 // not mandatory on any spec.
 type AssertionProfileSourcePinned interface {
 	SourceTypes() []string
+}
+
+// AssertionProfileIdentityChecker is an optional capability: a profile that cannot
+// truthfully render some pair of principals refuses it per request. Discovered by
+// type assertion, like AssertionProfileSourcePinned.
+//
+// It runs when the request's assertion is set up, BEFORE any cache lookup, and not
+// only at mint. The chained-secret cache is keyed on identity and shared across an
+// agent's sessions by design, so a check made only at mint would be skipped on a
+// cache hit: whether a request was refused would then depend on which session
+// happened to fill the cache first. Claims should still re-check, as defence in
+// depth.
+//
+// user is nil when the spec discloses no user. Both arguments are read-only.
+type AssertionProfileIdentityChecker interface {
+	CheckIdentities(agent AssertionIdentity, user *AssertionIdentity) error
 }
 
 // ValidateAssertionProfileConfig validates a spec's ConfigAssertionProfile against

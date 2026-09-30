@@ -98,7 +98,7 @@ func (AWSProfile) SourceTypes() []string { return []string{credential.SourceType
 // means "derive", which is invisible to a config-only check, and the profile simply
 // ignores the derived value.
 //
-// It never rejects assertion_user_claims: this profile does not render warden_user,
+// It never rejects assertion_user_claims: this profile does not render the user,
 // but that key also drives {{user.<claim>}} request templating on AWS specs.
 func (AWSProfile) ValidateSpec(config credential.Config) error {
 	if err := rejectExplicitResource(AWSProfileName, config); err != nil {

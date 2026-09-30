@@ -1519,9 +1519,9 @@ func agentTemplateClaims(projected map[string]string, principalID string) map[st
 }
 
 // projectUserClaims selects the operator-allowlisted keys from the secondary
-// (user) principal's login-derived metadata for the nested warden_user assertion
-// claim and for per-user secret_path templating. Unlike projectAssertionMetadata it
-// FAILS CLOSED on an absent key: warden_user scopes a security-sensitive downstream
+// (user) principal's login-derived metadata for the assertion's user level and for
+// per-user secret_path templating. Unlike projectAssertionMetadata it FAILS CLOSED
+// on an absent key: the user's claims scope a security-sensitive downstream
 // path (a templated policy / a per-user secret path), so a named-but-missing claim
 // must deny rather than silently widen the scope. Returns the projected map, which
 // is empty-key → nil.
@@ -1598,7 +1598,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 	}
 
 	// The secondary (user) principal, when the request captured one, feeds the
-	// warden_user assertion claim and per-user secret_path templating. Read from the
+	// assertion's user level and per-user secret_path templating. Read from the
 	// request — the same object the chaining closure captures, so it is present for a
 	// chained secret-spec too.
 	var userTE *logical.TokenEntry
@@ -1639,7 +1639,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// identity as the subject (Workload Identity Federation) — Warden signed it.
 		// Minted lazily on a cache miss; fails closed if the issuer is
 		// disabled/not-ready or no audience is available.
-		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, loadSource)
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, assertionSubjectSlot, loadSource)
 		if err != nil {
 			return nil, err
 		}
@@ -1651,8 +1651,9 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// with no coalescing), so they are READ-ONLY from here on. The profile
 		// interface documents the profile's half of that contract; this is core's.
 		// Surface the projected user claims so the driver can template a per-user
-		// request (e.g. kv2_read's secret_path) — the same projection embedded in the
-		// assertion's warden_user claim. Nil unless the spec set assertion_user_claims.
+		// request (e.g. kv2_read's secret_path) — the same projection the assertion's
+		// user level carries when the user is disclosed to it. Nil unless the spec set
+		// assertion_user_claims.
 		inputs.UserClaims = setup.userClaims
 		inputs.AgentClaims = setup.agentClaims
 	default:
@@ -1677,8 +1678,10 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// Delegation: Warden signs the agent as the RFC 8693 actor (act), acting on
 		// behalf of the user carried in the user_identity subject (spec validation
 		// requires subject_token_source=user_identity here). Minted lazily on a cache
-		// miss, like the subject assertion.
-		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, loadSource)
+		// miss, like the subject assertion. The actor slot never discloses the user
+		// to the profile: the token service builds act from this token's sub, so it
+		// must name the agent.
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, assertionActorSlot, loadSource)
 		if err != nil {
 			return nil, err
 		}
@@ -1711,19 +1714,31 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 type assertionSetup struct {
 	cacheIdentity string
 	resolve       func(ctx context.Context) (string, error)
-	// userClaims is the projected assertion_user_claims map (the same values
-	// embedded in the assertion's warden_user claim), surfaced so the driver can
-	// template a per-user path from them. Nil when the spec sets no
-	// assertion_user_claims.
+	// userClaims is the projected assertion_user_claims map, surfaced so the driver
+	// can template a per-user path from them. It is set whenever the spec lists
+	// assertion_user_claims — including when the user is NOT disclosed to the
+	// assertion (the actor slot, a sub-only verifier's source) — so templating never
+	// depends on the claim shape. Nil when the spec sets no assertion_user_claims.
 	userClaims map[string]string
 	// agentClaims is the primary principal's template map: the projected
-	// assertion_metadata_claims plus "sub" (the raw principal). Every value is
-	// already embedded in the assertion — warden_metadata and warden_sub — and
+	// assertion_metadata_claims plus "sub" (the raw principal). The metadata is
+	// what the assertion's agent level carries as warden_metadata, and the raw
+	// principal is the trailing segment of the agent's composite sub; both are
 	// already inside cacheIdentity, via mdFingerprint and wardenSubject
 	// respectively, so templating from it discloses nothing the assertion does not
 	// and needs no cache dimension of its own. Never nil: "sub" is unconditional.
 	agentClaims map[string]string
 }
+
+// assertionSlot is which token of an exchange a Warden assertion fills. It decides
+// whether a user can be disclosed to the profile: only the subject token may name
+// the user, since the actor token must name the party acting.
+type assertionSlot int
+
+const (
+	assertionSubjectSlot assertionSlot = iota
+	assertionActorSlot
+)
 
 // resolveAssertionProfile maps a spec's assertion_profile name onto a registered
 // profile, failing closed on a name this build does not have.
@@ -1750,9 +1765,10 @@ func (c *Core) resolveAssertionProfile(name string) (credential.AssertionProfile
 // buildAssertionSetup validates the OIDC issuer is ready and derives the
 // audience, resource, and projected metadata for a warden_identity assertion of
 // te, returning a stable cache fragment (identity + audience [+ role]
-// [+ resource] [+ metadata]) and a lazy mint closure. It is source-type agnostic, so the same
-// setup serves a WIF subject (the agent IS the identity) and a delegation actor
-// (the agent acts for the subject-header user). loadSource is passed in so the
+// [+ resource] [+ metadata]) and a lazy mint closure. The same setup serves a WIF
+// subject (the agent IS the identity) and a delegation actor (the agent acts for
+// the subject-header user); slot says which, and — with the source's type — decides
+// whether the user is disclosed to the profile. loadSource is passed in so the
 // spec's source is fetched at most once per request across both slots.
 //
 // It fails closed if the issuer is disabled/not-ready or no audience can be
@@ -1760,7 +1776,7 @@ func (c *Core) resolveAssertionProfile(name string) (credential.AssertionProfile
 // derived from the source; resource is unset→derived, "none"→omitted, else
 // verbatim; metadata is the operator-allowlisted projection (empty→no claim, so
 // the cache key is byte-identical to the no-metadata case).
-func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *credential.CredSpec, te *logical.TokenEntry, userTE *logical.TokenEntry, loadSource func() (*credential.CredSource, error)) (*assertionSetup, error) {
+func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *credential.CredSpec, te *logical.TokenEntry, userTE *logical.TokenEntry, slot assertionSlot, loadSource func() (*credential.CredSource, error)) (*assertionSetup, error) {
 	issuer := c.OIDCIssuer()
 	if issuer == nil || !issuer.Ready() {
 		return nil, fmt.Errorf("spec %q requires warden_identity but the OIDC issuer is not enabled/ready", specName)
@@ -1820,29 +1836,38 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 
 	// The same projection serves the assertion claim and {{agent.<claim>}}
 	// templating, so a template resolves exactly the value a downstream policy can
-	// bind — the property the user side states below for warden_user.
+	// bind — the property the user side states below for the user's claims.
 	agentClaims := agentTemplateClaims(projected, te.PrincipalID)
 
-	// Project the secondary (user) principal into the nested warden_user claim, but
-	// only when the spec opts into disclosure via assertion_user_claims — like
-	// assertion_metadata_claims, a spec that does not ask never leaks user identity
-	// into its assertion. When it asks, a user principal MUST be present and every
-	// named claim MUST resolve; both fail closed, since warden_user scopes a
-	// security-sensitive downstream path. userClaims (the projected values) is
-	// surfaced on the setup so a driver can template a per-user path from it; the
-	// assertion's warden_user additionally carries the user's original sub (the raw
-	// principal, as warden_sub does for the agent — never the Warden composite).
+	// Project the secondary (user) principal, but only when the spec opts in via
+	// assertion_user_claims — like assertion_metadata_claims, a spec that does not
+	// ask never leaks user identity into its assertion. When it asks, a user
+	// principal MUST be present and every named claim MUST resolve; both fail
+	// closed, since the user's claims scope a security-sensitive downstream path.
+	// userClaims (the projected values plus the user's raw principal as "sub") is
+	// surfaced on the setup so a driver can template a per-user path from it.
 	// Per-user cache isolation is the manager's ":u:" token-id dimension, so the
 	// user does not enter cacheIdentity here.
+	//
+	// The same opt-in can also DISCLOSE the user to the profile (userIdentity:
+	// namespace, mount, principal, role and the user token's own verified act
+	// chain), which makes the user the assertion's subject and the agent its
+	// actor. It is disclosed only for the subject slot — an actor token must name
+	// the agent, since the token service builds act from its sub — and only when
+	// the source's verifier can bind claims beyond iss, sub and aud
+	// (subOnlyVerifierSources): the user's raw id needs its warden_namespace bound
+	// beside it to be a tenant boundary. Withheld, the assertion keeps the agent's
+	// composite sub, and userClaims still drives templating. Projected once, here,
+	// and snapshotted into the mint closure.
 	var userClaims map[string]string
+	var userIdentity *credential.AssertionIdentity
 	if userKeys := credential.AssertionUserClaimKeys(spec.Config); len(userKeys) > 0 {
 		if userTE == nil {
 			return nil, fmt.Errorf("spec %q sets assertion_user_claims: %w", specName, credential.ErrUserRequired)
 		}
 		// "sub" names the user's identity principal, not a metadata key — exclude it
-		// from the metadata projection so an operator can list it (to bind
-		// warden_user.sub / template {{user.sub}}) without needing a metadata key
-		// literally named "sub". Listing only "sub" yields an identity-only warden_user.
+		// from the metadata projection so an operator can list it (to template
+		// {{user.sub}}) without needing a metadata key literally named "sub".
 		metaKeys := make([]string, 0, len(userKeys))
 		for _, k := range userKeys {
 			if k != "sub" {
@@ -1853,14 +1878,36 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 		if perr != nil {
 			return nil, fmt.Errorf("spec %q: %w", specName, perr)
 		}
-		// One warden_user map serves BOTH the assertion claim and secret_path
-		// templating, so {{user.sub}} templates exactly the value the policy binds.
-		// The identity sub (the raw principal) is authoritative and set last.
+		// One map serves BOTH the assertion's user level and secret_path templating,
+		// so {{user.sub}} templates exactly the value a verifier binds as sub. The
+		// identity sub (the raw principal) is authoritative and set last.
 		userClaims = make(map[string]string, len(projectedUser)+1)
 		for k, v := range projectedUser {
 			userClaims[k] = v
 		}
 		userClaims["sub"] = userTE.PrincipalID
+
+		if slot == assertionSubjectSlot {
+			src, err := loadSource()
+			if err != nil {
+				return nil, err
+			}
+			if !subOnlyVerifierSources[src.Type] {
+				uid := identityFromTokenEntry(userTE)
+				userIdentity = &uid
+			}
+		}
+	}
+
+	// A profile that cannot truthfully render this pair of principals refuses it
+	// here, before cacheIdentity exists and so before any cache lookup. Refusing
+	// only at mint would be skipped on a cache hit: the chained-secret cache is
+	// identity-keyed and shared across an agent's sessions, so a session the
+	// profile must refuse could be served what an acceptable session cached.
+	if checker, ok := profile.(credential.AssertionProfileIdentityChecker); ok {
+		if err := checker.CheckIdentities(identityFromTokenEntry(te), userIdentity); err != nil {
+			return nil, fmt.Errorf("spec %q: assertion profile %q: %w", specName, profile.Name(), err)
+		}
 	}
 
 	// Key the credential cache on the stable identity + audience, NOT the
@@ -1901,11 +1948,15 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// ONE fragment is enough, and it is worth saying why. Every input a profile can
 	// read is already fingerprinted: identity and audience directly, role via
 	// "role=", resource via "res=", projected metadata via mdFingerprint, and the
-	// user via the Manager's ":u:" token-id dimension. A profile only changes how
-	// those are RENDERED, so its name is the single new degree of freedom. Should a
-	// later profile ever read something outside that set, it needs a fragment of its
-	// own — that is the moment to give the interface a CacheFragment method, not
-	// before.
+	// user via the Manager's ":u:" token-id dimension. That last one covers the
+	// user's whole IDENTITY, not just its claims: namespace, mount, principal and
+	// act chain are all fixed for the life of the user's token entry, and a
+	// transparent user token's id hashes the very credential the act chain was read
+	// from. (The agent's own act chain is read only to refuse, never rendered, so it
+	// keys nothing.) A profile only changes how those are RENDERED, so its name is
+	// the single new degree of freedom. Should a later profile ever read something
+	// outside that set, it needs a fragment of its own — that is the moment to give
+	// the interface a CacheFragment method, not before.
 	//
 	// This reaches every cache mechanically, with nothing further to remember:
 	// cacheIdentity becomes inputs.Subject/ActorCacheIdentity, which
@@ -1966,6 +2017,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 				Metadata:   projected,
 				Resource:   resource,
 				UserClaims: userClaims,
+				User:       userIdentity,
 				Profile:    profile,
 			})
 		},
@@ -2038,7 +2090,7 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	// revoking or expiring EITHER stops new mints. The user TTL is computed exactly
 	// like the agent's above (1h default for a non-expiring token; expired is an
 	// error). The user's identity/metadata are read from req.User where they are
-	// consumed (the warden_user assertion), not duplicated here.
+	// consumed (the assertion's user level), not duplicated here.
 	var userCtx *credential.UserContext
 	if req.User != nil && req.User.TokenEntry != nil {
 		ute := req.User.TokenEntry

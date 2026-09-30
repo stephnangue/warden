@@ -57,6 +57,33 @@ func agentIdentityNote(specs []credential.PlannedSpec) []credential.Prerequisite
 	}}
 }
 
+// delegationNote is rendered when some specs mint delegation tokens: a
+// warden_identity subject on the default profile with assertion_user_claims set.
+// Their sub is the user's raw id — not tenant-qualified like the agent's composite —
+// so the verifier must bind warden_namespace beside it; bind says how, for this
+// verifier.
+func delegationNote(specs []credential.PlannedSpec, env credential.TrustEnv, bind string) []credential.Prerequisite {
+	var names []string
+	for _, s := range specs {
+		if usesWardenIdentity(s.Config) &&
+			credential.AssertionProfileName(s.Config) == credential.DefaultAssertionProfileName &&
+			len(credential.AssertionUserClaimKeys(s.Config)) > 0 {
+			names = append(names, s.Name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return []credential.Prerequisite{{
+		Title:  "Delegation specs",
+		Where:  strings.Join(names, ", "),
+		Format: "text",
+		Body: "These specs set assertion_user_claims, so their assertions are RFC 8693 delegation tokens: sub is the user's own id " +
+			"and act.sub the agent's " + env.SubjectPrefix + "<mount_accessor>:<principal_id>. A user id is not tenant-qualified, " +
+			"so bind warden_namespace = \"" + env.NamespaceClaim + "\" together with it: " + bind,
+	}}
+}
+
 // subjectPattern is the subject every agent of the namespace presents, up to
 // the mount and principal: "wid:<namespace>:*".
 func subjectPattern(env credential.TrustEnv) string {
@@ -280,7 +307,9 @@ func (f *VaultDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 			"vault write auth/%s/config \\\n  jwks_url=%q \\\n  bound_issuer=%q\n"+
 			"vault write auth/%s/role/%s - <<'EOF'\n%s\nEOF",
 			mount, mount, env.JWKSURL, env.IssuerURL, mount, role, roleBody),
-	}}, agentIdentityNote(specs)...)
+	}}, append(agentIdentityNote(specs), delegationNote(specs, env,
+		"give them their own JWT role (jwt_role on the spec) with user_claim \"sub\" and "+
+			"bound_claims {\"warden_namespace\": \""+env.NamespaceClaim+"\"}, since their sub no longer matches the agents' pattern.")...)...)
 }
 
 // ============================================================================
@@ -491,7 +520,10 @@ func (f *GCPDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 			"With no --allowed-audiences the provider accepts its own resource name, which is the audience Warden derives.\n" +
 			"attribute.warden_role maps a claim the minimal assertion profile does not carry; drop that mapping for specs using it.",
 	})
-	return append(prereqs, agentIdentityNote(specs)...)
+	prereqs = append(prereqs, agentIdentityNote(specs)...)
+	return append(prereqs, delegationNote(specs, env,
+		"widen the attribute condition to \"assertion.sub.startsWith('"+env.SubjectPrefix+"') || "+
+			"assertion.warden_namespace == '"+env.NamespaceClaim+"'\" and map attribute.warden_namespace=assertion.warden_namespace.")...)
 }
 
 // parseWIFProvider splits
@@ -569,7 +601,9 @@ jwt:
 			Body: "--authentication-config cannot be combined with the --oidc-* flags. Agents authenticate as users " +
 				"\"warden:" + env.SubjectPrefix + "<mount_accessor>:<principal_id>\"; bind RBAC roles to those users.",
 		},
-	}, agentIdentityNote(specs)...)
+	}, append(agentIdentityNote(specs), delegationNote(specs, env,
+		"widen the claim validation rule to 'claims.sub.startsWith(\""+env.SubjectPrefix+"\") || "+
+			"claims.warden_namespace == \""+env.NamespaceClaim+"\"'. Delegated users then authenticate as \"warden:<user id>\".")...)...)
 }
 
 // ============================================================================

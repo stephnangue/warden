@@ -364,10 +364,10 @@ type AssertionClaims struct {
 	TTL time.Duration
 	// Alg selects the signing key/algorithm (e.g. RS256, ES256).
 	Alg string
-	// Metadata is the projected login metadata offered to the profile. Under the
-	// DEFAULT profile it is embedded under a single nested "warden_metadata" claim
-	// (never splatted at the top level, so it cannot clobber a registered or
-	// warden_* claim); another profile may render it elsewhere or drop it. The
+	// Metadata is the agent's projected login metadata offered to the profile. Under
+	// the DEFAULT profile it is embedded under a single nested "warden_metadata"
+	// claim at the agent's level (never splatted, so it cannot clobber a registered
+	// or warden_* claim); another profile may render it elsewhere or drop it. The
 	// caller chooses and bounds what it contains: the assertion crosses a trust
 	// boundary, so only operator-allowlisted, size-capped attributes should reach
 	// this point.
@@ -376,19 +376,22 @@ type AssertionClaims struct {
 	// claim naming the single downstream resource the assertion targets, so a
 	// verifier evaluating bound claims can pin it to one resource. Opaque string.
 	Resource string
-	// UserClaims identifies the secondary (user) principal the agent acts on behalf
-	// of — its identity "sub" plus operator-allowlisted, size-capped attributes.
-	//
-	// Under the DEFAULT profile it is embedded under a single nested "warden_user"
-	// claim, nested (never splatted at the top level) so it cannot clobber a
-	// registered or warden_* claim, and the assertion `sub` stays the AGENT — a
-	// verifier's templated policy scopes the authorized path on warden_user,
-	// keeping the agent binding. How the two principals are arranged is the
-	// PROFILE's decision, not this struct's: a profile may instead promote the user
-	// to `sub` and move the agent to an RFC 8693 `act` claim.
+	// UserClaims are the secondary (user) principal's projected claims — its
+	// identity "sub" plus operator-allowlisted, size-capped attributes. They are set
+	// whenever the spec lists assertion_user_claims, including when the user is NOT
+	// disclosed (User nil), so a profile must decide what to render from User, never
+	// from UserClaims. Under the DEFAULT profile, with User set, they become the
+	// user level's warden_metadata (minus sub); with User nil they are not rendered.
 	UserClaims map[string]string
-	// Profile selects the claim SHAPE. A nil Profile selects the default profile,
-	// which reproduces the historical claim set exactly.
+	// User is the user principal's identity (namespace, mount, principal, role and
+	// its own verified act chain), DISCLOSED to the profile only for the subject
+	// slot of a spec that lists assertion_user_claims on a source whose verifier
+	// can bind claims beyond iss, sub and aud; nil otherwise. A profile that renders
+	// the user as a principal reads it from here: the DEFAULT profile then names the
+	// user as sub and moves the agent to an RFC 8693 act claim. Projected once per
+	// request, off the signing path.
+	User *credential.AssertionIdentity
+	// Profile selects the claim SHAPE. A nil Profile selects the default profile.
 	//
 	// The nil fallback is compatibility, not fail-open: a spec naming a profile this
 	// build does not have fails closed in buildAssertionSetup, before any cache
@@ -482,6 +485,7 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 		Metadata:   c.Metadata,
 		Resource:   c.Resource,
 		UserClaims: c.UserClaims,
+		User:       c.User,
 	}
 
 	claims, err := profile.Claims(req)
@@ -500,13 +504,25 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 // identityFromTokenEntry projects a token entry onto the plain identity struct a
 // profile renders. It exists because package credential cannot import logical
 // (logical imports credential), so the profile interface must not name TokenEntry.
+//
+// The act chain is COPIED, so a profile can never alias the token entry's slice,
+// which the token cache shares across requests. The copy is made only when a chain
+// exists, so the common path allocates nothing.
 func identityFromTokenEntry(te *logical.TokenEntry) credential.AssertionIdentity {
+	var actors []credential.AssertionActor
+	if len(te.Actors) > 0 {
+		actors = make([]credential.AssertionActor, len(te.Actors))
+		for i, a := range te.Actors {
+			actors[i] = credential.AssertionActor{Subject: a.Subject, Issuer: a.Issuer}
+		}
+	}
 	return credential.AssertionIdentity{
 		PrincipalID:   te.PrincipalID,
 		RoleName:      te.RoleName,
 		NamespaceID:   te.NamespaceID,
 		NamespacePath: te.NamespacePath,
 		MountAccessor: te.MountAccessor,
+		Actors:        actors,
 	}
 }
 

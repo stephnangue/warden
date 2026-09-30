@@ -268,7 +268,7 @@ func setupKMSAssertionChain(t *testing.T, stsURL, signingAlg string) {
 	// broad role the same mount already carries.
 	mustVault("POST", "auth/jwt-warden/role/"+kmsSignerRole, fmt.Sprintf(`{
 		"role_type":"jwt","bound_audiences":["https://vault.e2e.warden"],
-		"bound_claims":{"warden_sub":["%s","%s"]},"user_claim":"warden_sub",
+		"bound_claims_type":"glob","bound_claims":{"sub":["wid:root:*:%s","wid:root:*:%s"]},"user_claim":"sub",
 		"token_policies":["%s"],"token_type":"batch","token_ttl":"120s"}`,
 		txAgentA, txAgentB, kmsSignerPolicy),
 		"create the narrow signing role")

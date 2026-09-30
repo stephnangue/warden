@@ -551,7 +551,7 @@ func TestValidateExchangeSpecConfig_AssertionUserClaimsGate(t *testing.T) {
 	})); err == nil {
 		t.Fatal("whitespace-only assertion_user_claims must be rejected")
 	}
-	// Rejected: a non-minting subject cannot carry warden_user.
+	// Rejected: a non-minting subject cannot disclose the user.
 	err := ValidateExchangeSpecConfig(NewConfig(map[string]string{
 		ConfigSubjectTokenSource:  SourceAgentIdentity,
 		ConfigAssertionUserClaims: "username",

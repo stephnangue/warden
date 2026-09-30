@@ -249,9 +249,10 @@ func TestKeylessLeftovers_RevealNothingMasked(t *testing.T) {
 }
 
 var testTrustEnv = credential.TrustEnv{
-	IssuerURL:     "https://warden.example.com",
-	JWKSURL:       "https://warden.example.com/oidc/jwks",
-	SubjectPrefix: "wid:root:",
+	IssuerURL:      "https://warden.example.com",
+	JWKSURL:        "https://warden.example.com/oidc/jwks",
+	SubjectPrefix:  "wid:root:",
+	NamespaceClaim: "root",
 }
 
 // The rendered JSON bodies parse, and carry the issuer, the audience and the
@@ -320,6 +321,32 @@ func TestKeylessPrerequisites_Shapes(t *testing.T) {
 		var policy map[string]any
 		require.NoError(t, json.Unmarshal([]byte(prereqs[1].Body), &policy))
 		assert.Contains(t, prereqs[1].Body, `"oidc:sub"`)
+	})
+
+	// A spec that discloses a user mints delegation tokens whose sub is the user's
+	// raw id, so each verifier that can bind claims is told to bind warden_namespace
+	// beside it. A spec on another profile, or filling the actor slot, is not listed.
+	t.Run("delegation specs are told to bind warden_namespace", func(t *testing.T) {
+		specs := []credential.PlannedSpec{
+			{Name: "as-user", Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_user_claims": "sub"})},
+			{Name: "as-user-minimal", Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity", "assertion_user_claims": "sub", "assertion_profile": "minimal"})},
+			{Name: "actor-slot", Config: credential.NewConfig(map[string]string{"subject_token_source": "user_identity", "actor_token_source": "warden_identity", "assertion_user_claims": "sub"})},
+			{Name: "agent-only", Config: credential.NewConfig(map[string]string{"subject_token_source": "warden_identity"})},
+		}
+		for name, prereqs := range map[string][]credential.Prerequisite{
+			"vault":      (&VaultDriverFactory{}).KeylessPrerequisites(credential.NewConfig(map[string]string{"audience": "a"}), specs, testTrustEnv),
+			"gcp":        (&GCPDriverFactory{}).KeylessPrerequisites(credential.NewConfig(map[string]string{}), specs, testTrustEnv),
+			"kubernetes": (&KubernetesDriverFactory{}).KeylessPrerequisites(credential.NewConfig(map[string]string{"audience": "k"}), specs, testTrustEnv),
+		} {
+			note := prereqs[len(prereqs)-1]
+			assert.Equal(t, "as-user", note.Where, name)
+			assert.Contains(t, note.Body, `warden_namespace = "root"`, name)
+		}
+
+		none := (&VaultDriverFactory{}).KeylessPrerequisites(credential.NewConfig(map[string]string{"audience": "a"}), specs[1:], testTrustEnv)
+		for _, p := range none {
+			assert.NotEqual(t, "Delegation specs", p.Title)
+		}
 	})
 
 	t.Run("agent_identity specs are pointed at their own issuer", func(t *testing.T) {

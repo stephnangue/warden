@@ -337,7 +337,7 @@ func TestScaleway_InboundAuthorizationNeverReachesUpstream(t *testing.T) {
 // The agent leg is a JWT rather than the usual certificate: agent_identity
 // forwards that JWT as the exchange subject and fails closed on a
 // cert-authenticated request, and warden_identity needs the principal to be
-// e2e-agent to match the Vault role's bound warden_sub.
+// e2e-agent to match the Vault role's bound sub, wid:root:*:e2e-agent.
 func TestScaleway_DynamicKeysChainMintsWithVaultHeldManagementKey(t *testing.T) {
 	ensureEnv(t)
 	useJWTAgentLeg(t, scalewayEnv)

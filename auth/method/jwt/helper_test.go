@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/logical"
+
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -599,6 +601,30 @@ func TestExtractActChain_NestedChain(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.Equal(t, "broker-beta", got[0].Subject)
 	assert.Equal(t, "agents/alpha", got[1].Subject)
+}
+
+func TestExtractActChain_Issuer(t *testing.T) {
+	// A layer's iss is kept only when it is a non-empty string, and never
+	// defaulted from the token's own iss: an assertion that re-emits the chain
+	// must pass through exactly what the IdP attested.
+	claims := map[string]interface{}{
+		"iss": "https://token-issuer.example.com",
+		"sub": "alice",
+		"act": map[string]interface{}{
+			"sub": "broker-beta",
+			"iss": "https://idp.example.com",
+			"act": map[string]interface{}{
+				"sub": "agents/alpha",
+				"iss": 42, // non-string: dropped, the layer itself is kept
+				"act": map[string]interface{}{"sub": "agents/root"},
+			},
+		},
+	}
+	got := extractActChain(claims)
+	require.Len(t, got, 3)
+	assert.Equal(t, logical.ActorRef{Subject: "broker-beta", Issuer: "https://idp.example.com"}, got[0])
+	assert.Equal(t, logical.ActorRef{Subject: "agents/alpha"}, got[1])
+	assert.Equal(t, logical.ActorRef{Subject: "agents/root"}, got[2])
 }
 
 func TestExtractActChain_NonObjectAct(t *testing.T) {

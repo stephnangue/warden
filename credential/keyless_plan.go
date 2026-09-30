@@ -90,6 +90,11 @@ type TrustEnv struct {
 	// SubjectPrefix is the fixed start of every subject this namespace's
 	// agents present, "wid:<namespace>:"; the mount and principal follow.
 	SubjectPrefix string
+
+	// NamespaceClaim is the warden_namespace value a delegation token carries for
+	// this namespace's users: the namespace path, or "root" for the root namespace.
+	// A user's sub is its raw id, so a verifier binds this beside it.
+	NamespaceClaim string
 }
 
 // Prerequisite is one piece of upstream configuration a keyless source needs.

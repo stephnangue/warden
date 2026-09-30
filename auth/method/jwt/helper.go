@@ -170,14 +170,17 @@ func extractMetadata(claims map[string]interface{}, claimMappings map[string]str
 // flat verified actor list. Returns nil when no "act" claim is present.
 // Terminates without erroring on malformed layers (non-object, missing
 // "sub", non-string "sub") and on chains deeper than maxActChainDepth.
+// A layer's "iss" is kept only when it is a non-empty string; it is never
+// defaulted to the token's own iss.
 //
 // Example input:
 //
-//	{"act": {"sub": "broker-beta", "act": {"sub": "agents/alpha"}}}
+//	{"act": {"sub": "broker-beta", "iss": "https://idp.example.com",
+//	         "act": {"sub": "agents/alpha"}}}
 //
 // Example output:
 //
-//	[{Subject: "broker-beta"},
+//	[{Subject: "broker-beta", Issuer: "https://idp.example.com"},
 //	 {Subject: "agents/alpha"}]
 func extractActChain(claims map[string]interface{}) []logical.ActorRef {
 	var actors []logical.ActorRef
@@ -195,7 +198,8 @@ func extractActChain(claims map[string]interface{}) []logical.ActorRef {
 		if !ok || sub == "" {
 			break // malformed: layer must carry a non-empty string sub
 		}
-		actors = append(actors, logical.ActorRef{Subject: sub})
+		iss, _ := act["iss"].(string)
+		actors = append(actors, logical.ActorRef{Subject: sub, Issuer: iss})
 		current = act
 	}
 	return actors

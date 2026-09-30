@@ -132,15 +132,17 @@ func splitClaimKeys(raw string) []string {
 }
 
 // ConfigAssertionUserClaims is the spec-config key naming which user claims to
-// project into the nested warden_user claim of a warden_identity assertion
-// (comma-separated). warden_user always carries the user's identity "sub" (the raw
-// principal); listing metadata keys additionally projects the user token's
+// project (comma-separated) for a warden_identity assertion and for {{user.*}}
+// request templating. The projection always carries the user's identity "sub" (the
+// raw principal); listing metadata keys additionally projects the user token's
 // login-derived metadata under those names. It scopes a security-sensitive
 // downstream path (a templated Vault policy / a per-user secret_path), so — unlike
 // assertion_metadata_claims — a named-but-absent metadata claim FAILS CLOSED. It is
-// opt-in: absent/empty emits NO warden_user claim (a spec that does not ask never
-// discloses the user); when set it must name at least one claim — list "sub" alone
-// for an identity-only warden_user. Valid only when subject_token_source=warden_identity.
+// opt-in: absent/empty discloses no user (a spec that does not ask never does);
+// when set it must name at least one claim — list "sub" alone for identity only.
+// Under the default profile, a set value makes the assertion a delegation token
+// naming the user as sub, where the core discloses the user to the profile (see
+// buildAssertionSetup). Valid only when subject_token_source=warden_identity.
 const ConfigAssertionUserClaims = "assertion_user_claims"
 
 // AssertionUserClaimKeys parses the comma-separated ConfigAssertionUserClaims value
@@ -308,7 +310,7 @@ type ExchangeInputs struct {
 	// UserClaims carries the secondary (user) principal's projected claims so a
 	// driver can scope its request per user — the kv2_read driver templates
 	// secret_path from {{user.<claim>}}. Set by core from the same projection that
-	// feeds the warden_user assertion claim. Not hashed by Fingerprint (the cache is
+	// feeds the assertion's user level. Not hashed by Fingerprint (the cache is
 	// already isolated per user by the ":u:" key dimension); nil for an agent-only
 	// request.
 	UserClaims map[string]string
@@ -477,8 +479,8 @@ func ValidateExchangeSpecConfig(config Config) error {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s', or the subject is '%s'",
 			ConfigAssertionMetadataClaims, SourceWardenIdentity, SourceAgentIdentity)
 	}
-	// Projecting user claims into the assertion's warden_user claim (which also
-	// scopes a per-user secret_path) only makes sense when Warden mints the assertion.
+	// Projecting user claims for the assertion (they also scope a per-user
+	// secret_path) only makes sense when Warden mints the assertion.
 	if raw := config.Get(ConfigAssertionUserClaims); raw != "" {
 		if !mintsAssertion {
 			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
@@ -486,8 +488,8 @@ func ValidateExchangeSpecConfig(config Config) error {
 		}
 		// A set-but-empty value (e.g. " , ") parses to zero keys and would silently
 		// disclose nothing while looking configured — reject it. "sub" is allowed: it
-		// is the identity opt-in (warden_user.sub is always the user's raw principal),
-		// projected from identity, not from metadata.
+		// is the identity opt-in (the projected "sub" is always the user's raw
+		// principal), projected from identity, not from metadata.
 		if len(AssertionUserClaimKeys(config)) == 0 {
 			return fmt.Errorf("field '%s': must name at least one claim", ConfigAssertionUserClaims)
 		}

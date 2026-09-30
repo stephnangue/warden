@@ -488,7 +488,7 @@ func TestAzureKeyVault_WardenIdentityPresentsAMintedAssertion(t *testing.T) {
 		if got, want := claims["warden_resource"], "azure-keyvault:"+azkvVault+"/"+azkvSecretName; got != want {
 			t.Errorf("assertion warden_resource = %v, want %s", got, want)
 		}
-		if _, ok := claims["warden_sub"]; !ok {
+		if _, ok := claims["warden_role"]; !ok {
 			t.Error("the default profile must still carry the warden_* claims")
 		}
 	})

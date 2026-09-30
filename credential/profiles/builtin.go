@@ -18,7 +18,8 @@ func Default() credential.AssertionProfile { return defaultProfile }
 
 // RegisterBuiltinProfiles registers all built-in assertion profiles
 func RegisterBuiltinProfiles(registry *credential.AssertionProfileRegistry) error {
-	// Register the default (historical) claim shape
+	// Register the default claim shape (the agent; the user and agent as an RFC 8693
+	// delegation when a user is disclosed)
 	if err := registry.Register(defaultProfile); err != nil {
 		return err
 	}

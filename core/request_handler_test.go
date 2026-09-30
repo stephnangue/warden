@@ -3042,9 +3042,9 @@ func parseJWTClaimsForTest(t *testing.T, token string) map[string]interface{} {
 
 // TestResolveExchangeInputs_WardenUserClaims covers the per-user federation path:
 // a warden_identity subject spec with assertion_user_claims projects the user into
-// inputs.UserClaims (for driver templating) and into the assertion's warden_user
-// claim, while the assertion's own sub stays the AGENT. It also covers the sub-only
-// opt-in and the fail-closed cases.
+// inputs.UserClaims (for driver templating) and discloses it to the assertion,
+// which under the default profile makes the user the subject and the agent its
+// actor. It also covers the sub-only opt-in and the fail-closed cases.
 func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
@@ -3062,7 +3062,7 @@ func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 	agentTE := &logical.TokenEntry{CredentialSpec: "wid-user", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1"}
 	userTE := &logical.TokenEntry{PrincipalID: "alice-sub", NamespaceID: "ns1", MountAccessor: "auth_user", Metadata: map[string]string{"username": "alice"}}
 
-	t.Run("projects user claims and emits warden_user; sub stays the agent", func(t *testing.T) {
+	t.Run("projects user claims and names the user as sub, the agent as act", func(t *testing.T) {
 		req := requestWith("s.opaque-session", nil)
 		req.User = &logical.UserPrincipal{TokenEntry: userTE}
 		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
@@ -3070,20 +3070,19 @@ func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 		require.NotNil(t, inputs)
 		// UserClaims (driver templating): projected metadata + the user's raw principal.
 		assert.Equal(t, "alice", inputs.UserClaims["username"])
-		assert.Equal(t, "alice-sub", inputs.UserClaims["sub"], "warden_user.sub is the user's raw principal")
+		assert.Equal(t, "alice-sub", inputs.UserClaims["sub"], "the projected sub is the user's raw principal")
 
 		tok, err := inputs.ResolveSubjectToken(ctx)
 		require.NoError(t, err)
 		claims := parseJWTClaimsForTest(t, tok)
-		assert.Equal(t, wardenSubject(agentTE), claims["sub"], "assertion sub stays the AGENT composite")
-		assert.Equal(t, "agent-bot", claims["warden_sub"], "warden_sub is the agent's raw principal")
-		wu, ok := claims["warden_user"].(map[string]interface{})
-		require.True(t, ok, "warden_user missing: %v", claims["warden_user"])
-		assert.Equal(t, "alice", wu["username"])
-		assert.Equal(t, "alice-sub", wu["sub"])
+		assert.Equal(t, "alice-sub", claims["sub"], "{{user.sub}} templates exactly the sub a verifier binds")
+		assert.Equal(t, map[string]interface{}{"username": "alice"}, claims["warden_metadata"])
+		act, ok := claims["act"].(map[string]interface{})
+		require.True(t, ok, "act missing: %v", claims["act"])
+		assert.Equal(t, wardenSubject(agentTE), act["sub"], "the agent, by its composite")
 	})
 
-	t.Run("sub-only opt-in yields identity-only warden_user", func(t *testing.T) {
+	t.Run("sub-only opt-in yields identity-only user claims", func(t *testing.T) {
 		subOnlyAgent := &logical.TokenEntry{CredentialSpec: "wid-subonly", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1"}
 		req := requestWith("s.opaque-session", nil)
 		req.User = &logical.UserPrincipal{TokenEntry: userTE}
@@ -3528,6 +3527,189 @@ func TestResolveExchangeInputs_AWSProfile(t *testing.T) {
 	assert.Equal(t, "JWT", header["typ"])
 }
 
+// TestResolveExchangeInputs_DefaultDelegation drives the default profile's
+// delegation shape through the real setup and issuer: the user at the top level by
+// raw id with its own namespace, the agent in act by its composite, and the user
+// token's own act chain nested beneath the agent.
+func TestResolveExchangeInputs_DefaultDelegation(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "as-user", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://orders.example/aud",
+		credential.ConfigAssertionUserClaims: "sub,username",
+	})
+
+	agentTE := &logical.TokenEntry{
+		CredentialSpec: "as-user", PrincipalID: "agent-checkout-7", NamespaceID: "ns1",
+		NamespacePath: "team-payments/", MountAccessor: "auth_jwt_1", RoleName: "orders-reader",
+	}
+	userTE := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", NamespacePath: "team-payments/", MountAccessor: "auth_oidc_2",
+		RoleName: "users",
+		Metadata: map[string]string{"username": "alice"},
+		Actors: []logical.ActorRef{
+			{Subject: "broker-beta", Issuer: "https://idp.example"},
+			{Subject: "agents/alpha"},
+		},
+	}
+
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: userTE}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+	require.NoError(t, err)
+	assert.NotContains(t, inputs.SubjectCacheIdentity, "prof=", "default keys with no profile fragment")
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+
+	assert.Equal(t, "alice", claims["sub"], "sub is the USER's raw principal, with no Warden namespace or mount")
+	assert.Equal(t, "team-payments/", claims["warden_namespace"], "the user's namespace qualifies sub")
+	assert.Equal(t, "users", claims["warden_role"], "the top-level role is the user's; the agent's is in act")
+	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_metadata"], "the user's claims, without sub")
+	assert.Equal(t, map[string]any{
+		"sub":         wardenSubject(agentTE),
+		"iss":         "https://warden-oidc.example",
+		"warden_role": "orders-reader",
+		"act": map[string]any{
+			"sub": "broker-beta",
+			"iss": "https://idp.example",
+			"act": map[string]any{"sub": "agents/alpha"},
+		},
+	}, claims["act"], "the agent by its composite, with no warden_namespace")
+	for _, gone := range []string{"warden_sub", "warden_user", "warden_auth_mount"} {
+		assert.NotContains(t, claims, gone)
+	}
+
+	// The token entry's chain was copied, not aliased, into the assertion request.
+	assert.Equal(t, "broker-beta", userTE.Actors[0].Subject)
+}
+
+// TestResolveExchangeInputs_DefaultWithholdsUser pins the two places the core does
+// NOT disclose a user to the profile although the spec lists assertion_user_claims:
+// the actor slot of a two-token exchange (the token service builds act from the
+// actor token's sub, so it must name the agent), and a source whose verifier binds
+// only iss/sub/aud (a raw user sub could not be tenant-qualified there). Both mint
+// the agent shape — composite sub, no act, no user claims — while the user's claims
+// still reach templating.
+func TestResolveExchangeInputs_DefaultWithholdsUser(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	userTE := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2", RoleName: "users",
+		Metadata: map[string]string{"username": "alice"},
+	}
+	assertAgentShape := func(t *testing.T, tok string, agent *logical.TokenEntry) {
+		t.Helper()
+		claims := decodeAssertionClaims(t, tok)
+		assert.Equal(t, wardenSubject(agent), claims["sub"], "the agent, by its composite")
+		assert.NotContains(t, claims, "act")
+		assert.NotContains(t, claims, "warden_namespace")
+		assert.NotContains(t, claims, "warden_metadata", "the user's claims are not rendered")
+	}
+
+	t.Run("actor slot of a two-token exchange", func(t *testing.T) {
+		seedExchangeSpec(t, c, ctx, "delegate", map[string]string{
+			credential.ConfigSubjectTokenSource:  credential.SourceUserIdentity,
+			credential.ConfigActorTokenSource:    credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:   "https://sts.example/aud",
+			credential.ConfigAssertionUserClaims: "sub,username",
+		})
+		agentTE := &logical.TokenEntry{CredentialSpec: "delegate", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1", RoleName: "r"}
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE, RawToken: "user-raw-cred"}
+
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+		require.NoError(t, err)
+		assert.Equal(t, "alice", inputs.UserClaims["username"], "templating still sees the user")
+		tok, err := inputs.ResolveActorToken(ctx)
+		require.NoError(t, err)
+		assertAgentShape(t, tok, agentTE)
+
+		// An agent carrying its own act chain is not refused here: no user is
+		// disclosed, so the actor token makes no delegation claim to misstate.
+		acted := *agentTE
+		acted.Actors = []logical.ActorRef{{Subject: "orchestrator"}}
+		_, err = resolveExchangeInputsForTest(c, ctx, req, &acted)
+		require.NoError(t, err)
+	})
+
+	t.Run("source whose verifier binds only sub", func(t *testing.T) {
+		require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+			Name: "aws-fed", Type: credential.SourceTypeAWS,
+			Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+		}))
+		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+			Name: "aws-as-user", Type: "vault_token", Source: "aws-fed",
+			Config: credential.NewConfig(map[string]string{
+				credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:   "sts.amazonaws.com",
+				credential.ConfigAssertionProfile:    credential.DefaultAssertionProfileName,
+				credential.ConfigAssertionUserClaims: "sub,username",
+				"mint_method":                        "secrets_manager",
+				"secret_id":                          "users/{{user.username}}",
+			}),
+		}))
+		agentTE := &logical.TokenEntry{CredentialSpec: "aws-as-user", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1", RoleName: "r"}
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE}
+
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+		require.NoError(t, err)
+		assert.Equal(t, "alice", inputs.UserClaims["username"], "templating still sees the user")
+		tok, err := inputs.ResolveSubjectToken(ctx)
+		require.NoError(t, err)
+		assertAgentShape(t, tok, agentTE)
+	})
+}
+
+// TestResolveExchangeInputs_DefaultRefusesActedAgentBeforeCache pins where the
+// agent-chain refusal happens: in setup, so resolveExchangeInputs returns no inputs,
+// and with no inputs there is no fingerprint to key a cache with. The other half —
+// that the manager resolves inputs before touching the shared chained-secret cache,
+// so a refused session is refused even when another session of the same agent has
+// filled the entry — is TestChaining_RefusedInputsNeverReachSharedCache.
+func TestResolveExchangeInputs_DefaultRefusesActedAgentBeforeCache(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "as-user", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://orders.example/aud",
+		credential.ConfigAssertionUserClaims: "sub",
+	})
+	userTE := &logical.TokenEntry{PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2"}
+	agent := func(actors []logical.ActorRef) *logical.TokenEntry {
+		return &logical.TokenEntry{
+			CredentialSpec: "as-user", PrincipalID: "agent-checkout-7", NamespaceID: "ns1",
+			MountAccessor: "auth_jwt_1", RoleName: "orders-reader", Actors: actors,
+		}
+	}
+	withUser := func() *logical.Request {
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE}
+		return req
+	}
+
+	t.Run("act-free agent session resolves", func(t *testing.T) {
+		_, err := resolveExchangeInputsForTest(c, ctx, withUser(), agent(nil))
+		require.NoError(t, err)
+	})
+
+	t.Run("same agent carrying act is refused before any cache key exists", func(t *testing.T) {
+		inputs, err := resolveExchangeInputsForTest(c, ctx, withUser(), agent([]logical.ActorRef{{Subject: "broker-x"}}))
+		require.Error(t, err)
+		assert.Nil(t, inputs, "no inputs means no fingerprint, so no cache lookup can happen")
+		assert.Contains(t, err.Error(), "act chain")
+		assert.Contains(t, err.Error(), `"default"`)
+	})
+
+	t.Run("no user principal fails closed", func(t *testing.T) {
+		_, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque-session", nil), agent(nil))
+		assert.ErrorIs(t, err, credential.ErrUserRequired)
+	})
+}
+
 // TestResolveExchangeInputs_LegacyAWSSpecMintsDefault is the upgrade guarantee at
 // mint: an AWS federated spec stored before the create-time default existed carries
 // no assertion_profile, and unset still means default at mint — so it keeps emitting
@@ -3558,7 +3740,7 @@ func TestResolveExchangeInputs_LegacyAWSSpecMintsDefault(t *testing.T) {
 	tok, err := inputs.ResolveSubjectToken(ctx)
 	require.NoError(t, err)
 	claims := decodeAssertionClaims(t, tok)
-	assert.Equal(t, "p", claims["warden_sub"], "the default shape, as before the upgrade")
+	assert.Equal(t, wardenSubject(te), claims["sub"], "the agent's composite sub, byte-identical to before the upgrade")
 	assert.Equal(t, "reader", claims["warden_role"])
 	assert.NotContains(t, claims, "https://aws.amazon.com/tags", "no session tags on a legacy spec")
 }

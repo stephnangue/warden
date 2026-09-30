@@ -194,7 +194,7 @@ func TestAWSProfile_ValidateSpec_Resource(t *testing.T) {
 	assert.Contains(t, err.Error(), "never emits warden_resource")
 }
 
-// assertion_user_claims is never rejected: this profile does not render warden_user,
+// assertion_user_claims is never rejected: this profile does not render the user,
 // but the key also drives {{user.*}} request templating on AWS specs.
 func TestAWSProfile_ValidateSpec_AcceptsUserClaims(t *testing.T) {
 	assert.NoError(t, AWSProfile{}.ValidateSpec(credential.NewConfig(map[string]string{
