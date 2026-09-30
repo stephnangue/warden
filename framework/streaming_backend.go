@@ -192,6 +192,17 @@ type StreamingBackend struct {
 	// Logger is the provider's scoped logger (set via conf.Logger.WithSubsystem).
 	Logger *logger.GatedLogger
 
+	// ProxyErrorWriter optionally writes the answer when the proxy fails — the
+	// upstream could not be reached (502), or did not answer before the
+	// request's deadline (504) — in place of the plain-text body. It returns
+	// false to fall back to that body. It is given the status only: the
+	// underlying error can name the upstream's address, so it goes to the log
+	// and never toward the client.
+	//
+	// Set it before InitProxy and never again: the proxy's error handler reads
+	// it on every failure without a lock.
+	ProxyErrorWriter func(w http.ResponseWriter, r *http.Request, status int) bool
+
 	// StorageView is the provider's storage backend for persisting configuration.
 	StorageView sdklogical.Storage
 
@@ -744,7 +755,7 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 					logger.Err(err),
 					logger.String("target_url", r.URL.String()),
 				)
-				http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+				b.writeProxyError(w, r, http.StatusGatewayTimeout)
 				return
 			}
 			// Client-side cancellation isn't a Warden error. Common
@@ -763,9 +774,18 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 				logger.Err(err),
 				logger.String("target_url", r.URL.String()),
 			)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			b.writeProxyError(w, r, http.StatusBadGateway)
 		},
 	}
+}
+
+// writeProxyError answers a failed proxy with the provider's writer when it has
+// one and it accepts, and with the plain-text status otherwise.
+func (b *StreamingBackend) writeProxyError(w http.ResponseWriter, r *http.Request, status int) {
+	if b.ProxyErrorWriter != nil && b.ProxyErrorWriter(w, r, status) {
+		return
+	}
+	http.Error(w, http.StatusText(status), status)
 }
 
 // initUnauthPaths parses UnauthenticatedPaths into radix tree + wildcard slice

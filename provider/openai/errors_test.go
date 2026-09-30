@@ -64,6 +64,22 @@ func TestRenderOpenAIError(t *testing.T) {
 			wantStatus: 400, wantType: "invalid_request_error", wantCode: "warden_invalid_request",
 		},
 		{
+			name:       "upstream timed out",
+			failure:    &logical.GatewayFailure{Class: logical.GatewayFailureUnavailable, Status: 504, Err: errors.New("the upstream did not answer within the mount's timeout")},
+			wantStatus: 504, wantType: "service_unavailable_error", wantCode: "warden_upstream_timeout",
+		},
+		{
+			name:       "upstream unreachable",
+			failure:    &logical.GatewayFailure{Class: logical.GatewayFailureUnavailable, Status: 502, Err: errors.New("the upstream could not be reached")},
+			wantStatus: 502, wantType: "service_unavailable_error", wantCode: "warden_upstream_unreachable",
+		},
+		{
+			// A credential the extractor cannot use: Warden's fault, whatever the status.
+			name:       "credential could not be applied",
+			failure:    &logical.GatewayFailure{Class: logical.GatewayFailureInternal, Status: 401, Err: errors.New("the credential could not be applied to the request")},
+			wantStatus: 401, wantType: "server_error", wantCode: "warden_internal_error",
+		},
+		{
 			// The token endpoint refused the assertion: not retryable.
 			name:       "upstream refused the credential",
 			failure:    mintFailure(http.StatusBadRequest),

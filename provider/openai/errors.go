@@ -26,6 +26,8 @@ const (
 	codeInvalidRequest        = "warden_invalid_request"
 	codeCredentialRefused     = "warden_credential_refused"
 	codeCredentialUnavailable = "warden_credential_unavailable"
+	codeUpstreamTimeout       = "warden_upstream_timeout"
+	codeUpstreamUnreachable   = "warden_upstream_unreachable"
 	codeInternal              = "warden_internal_error"
 )
 
@@ -72,6 +74,14 @@ func openaiErrorFor(class logical.GatewayFailureClass, status int) (errType, cod
 		return openaiTypeInvalidRequest, codePermissionDenied
 	case logical.GatewayFailureBadRequest:
 		return openaiTypeInvalidRequest, codeInvalidRequest
+	case logical.GatewayFailureUnavailable:
+		// Only the proxy's own failures carry this class: core raises none for a
+		// gateway request, and a mint's is classed Mint.
+		if status == http.StatusGatewayTimeout {
+			// OpenAI did not answer within the mount's timeout.
+			return openaiTypeServiceUnavailable, codeUpstreamTimeout
+		}
+		return openaiTypeServiceUnavailable, codeUpstreamUnreachable
 	case logical.GatewayFailureMint:
 		switch {
 		case status == http.StatusServiceUnavailable:

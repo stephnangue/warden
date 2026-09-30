@@ -347,6 +347,12 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 		// if conf.Config carries non-empty values.
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
+		// A spec that renders its errors answers the proxy's own failures (502,
+		// 504) the same way. Set before InitProxy: the proxy reads it unlocked.
+		if spec.RenderGatewayError != nil {
+			b.StreamingBackend.ProxyErrorWriter = b.writeProxyFailure
+		}
+
 		// Initialize reverse proxy with provider-type shared transport
 		b.StreamingBackend.InitProxy(sharedTransport)
 
