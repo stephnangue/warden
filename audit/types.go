@@ -108,7 +108,9 @@ type Auth struct {
 	CreatedByIP string `json:"created_by_ip,omitempty"`
 
 	// Actor chain — the verified RFC 8693 "act" delegation chain from the
-	// authenticated token (the JWT "act" claim per RFC 8693 §4.1).
+	// authenticated token (the JWT "act" claim per RFC 8693 §4.1). Like every
+	// field at this level, it describes the AGENT; the user token's own chain is
+	// User.Actors.
 	Actors []ActorRef `json:"actors,omitempty"`
 
 	// User is the secondary (user) principal the agent acted for, captured by
@@ -130,13 +132,29 @@ type UserAttribution struct {
 	TokenID string `json:"token_id,omitempty"`
 	// NamespaceID is the user token's namespace.
 	NamespaceID string `json:"namespace_id,omitempty"`
+	// NamespacePath is the user token's namespace path, as the agent's
+	// Auth.NamespacePath records the agent's: the stored path, so empty (and
+	// omitted) for the root namespace. A delegation assertion's warden_namespace
+	// carries the same path, rendered "root" for the root namespace.
+	NamespacePath string `json:"namespace_path,omitempty"`
+	// RoleName is the auth role the user's token was validated under (the mount's
+	// user auth role) — the warden_role a delegation assertion carries for the user.
+	RoleName string `json:"role_name,omitempty"`
+	// Actors is the user token's OWN verified RFC 8693 "act" chain, outermost
+	// first — who handled the user's token before the agent presented it. A
+	// delegation assertion nests it under the agent as prior actors. Distinct from
+	// Auth.Actors, which is the agent token's chain.
+	Actors []ActorRef `json:"actors,omitempty"`
 }
 
-// ActorRef identifies one party in the RFC 8693 "act" delegation chain
-// alongside the authenticated principal. Every actor is cryptographically
-// attested by an IdP (the JWT "act" claim), so there is no unverified variant.
+// ActorRef identifies one party in an RFC 8693 "act" delegation chain. Every actor
+// is cryptographically attested by an IdP (the JWT "act" claim), so there is no
+// unverified variant.
 type ActorRef struct {
 	Subject string `json:"subject"`
+	// Issuer is the act layer's "iss", recorded only when the inbound layer carried
+	// one — the context Subject is interpreted in.
+	Issuer string `json:"issuer,omitempty"`
 }
 
 // PolicyResults captures which policies granted access
@@ -368,6 +386,12 @@ func (e *LogEntry) Clone() *LogEntry {
 		// memory and lost on the way to disk.
 		if e.Auth.User != nil {
 			user := *e.Auth.User
+			// The struct copy shares the chain's backing array; copy it too, or
+			// devices writing the same entry would share (and could race on) it.
+			if e.Auth.User.Actors != nil {
+				user.Actors = make([]ActorRef, len(e.Auth.User.Actors))
+				copy(user.Actors, e.Auth.User.Actors)
+			}
 			clone.Auth.User = &user
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logical"
@@ -251,11 +252,37 @@ func TestStampUserAttribution(t *testing.T) {
 		assert.NotContains(t, entry.Auth.User.Subject, "wid:", "user attribution must be the raw sub, not the wid composite")
 		assert.Equal(t, userTE.ID, entry.Auth.User.TokenID)
 		assert.Equal(t, userTE.NamespaceID, entry.Auth.User.NamespaceID)
+		assert.Equal(t, "slack-user", entry.Auth.User.RoleName, "the user auth role a delegation assertion carries")
 
 		// The raw user credential must never be serialized into an audit record.
 		blob, err := json.Marshal(entry)
 		require.NoError(t, err)
 		assert.NotContains(t, string(blob), userJWT, "raw user credential must never be serialized")
+	})
+
+	// The user's namespace path and its token's own act chain, issuers included,
+	// are recorded — the namespace and prior actors a delegation assertion asserts.
+	// The chain is copied, never aliased: the token entry is shared by the cache.
+	t.Run("stamps the user's namespace path and act chain", func(t *testing.T) {
+		chained := *userTE
+		chained.NamespacePath = "team-payments/orders/"
+		chained.Actors = []logical.ActorRef{
+			{Subject: "broker-beta", Issuer: "https://idp.example.com"},
+			{Subject: "agents/alpha"},
+		}
+		req := &logical.Request{User: &logical.UserPrincipal{TokenEntry: &chained, RawToken: userJWT}}
+
+		entry := core.buildRequestAuditEntry(ctx, req, &logical.Auth{}, nil, nil)
+		require.NotNil(t, entry.Auth)
+		require.NotNil(t, entry.Auth.User)
+		assert.Equal(t, "team-payments/orders/", entry.Auth.User.NamespacePath)
+		assert.Equal(t, []audit.ActorRef{
+			{Subject: "broker-beta", Issuer: "https://idp.example.com"},
+			{Subject: "agents/alpha"},
+		}, entry.Auth.User.Actors)
+
+		entry.Auth.User.Actors[0].Subject = "modified"
+		assert.Equal(t, "broker-beta", chained.Actors[0].Subject, "the entry aliases the token entry's chain")
 	})
 
 	t.Run("no user attribution when req.User is nil", func(t *testing.T) {

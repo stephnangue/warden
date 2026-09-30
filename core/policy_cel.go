@@ -50,7 +50,7 @@ import (
 //	  request.data.<k>
 //	agent.present, agent.principal, agent.role, agent.namespace,
 //	  agent.policies (list), agent.metadata.<k>, agent.actors (list of
-//	  {subject}), agent.token_type, agent.token_ttl_seconds,
+//	  {subject, issuer?}), agent.token_type, agent.token_ttl_seconds,
 //	  agent.token_expires_at
 //	user.<same, minus policies>
 //	now (timestamp)
@@ -628,9 +628,16 @@ func buildPrincipalNS(p celPrincipalInput, f fieldSet, leg principalLeg) map[str
 	if f.has("actors") {
 		acts := make([]any, 0, len(p.Actors))
 		for _, a := range p.Actors {
-			acts = append(acts, map[string]any{
-				"subject": a.Subject,
-			})
+			// issuer is present only when the inbound act layer carried one, as in
+			// the audit JSON: an actor with none renders exactly as it did before
+			// the key existed, so a condition's audited Inputs do not change for
+			// it. Read it behind has(a.issuer); an unguarded read of an absent key
+			// errors, which fails closed.
+			actor := map[string]any{"subject": a.Subject}
+			if a.Issuer != "" {
+				actor["issuer"] = a.Issuer
+			}
+			acts = append(acts, actor)
 		}
 		m["actors"] = acts
 	}
