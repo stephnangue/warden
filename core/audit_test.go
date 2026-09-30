@@ -1082,13 +1082,18 @@ func TestBuildAuditAuth_ActorsFromTokenEntry(t *testing.T) {
 	te := &logical.TokenEntry{
 		PrincipalID: "mcp-github",
 		Actors: []logical.ActorRef{
-			{Subject: "agents/alpha"},
+			{Subject: "agents/alpha", Issuer: "https://idp.example.com"},
+			{Subject: "agents/root"},
 		},
 	}
 	result := buildAuditAuth(nil, te)
 	require.NotNil(t, result)
-	require.Len(t, result.Actors, 1)
-	assert.Equal(t, "agents/alpha", result.Actors[0].Subject)
+	// Each layer's issuer is recorded where the inbound layer had one, and only
+	// there.
+	assert.Equal(t, []audit.ActorRef{
+		{Subject: "agents/alpha", Issuer: "https://idp.example.com"},
+		{Subject: "agents/root"},
+	}, result.Actors)
 }
 
 func TestBuildAuditAuth_NoActors(t *testing.T) {

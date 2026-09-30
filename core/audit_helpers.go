@@ -180,14 +180,16 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 }
 
 // toAuditActors translates the RFC 8693 "act" delegation chain from the logical
-// layer into its audit-layer shape.
+// layer into its audit-layer shape, issuer included where the inbound layer had
+// one. It builds a fresh slice, so the entry never aliases the token entry's chain,
+// which the token cache shares across requests.
 func toAuditActors(actors []logical.ActorRef) []audit.ActorRef {
 	if len(actors) == 0 {
 		return nil
 	}
 	out := make([]audit.ActorRef, len(actors))
 	for i, a := range actors {
-		out[i] = audit.ActorRef{Subject: a.Subject}
+		out[i] = audit.ActorRef{Subject: a.Subject, Issuer: a.Issuer}
 	}
 	return out
 }
@@ -304,8 +306,9 @@ func (c *Core) buildRequestAuditEntry(
 
 // stampUserAttribution records the secondary (user) principal onto an audit
 // entry's Auth block for per-user attribution — so a mint performed for a user is
-// traceable to that user. It is a no-op when the request carried no user
-// principal. Identity only: the raw user credential is never logged.
+// traceable to that user, with the namespace, role and verified act chain a
+// delegation assertion asserts for it. It is a no-op when the request carried no
+// user principal. Identity only: the raw user credential is never logged.
 func stampUserAttribution(entry *audit.LogEntry, req *logical.Request) {
 	if entry == nil || req == nil || req.User == nil || req.User.TokenEntry == nil {
 		return
@@ -315,9 +318,12 @@ func stampUserAttribution(entry *audit.LogEntry, req *logical.Request) {
 	}
 	ute := req.User.TokenEntry
 	entry.Auth.User = &audit.UserAttribution{
-		Subject:     ute.PrincipalID,
-		TokenID:     ute.ID,
-		NamespaceID: ute.NamespaceID,
+		Subject:       ute.PrincipalID,
+		TokenID:       ute.ID,
+		NamespaceID:   ute.NamespaceID,
+		NamespacePath: ute.NamespacePath,
+		RoleName:      ute.RoleName,
+		Actors:        toAuditActors(ute.Actors),
 	}
 }
 

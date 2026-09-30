@@ -215,6 +215,46 @@ func TestCEL_ActorVerifiedKeyDenies(t *testing.T) {
 	}
 }
 
+// TestCEL_ActorIssuer: each actor exposes the issuer its IdP attested for that act
+// layer, on both principals' chains — and only when the layer carried one, so an
+// actor with none is the same map it was before the key existed.
+func TestCEL_ActorIssuer(t *testing.T) {
+	base := mustEnv(t, false)
+	now := time.Unix(0, 0).UTC()
+	agent := celPrincipalInput{Present: true, Actors: []logical.ActorRef{{Subject: "orchestrator", Issuer: "https://idp.example.com"}}}
+	user := celPrincipalInput{Present: true, Actors: []logical.ActorRef{{Subject: "broker-beta"}}}
+	act := buildBaseActivation(celRequestInput{}, agent, user, now)
+
+	for _, src := range []string{
+		"agent.actors[0].issuer == 'https://idp.example.com'",
+		"user.actors[0].subject == 'broker-beta' && !has(user.actors[0].issuer)",
+		"agent.actors.all(a, has(a.issuer) && a.issuer.startsWith('https://'))",
+	} {
+		got, err := evalCELCondition(mustCompile(t, base, src), act)
+		if err != nil || !got {
+			t.Fatalf("%s: got=%v err=%v", src, got, err)
+		}
+	}
+
+	// An unguarded read of an absent issuer errors, which fails closed.
+	_, err := evalCELCondition(mustCompile(t, base, "user.actors[0].issuer == 'x'"), act)
+	if got := celErrorKind(err); got != "no_such_key" {
+		t.Fatalf("kind=%q want no_such_key (err: %v)", got, err)
+	}
+}
+
+// TestCEL_ActorInputsRenderingUnchanged pins the audited Inputs rendering of an
+// actors reference for a chain with no issuers — the only chains that existed
+// before issuer did — so adding the key changed nothing an existing condition logs.
+func TestCEL_ActorInputsRenderingUnchanged(t *testing.T) {
+	agent := celPrincipalInput{Present: true, Actors: []logical.ActorRef{{Subject: "orchestrator"}}}
+	act := buildBaseActivation(celRequestInput{}, agent, celPrincipalInput{}, time.Unix(0, 0).UTC())
+	agentMap := act["agent"].(map[string]any)
+	if got, want := formatCELValue(agentMap["actors"]), "[map[subject:orchestrator]]"; got != want {
+		t.Fatalf("audited actors input = %q, want %q", got, want)
+	}
+}
+
 // TestCEL_ReferencedPaths locks in the dotted request/agent/call paths captured
 // for audit Inputs: clean field-selection chains are captured; has(),
 // index/optional access, and now.* are not.

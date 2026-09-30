@@ -1,11 +1,72 @@
 package audit
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/logical"
 )
+
+// TestCloneUserAttribution: the user's chain is deep-copied. The user struct is
+// copied by value, which alone would share the Actors backing array between the
+// entry and every clone a device writes — a race under multiple audit devices.
+func TestCloneUserAttribution(t *testing.T) {
+	entry := &LogEntry{Auth: &Auth{User: &UserAttribution{
+		Subject:       "alice",
+		NamespacePath: "team-payments/orders/",
+		RoleName:      "users",
+		Actors:        []ActorRef{{Subject: "broker-beta", Issuer: "https://idp.example.com"}},
+	}}}
+
+	clone := entry.Clone()
+	entry.Auth.User.Actors[0].Subject = "modified"
+	entry.Auth.User.RoleName = "modified"
+
+	if got := clone.Auth.User.Actors[0]; got != (ActorRef{Subject: "broker-beta", Issuer: "https://idp.example.com"}) {
+		t.Errorf("clone shares the user's actor chain: %+v", got)
+	}
+	if clone.Auth.User.RoleName != "users" || clone.Auth.User.NamespacePath != "team-payments/orders/" {
+		t.Errorf("clone user fields mismatch: %+v", clone.Auth.User)
+	}
+}
+
+// TestUserAttribution_JSONCompat: every new field is omitempty, so an entry that
+// carries none of them serializes exactly as it did before they existed — an
+// existing log consumer sees no new keys until there is something to report.
+func TestUserAttribution_JSONCompat(t *testing.T) {
+	b, err := json.Marshal(&Auth{
+		Actors: []ActorRef{{Subject: "orchestrator"}},
+		User:   &UserAttribution{Subject: "alice", TokenID: "t1", NamespaceID: "root"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"actors":[{"subject":"orchestrator"}],"user":{"subject":"alice","token_id":"t1","namespace_id":"root"}}`
+	if string(b) != want {
+		t.Errorf("got  %s\nwant %s", b, want)
+	}
+
+	// With the new data present, the wire keys are pinned: consumers bind to them.
+	b, err = json.Marshal(&Auth{
+		Actors: []ActorRef{{Subject: "orchestrator", Issuer: "https://idp.example.com"}},
+		User: &UserAttribution{
+			Subject: "alice", TokenID: "t1", NamespaceID: "ns-77c0d4",
+			NamespacePath: "team-payments/orders/", RoleName: "users",
+			Actors: []ActorRef{{Subject: "broker-beta", Issuer: "https://idp.example.com"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"actors":[{"subject":"orchestrator","issuer":"https://idp.example.com"}],` +
+		`"user":{"subject":"alice","token_id":"t1","namespace_id":"ns-77c0d4",` +
+		`"namespace_path":"team-payments/orders/","role_name":"users",` +
+		`"actors":[{"subject":"broker-beta","issuer":"https://idp.example.com"}]}}`
+	if string(b) != want {
+		t.Errorf("got  %s\nwant %s", b, want)
+	}
+}
 
 func TestCloneNil(t *testing.T) {
 	var entry *LogEntry
