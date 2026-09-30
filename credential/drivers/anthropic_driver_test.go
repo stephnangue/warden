@@ -21,9 +21,13 @@ const (
 	anthropicTestRule      = "fdrl_01ExampleRule"
 	anthropicTestAccount   = "svac_01ExampleAccount"
 	anthropicTestWorkspace = "wrkspc_01ExampleWorkspace"
-	anthropicTestAssertion = "header.payload.signature"
 	anthropicTestToken     = "sk-ant-oat01-test"
+	anthropicTestAgentSub  = "wid:root:auth/jwt/:agent-1"
 )
+
+// anthropicTestAssertion is an agent-only assertion in the default profile's
+// shape: the agent's composite sub at the top, no act.
+var anthropicTestAssertion = makeUnsignedJWT(map[string]interface{}{"sub": anthropicTestAgentSub})
 
 // anthropicTokenStub stands in for Anthropic's token endpoint. It records every
 // grant it receives, with its headers, and answers with respond — so a test can
@@ -300,7 +304,8 @@ func TestAnthropicDriver_MintCredentialWithExchange(t *testing.T) {
 	assert.Equal(t, anthropicTestRule, metadata["federation_rule_id"])
 	assert.Equal(t, anthropicTestAccount, metadata["service_account_id"])
 	assert.Equal(t, anthropicTestWorkspace, metadata["workspace_id"])
-	assert.Equal(t, "agent-1", metadata["subject"])
+	assert.Equal(t, anthropicTestAgentSub, metadata["subject"], "the sub Anthropic verified, read off the assertion")
+	assert.NotContains(t, metadata, "actor", "an agent-only assertion has no actor")
 	expiration, err := time.Parse(time.RFC3339, metadata["expiration"].(string))
 	require.NoError(t, err)
 	// The token's own expiry, not the lease's: an hour out, give or take the test.
@@ -309,6 +314,24 @@ func TestAnthropicDriver_MintCredentialWithExchange(t *testing.T) {
 		assert.NotEqual(t, anthropicTestToken, v, "the token must never reach audit metadata")
 		assert.NotEqual(t, anthropicTestAssertion, v, "the assertion must never reach audit metadata")
 	}
+}
+
+func TestAnthropicDriver_MintCredentialWithExchange_DelegationMetadata(t *testing.T) {
+	// Under the delegation shape Anthropic sees the user's id as sub and the agent
+	// as the actor. Metadata names both as Anthropic saw them.
+	stub := newAnthropicTokenStub(t, anthropicTokenResponse(3600))
+	d := newTestAnthropicDriver(t, stub.server.URL, nil)
+	inputs := anthropicTestInputs()
+	inputs.SubjectToken = makeUnsignedJWT(map[string]interface{}{
+		"sub":              "user-42",
+		"warden_namespace": "root",
+		"act":              map[string]interface{}{"sub": anthropicTestAgentSub},
+	})
+
+	_, metadata, _, _, err := d.MintCredentialWithExchange(context.Background(), anthropicTestSpec(nil), inputs)
+	require.NoError(t, err)
+	assert.Equal(t, "user-42", metadata["subject"])
+	assert.Equal(t, anthropicTestAgentSub, metadata["actor"])
 }
 
 func TestAnthropicDriver_MintCredentialWithExchange_OmitsUnsetWorkspace(t *testing.T) {

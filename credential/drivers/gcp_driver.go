@@ -915,14 +915,16 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		// The subject is the principal the token was federated for, not the provider
 		// it was federated through — the provider is one value for the whole source,
 		// so recording it here made every caller look identical in the audit trail.
-		// It is still reported separately as `provider`.
+		// It is still reported separately as `provider`. It is read off the token
+		// Google verified, so a delegation assertion records the user as subject
+		// and the agent as actor, as the upstream saw them.
 		rawData := map[string]interface{}{"access_token": fedToken}
 		metadata := map[string]interface{}{
 			"scopes":   scopesStr,
 			"provider": d.getWorkloadIdentityProvider(),
 		}
-		if sub := inputs.AgentClaims["sub"]; sub != "" {
-			metadata["subject"] = sub
+		for k, v := range assertionSubjectMetadata(inputs.SubjectToken) {
+			metadata[k] = v
 		}
 		if d.logger != nil {
 			d.logger.Debug("minted federated GCP access token",

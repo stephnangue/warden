@@ -234,8 +234,8 @@ func (d *AnthropicDriver) MintCredentialWithExchange(ctx context.Context, spec *
 	if target.workspaceID != "" {
 		metadata["workspace_id"] = target.workspaceID
 	}
-	if sub := inputs.AgentClaims["sub"]; sub != "" {
-		metadata["subject"] = sub
+	for k, v := range assertionSubjectMetadata(inputs.SubjectToken) {
+		metadata[k] = v
 	}
 	if d.logger != nil {
 		d.logger.Debug("minted federated Anthropic access token",

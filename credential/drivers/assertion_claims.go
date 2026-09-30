@@ -6,6 +6,30 @@ import (
 	"github.com/stephnangue/warden/credential"
 )
 
+// assertionSubjectMetadata names who a federated exchange spoke for, read from the
+// token actually exchanged: subject is the sub the upstream verified, and actor is
+// act.sub when that token is a delegation token. Under delegation the sub is the
+// user's id and the agent is the actor, so reading the agent's own claims instead
+// would attribute the credential to the wrong party. Claim reads only — no token or
+// assertion bytes are recorded — and best-effort: a token that does not parse
+// yields no metadata, never a failed mint.
+func assertionSubjectMetadata(subjectToken string) map[string]interface{} {
+	meta := map[string]interface{}{}
+	claims := unverifiedJWTClaims(subjectToken)
+	if claims == nil {
+		return meta
+	}
+	if sub, ok := scalarClaim(claims["sub"]); ok && sub != "" {
+		meta["subject"] = sub
+	}
+	if act, ok := claims["act"].(map[string]interface{}); ok {
+		if sub, ok := scalarClaim(act["sub"]); ok && sub != "" {
+			meta["actor"] = sub
+		}
+	}
+	return meta
+}
+
 // DeriveAssertionResource returns the canonical downstream resource a
 // warden_identity federation spec targets, or ("", false) when there is no single
 // statically-known one. It is pure: it reads the source and spec config maps only

@@ -231,29 +231,6 @@ func (d *OpenAIDriver) MintCredentialWithExchange(ctx context.Context, spec *cre
 	return accessTokenRawData(resp), metadata, ttl, "", nil
 }
 
-// assertionSubjectMetadata names who the exchange spoke for, read from the
-// assertion's own claims: subject is the sub the upstream verified, and actor is
-// act.sub when the assertion is a delegation token. Under delegation the sub is
-// the user's id and the agent is the actor, so reading the agent's claims instead
-// would attribute the token to the wrong party. Claim reads only — no token or
-// assertion bytes are recorded.
-func assertionSubjectMetadata(assertion string) map[string]interface{} {
-	meta := map[string]interface{}{}
-	claims := unverifiedJWTClaims(assertion)
-	if claims == nil {
-		return meta
-	}
-	if sub, ok := scalarClaim(claims["sub"]); ok && sub != "" {
-		meta["subject"] = sub
-	}
-	if act, ok := claims["act"].(map[string]interface{}); ok {
-		if sub, ok := scalarClaim(act["sub"]); ok && sub != "" {
-			meta["actor"] = sub
-		}
-	}
-	return meta
-}
-
 // openaiTarget is what one exchange asks for: the identity provider that trusts
 // Warden's issuer, and the service account the token acts as.
 type openaiTarget struct {

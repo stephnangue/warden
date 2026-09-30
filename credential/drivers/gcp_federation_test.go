@@ -336,6 +336,62 @@ func TestGCPDriver_MintCredentialWithExchange_DefaultsToAccessToken(t *testing.T
 	assert.Equal(t, "FED-TOKEN", raw["access_token"])
 }
 
+// The federated token's subject is read off the token Google verified, so a
+// delegation assertion names the user as subject and the agent as actor — not the
+// agent as subject, which would attribute the token to the wrong party. A subject
+// token that does not parse yields no subject and still mints.
+func TestGCPDriver_MintCredentialWithExchange_SubjectMetadata(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"FED-TOKEN","expires_in":3600}`))
+	}))
+	defer sts.Close()
+	d := newFederationDriver(testWIFProvider, sts.URL, "")
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "access_token"})}
+
+	tests := []struct {
+		name        string
+		token       string
+		wantSubject string
+		wantActor   string
+	}{
+		{
+			name:        "agent-only assertion",
+			token:       makeUnsignedJWT(map[string]interface{}{"sub": "wid:root:auth/jwt/:agent-1"}),
+			wantSubject: "wid:root:auth/jwt/:agent-1",
+		},
+		{
+			name: "delegation assertion",
+			token: makeUnsignedJWT(map[string]interface{}{
+				"sub": "user-42",
+				"act": map[string]interface{}{"sub": "wid:root:auth/jwt/:agent-1"},
+			}),
+			wantSubject: "user-42",
+			wantActor:   "wid:root:auth/jwt/:agent-1",
+		},
+		{name: "unparseable subject token", token: "jwt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputs := &credential.ExchangeInputs{
+				SubjectToken: tt.token,
+				AgentClaims:  map[string]string{"sub": "agent-1"},
+			}
+			_, meta, _, _, err := d.MintCredentialWithExchange(context.TODO(), spec, inputs)
+			require.NoError(t, err)
+			if tt.wantSubject == "" {
+				assert.NotContains(t, meta, "subject")
+			} else {
+				assert.Equal(t, tt.wantSubject, meta["subject"])
+			}
+			if tt.wantActor == "" {
+				assert.NotContains(t, meta, "actor")
+			} else {
+				assert.Equal(t, tt.wantActor, meta["actor"])
+			}
+		})
+	}
+}
+
 func TestGCPDriver_MintCredentialWithExchange_UnsupportedMethod(t *testing.T) {
 	d := newFederationDriver(testWIFProvider, "", "")
 	inputs := &credential.ExchangeInputs{SubjectToken: "jwt"}
