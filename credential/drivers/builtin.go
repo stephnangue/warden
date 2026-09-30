@@ -99,5 +99,10 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
+	// Register OpenAI driver factory (workload identity federation)
+	if err := registry.RegisterFactory(&OpenAIDriverFactory{}); err != nil {
+		return err
+	}
+
 	return nil
 }

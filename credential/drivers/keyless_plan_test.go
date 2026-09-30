@@ -86,6 +86,7 @@ var noSourceSecret = map[string]bool{
 	credential.SourceTypeGitHub:     true,
 	credential.SourceTypeAnthropic:  true,
 	credential.SourceTypeCloudflare: true,
+	credential.SourceTypeOpenAI:     true,
 }
 
 func TestKeylessPlanners_Completeness(t *testing.T) {

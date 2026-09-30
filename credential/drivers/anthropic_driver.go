@@ -301,35 +301,16 @@ func (t anthropicTarget) grant(assertion string) map[string]string {
 }
 
 // anthropicLeaseTTL is how long the credential cache may serve a token: its
-// lifetime less anthropicRefreshBuffer, so the next request re-mints before the
-// token expires. A short token would be left with little or nothing after the
-// buffer, so the lease never drops below half the lifetime. It is capped at the
-// spec's MaxTTL; MinTTL is not applied, since Anthropic fixes the lifetime from
-// the federation rule and a floor could not lengthen it.
+// lifetime less anthropicRefreshBuffer, never below half the lifetime, capped at
+// the spec's MaxTTL. Anthropic fixes the lifetime from the federation rule.
 func anthropicLeaseTTL(lifetime, maxTTL time.Duration) time.Duration {
-	ttl := lifetime - anthropicRefreshBuffer
-	if half := lifetime / 2; ttl < half {
-		ttl = half
-	}
-	if maxTTL > 0 && ttl > maxTTL {
-		ttl = maxTTL
-	}
-	return ttl
+	return federatedLeaseTTL(lifetime, anthropicRefreshBuffer, maxTTL)
 }
 
-// anthropicLifetime converts a response's expires_in to how long its token lives.
-// Missing or non-positive takes the fallback, and anything past the longest a rule
-// can issue is capped to that before the multiply, which is what keeps an absurd
-// value from overflowing into a plausible-looking one.
+// anthropicLifetime converts a response's expires_in to how long its token lives,
+// capped at the longest a federation rule can issue.
 func anthropicLifetime(expiresIn int) time.Duration {
-	switch {
-	case expiresIn <= 0:
-		return anthropicFallbackLifetime
-	case expiresIn > int(anthropicMaxLifetime/time.Second):
-		return anthropicMaxLifetime
-	default:
-		return time.Duration(expiresIn) * time.Second
-	}
+	return federatedTokenLifetime(expiresIn, anthropicFallbackLifetime, anthropicMaxLifetime)
 }
 
 // Revoke is a no-op: Anthropic has no endpoint to revoke a federated token, and

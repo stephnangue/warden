@@ -28,6 +28,40 @@ func postOAuthTokenJSON(ctx context.Context, httpClient *http.Client, tokenURL s
 	return postOAuthToken(ctx, httpClient, tokenURL, "application/json", body, extraHeaders)
 }
 
+// federatedTokenLifetime converts a token response's expires_in into how long the
+// token actually lives. Missing or non-positive takes fallback, which should be
+// the shortest lifetime the upstream issues so a guess can only re-mint early.
+// Anything past max is capped to it before the multiply: taken as-is, a value
+// past ~292 years overflows time.Duration and can wrap to a small positive
+// lifetime that would pass as a real one.
+func federatedTokenLifetime(expiresIn int, fallback, max time.Duration) time.Duration {
+	switch {
+	case expiresIn <= 0:
+		return fallback
+	case expiresIn > int(max/time.Second):
+		return max
+	default:
+		return time.Duration(expiresIn) * time.Second
+	}
+}
+
+// federatedLeaseTTL is how long the credential cache may serve a federated token:
+// its lifetime less buffer, so the next request re-mints while the token is still
+// good. A short token would be left with little or nothing after the buffer, so
+// the lease never drops below half the lifetime. It is capped at the spec's
+// MaxTTL; MinTTL is not applied, since the upstream fixes the lifetime and a floor
+// could not lengthen it.
+func federatedLeaseTTL(lifetime, buffer, maxTTL time.Duration) time.Duration {
+	ttl := lifetime - buffer
+	if half := lifetime / 2; ttl < half {
+		ttl = half
+	}
+	if maxTTL > 0 && ttl > maxTTL {
+		ttl = maxTTL
+	}
+	return ttl
+}
+
 // postOAuthToken POSTs a token request to tokenURL and decodes the response. A
 // body carrying an "error" field is treated as a failure even on HTTP 200 (some
 // providers, notably GitHub, report failures that way). HTTP 400/401 bodies are

@@ -39,6 +39,8 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg credential.Co
 		return alicloudAssertionResource(specCfg)
 	case credential.SourceTypeAnthropic:
 		return anthropicAssertionResource(specCfg)
+	case credential.SourceTypeOpenAI:
+		return openaiAssertionResource(specCfg)
 	default:
 		return "", false
 	}
@@ -71,6 +73,8 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg credential.Co
 		return alicloudAssertionAudience(sourceCfg)
 	case credential.SourceTypeAnthropic:
 		return anthropicAssertionAudience(sourceCfg)
+	case credential.SourceTypeOpenAI:
+		return openaiAssertionAudience(sourceCfg)
 	default:
 		return "", false
 	}
@@ -107,6 +111,38 @@ func anthropicAssertionAudience(sourceCfg credential.Config) (string, bool) {
 func anthropicAssertionResource(specCfg credential.Config) (string, bool) {
 	if sa := credential.GetString(specCfg, "service_account_id", ""); sa != "" {
 		return "anthropic:" + sa, true
+	}
+	return "", false
+}
+
+// openaiAssertionAudience derives the warden_identity assertion audience for an
+// openai source: the source's explicit `audience`, or ("", false) when unset. There
+// is no conventional default — the identity provider matches whatever audience the
+// operator registered — so an unset audience forces the spec to set
+// assertion_audience.
+//
+// Gated on auth_method=oidc_federation like the other keyless sources, even though
+// it is the openai source's only mode: ValidateConfig requires the key, so a record
+// without it did not pass validation and derives nothing.
+func openaiAssertionAudience(sourceCfg credential.Config) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", "") != openaiAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// openaiAssertionResource reports the service account a federation spec acts as,
+// for the warden_resource claim — which a service account mapping can then match
+// on, pinning the mapping to one service account. Pure: reads spec config only.
+//
+// The provider prefix is human-readable sugar on an opaque value — never parse it
+// back.
+func openaiAssertionResource(specCfg credential.Config) (string, bool) {
+	if sa := credential.GetString(specCfg, "service_account_id", ""); sa != "" {
+		return "openai:" + sa, true
 	}
 	return "", false
 }

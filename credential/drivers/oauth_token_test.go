@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stretchr/testify/assert"
@@ -109,6 +111,49 @@ func TestPostOAuthToken_ClassifiesErrorBody(t *testing.T) {
 			status, ok := credential.UpstreamStatus(fmt.Errorf("mint: %w", err))
 			assert.True(t, ok)
 			assert.Equal(t, tt.upstream, status)
+		})
+	}
+}
+
+func TestFederatedTokenLifetime(t *testing.T) {
+	const fallback, max = time.Minute, time.Hour
+	tests := []struct {
+		name      string
+		expiresIn int
+		want      time.Duration
+	}{
+		{name: "absent takes the fallback", expiresIn: 0, want: fallback},
+		{name: "negative takes the fallback", expiresIn: -5, want: fallback},
+		{name: "in range is taken as-is", expiresIn: 900, want: 900 * time.Second},
+		{name: "exactly the cap", expiresIn: 3600, want: max},
+		{name: "past the cap is capped", expiresIn: 3601, want: max},
+		// Multiplied first, this would overflow time.Duration and could wrap to a
+		// small positive value that passes as a real lifetime.
+		{name: "overflowing value is capped", expiresIn: math.MaxInt, want: max},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, federatedTokenLifetime(tt.expiresIn, fallback, max))
+		})
+	}
+}
+
+func TestFederatedLeaseTTL(t *testing.T) {
+	const buffer = time.Minute
+	tests := []struct {
+		name     string
+		lifetime time.Duration
+		maxTTL   time.Duration
+		want     time.Duration
+	}{
+		{name: "lifetime less the buffer", lifetime: time.Hour, want: 59 * time.Minute},
+		{name: "short token keeps half its life", lifetime: time.Minute, want: 30 * time.Second},
+		{name: "capped by MaxTTL", lifetime: time.Hour, maxTTL: 10 * time.Minute, want: 10 * time.Minute},
+		{name: "MaxTTL above the lease changes nothing", lifetime: time.Hour, maxTTL: 2 * time.Hour, want: 59 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, federatedLeaseTTL(tt.lifetime, buffer, tt.maxTTL))
 		})
 	}
 }

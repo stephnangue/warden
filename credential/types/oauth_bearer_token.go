@@ -120,7 +120,7 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("Federation rule the Warden assertion must satisfy (anthropic source)").
 			Example("fdrl_01AbCdEfGhIjKlMnOpQrStUv"),
 		credential.StringField("service_account_id").
-			Describe("Service account the minted token acts as (anthropic source)").
+			Describe("Service account the minted token acts as (anthropic and openai sources)").
 			Example("svac_01AbCdEfGhIjKlMnOpQrStUv"),
 		credential.StringField("workspace_id").
 			Describe("Workspace the token acts in — needed only when the federation rule covers more than one (anthropic source)").
@@ -187,13 +187,56 @@ func validateAnthropicSpec(config credential.Config) error {
 	return nil
 }
 
+// openaiForeignSpecKeys are keys an openai spec never reads, each with why. Set,
+// they would look like they shaped the exchange or the request while doing
+// nothing, so they are refused at the write rather than ignored.
+var openaiForeignSpecKeys = []struct{ key, why string }{
+	{"identity_provider_id", "belongs on the openai source, not the spec: a source holds one identity provider's trust relationship"},
+	{"audience", "is not read on an openai spec: the assertion's audience is the source's 'audience', which a spec overrides with '" + credential.ConfigAssertionAudience + "'"},
+	{"organization_id", "is not read on an openai spec: a federated token is issued for one service account, which already belongs to one organization"},
+	{"project_id", "is not read on an openai spec: a federated token is issued for one service account, which already belongs to one project"},
+	{"federation_rule_id", "is an anthropic key, not read on an openai spec"},
+	{"workspace_id", "is an anthropic key, not read on an openai spec"},
+}
+
+// validateOpenAISpec checks an openai spec's exchange target. The source holds
+// the identity provider and the audience; the spec names the service account one
+// exchange acts as. OpenAI documents no stable id prefixes, so unlike anthropic
+// the id is checked for presence only — requiring a guessed prefix would reject
+// valid ids.
+func validateOpenAISpec(config credential.Config) error {
+	// The source is keyless: it mints only by exchanging a Warden-signed assertion,
+	// which is the issuer the identity provider trusts. A spec that opts out of
+	// exchange has nothing to mint with, and one presenting another identity would
+	// be refused by the identity provider registered for Warden's issuer.
+	switch src := config.Get(credential.ConfigSubjectTokenSource); src {
+	case credential.SourceWardenIdentity:
+	case "", credential.SourceNone:
+		return fmt.Errorf("'%s' is required for an openai source: set it to '%s'",
+			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
+	default:
+		return fmt.Errorf("'%s' must be '%s' for an openai source, got %q: the exchange presents a Warden-signed assertion, which is what the identity provider trusts",
+			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, src)
+	}
+
+	if config.Get("service_account_id") == "" {
+		return fmt.Errorf("'service_account_id' is required for an openai source")
+	}
+	for _, k := range openaiForeignSpecKeys {
+		if config.Get(k.key) != "" {
+			return fmt.Errorf("'%s' %s", k.key, k.why)
+		}
+	}
+	return nil
+}
+
 // ValidateConfig validates the Config for an OAuth bearer token credential spec.
 func (t *OAuthBearerTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	switch sourceType {
-	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM, credential.SourceTypeTokenExchange, credential.SourceTypeAnthropic:
+	case credential.SourceTypeOAuth2, credential.SourceTypeVault, credential.SourceTypeIBM, credential.SourceTypeTokenExchange, credential.SourceTypeAnthropic, credential.SourceTypeOpenAI:
 		// Supported
 	default:
-		return fmt.Errorf("oauth_bearer_token credentials require an oauth2, vault, ibm, token_exchange, or anthropic source, got: %s", sourceType)
+		return fmt.Errorf("oauth_bearer_token credentials require an oauth2, vault, ibm, token_exchange, anthropic, or openai source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -235,6 +278,10 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config credential.Config, sour
 		}
 	case credential.SourceTypeAnthropic:
 		if err := validateAnthropicSpec(config); err != nil {
+			return err
+		}
+	case credential.SourceTypeOpenAI:
+		if err := validateOpenAISpec(config); err != nil {
 			return err
 		}
 	}

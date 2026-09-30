@@ -57,6 +57,9 @@ var storedSecretsCases = map[string][]storedSecretsCase{
 	credential.SourceTypeAnthropic: {
 		{name: "federation", config: map[string]string{"auth_method": "oidc_federation", "ca_data": "pem"}, want: nil},
 	},
+	credential.SourceTypeOpenAI: {
+		{name: "federation", config: map[string]string{"auth_method": "oidc_federation", "ca_data": "pem"}, want: nil},
+	},
 	credential.SourceTypeOAuth2: {
 		{name: "chained", config: map[string]string{"secret_spec": "ref"}, want: nil},
 		{name: "inline", config: map[string]string{"client_id": "id", "client_secret": "s"}, want: []string{"client_secret"}},

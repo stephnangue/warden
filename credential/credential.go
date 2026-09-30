@@ -45,6 +45,7 @@ const (
 	SourceTypeTokenExchange = "token_exchange"
 	SourceTypeAnthropic     = "anthropic"
 	SourceTypeCloudflare    = "cloudflare"
+	SourceTypeOpenAI        = "openai"
 )
 
 // Category constants for credential categorization
