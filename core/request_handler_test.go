@@ -3664,6 +3664,45 @@ func TestResolveExchangeInputs_DefaultWithholdsUser(t *testing.T) {
 	})
 }
 
+// TestResolveExchangeInputs_OpenAIDisclosesUser pins that openai is not a sub-only
+// verifier: its service account mappings can bind warden_namespace beside sub (a
+// CEL attribute over the assertion), so a delegation spec on an openai source gets
+// the delegation shape — the user as subject, the agent as act.
+func TestResolveExchangeInputs_OpenAIDisclosesUser(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "openai-wif", Type: credential.SourceTypeOpenAI,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "openai-as-user", Type: "vault_token", Source: "openai-wif",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:   "https://warden.example.com/openai",
+			credential.ConfigAssertionUserClaims: "sub,username",
+		}),
+	}))
+	userTE := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2", RoleName: "users",
+		Metadata: map[string]string{"username": "alice"},
+	}
+	agentTE := &logical.TokenEntry{CredentialSpec: "openai-as-user", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1", RoleName: "r"}
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: userTE}
+
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+	require.NoError(t, err)
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	assert.Equal(t, "alice", claims["sub"], "the user, by her raw id")
+	assert.Contains(t, claims, "warden_namespace", "the namespace that qualifies the raw id")
+	act, ok := claims["act"].(map[string]interface{})
+	require.True(t, ok, "act missing: %v", claims["act"])
+	assert.Equal(t, wardenSubject(agentTE), act["sub"], "the agent, by its composite")
+}
+
 // TestResolveExchangeInputs_DefaultRefusesActedAgentBeforeCache pins where the
 // agent-chain refusal happens: in setup, so resolveExchangeInputs returns no inputs,
 // and with no inputs there is no fingerprint to key a cache with. The other half —

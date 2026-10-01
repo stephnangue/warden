@@ -1931,6 +1931,7 @@ func TestCredentialConfigStore_FederationSourceRejectsRotationPeriod(t *testing.
 		credential.SourceTypeKubernetes,
 		credential.SourceTypeAlicloud,
 		credential.SourceTypeAnthropic,
+		credential.SourceTypeOpenAI,
 	}
 
 	for _, sourceType := range federationTypes {
@@ -3379,6 +3380,172 @@ func TestCredentialConfigStore_AnthropicSpec(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.errorMsg)
 		})
 	}
+}
+
+// newOpenAITestStore is a config store with the real openai factory and the real
+// credential types wired in, for the same reason as newAnthropicTestStore.
+func newOpenAITestStore(t *testing.T) (*CredentialConfigStore, context.Context) {
+	t.Helper()
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = credential.NewDriverRegistry(nil)
+	require.NoError(t, store.core.credentialDriverRegistry.RegisterFactory(&drivers.OpenAIDriverFactory{}))
+	store.core.credentialTypeRegistry = credential.NewTypeRegistry()
+	require.NoError(t, types.RegisterBuiltinTypes(store.core.credentialTypeRegistry))
+	return store, ctx
+}
+
+// openaiStoreSource is a valid openai source with overrides applied; an override
+// set to "" removes the key.
+func openaiStoreSource(name string, overrides map[string]string) *credential.CredSource {
+	cfg := map[string]string{
+		"auth_method":          "oidc_federation",
+		"identity_provider_id": "example-identity-provider",
+	}
+	applyConfigOverrides(cfg, overrides)
+	return &credential.CredSource{Name: name, Type: credential.SourceTypeOpenAI, Config: credential.NewConfig(cfg)}
+}
+
+// openaiStoreSpec is a valid openai spec with overrides applied; an override set
+// to "" removes the key.
+func openaiStoreSpec(name, source string, overrides map[string]string) *credential.CredSpec {
+	cfg := map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		"service_account_id":                "example-service-account",
+	}
+	applyConfigOverrides(cfg, overrides)
+	return &credential.CredSpec{Name: name, Type: credential.TypeOAuthBearerToken, Source: source, Config: credential.NewConfig(cfg)}
+}
+
+// TestCredentialConfigStore_OpenAISource drives the real openai factory through
+// source creation.
+func TestCredentialConfigStore_OpenAISource(t *testing.T) {
+	t.Run("a federated source is accepted", func(t *testing.T) {
+		store, ctx := newOpenAITestStore(t)
+		require.NoError(t, store.CreateSource(ctx, openaiStoreSource("openai-wif",
+			map[string]string{"audience": "https://warden.example.com/openai"})))
+	})
+
+	t.Run("a rotation_period is refused", func(t *testing.T) {
+		store, ctx := newOpenAITestStore(t)
+		source := openaiStoreSource("openai-wif", nil)
+		source.RotationPeriod = 24 * time.Hour
+
+		err := store.CreateSource(ctx, source)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rotation_period does not apply to a federated credential source")
+	})
+
+	t.Run("omitting auth_method cannot slip a rotation_period through", func(t *testing.T) {
+		store, ctx := newOpenAITestStore(t)
+		source := openaiStoreSource("openai-wif", map[string]string{"auth_method": ""})
+		source.RotationPeriod = 24 * time.Hour
+
+		err := store.CreateSource(ctx, source)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field 'auth_method' is required")
+	})
+
+	t.Run("the service account belongs on the spec", func(t *testing.T) {
+		store, ctx := newOpenAITestStore(t)
+		err := store.CreateSource(ctx, openaiStoreSource("openai-wif",
+			map[string]string{"service_account_id": "example-service-account"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "service_account_id belongs on the spec")
+	})
+}
+
+// TestCredentialConfigStore_OpenAISpec drives spec creation, where every rule an
+// openai spec carries is enforced. An openai spec is always an exchange spec, which
+// the store neither test-mints nor hands to a SpecVerifier, so these writes are the
+// only point its target is checked before a live request.
+func TestCredentialConfigStore_OpenAISpec(t *testing.T) {
+	store, ctx := newOpenAITestStore(t)
+	require.NoError(t, store.CreateSource(ctx, openaiStoreSource("with-aud",
+		map[string]string{"audience": "https://warden.example.com/openai"})))
+	require.NoError(t, store.CreateSource(ctx, openaiStoreSource("no-aud", nil)))
+
+	tests := []struct {
+		name     string
+		spec     *credential.CredSpec
+		errorMsg string // empty => expect success
+	}{
+		{
+			name: "audience is derived from the source",
+			spec: openaiStoreSpec("derived", "with-aud", nil),
+		},
+		{
+			name: "a spec audience stands in for the source's",
+			spec: openaiStoreSpec("explicit", "no-aud",
+				map[string]string{credential.ConfigAssertionAudience: "https://warden.example.com/openai"}),
+		},
+		{
+			// Registered claims only: a mapping on sub/iss/aud alone still matches.
+			name: "the minimal profile is accepted",
+			spec: openaiStoreSpec("minimal", "with-aud",
+				map[string]string{credential.ConfigAssertionProfile: profiles.MinimalProfileName}),
+		},
+		{
+			name:     "no audience anywhere is refused",
+			spec:     openaiStoreSpec("no-aud-spec", "no-aud", nil),
+			errorMsg: "is required when the subject or actor is",
+		},
+		{
+			name:     "subject_token_source is required",
+			spec:     openaiStoreSpec("no-subject", "with-aud", map[string]string{credential.ConfigSubjectTokenSource: ""}),
+			errorMsg: "is required for an openai source",
+		},
+		{
+			name: "another identity is refused",
+			spec: openaiStoreSpec("agent-subject", "with-aud",
+				map[string]string{credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity}),
+			errorMsg: "must be 'warden_identity' for an openai source",
+		},
+		{
+			name:     "the service account is required",
+			spec:     openaiStoreSpec("no-account", "with-aud", map[string]string{"service_account_id": ""}),
+			errorMsg: "'service_account_id' is required for an openai source",
+		},
+		{
+			name: "the identity provider belongs on the source",
+			spec: openaiStoreSpec("idp-on-spec", "with-aud",
+				map[string]string{"identity_provider_id": "example-identity-provider"}),
+			errorMsg: "'identity_provider_id' belongs on the openai source",
+		},
+		{
+			// Without the refusal this spec is accepted and mints for the source's
+			// audience, not the one it appears to set.
+			name: "the source's audience key is refused on a spec",
+			spec: openaiStoreSpec("aud-on-spec", "with-aud",
+				map[string]string{"audience": "https://other.example.com"}),
+			errorMsg: "overrides with 'assertion_audience'",
+		},
+		{
+			// The aws profile is pinned to AWS sources.
+			name: "the aws profile is refused",
+			spec: openaiStoreSpec("aws-profile", "with-aud",
+				map[string]string{credential.ConfigAssertionProfile: profiles.AWSProfileName}),
+			errorMsg: "requires a source of type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.CreateSpec(ctx, tt.spec)
+			if tt.errorMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errorMsg)
+		})
+	}
+
+	// OpenAI's service account mappings can match any claim, so an openai spec is
+	// not narrowed at create: no profile is written, and it mints the default shape.
+	stored, err := store.GetSpec(ctx, "derived")
+	require.NoError(t, err)
+	assert.Empty(t, stored.Config.Get(credential.ConfigAssertionProfile),
+		"a new openai spec gets no create-time assertion profile")
 }
 
 // assertBadRequest asserts the error carries HTTP 400, so an operator's bad value

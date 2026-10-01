@@ -1801,7 +1801,7 @@ const authMethodOIDCFederation = "oidc_federation"
 
 // isFederationSource reports whether a source authenticates by presenting a
 // caller's identity assertion. Every such driver — aws, azure, gcp, hvault,
-// kubernetes, alicloud, anthropic — spells it the same way, so one predicate covers
+// kubernetes, alicloud, anthropic, openai — spells it the same way, so one predicate covers
 // them all and covers a new one the day it lands.
 //
 // Not every keyless source federates: ibm, ovh, scaleway and cloudflare have no

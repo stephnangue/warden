@@ -137,6 +137,25 @@ func TestDeriveAssertionAudience(t *testing.T) {
 			wantOK:     false,
 		},
 		{
+			name:       "openai federation derives explicit audience",
+			sourceType: credential.SourceTypeOpenAI,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "https://warden.example.com/openai"},
+			wantAud:    "https://warden.example.com/openai",
+			wantOK:     true,
+		},
+		{
+			name:       "openai absent auth_method derives nothing",
+			sourceType: credential.SourceTypeOpenAI,
+			sourceCfg:  map[string]string{"audience": "https://warden.example.com/openai"},
+			wantOK:     false,
+		},
+		{
+			name:       "openai without audience derives nothing (no default)",
+			sourceType: credential.SourceTypeOpenAI,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation"},
+			wantOK:     false,
+		},
+		{
 			name:       "unknown source type derives nothing",
 			sourceType: credential.SourceTypeGitHub,
 			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "x"},
@@ -349,6 +368,19 @@ func TestDeriveAssertionResource(t *testing.T) {
 			name:       "anthropic without service account omits",
 			sourceType: credential.SourceTypeAnthropic,
 			specCfg:    map[string]string{"federation_rule_id": "fdrl_01ExampleRule"},
+			wantOK:     false,
+		},
+		{
+			name:       "openai names the service account",
+			sourceType: credential.SourceTypeOpenAI,
+			specCfg:    map[string]string{"service_account_id": "example-service-account"},
+			want:       "openai:example-service-account",
+			wantOK:     true,
+		},
+		{
+			name:       "openai without service account omits",
+			sourceType: credential.SourceTypeOpenAI,
+			specCfg:    map[string]string{},
 			wantOK:     false,
 		},
 		{

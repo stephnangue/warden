@@ -75,6 +75,7 @@ func TestDriverCleanup_ClosesIdleConnections(t *testing.T) {
 		{"aws", func(c *http.Client) credential.SourceDriver { return &AWSDriver{httpClient: c} }},
 		{"ibm", func(c *http.Client) credential.SourceDriver { return &IBMDriver{httpClient: c} }},
 		{"vault", func(c *http.Client) credential.SourceDriver { return &VaultDriver{httpClient: c} }},
+		{"openai", func(c *http.Client) credential.SourceDriver { return &OpenAIDriver{httpClient: c} }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

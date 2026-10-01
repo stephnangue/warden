@@ -47,21 +47,21 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeLocal,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, token_exchange, or anthropic source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, anthropic, or openai source",
 		},
 		{
 			name:       "unsupported source type - aws",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAWS,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, token_exchange, or anthropic source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, anthropic, or openai source",
 		},
 		{
 			name:       "unsupported source type - static apikey",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, token_exchange, or anthropic source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, anthropic, or openai source",
 		},
 		{
 			name:       "token_exchange source - agent_identity subject",
@@ -237,6 +237,120 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeAnthropic,
 			wantErr:    false,
+		},
+		{
+			name: "openai source - minimal target",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    false,
+		},
+		{
+			// The key that overrides the source's audience is accepted.
+			name: "openai source - assertion_audience on the spec accepted",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				credential.ConfigAssertionAudience:  "https://warden.example.com/openai",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    false,
+		},
+		{
+			name:       "openai source - missing subject source",
+			config:     map[string]string{"service_account_id": "example-service-account"},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "is required for an openai source: set it to 'warden_identity'",
+		},
+		{
+			name: "openai source - subject source none",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceNone,
+				"service_account_id":                "example-service-account",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "is required for an openai source",
+		},
+		{
+			// The identity provider trusts Warden's issuer; forwarding the agent's own
+			// token would present an identity it does not trust.
+			name: "openai source - agent_identity subject refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity,
+				"service_account_id":                "example-service-account",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "must be 'warden_identity' for an openai source",
+		},
+		{
+			name:       "openai source - missing service account",
+			config:     map[string]string{credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'service_account_id' is required for an openai source",
+		},
+		{
+			// The driver reads the identity provider from the source only, so a spec
+			// value would be silently ignored.
+			name: "openai source - identity provider on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"identity_provider_id":              "example-identity-provider",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'identity_provider_id' belongs on the openai source",
+		},
+		{
+			name: "openai source - audience on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"audience":                          "https://warden.example.com/openai",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "overrides with 'assertion_audience'",
+		},
+		{
+			// The bearer branch sends no org/project header, so these would do nothing.
+			name: "openai source - organization on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"organization_id":                   "org-example",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'organization_id' is not read on an openai spec",
+		},
+		{
+			name: "openai source - project on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"project_id":                        "proj_example",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'project_id' is not read on an openai spec",
+		},
+		{
+			name: "openai source - anthropic key refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"federation_rule_id":                "fdrl_01ExampleRule",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'federation_rule_id' is an anthropic key",
 		},
 	}
 
