@@ -212,6 +212,24 @@ type ProviderSpec struct {
 	// open would instead give every hung call on the mount that same
 	// ceiling.
 	SelectTimeout func(req *logical.Request, state map[string]any) time.Duration
+
+	// RenderGatewayError optionally answers a gateway request Warden failed
+	// itself — authentication, policy, credential issuance — in the upstream's
+	// native error shape, so the provider's SDKs read it as they would one of
+	// the upstream's own errors instead of failing to parse Warden's generic
+	// {"errors": [...]} body. It is never called for an error the upstream sent:
+	// those pass through untouched.
+	//
+	// Return nil to keep Warden's generic body; that is also the behaviour when
+	// the hook is unset, so a provider that does not set it is untouched. The
+	// response must carry StatusCode, Headers and Body, and StatusCode must be
+	// f.Status: the status is Warden's decision about retryability, and the
+	// renderer only changes how it is worded.
+	//
+	// It takes the HTTP request rather than the logical one so the gateway's
+	// own failures, which have only the HTTP request, can be rendered by the
+	// same hook.
+	RenderGatewayError func(r *http.Request, f *logical.GatewayFailure) *logical.Response
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.
@@ -544,6 +562,23 @@ var _ logical.TransparentAuthRoleExtractor = (*proxyBackend)(nil)
 // assertion catches regressions where someone changes the override
 // signature in a way that breaks interface satisfaction.
 var _ logical.TransparentModeProvider = (*proxyBackend)(nil)
+
+// Compile-time assertion that proxyBackend satisfies GatewayErrorRenderer. The
+// implementation delegates to spec.RenderGatewayError; providers that leave the
+// hook nil decline, which keeps Warden's generic error exactly as before —
+// including the MCP-specific deny bodies, which the mcp spec does not render.
+var _ logical.GatewayErrorRenderer = (*proxyBackend)(nil)
+
+// RenderGatewayError delegates to the optional spec hook. See
+// ProviderSpec.RenderGatewayError for the contract. Core calls it only for a
+// streamed gateway request, which always carries its HTTP request, and always
+// with a failure.
+func (b *proxyBackend) RenderGatewayError(req *logical.Request, f *logical.GatewayFailure) *logical.Response {
+	if b.spec.RenderGatewayError == nil {
+		return nil
+	}
+	return b.spec.RenderGatewayError(req.HTTPRequest, f)
+}
 
 // GetAuthRoleFromRequest delegates to the optional spec hook. See
 // ProviderSpec.GetAuthRoleFromRequest for the contract.
