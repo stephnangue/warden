@@ -871,6 +871,35 @@ func TestAnthropic_WIFRejectedExchangeFailsClosed(t *testing.T) {
 	if assertion := grants[0]["assertion"]; assertion != "" && strings.Contains(string(body), assertion) {
 		t.Error("the error returned to the caller carries the assertion")
 	}
+	// In Anthropic's error shape, so the caller's SDK surfaces the reason.
+	assertAnthropicError(t, body, "permission_error")
+}
+
+// assertAnthropicError checks a gateway failure came back in Anthropic's error
+// shape, with the error type an Anthropic SDK maps its status to and a message
+// marked as Warden's.
+func assertAnthropicError(t *testing.T, body []byte, wantType string) {
+	t.Helper()
+	var env struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("body is not Anthropic's error shape: %v: %s", err, body)
+	}
+	if env.Type != "error" {
+		t.Errorf("type = %q, want %q: %s", env.Type, "error", body)
+	}
+	if env.Error.Type != wantType {
+		t.Errorf("error.type = %q, want %q: %s", env.Error.Type, wantType, body)
+	}
+	if !strings.HasPrefix(env.Error.Message, "Warden: ") {
+		t.Errorf("error.message = %q, want it marked as Warden's", env.Error.Message)
+	}
 }
 
 // TestAnthropic_WIFBearerRidesAStreamedMessage drives the call the mount exists for —
