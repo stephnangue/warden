@@ -71,6 +71,7 @@ var Spec = &httpproxy.ProviderSpec{
 	HelpText:             openaiBackendHelp,
 	ExtractCredentials:   openaiCredentialExtractor,
 	ExtraHeadersToRemove: []string{"OpenAI-Organization", "OpenAI-Project"},
+	RenderGatewayError:   renderOpenAIError,
 }
 
 // Factory creates a new OpenAI provider backend.

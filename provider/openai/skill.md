@@ -108,4 +108,11 @@ curl -H "Authorization: Bearer <jwt>" \
   account, whose organization and project are fixed by that binding.
 - **Streaming responses (SSE)** pass through unchanged — usable from
   the OpenAI SDK's `stream=true` mode.
+- **Warden's own failures use OpenAI's error shape.** A request Warden
+  refuses itself (authentication, policy, credential) comes back as
+  `{"error": {...}}` with a `code` starting `warden_` and a message
+  starting `Warden: `. `warden_credential_refused` and
+  `warden_permission_denied` will not succeed on retry: the role or
+  its credential needs changing. Errors without the prefix are
+  OpenAI's own.
 

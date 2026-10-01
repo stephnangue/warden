@@ -367,6 +367,8 @@ func TestFullChain_PolicyDenialStopsBeforeUpstream(t *testing.T) {
 		Status:        403,
 		UpstreamCalls: 0,
 	})
+	// openai renders Warden's own failures in OpenAI's error shape.
+	assertOpenAIError(t, body, "warden_permission_denied")
 }
 
 // TestFullChain_UntrustedAgentCertIsRejected mints a well-formed certificate
