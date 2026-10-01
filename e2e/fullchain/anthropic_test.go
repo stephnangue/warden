@@ -596,8 +596,8 @@ func anthropicOAuthSeenAt() []time.Time {
 	return append([]time.Time(nil), anthropicOAuthAt...)
 }
 
-// anthropicMustWrite POSTs v as JSON and fails the test on anything but success.
-func anthropicMustWrite(t *testing.T, path string, v any, what string) {
+// mustWriteJSON POSTs v as JSON and fails the test on anything but success.
+func mustWriteJSON(t *testing.T, path string, v any, what string) {
 	t.Helper()
 	body, err := json.Marshal(v)
 	if err != nil {
@@ -630,7 +630,7 @@ func setupAnthropicWIF(t *testing.T) {
 
 	// No key anywhere. The source names the organization, the audience the
 	// federation rules match, and where to exchange.
-	anthropicMustWrite(t, "sys/cred/sources/"+anthropicWIFSource, map[string]any{
+	mustWriteJSON(t, "sys/cred/sources/"+anthropicWIFSource, map[string]any{
 		"type": "anthropic",
 		"config": map[string]string{
 			"auth_method":     "oidc_federation",
@@ -643,7 +643,7 @@ func setupAnthropicWIF(t *testing.T) {
 	for _, tg := range targets {
 		// The workspace is named so a row can show it goes into the exchange and not
 		// into a header: the token the exchange returns already binds it.
-		anthropicMustWrite(t, "sys/cred/specs/"+tg.spec, map[string]any{
+		mustWriteJSON(t, "sys/cred/specs/"+tg.spec, map[string]any{
 			"type":   "oauth_bearer_token",
 			"source": anthropicWIFSource,
 			"config": map[string]string{
@@ -654,7 +654,7 @@ func setupAnthropicWIF(t *testing.T) {
 			},
 		}, "create the keyless spec "+tg.spec)
 
-		anthropicMustWrite(t, "auth/cert/role/"+tg.role, map[string]any{
+		mustWriteJSON(t, "auth/cert/role/"+tg.role, map[string]any{
 			"allowed_common_names": []string{h.FullChainAgentCN},
 			"token_policies":       []string{anthropicEnv.Policy()},
 			"cred_spec_name":       tg.spec,
