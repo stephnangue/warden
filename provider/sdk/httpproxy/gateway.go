@@ -80,7 +80,15 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		credHeaders, err = credExtractor(req)
 		if err != nil {
 			b.Logger.Warn("Failed to get credentials", logger.Err(err))
-			http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+			// The credential Warden minted lacks what the extractor needs: Warden's
+			// fault, not the caller's authentication, so it is classed internal.
+			// The 401 is kept as it has always been answered.
+			if !b.writeGatewayFailure(req.ResponseWriter, req.HTTPRequest, &logical.GatewayFailure{
+				Class: logical.GatewayFailureInternal, Status: http.StatusUnauthorized, Err: errCredentialNotUsable,
+				RequestID: req.RequestID,
+			}) {
+				http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+			}
 			return
 		}
 	}
@@ -89,7 +97,7 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	targetURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		b.writeInternalFailure(req)
 		return
 	}
 
@@ -98,7 +106,7 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		b.Logger.Error("Failed to parse target URL", logger.Err(err))
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		b.writeInternalFailure(req)
 		return
 	}
 	r.URL = parsedURL
@@ -144,6 +152,17 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Forward the request (body streams through without buffering unless an
 	// MCP list filter is installed, which buffers only the list response)
 	proxy.ServeHTTP(req.ResponseWriter, r)
+}
+
+// writeInternalFailure answers a request whose upstream address could not be
+// built, rendered when the spec renders its errors.
+func (b *proxyBackend) writeInternalFailure(req *logical.Request) {
+	if !b.writeGatewayFailure(req.ResponseWriter, req.HTTPRequest, &logical.GatewayFailure{
+		Class: logical.GatewayFailureInternal, Status: http.StatusInternalServerError, Err: errUpstreamAddress,
+		RequestID: req.RequestID,
+	}) {
+		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+	}
 }
 
 // buildTargetURL constructs the target URL from the gateway path.

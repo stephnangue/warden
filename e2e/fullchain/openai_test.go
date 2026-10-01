@@ -580,6 +580,69 @@ func TestOpenAI_WIFRejectedExchangeFailsClosed(t *testing.T) {
 	assertOpenAIError(t, body, "warden_credential_refused")
 }
 
+// TestOpenAI_ProxyFailuresInOpenAIShape covers the failures the gateway writes
+// itself once a request is routed — an upstream it cannot reach (502), and one
+// that has not answered within the mount's timeout (504). Core's renderer never
+// sees these; the gateway renders them through the same hook, so an OpenAI SDK
+// can read them and retry, as it does its own 5xx.
+//
+// Each needs a mount of its own, pointed at an upstream that fails that way. The
+// credential is a static key from the same apikey shape as openaiEnv.
+func TestOpenAI_ProxyFailuresInOpenAIShape(t *testing.T) {
+	ensureEnv(t)
+
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	t.Cleanup(slow.Close)
+
+	for _, tc := range []struct {
+		name     string
+		mount    string
+		upstream string
+		extra    map[string]any
+		status   int
+		code     string
+	}{
+		{"upstream unreachable", "fc-openai-gone", gone.URL, nil, http.StatusBadGateway, "warden_upstream_unreachable"},
+		{"upstream past the mount's timeout", "fc-openai-slow", slow.URL, map[string]any{"timeout": "1s"}, http.StatusGatewayTimeout, "warden_upstream_timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := h.ProviderEnv{
+				Mount:        tc.mount,
+				Type:         "openai",
+				URLKey:       "openai_url",
+				CredType:     "api_key",
+				SourceType:   "apikey",
+				SourceConfig: map[string]string{"credential_fields": "organization_id,project_id"},
+				CredConfig:   map[string]string{"api_key": openaiKey},
+				ExtraConfig:  tc.extra,
+			}
+			h.SetupFullChainProvider(t, leaderPort, tc.upstream, env)
+			t.Cleanup(func() { h.TeardownFullChainProviderBestEffort(leaderPort, env) })
+
+			status, body, _ := h.ChainRequest(t, leaderPort, env, h.ChainOpts{
+				AgentCertPEM: agentCert(t),
+				Bearer:       h.FullChainUserJWT(t),
+				Role:         env.CertRole(),
+			})
+			if status != tc.status {
+				t.Fatalf("status = %d, want %d: %s", status, tc.status, body)
+			}
+			assertOpenAIError(t, body, tc.code)
+			if strings.Contains(string(body), strings.TrimPrefix(tc.upstream, "http://")) {
+				t.Errorf("the error names the upstream's address: %s", body)
+			}
+		})
+	}
+}
+
 // assertOpenAIError checks a gateway failure came back in OpenAI's error shape,
 // with Warden's code and a message marked as Warden's — what an OpenAI SDK
 // decodes and shows its caller.

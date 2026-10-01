@@ -379,5 +379,43 @@ func TestStreamingBackend_InitProxy_Failures(t *testing.T) {
 			assert.Equal(t, tc.status, rec.Code)
 			assert.Equal(t, tc.body, rec.Body.String())
 		})
+
+		// The same failure with a ProxyErrorWriter: it writes the answer, and is
+		// told the status; one that declines falls back to the plain text. A
+		// client that went away still gets nothing, and the writer is not asked.
+		t.Run(tc.name+" with an error writer", func(t *testing.T) {
+			for _, accept := range []bool{true, false} {
+				var gotStatus int
+				sb := &StreamingBackend{Backend: &Backend{}, Logger: newTestLogger()}
+				sb.ProxyErrorWriter = func(w http.ResponseWriter, _ *http.Request, status int) bool {
+					gotStatus = status
+					if !accept {
+						return false
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"rendered":true}`))
+					return true
+				}
+				sb.InitProxy(tc.transport)
+				r := httptest.NewRequest(http.MethodGet, "http://upstream.test/v1/x", nil).WithContext(tc.ctx())
+
+				rec := httptest.NewRecorder()
+				sb.Proxy.ServeHTTP(rec, r)
+
+				if tc.status == 0 {
+					assert.Zero(t, gotStatus, "a cancelled request is not a failure to render")
+					assert.Zero(t, rec.Body.Len())
+					continue
+				}
+				assert.Equal(t, tc.status, gotStatus)
+				assert.Equal(t, tc.status, rec.Code)
+				if accept {
+					assert.Equal(t, `{"rendered":true}`, rec.Body.String())
+				} else {
+					assert.Equal(t, tc.body, rec.Body.String())
+				}
+			}
+		})
 	}
 }
