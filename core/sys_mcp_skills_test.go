@@ -113,6 +113,24 @@ func TestSkillsList_VisibleSet(t *testing.T) {
 	assert.Equal(t, []string{"escalation", "runbook", "troubleshooting", "vault"}, skillNames(res))
 }
 
+// A visible skill lists what it requires as skill:// URIs, and the identity
+// can read every one of them: the requires closure is part of its visible set.
+func TestSkillsList_RequiresAreReadableURIs(t *testing.T) {
+	c, _ := setupSkillsDiscovery(t)
+	session := connectSkillsClient(t, startMCPTestServer(t, c, nil), "eyJ.any.token")
+
+	got, err := getSkill(session, "skill://runbook/SKILL.md")
+	require.NoError(t, err)
+	requires := got.Skill.Frontmatter.Metadata["requires"]
+	assert.Equal(t, "skill://escalation/SKILL.md", requires)
+
+	for _, uri := range strings.Fields(requires) {
+		read, err := readSkillResource(session, uri)
+		require.NoError(t, err, "required skill %s must be readable", uri)
+		assert.NotEmpty(t, read.Contents)
+	}
+}
+
 // Each entry's digest and size describe exactly the bytes resources/read and
 // read_skill serve, and its frontmatter is the file's.
 func TestSkillsList_EntryMatchesServedBytes(t *testing.T) {

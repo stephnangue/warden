@@ -23,14 +23,20 @@ type skillFrontmatter struct {
 	Metadata    map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
-// frontmatterFor projects a stored skill onto the served frontmatter.
+// frontmatterFor projects a stored skill onto the served frontmatter. The
+// skills it requires are given as their skill:// URIs, space-separated, so
+// an agent can read each one directly.
 func frontmatterFor(s *Skill) skillFrontmatter {
+	requires := make([]string, len(s.Requires))
+	for i, name := range s.Requires {
+		requires[i] = skillURI(name)
+	}
 	meta := make(map[string]string, 4)
 	for k, v := range map[string]string{
 		"category": s.Category,
 		"provider": s.Provider,
 		"upstream": s.Upstream,
-		"requires": strings.Join(s.Requires, " "),
+		"requires": strings.Join(requires, " "),
 	} {
 		if v != "" {
 			meta[k] = v
