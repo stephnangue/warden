@@ -38,12 +38,13 @@ const (
 // The token value itself is brokered per request from the credential subsystem
 // exactly like every other provider; only its placement is configurable.
 //
-// Request bodies labelled JSON or form are parsed into request.data so policy
-// conditions can read them, as for every other HTTP provider. A REST mount fronts
-// arbitrary APIs, though, so the parse is switchable per mount, and a body with no
-// Content-Type is never parsed (core would read it as JSON and refuse anything else).
-// A mount created before the switch existed has no parse_request_body in its stored
-// config and keeps not parsing; new mounts get it on at creation (OnFirstConfig).
+// Request bodies are parsed into request.data so policy conditions can read them,
+// exactly as core does for every other HTTP provider: JSON and form bodies are
+// parsed, an unlabelled body is read as JSON, and one that does not parse is refused
+// rather than streamed past policy unseen. A REST mount fronts arbitrary APIs, so
+// the parse is switchable per mount, for upload and binary APIs. A mount created
+// before the switch existed has no parse_request_body in its stored config and keeps
+// not parsing; new mounts get it on at creation (OnFirstConfig).
 var Spec = &httpproxy.ProviderSpec{
 	Name:            "rest",
 	DefaultURL:      "", // operator must configure base_url
@@ -84,13 +85,13 @@ var Spec = &httpproxy.ProviderSpec{
 	// override (Header.Set) semantics — operator-pinned headers cannot be
 	// suppressed by a client sending the same header name. The same dispatch
 	// decides, per request, whether the body is parsed for policy.
-	ResolveUpstream: func(r *http.Request, _ string, state map[string]any) (httpproxy.Dispatch, bool) {
+	ResolveUpstream: func(_ *http.Request, _ string, state map[string]any) (httpproxy.Dispatch, bool) {
 		header := stateString(state, "token_header", defaultTokenHeader)
 		prefix := statePrefix(state)
 		static := stateHeaders(state)
 		return httpproxy.Dispatch{
 			ExtractCredentials: tokenExtractor(header, prefix, static),
-			BypassBodyParsing:  !stateParseBody(state) || unlabelledBody(r),
+			BypassBodyParsing:  !stateParseBody(state),
 		}, true
 	},
 
@@ -186,22 +187,6 @@ const parseRequestBodyKey = "parse_request_body"
 func stateParseBody(state map[string]any) bool {
 	b, _ := state[parseRequestBodyKey].(bool)
 	return b
-}
-
-// unlabelledBody reports whether r may carry a body that names no Content-Type.
-// Core reads an unlabelled body as JSON, so parsing one would refuse every raw
-// upload a REST API accepts; it is left unparsed and streamed untouched instead.
-// GET, HEAD and DELETE are excluded: core reads only their query string, which is
-// still worth giving to policy.
-func unlabelledBody(r *http.Request) bool {
-	if r == nil || r.Header.Get("Content-Type") != "" {
-		return false
-	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead, http.MethodDelete:
-		return false
-	}
-	return r.ContentLength != 0
 }
 
 // coerceBool accepts the shapes a boolean setting arrives in: a bool from JSON
@@ -350,11 +335,14 @@ Supported credential types: api_key (apikey/grafana/elastic sources)
 and oauth_bearer_token (oauth2 source). Both carry the token in the api_key field.
 
 Request bodies and policy:
-  With parse_request_body on, a body labelled application/json or
-  application/x-www-form-urlencoded is parsed before policy runs, so a condition
-  can read its fields (request.data.<field>). Invalid JSON, or form-labelled bytes
-  that are not form data, are refused with 400. Any other Content-Type, or none,
-  is streamed untouched and policy sees no body fields. Write body conditions to
-  fail closed - has(request.data.amount) && request.data.amount <= 100 - so a body
-  Warden could not read is refused rather than let through.
+  With parse_request_body on, a JSON or form body is parsed before policy runs,
+  so a condition can read its fields (request.data.<field>). A body with no
+  Content-Type is read as JSON. A body that does not parse as its label says -
+  invalid JSON, unlabelled non-JSON, form-labelled bytes that are not form data -
+  is refused with 400, so it never reaches the upstream unseen by policy. Other
+  content types (multipart, octet-stream, text, XML) are streamed untouched and
+  contribute no body fields. Turn parse_request_body off on a mount that fronts an
+  upload or binary API. Write body conditions to fail closed -
+  has(request.data.amount) && request.data.amount <= 100 - so a body Warden did
+  not read is refused rather than let through.
 `

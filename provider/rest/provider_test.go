@@ -1,14 +1,17 @@
 package rest
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -315,8 +318,9 @@ func TestResolveUpstream_BodyParsing(t *testing.T) {
 		{"json body is parsed", on, newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`), false},
 		{"json with charset is parsed", on, newBodyRequest(http.MethodPost, "application/json; charset=utf-8", `{"amount":50}`), false},
 		{"form body is parsed", on, newBodyRequest(http.MethodPost, "application/x-www-form-urlencoded", "amount=50"), false},
-		{"unlabelled body is not parsed", on, newBodyRequest(http.MethodPost, "", "raw bytes"), true},
-		{"unlabelled empty POST is parsed (query string only)", on, newBodyRequest(http.MethodPost, "", ""), false},
+		// Core reads an unlabelled body as JSON and refuses one that does not parse,
+		// so stripping the header cannot slip a body past policy.
+		{"unlabelled body is parsed", on, newBodyRequest(http.MethodPost, "", `{"amount":500}`), false},
 		{"GET without a type is parsed (query string only)", on, newBodyRequest(http.MethodGet, "", ""), false},
 		{"switched off: json is not parsed", off, newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`), true},
 		{"legacy mount: json is not parsed", legacy, newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`), true},
@@ -327,6 +331,53 @@ func TestResolveUpstream_BodyParsing(t *testing.T) {
 			assert.Equal(t, tt.wantBypass, bypass(t, tt.state, tt.req))
 		})
 	}
+}
+
+// streamParser is what core asks of a mounted rest backend before parsing a body.
+type streamParser interface {
+	ShouldParseStreamBody(r *http.Request) bool
+}
+
+// mountRest builds and initializes a rest backend the way a mount does.
+func mountRest(t *testing.T, storage sdklogical.Storage, mountConfig map[string]any) streamParser {
+	t.Helper()
+	gl, _ := logger.NewGatedLogger(&logger.Config{Level: logger.ErrorLevel, Format: logger.DefaultFormat},
+		logger.GatedWriterConfig{InitialState: logger.GateOpen})
+	b, err := Factory(context.Background(), &logical.BackendConfig{StorageView: storage, Logger: gl, Config: mountConfig})
+	require.NoError(t, err)
+	require.NoError(t, b.Initialize(context.Background()))
+	return b.(streamParser)
+}
+
+// Through the real backend, as core sees it: a new mount parses, a mount whose
+// stored config predates the setting does not, and a mount-time "false" holds.
+func TestShouldParseStreamBody_ByMountAge(t *testing.T) {
+	jsonBody := newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`)
+	chunked := newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`)
+	chunked.ContentLength = -1
+
+	t.Run("new mount parses", func(t *testing.T) {
+		b := mountRest(t, &sdklogical.InmemStorage{}, nil)
+		assert.True(t, b.ShouldParseStreamBody(jsonBody))
+		assert.True(t, b.ShouldParseStreamBody(chunked), "a body of unknown length is parsed too")
+	})
+
+	t.Run("mount created before the setting does not", func(t *testing.T) {
+		storage := &sdklogical.InmemStorage{}
+		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{"base_url": "https://api.example.com"})
+		require.NoError(t, err)
+		require.NoError(t, storage.Put(context.Background(), entry))
+		b := mountRest(t, storage, nil)
+		assert.False(t, b.ShouldParseStreamBody(jsonBody))
+	})
+
+	t.Run("mount-time false holds", func(t *testing.T) {
+		b := mountRest(t, &sdklogical.InmemStorage{}, map[string]any{
+			"base_url":          "https://api.example.com",
+			parseRequestBodyKey: "false",
+		})
+		assert.False(t, b.ShouldParseStreamBody(jsonBody))
+	})
 }
 
 func TestOnFirstConfig_DefaultsParsingOn(t *testing.T) {
