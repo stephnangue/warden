@@ -85,7 +85,11 @@ func TestFrontmatterFor_MetadataLayout(t *testing.T) {
 	assert.Equal(t, skillFrontmatter{
 		Name:        "mcp-aws",
 		Description: "d",
-		Metadata:    map[string]string{"category": "provider-guide", "provider": "mcp_aws", "requires": "a b"},
+		Metadata: map[string]string{
+			"category": "provider-guide",
+			"provider": "mcp_aws",
+			"requires": "skill://a/SKILL.md skill://b/SKILL.md",
+		},
 	}, fm)
 
 	// Rendering is byte-for-byte stable, so a digest over it is too.
