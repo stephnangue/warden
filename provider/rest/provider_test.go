@@ -3,6 +3,8 @@ package rest
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
@@ -278,4 +280,92 @@ func TestSpec(t *testing.T) {
 	assert.NotNil(t, Spec.ResolveUpstream)
 	assert.NotNil(t, Spec.ExtractCredentials)
 	assert.NotNil(t, Factory)
+	assert.True(t, Spec.ParseStreamBody, "rest parses bodies; ResolveUpstream switches it off per mount or per request")
+}
+
+// bypass reports whether the dispatch for r on a mount with state skips body parsing.
+func bypass(t *testing.T, state map[string]any, r *http.Request) bool {
+	t.Helper()
+	d, ok := Spec.ResolveUpstream(r, "", state)
+	require.True(t, ok)
+	return d.BypassBodyParsing
+}
+
+func newBodyRequest(method, contentType, body string) *http.Request {
+	r := httptest.NewRequest(method, "/v1/bank-api/role/teller/gateway/accounts/me/withdraw", strings.NewReader(body))
+	if contentType != "" {
+		r.Header.Set("Content-Type", contentType)
+	} else {
+		r.Header.Del("Content-Type")
+	}
+	return r
+}
+
+func TestResolveUpstream_BodyParsing(t *testing.T) {
+	on := map[string]any{parseRequestBodyKey: true}
+	off := map[string]any{parseRequestBodyKey: false}
+	legacy := map[string]any{} // a mount created before the setting existed
+
+	tests := []struct {
+		name       string
+		state      map[string]any
+		req        *http.Request
+		wantBypass bool
+	}{
+		{"json body is parsed", on, newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`), false},
+		{"json with charset is parsed", on, newBodyRequest(http.MethodPost, "application/json; charset=utf-8", `{"amount":50}`), false},
+		{"form body is parsed", on, newBodyRequest(http.MethodPost, "application/x-www-form-urlencoded", "amount=50"), false},
+		{"unlabelled body is not parsed", on, newBodyRequest(http.MethodPost, "", "raw bytes"), true},
+		{"unlabelled empty POST is parsed (query string only)", on, newBodyRequest(http.MethodPost, "", ""), false},
+		{"GET without a type is parsed (query string only)", on, newBodyRequest(http.MethodGet, "", ""), false},
+		{"switched off: json is not parsed", off, newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`), true},
+		{"legacy mount: json is not parsed", legacy, newBodyRequest(http.MethodPost, "application/json", `{"amount":50}`), true},
+		{"no request: parsing follows the setting", on, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantBypass, bypass(t, tt.state, tt.req))
+		})
+	}
+}
+
+func TestOnFirstConfig_DefaultsParsingOn(t *testing.T) {
+	state := Spec.OnFirstConfig(map[string]any{})
+	assert.Equal(t, true, state[parseRequestBodyKey])
+
+	// A value set at mount time is kept.
+	state = Spec.OnFirstConfig(map[string]any{parseRequestBodyKey: false})
+	assert.Equal(t, false, state[parseRequestBodyKey])
+}
+
+func TestParseRequestBody_ConfigRoundTrip(t *testing.T) {
+	state, err := Spec.OnConfigWrite(fieldData(map[string]any{parseRequestBodyKey: false}), map[string]any{parseRequestBodyKey: true})
+	require.NoError(t, err)
+	assert.Equal(t, false, state[parseRequestBodyKey])
+
+	persisted := Spec.OnConfigRead(state)
+	blob, err := json.Marshal(persisted)
+	require.NoError(t, err)
+	var reloaded map[string]any
+	require.NoError(t, json.Unmarshal(blob, &reloaded))
+	assert.Equal(t, false, Spec.OnInitialize(reloaded, map[string]any{})[parseRequestBodyKey])
+
+	// A write that leaves the setting out keeps it.
+	state, err = Spec.OnConfigWrite(fieldData(map[string]any{"token_header": "X-Key"}), map[string]any{parseRequestBodyKey: true})
+	require.NoError(t, err)
+	assert.Equal(t, true, state[parseRequestBodyKey])
+}
+
+func TestOnInitialize_LegacyConfigKeepsParsingOff(t *testing.T) {
+	state := Spec.OnInitialize(map[string]any{"token_header": "Authorization"}, map[string]any{})
+	_, present := state[parseRequestBodyKey]
+	assert.False(t, present)
+	assert.False(t, stateParseBody(state))
+	assert.Equal(t, false, Spec.OnConfigRead(state)[parseRequestBodyKey])
+}
+
+func TestValidateExtraConfig_ParseRequestBody(t *testing.T) {
+	assert.NoError(t, Spec.ValidateExtraConfig(map[string]any{parseRequestBodyKey: true}))
+	assert.NoError(t, Spec.ValidateExtraConfig(map[string]any{parseRequestBodyKey: "false"}))
+	assert.ErrorContains(t, Spec.ValidateExtraConfig(map[string]any{parseRequestBodyKey: "maybe"}), "must be a boolean")
 }

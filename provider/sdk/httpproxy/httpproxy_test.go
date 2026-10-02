@@ -571,6 +571,79 @@ func TestInitialize_WithExtraState(t *testing.T) {
 	assert.Equal(t, "v2", pb.extraState["version"])
 }
 
+// OnFirstConfig runs only for a mount with no persisted config, and what it stamps is
+// persisted. A mount whose persisted config predates the key keeps it absent.
+func TestInitialize_OnFirstConfig(t *testing.T) {
+	newSpec := func(calls *int) *ProviderSpec {
+		spec := testSpec()
+		spec.OnFirstConfig = func(state map[string]any) map[string]any {
+			*calls++
+			if _, ok := state["feature"]; !ok {
+				state["feature"] = true
+			}
+			return state
+		}
+		spec.OnInitialize = func(config map[string]any, state map[string]any) map[string]any {
+			if v, ok := config["feature"].(bool); ok {
+				state["feature"] = v
+			}
+			return state
+		}
+		spec.OnConfigRead = func(state map[string]any) map[string]any {
+			v, _ := state["feature"].(bool)
+			return map[string]any{"feature": v}
+		}
+		return spec
+	}
+
+	t.Run("new mount gets the default and persists it", func(t *testing.T) {
+		var calls int
+		storage := newInmemStorage()
+		pb := setupBackend(t, newSpec(&calls)).(*proxyBackend)
+		pb.StorageView = storage
+
+		require.NoError(t, pb.Initialize(context.Background()))
+		assert.Equal(t, 1, calls)
+		assert.Equal(t, true, pb.extraState["feature"])
+
+		entry, err := storage.Get(context.Background(), "config")
+		require.NoError(t, err)
+		var persisted map[string]any
+		require.NoError(t, entry.DecodeJSON(&persisted))
+		assert.Equal(t, true, persisted["feature"])
+	})
+
+	t.Run("existing mount without the key stays off", func(t *testing.T) {
+		var calls int
+		storage := newInmemStorage()
+		entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{"test_url": "https://saved.com"})
+		require.NoError(t, storage.Put(context.Background(), entry))
+		pb := setupBackend(t, newSpec(&calls)).(*proxyBackend)
+		pb.StorageView = storage
+
+		require.NoError(t, pb.Initialize(context.Background()))
+		assert.Equal(t, 0, calls, "OnFirstConfig must not run for a mount with persisted config")
+		_, present := pb.extraState["feature"]
+		assert.False(t, present)
+	})
+
+	t.Run("mount-time config wins over the default", func(t *testing.T) {
+		var calls int
+		storage := newInmemStorage()
+		b, err := NewFactory(newSpec(&calls))(context.Background(), &logical.BackendConfig{
+			StorageView: storage,
+			Logger:      testLogger(),
+			Config:      map[string]any{"test_url": "https://ok.com", "feature": false},
+		})
+		require.NoError(t, err)
+		pb := b.(*proxyBackend)
+
+		require.NoError(t, pb.Initialize(context.Background()))
+		assert.Equal(t, 1, calls)
+		assert.Equal(t, false, pb.extraState["feature"])
+	})
+}
+
 // --- SensitiveConfigFields tests ---
 
 func TestSensitiveConfigFields(t *testing.T) {
