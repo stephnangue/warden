@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Names of everything the bootstrap creates. Kept together because the bootstrap,
@@ -297,7 +298,13 @@ func Bootstrap(s Settings) []Step {
 		// Last, so the log holds the scenarios rather than the setup.
 		{
 			Path: "sys/audit/" + AuditDevice, Operation: "create",
-			Data: map[string]any{"type": "file", "description": "The playground's audit log.", "config": map[string]any{"file_path": s.AuditPath}},
+			Data: map[string]any{"type": "file", "description": "The playground's audit log.", "config": map[string]any{
+				"file_path": s.AuditPath,
+				// Write each entry at once, so warden dev audit shows a call as
+				// soon as it is made. flush_period decodes as nanoseconds.
+				"buffer_size":  1,
+				"flush_period": int64(200 * time.Millisecond),
+			}},
 			Note: "Every call from here on is recorded; read it with warden dev audit.",
 		},
 	}

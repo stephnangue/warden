@@ -302,6 +302,11 @@ type Core struct {
 	// handler to seed the skill registry on first mount of each type.
 	providerSkills map[string]string
 
+	// devPlayground is the dev playground's fixtures, from
+	// CoreConfig.DevPlayground. Nil on every server not started with
+	// -dev-playground; the sys/dev paths exist only when it is set.
+	devPlayground DevPlayground
+
 	auditManager audit.AuditManager
 
 	audit *MountTable
@@ -431,6 +436,11 @@ type CoreConfig struct {
 	// SeedProviderSkill. Types absent from this map simply don't appear
 	// in the agent skill catalog until an operator creates one manually.
 	ProviderSkills map[string]string
+
+	// DevPlayground is set only by a dev server started with -dev-playground.
+	// It serves the sys/dev paths: minting playground identities, the scenario
+	// catalogue and the playground's audit log.
+	DevPlayground DevPlayground
 
 	// TokenStore has been moved to core package and is created internally
 	// Deprecated: Remove this field, TokenStore is now created in NewCore
@@ -702,6 +712,7 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	// Provider backends
 	c.configureProvider(conf.Providers)
 	c.configureProviderSkills(conf.ProviderSkills)
+	c.devPlayground = conf.DevPlayground
 
 	// Auth backends
 	c.configureAuthMethods(conf.AuthMethods)

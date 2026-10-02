@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	wardenseal "github.com/stephnangue/warden/core/seal"
 	wardenhttp "github.com/stephnangue/warden/http"
 	"github.com/stephnangue/warden/internal/configutil"
+	"github.com/stephnangue/warden/internal/playground"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/listener/api"
 	clusterlistener "github.com/stephnangue/warden/listener/cluster"
@@ -121,6 +123,10 @@ var (
 	flagDevTLSRequireClientCert bool
 	flagDevTLSSpiffe            bool
 	flagDevTLSSpiffeSocket      string
+
+	flagDevPlayground         bool
+	flagDevPlaygroundASAddr   string
+	flagDevPlaygroundBankAddr string
 
 	ServerCmd = &cobra.Command{
 		Use:   "server",
@@ -245,9 +251,20 @@ func init() {
 	ServerCmd.Flags().BoolVar(&flagDevTLSRequireClientCert, "dev-tls-require-client-cert", false, "Require client certificates when CA cert is configured in dev mode")
 	ServerCmd.Flags().BoolVar(&flagDevTLSSpiffe, "dev-tls-spiffe", false, "Serve dev-mode TLS using a SPIFFE Workload API X509-SVID (server-auth, auto-rotating)")
 	ServerCmd.Flags().StringVar(&flagDevTLSSpiffeSocket, "dev-tls-spiffe-socket", "", "Workload API socket for -dev-tls-spiffe (default: SPIFFE_ENDPOINT_SOCKET env var)")
+	ServerCmd.Flags().BoolVar(&flagDevPlayground, "dev-playground", false, "Start a dev server with a playground: an identity provider, a protected bank and scenarios to try Warden with (implies -dev)")
+	ServerCmd.Flags().StringVar(&flagDevPlaygroundASAddr, "dev-playground-as-addr", playground.DefaultASAddr, "Address the playground's identity provider and authorization server listen on")
+	ServerCmd.Flags().StringVar(&flagDevPlaygroundBankAddr, "dev-playground-bank-addr", playground.DefaultBankAddr, "Address the playground's bank listens on")
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	// The playground is a dev server with fixtures.
+	if flagDevPlayground {
+		flagDev = true
+	}
+	if !flagDevPlayground && (cmd.Flags().Changed("dev-playground-as-addr") || cmd.Flags().Changed("dev-playground-bank-addr")) {
+		return fmt.Errorf("-dev-playground-as-addr and -dev-playground-bank-addr can only be used with -dev-playground")
+	}
+
 	// Validate flag combinations
 	if flagDevRootToken != "" && !flagDev {
 		return fmt.Errorf("-dev-root-token can only be used with -dev")
@@ -302,6 +319,16 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	flagDevTLSSpiffe = resolvedSpiffe
+
+	// The playground's authorization server fetches Warden's JWKS from the dev
+	// listener, so that listener has to be one it can reach: no SPIFFE-only
+	// trust, and no client certificate required.
+	if flagDevPlayground && flagDevTLSSpiffe {
+		return fmt.Errorf("-dev-playground cannot be used with -dev-tls-spiffe")
+	}
+	if flagDevPlayground && flagDevTLSRequireClientCert {
+		return fmt.Errorf("-dev-playground cannot be used with -dev-tls-require-client-cert")
+	}
 
 	// Load configuration: dev mode builds defaults, otherwise requires config file or dir
 	var conf *config.Config
@@ -367,6 +394,23 @@ func run(cmd *cobra.Command, args []string) error {
 		conf.Listeners[0].TLSDisable = false
 		conf.Listeners[0].TLSSPIFFE = true
 		conf.Listeners[0].TLSSPIFFESocket = flagDevTLSSpiffeSocket
+	}
+
+	// The playground's fixtures start before the core, which serves its sys/dev
+	// paths from them; the bootstrap that wires Warden to them runs after unseal.
+	var pg *playground.Playground
+	if flagDevPlayground {
+		var err error
+		pg, err = startPlayground(conf.Listeners[0])
+		if err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = pg.Close(shutdownCtx)
+			_ = os.RemoveAll(filepath.Dir(pg.AuditPath()))
+		}()
 	}
 
 	// construct the logger with gate closed during initialization
@@ -452,6 +496,9 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	coreConfig := createCoreConfig(logger, conf, storage, barrierSeal, unwrapSeal, secureRandomReader)
+	if pg != nil {
+		coreConfig.DevPlayground = pg
+	}
 
 	newCore, newCoreError := core.NewCore(&coreConfig)
 	if newCoreError != nil {
@@ -468,6 +515,14 @@ func run(cmd *cobra.Command, args []string) error {
 		devInitResult, err = devModeInit(newCore, flagDevRootToken)
 		if err != nil {
 			return fmt.Errorf("dev mode initialization failed: %w", err)
+		}
+	}
+
+	// Wire Warden to the playground, then check discovery sees what a first-time
+	// user will be told to expect.
+	if pg != nil {
+		if err := bootstrapPlayground(cmd.Context(), newCore, devInitResult.RootToken, pg); err != nil {
+			return err
 		}
 	}
 
@@ -598,6 +653,13 @@ func run(cmd *cobra.Command, args []string) error {
 	// Print dev mode banner before opening the log gate
 	if flagDev && devInitResult != nil {
 		printDevBanner(cmd.OutOrStdout(), devInitResult, conf.Listeners[0].Address, devTLSCertDir, flagDevTLSSpiffe)
+		if pg != nil {
+			scheme := "http"
+			if !conf.Listeners[0].TLSDisable {
+				scheme = "https"
+			}
+			printPlaygroundBanner(cmd.OutOrStdout(), pg, devClientAddr(scheme, conf.Listeners[0].Address))
+		}
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "\n==> Warden server started! Log data will stream in below:\n")

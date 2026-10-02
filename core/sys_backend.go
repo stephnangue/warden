@@ -39,6 +39,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 				"cred/*",
 				"audit/*",
 				"audit-hash/*",
+				"dev/*",
 			},
 		},
 		Paths: b.paths(),
@@ -84,6 +85,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// OpenAPI / schema endpoint (agent-facing introspection)
 	paths = append(paths, b.pathOpenAPI()...)
+
+	// Dev playground: present only on a server started with -dev-playground.
+	paths = append(paths, b.pathDev()...)
 
 	return paths
 }
