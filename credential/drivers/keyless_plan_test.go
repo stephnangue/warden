@@ -356,3 +356,25 @@ func TestKeylessPrerequisites_Shapes(t *testing.T) {
 		assert.Equal(t, "fwd", prereqs[len(prereqs)-1].Where)
 	})
 }
+
+// A public-client token_exchange source is already keyless. Its plan changes
+// nothing: it must not clear the client_id the authorization server may know it by,
+// ask for a secret_spec the source would refuse, or name a client secret that does
+// not exist.
+func TestKeylessPlan_TokenExchangePublicClient(t *testing.T) {
+	f := &TokenExchangeDriverFactory{}
+	current := credential.NewConfig(map[string]string{
+		"token_url": "https://as.example/token", "client_auth": clientAuthNone, "client_id": "warden",
+	})
+
+	plan, err := f.PlanKeyless(current, map[string]string{})
+	require.NoError(t, err)
+	assert.Empty(t, plan.Delta)
+	assert.Empty(t, plan.NeedsInput)
+	assert.Empty(t, plan.Leftovers)
+	require.Len(t, plan.Notes, 1)
+	assert.Contains(t, plan.Notes[0], "already keyless")
+	require.NoError(t, f.ValidateConfig(current.WithAll(plan.Delta)), "the unchanged config still validates")
+
+	assert.Empty(t, f.KeylessPrerequisites(current, nil, testTrustEnv))
+}

@@ -1189,6 +1189,34 @@ func TestCredentialConfigStore_ValidateSpec_UserIdentitySubjectRequiresTokenExch
 	}
 }
 
+// A public-client token_exchange source presents no client credential, so a spec that
+// chains one in must be refused at create rather than fail every mint. The general
+// token_exchange rule (client authentication is a source concern) already does it;
+// this pins it for client_auth=none, whose source refuses secret_spec too.
+func TestCredentialConfigStore_ValidateSpec_PublicClientRefusesChainedSecret(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = nil // skip the test-mint block
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "public-src", Type: credential.SourceTypeTokenExchange,
+		Config: credential.NewConfig(map[string]string{"token_url": "https://as.example/token", "client_auth": "none"}),
+	}))
+
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "public-ok", Type: "oauth_bearer_token", Source: "public-src",
+		Config: credential.NewConfig(map[string]string{credential.ConfigSubjectTokenSource: credential.SourceUserIdentity}),
+	}))
+
+	err := store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "public-chained", Type: "oauth_bearer_token", Source: "public-src",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+			credential.ConfigSecretSpec:         "some-client-secret",
+		}),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "set secret_spec on the source")
+}
+
 // TestCredentialConfigStore_ValidateSpec_ActorSourceRequiresTokenExchange locks
 // in that ANY actor token source — not just warden_identity — is pinned to a
 // token_exchange source, since only that driver consumes an actor token; every

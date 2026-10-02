@@ -236,6 +236,73 @@ func TestTokenExchangeDriver_PublicClient(t *testing.T) {
 	}
 }
 
+// noClientCredential asserts a token request carried no client credential.
+func noClientCredential(t *testing.T, r *http.Request) {
+	t.Helper()
+	for _, field := range []string{"client_secret", "client_assertion", "client_assertion_type"} {
+		_, present := r.Form[field]
+		assert.Falsef(t, present, "a public client must not send %s", field)
+	}
+	assert.Empty(t, r.Header.Get("Authorization"), "a public client must not send an Authorization header")
+}
+
+// The other grants go through the same client authentication, so a public client
+// stays credential-free on every leg.
+func TestTokenExchangeDriver_PublicClient_OtherGrants(t *testing.T) {
+	subject := makeUnsignedJWT(map[string]interface{}{"sub": "u"})
+
+	t.Run("jwt_bearer", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			assert.Equal(t, grantTypeJWTBearer, r.Form.Get("grant_type"))
+			noClientCredential(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+		}))
+		defer server.Close()
+		d := newExchangeDriver(map[string]string{
+			"token_url": server.URL, "grant": tokenExchangeGrantJWTBearer, "client_auth": clientAuthNone,
+		}, server.Client())
+		_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, subjectInputs(subject))
+		require.NoError(t, err)
+	})
+
+	t.Run("id_jag, both legs", func(t *testing.T) {
+		var legs int
+		resSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			legs++
+			noClientCredential(t, r)
+			assert.Equal(t, "warden", r.Form.Get("client_id"))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
+		}))
+		defer resSrv.Close()
+		idpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			legs++
+			noClientCredential(t, r)
+			assert.Equal(t, "warden", r.Form.Get("client_id"))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
+		}))
+		defer idpSrv.Close()
+
+		d := newExchangeDriver(map[string]string{
+			"token_url":          idpSrv.URL,
+			"resource_token_url": resSrv.URL,
+			"grant":              tokenExchangeGrantIDJAG,
+			"client_auth":        clientAuthNone,
+			"client_id":          "warden",
+		}, &http.Client{})
+		spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource-as.example.com"})}
+		rawData, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
+		require.NoError(t, err)
+		assert.Equal(t, "final-access", rawData["api_key"])
+		assert.Equal(t, 2, legs)
+	})
+}
+
 func TestTokenExchangeDriverFactory_PublicClientValidation(t *testing.T) {
 	f := &TokenExchangeDriverFactory{}
 	base := func() map[string]string {
