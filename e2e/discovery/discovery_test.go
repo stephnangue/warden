@@ -42,7 +42,13 @@ func (rt jwtRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 // returns a connected MCP client session.
 func connectDiscovery(t *testing.T) *mcp.ClientSession {
 	t.Helper()
-	port := h.GetLeaderPort(t)
+	return connectDiscoveryOn(t, h.GetLeaderPort(t))
+}
+
+// connectDiscoveryOn dials /v1/sys/mcp on the node at port with the default
+// JWT; the client can also send the Skills extension's methods.
+func connectDiscoveryOn(t *testing.T, port int) *mcp.ClientSession {
+	t.Helper()
 	jwt := h.GetDefaultJWT(t)
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-agent", Version: "1.0.0"}, nil)
@@ -119,6 +125,7 @@ type skillsListParams struct {
 
 type skillsListResult struct {
 	mcp.ResultBase
+	mcp.Cacheable
 	Skills []skillEntry `json:"skills"`
 }
 
@@ -210,20 +217,37 @@ func createDiscoveryRole(t *testing.T, port int, roleName string) {
 	})
 }
 
+// createHiddenSkill creates a custom skill no role points at, so no identity
+// should see it, and removes it when the test ends.
+func createHiddenSkill(t *testing.T, port int, name string) {
+	t.Helper()
+	status, respBody := h.APIRequest(t, "POST", "sys/skills/"+name, port,
+		`{"name":"`+name+`","description":"no role points here","category":"custom","body":"# hidden"}`)
+	if status != 200 && status != 201 && status != 204 {
+		t.Fatalf("create skill failed: status %d, body %s", status, string(respBody))
+	}
+	t.Cleanup(func() { h.APIRequest(t, "DELETE", "sys/skills/"+name, port, "") })
+}
+
+// assertUnknownSkill asserts skills/get answers uri with -32602.
+func assertUnknownSkill(t *testing.T, session *mcp.ClientSession, uri string) {
+	t.Helper()
+	_, err := mcp.CallCustomMethod[*skillsGetParams, *skillsGetResult](context.Background(), session, "skills/get",
+		&skillsGetParams{URI: uri})
+	var rpcErr *jsonrpc.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc.CodeInvalidParams {
+		t.Errorf("skills/get %s, which no role of this identity reaches: got %v, want a -32602 error", uri, err)
+	}
+}
+
 // TestMCPDiscovery_SkillsExtension drives the Skills extension: the identity
 // sees the skill its role reaches, the listed digest matches the bytes served,
 // and a skill no role of the identity reaches is unknown to it.
 func TestMCPDiscovery_SkillsExtension(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	createDiscoveryRole(t, port, "e2e-mcp-skills")
-
 	const hidden = "e2e-unreferenced-skill"
-	status, respBody := h.APIRequest(t, "POST", "sys/skills/"+hidden, port,
-		`{"name":"`+hidden+`","description":"no role points here","category":"custom","body":"# hidden"}`)
-	if status != 200 && status != 201 && status != 204 {
-		t.Fatalf("create skill failed: status %d, body %s", status, string(respBody))
-	}
-	t.Cleanup(func() { h.APIRequest(t, "DELETE", "sys/skills/"+hidden, port, "") })
+	createHiddenSkill(t, port, hidden)
 
 	session := connectDiscovery(t)
 	ctx := context.Background()
@@ -266,17 +290,100 @@ func TestMCPDiscovery_SkillsExtension(t *testing.T) {
 		t.Errorf("read_skill and resources/read serve different bytes")
 	}
 
-	_, err = mcp.CallCustomMethod[*skillsGetParams, *skillsGetResult](ctx, session, "skills/get",
-		&skillsGetParams{URI: "skill://" + hidden + "/SKILL.md"})
-	var rpcErr *jsonrpc.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc.CodeInvalidParams {
-		t.Errorf("skills/get for %s, which no role of this identity reaches: got %v, want a -32602 error", hidden, err)
+	assertUnknownSkill(t, session, "skill://"+hidden+"/SKILL.md")
+}
+
+// TestMCPDiscovery_ThroughStandby drives discovery through a standby node,
+// which forwards /v1/sys/mcp to the active node: the identity, the Skills
+// extension's methods, its -32602 answers and the private cache scope must
+// all survive the hop.
+func TestMCPDiscovery_ThroughStandby(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+	const roleName = "e2e-mcp-standby"
+	createDiscoveryRole(t, leader, roleName)
+	const hidden = "e2e-unreferenced-standby-skill"
+	createHiddenSkill(t, leader, hidden)
+
+	session := connectDiscoveryOn(t, h.GetStandbyPort(t))
+	ctx := context.Background()
+
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "list_roles"})
+	if err != nil {
+		t.Fatalf("list_roles via standby: %v", err)
+	}
+	var roles rolesResult
+	decodeStructured(t, res, &roles)
+	found := false
+	for _, r := range roles.Roles {
+		if r.Name == roleName {
+			found = true
+			if want := "/v1/vault/role/" + roleName + "/gateway/"; r.URL != want {
+				t.Errorf("url via standby = %q, want %q", r.URL, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("role %q not listed via standby; warnings: %v", roleName, roles.Warnings)
+	}
+
+	list, err := mcp.CallCustomMethod[*skillsListParams, *skillsListResult](ctx, session, "skills/list", &skillsListParams{})
+	if err != nil {
+		t.Fatalf("skills/list via standby: %v", err)
+	}
+	if list.CacheScope != "private" {
+		t.Errorf("skills/list cacheScope via standby = %q, want private", list.CacheScope)
+	}
+	seen := false
+	for _, s := range list.Skills {
+		seen = seen || s.URI == "skill://vault/SKILL.md"
+	}
+	if !seen {
+		t.Errorf("skills/list via standby misses skill://vault/SKILL.md")
+	}
+
+	read, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "skill://vault/SKILL.md"})
+	if err != nil {
+		t.Fatalf("resources/read via standby: %v", err)
+	}
+	if read.CacheScope != "private" {
+		t.Errorf("resources/read cacheScope via standby = %q, want private", read.CacheScope)
+	}
+
+	assertUnknownSkill(t, session, "skill://"+hidden+"/SKILL.md")
+}
+
+// TestMCPDiscovery_RoleDiscoveryFields writes the discovery fields through the
+// HTTP API: provider_path reads back normalised, and a malformed skill or
+// provider_path is refused.
+func TestMCPDiscovery_RoleDiscoveryFields(t *testing.T) {
+	port := h.GetLeaderPort(t)
+	const roleName = "e2e-mcp-fields"
+	createDiscoveryRole(t, port, roleName)
+
+	status, body := h.APIRequest(t, "GET", "auth/jwt/role/"+roleName, port, "")
+	if status != 200 {
+		t.Fatalf("read role: status %d, body %s", status, body)
+	}
+	if got := h.JSONString(t, body, "data.provider_path"); got != "vault/" {
+		t.Errorf("provider_path = %q, want it normalised to vault/", got)
+	}
+
+	for _, bad := range []string{
+		`{"token_policies":["vault-gateway-access"],"skill":"Gh_Repo"}`,
+		`{"token_policies":["vault-gateway-access"],"provider_path":"/vault"}`,
+		`{"token_policies":["vault-gateway-access"],"provider_path":"a/../vault"}`,
+	} {
+		status, body := h.APIRequest(t, "POST", "auth/jwt/role/e2e-mcp-bad-fields", port, bad)
+		if status != 400 {
+			t.Errorf("write %s: status %d, want 400; body %s", bad, status, body)
+			h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-mcp-bad-fields", port, "")
+		}
 	}
 }
 
 // TestMCPDiscovery_FullLoop walks the roles.md discovery loop: create a role
 // wired to the vault provider, list roles, take the role's skill URI and URL,
-// then read that skill.
+// read that skill, then act through the URL exactly as handed out.
 func TestMCPDiscovery_FullLoop(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	const roleName = "e2e-mcp-discovery"
@@ -309,6 +416,17 @@ func TestMCPDiscovery_FullLoop(t *testing.T) {
 		}
 		if md := readSkillText(t, session, r.Skill); !strings.HasPrefix(md, "---\nname: vault\n") {
 			t.Errorf("the role's skill does not read back as vault:\n%s", md)
+		}
+
+		// Act: the agent's only inputs are the Warden address, the role's
+		// url and its own JWT. The secret must come back through the gateway.
+		status, body := h.DoRequest(t, "GET", h.NodeURL(port)+r.URL+"v1/secret/data/e2e/app-config",
+			map[string]string{"Authorization": "Bearer " + h.GetDefaultJWT(t)}, "")
+		if status != 200 {
+			t.Fatalf("GET through the role's url: status %d, body %s", status, body)
+		}
+		if h.JSONPath(h.ParseJSON(t, body), "data.data") == nil {
+			t.Errorf("the gateway answered without the secret's data: %s", body)
 		}
 	}
 	if !found {
