@@ -165,6 +165,11 @@ func readDevAudit(path string, n int, filter devAuditFilter) ([]map[string]any, 
 		if s, _ := entry["type"].(string); s != "request" {
 			continue
 		}
+		// Only calls through Warden to a provider: the scenarios' traffic, not the
+		// operator's own sys/ calls, reading this log included.
+		if request, _ := entry["request"].(map[string]any); request["mount_class"] != "provider" {
+			continue
+		}
 		summary := summarizeDevAuditEntry(entry)
 		if !filter.matches(summary) {
 			continue

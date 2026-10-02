@@ -83,16 +83,19 @@ func auditLine(t *testing.T, entry map[string]any) string {
 func TestReadDevAudit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.log")
 	entries := []map[string]any{
-		{"type": "request", "timestamp": "t1", "request": map[string]any{"path": "role/atm/gateway", "mount_point": "bank/"},
+		{"type": "request", "timestamp": "t1", "request": map[string]any{"path": "role/atm/gateway", "mount_point": "bank/", "mount_class": "provider"},
 			"auth": map[string]any{"principal_id": "agent-1", "role_name": "atm", "policy_results": map[string]any{"allowed": true}}},
 		{"type": "response", "timestamp": "t1"},
-		{"type": "request", "timestamp": "t2", "request": map[string]any{"path": "role/atm/gateway", "mount_point": "bank/"},
+		// The operator's own call is not playground traffic.
+		{"type": "request", "timestamp": "t1b", "request": map[string]any{"path": "sys/dev/audit", "mount_class": "system"},
+			"auth": map[string]any{"principal_id": "root", "policy_results": map[string]any{"allowed": true}}},
+		{"type": "request", "timestamp": "t2", "request": map[string]any{"path": "role/atm/gateway", "mount_point": "bank/", "mount_class": "provider"},
 			"auth": map[string]any{"principal_id": "agent-1", "role_name": "atm", "policy_results": map[string]any{
 				"allowed": true,
 				"mcp_decision": map[string]any{"decision": "deny", "name": "withdraw", "rule_type": "condition",
 					"condition": map[string]any{"expression": "call.args.?amount.orValue(0) <= 100"}},
 			}}},
-		{"type": "request", "timestamp": "t3", "request": map[string]any{"path": "role/assistant/gateway", "mount_point": "bank-me/"},
+		{"type": "request", "timestamp": "t3", "request": map[string]any{"path": "role/assistant/gateway", "mount_point": "bank-me/", "mount_class": "provider"},
 			"auth": map[string]any{"principal_id": "agent-2", "role_name": "assistant", "user": map[string]any{"subject": "alice"},
 				"policy_results": map[string]any{"allowed": false, "condition": map[string]any{"expression": "user.metadata.may_act_sub == agent.principal"}}}},
 	}
@@ -105,7 +108,7 @@ func TestReadDevAudit(t *testing.T) {
 
 	all, err := readDevAudit(path, 10, devAuditFilter{})
 	require.NoError(t, err)
-	require.Len(t, all, 3, "request entries only, malformed lines skipped")
+	require.Len(t, all, 3, "provider request entries only; sys calls and malformed lines skipped")
 	assert.Equal(t, "t3", all[0]["time"], "newest first")
 	assert.Equal(t, "bank-me/role/assistant/gateway", all[0]["path"], "the mount is prefixed")
 	assert.Equal(t, "alice", all[0]["user"])
