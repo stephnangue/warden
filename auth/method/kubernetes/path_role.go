@@ -8,6 +8,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -52,6 +53,14 @@ func (b *kubernetesAuthBackend) pathRole() *framework.Path {
 			"cred_spec_name": {
 				Type:        framework.TypeString,
 				Description: "Credential spec name for implicit auth flows",
+			},
+			"skill": {
+				Type:        framework.TypeString,
+				Description: helper.SkillFieldDescription,
+			},
+			"provider_path": {
+				Type:        framework.TypeString,
+				Description: helper.ProviderPathFieldDescription,
 			},
 			"max_age": {
 				Type:        framework.TypeString,
@@ -152,6 +161,8 @@ func (b *kubernetesAuthBackend) handleRoleRead(ctx context.Context, _ *logical.R
 			"token_policies":                   role.TokenPolicies,
 			"token_ttl":                        role.TokenTTL,
 			"cred_spec_name":                   role.CredSpecName,
+			"skill":                            role.Skill,
+			"provider_path":                    role.ProviderPath,
 			"max_age":                          role.MaxAge,
 			"metadata_mappings":                role.MetadataMappings,
 		},
@@ -191,6 +202,12 @@ func (b *kubernetesAuthBackend) handleRoleUpdate(ctx context.Context, _ *logical
 		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
+		}
+		if v, ok := d.GetOk("skill"); ok {
+			role.Skill = v.(string)
+		}
+		if v, ok := d.GetOk("provider_path"); ok {
+			role.ProviderPath = v.(string)
 		}
 		if v, ok := d.GetOk("max_age"); ok {
 			role.MaxAge = v.(string)
@@ -285,6 +302,12 @@ func (b *kubernetesAuthBackend) validateRole(role *KubernetesRole) error {
 		}
 	}
 
+	providerPath, err := helper.ValidateDiscoveryFields(role.Skill, role.ProviderPath)
+	if err != nil {
+		return err
+	}
+	role.ProviderPath = providerPath
+
 	return nil
 }
 
@@ -327,6 +350,12 @@ func (b *kubernetesAuthBackend) buildRoleFromFieldData(name string, d *framework
 	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)
+	}
+	if v, ok := d.GetOk("skill"); ok {
+		role.Skill = v.(string)
+	}
+	if v, ok := d.GetOk("provider_path"); ok {
+		role.ProviderPath = v.(string)
 	}
 	if v, ok := d.GetOk("max_age"); ok {
 		role.MaxAge = v.(string)

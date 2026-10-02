@@ -19,15 +19,10 @@ it as `Authorization: Bearer <pat>`, and forwards to Tower. The agent
 
 ## Configure the CLI/SDK
 
-`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
-returns each role with a `description`, and for a non-MCP provider the operator
-embeds the role's **gateway URL** in it — a relative path
-`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
-used to discover your roles).
-
-The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
-To act under a *different* role, use the `<gateway-url>` of that role from
-`list_roles` — each role provides its own role-bearing URL in its description.
+`<gateway-url>` is the `url` of the role you chose, as returned by the
+`list_roles` discovery tool. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles). Each role has its own `url`: to act under a
+*different* role, use that role's `url`.
 
 Present your identity on every call: `Authorization: Bearer <jwt>`, or an mTLS
 client certificate. A `401` means the JWT expired (typical TTL 5–60 min) —
@@ -45,8 +40,7 @@ does not strip or prepend it. Write the upstream path verbatim after
 ## Examples
 
 (Examples use a concrete `<gateway-url>` of
-`/v1/ansible_tower/role/ansible-ops/gateway/`; substitute the one from your
-role's `list_roles` description.)
+`/v1/ansible_tower/role/ansible-ops/gateway/`; substitute your role's `url`.)
 
 Ping (health check):
 ```bash

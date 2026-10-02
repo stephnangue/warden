@@ -95,7 +95,7 @@ func Handler(props *HandlerProperties) http.Handler {
 	mux.Handle(prmPath+"/", handlePRM(core, log))
 
 	// MCP discovery interface — Warden answering MCP for its own
-	// capabilities (list_roles, get_skill). Registered before the /v1/sys/
+	// capabilities (list_roles, read_skill). Registered before the /v1/sys/
 	// catch-all. Not in standbyAllowedPaths: it reads live mount/skill/
 	// introspection state, so standby nodes forward it to the active node.
 	mux.Handle(sysMCPPath, handleSysMCP(core, log))

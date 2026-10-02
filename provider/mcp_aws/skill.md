@@ -27,8 +27,8 @@ Warden policy applies). Your role is the `role/<role>/gateway` segment of the UR
 this server was attached at — **fixed for this server**, and not changeable at
 runtime (an MCP client sends fixed headers, and the role can't be passed in a
 tool call). To act under a *different* role, call the MCP server the operator
-attached for that role: the operator attaches **one server per role**, named or
-described to match a `list_roles` entry.
+attached for that role: the operator attaches **one server per role**, each at
+that role's `url` from the `list_roles` discovery tool.
 
 ## Attaching the client
 

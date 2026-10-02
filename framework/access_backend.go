@@ -40,6 +40,7 @@ type AccessBackend struct {
 // Compile-time interface assertions
 var _ logical.Backend = (*AccessBackend)(nil)
 var _ logical.TransparentModeProvider = (*AccessBackend)(nil)
+var _ logical.RoleURLProvider = (*AccessBackend)(nil)
 
 // Setup initializes the access backend with the provided configuration.
 // It loads persisted config from storage.
@@ -96,6 +97,15 @@ func (b *AccessBackend) IsTransparentPath(path string) bool {
 		prefix = "access/"
 	}
 	return strings.HasPrefix(path, prefix)
+}
+
+// RoleURLSuffix returns the access path prefix: grants are fetched beneath it
+// and the role travels as the ?role= query parameter, so every role shares it.
+func (b *AccessBackend) RoleURLSuffix(string) string {
+	if b.AccessPathPrefix == "" {
+		return "access/"
+	}
+	return b.AccessPathPrefix
 }
 
 // IsUnauthenticatedPath returns false — all access paths require authentication.

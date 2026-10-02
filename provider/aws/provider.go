@@ -100,8 +100,17 @@ func extractTokens(r *http.Request, _ bool) (agent, user string) {
 	return sigv4.ExtractAccessKeyID(authHeader), ""
 }
 
-// Compile-time interface assertion
-var _ logical.TransparentAuthRoleExtractor = (*awsBackend)(nil)
+// Compile-time interface assertions
+var (
+	_ logical.TransparentAuthRoleExtractor = (*awsBackend)(nil)
+	_ logical.RoleURLProvider              = (*awsBackend)(nil)
+)
+
+// RoleURLSuffix returns the mount-level gateway: an AWS SDK carries the role
+// in its access key ID, so every role shares one URL.
+func (b *awsBackend) RoleURLSuffix(string) string {
+	return "gateway"
+}
 
 // GetAuthRoleFromRequest extracts the auth role from the SigV4 Authorization
 // header. Returns the access_key_id (used as the role name) when present, or

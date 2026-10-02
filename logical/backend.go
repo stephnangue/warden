@@ -223,6 +223,22 @@ type TransparentAuthRoleExtractor interface {
 	GetAuthRoleFromRequest(r *http.Request) string
 }
 
+// DefaultRoleURLSuffix is the mount-relative entry point an agent uses to act
+// under a role on a provider that does not implement RoleURLProvider: the
+// role-bearing gateway path most gateway providers accept.
+func DefaultRoleURLSuffix(role string) string {
+	return "role/" + role + "/gateway/"
+}
+
+// RoleURLProvider is implemented by providers whose role-scoped entry point
+// differs from DefaultRoleURLSuffix — for example a provider that reads the
+// role from the request itself and serves a mount-level gateway, or one that
+// takes the role as a query parameter. The discovery server joins the mount
+// URL and this suffix into the URL it hands an agent for the role.
+type RoleURLProvider interface {
+	RoleURLSuffix(role string) string
+}
+
 // StreamBodyParser can be implemented by streaming backends that want the core
 // to parse the request body into req.Data before policy evaluation, even for
 // streaming requests. By default, streaming requests skip body parsing to avoid

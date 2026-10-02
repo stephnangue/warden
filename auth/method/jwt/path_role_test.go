@@ -223,6 +223,54 @@ func TestPathRole_Update(t *testing.T) {
 	assert.Len(t, updatedRole.BoundAudiences, 1)
 }
 
+// The discovery fields round-trip through create, read and update; provider_path
+// is normalised to a trailing slash and a bad shape is a 400.
+func TestPathRole_DiscoveryFields(t *testing.T) {
+	b, ctx := createTestBackendWithStorage(t)
+	schema := map[string]*framework.FieldSchema{
+		"name":          {Type: framework.TypeString},
+		"skill":         {Type: framework.TypeString},
+		"provider_path": {Type: framework.TypeString},
+	}
+
+	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, &framework.FieldData{
+		Raw:    map[string]any{"name": "repo-creator", "skill": "gh-repo-creator", "provider_path": "github"},
+		Schema: schema,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	resp, err = b.handleRoleRead(ctx, &logical.Request{}, &framework.FieldData{
+		Raw:    map[string]any{"name": "repo-creator"},
+		Schema: schema,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "gh-repo-creator", resp.Data["skill"])
+	assert.Equal(t, "github/", resp.Data["provider_path"])
+
+	// Clearing the skill falls back to the provider's default skill.
+	resp, err = b.handleRoleUpdate(ctx, &logical.Request{}, &framework.FieldData{
+		Raw:    map[string]any{"name": "repo-creator", "skill": ""},
+		Schema: schema,
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	role, err := b.getRole(ctx, "repo-creator")
+	require.NoError(t, err)
+	assert.Empty(t, role.Skill)
+	assert.Equal(t, "github/", role.ProviderPath)
+
+	for _, raw := range []map[string]any{
+		{"name": "bad", "skill": "Gh_Repo"},
+		{"name": "bad", "provider_path": "/vault"},
+		{"name": "bad", "provider_path": "team/../vault"},
+	} {
+		resp, err := b.handleRoleCreate(ctx, &logical.Request{}, &framework.FieldData{Raw: raw, Schema: schema})
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%v", raw)
+	}
+}
+
 // TestPathRole_UpdateCreatesIfNotExists verifies the upsert pattern -
 // UpdateOperation creates the role if it doesn't exist.
 func TestPathRole_UpdateCreatesIfNotExists(t *testing.T) {

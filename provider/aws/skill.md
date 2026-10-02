@@ -22,11 +22,9 @@ Two values are per-task:
 - `<role>` is the role you chose for this task. AWS is unusual: the
   role travels in `AWS_ACCESS_KEY_ID` (Warden reads it out of the SigV4
   Authorization header to pick the credential spec), **not** in the URL.
-- `<gateway-url>` is the gateway URL for that role, embedded in the
-  role's `description` returned by the `list_roles` MCP tool. It is a
-  **relative** path — for AWS, mount-level: `/v1/<namespace>/<mount>/gateway`
-  (e.g. `/v1/aws/gateway`, `/v1/team-data/aws-prod/gateway`). Prepend
-  `$WARDEN_ADDR`.
+- `<gateway-url>` is the role's `url`, as returned by the `list_roles`
+  discovery tool. For AWS it is mount-level — every role on the mount
+  shares it, because the role is not in the URL. Prepend `$WARDEN_ADDR`.
 
 Present your identity as the JWT placed in the SigV4 secret slots
 (below); Warden verifies the signature against it. A stale JWT surfaces

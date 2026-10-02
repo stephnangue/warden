@@ -27,11 +27,10 @@ PostgreSQL or MySQL client unchanged. There's no SDK setup; this is
 a single HTTP call followed by a regular DB connection.
 
 You need three values:
-- `<access-url>` is the access URL for the role you chose, embedded in
-  the role's `description` returned by the `list_roles` MCP tool. RDS is
-  not a gateway provider, so this is a **relative** access path
-  `/v1/<namespace>/<mount>/access/` (e.g. `/v1/rds/access/`,
-  `/v1/team-data/rds-prod/access/`) — prepend `$WARDEN_ADDR`.
+- `<access-url>` is the `url` of the role you chose, as returned by the
+  `list_roles` discovery tool — prepend `$WARDEN_ADDR`. RDS is not a
+  gateway provider: the URL is the mount's access path, shared by every
+  role, and the grant name goes after it.
 - `<grant-name>` is a pre-configured grant (operator decides which
   RDS instance + DB user + capabilities each grant exposes). Grants are
   operator-managed and can't be listed by the agent — the grant to use

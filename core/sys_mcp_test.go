@@ -116,7 +116,7 @@ func TestMCPServer_ListRoles_JWTFanOut(t *testing.T) {
 	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-a/"}))
 	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-b/"}))
 	ctrl.rolesByMount["auth/jwt-a/"] = []map[string]any{
-		{"name": "reader", "description": "search & read any repo (skill: github)"},
+		{"name": "reader", "description": "search & read any repo"},
 	}
 	ctrl.rolesByMount["auth/jwt-b/"] = []map[string]any{
 		{"name": "writer", "description": "write staging"},
@@ -130,24 +130,24 @@ func TestMCPServer_ListRoles_JWTFanOut(t *testing.T) {
 	require.NotNil(t, session.InitializeResult())
 	assert.Equal(t, "2026-07-28", session.InitializeResult().ProtocolVersion)
 
-	// tools/list advertises list_roles.
+	// tools/list advertises list_roles and read_skill; get_skill is gone.
 	tools, err := session.ListTools(context.Background(), nil)
 	require.NoError(t, err)
 	var names []string
 	for _, tl := range tools.Tools {
 		names = append(names, tl.Name)
 	}
-	assert.Contains(t, names, "list_roles")
+	assert.ElementsMatch(t, []string{"list_roles", "read_skill"}, names)
 
 	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
 	require.NoError(t, err)
 	out := decodeListRoles(t, res)
 
 	// Sorted by auth_path then name: jwt-a/reader, jwt-b/writer. auth_path is
-	// dropped from the projection — only {name, description} survive.
+	// dropped from the projection.
 	require.Len(t, out.Roles, 2)
 	assert.Equal(t, "reader", out.Roles[0].Name)
-	assert.Equal(t, "search & read any repo (skill: github)", out.Roles[0].Description)
+	assert.Equal(t, "search & read any repo", out.Roles[0].Description)
 	assert.Equal(t, "writer", out.Roles[1].Name)
 	assert.Empty(t, out.Warnings)
 }
@@ -163,7 +163,7 @@ func TestMCPServer_ListRoles_CertPath(t *testing.T) {
 	c.authMethods["cert"] = ctrl.factory()
 	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "cert", Path: "cert-mount/"}))
 	ctrl.rolesByMount["auth/cert-mount/"] = []map[string]any{
-		{"name": "cert-role", "description": "clone via Git (skill: github)"},
+		{"name": "cert-role", "description": "clone via Git"},
 	}
 
 	cert := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "agent"}}
@@ -266,42 +266,47 @@ func seedTestSkill(t *testing.T, c *Core, ctx context.Context, name string) {
 	}))
 }
 
-// callGetSkill invokes the get_skill tool and returns the raw result.
-func callGetSkill(t *testing.T, session *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
+// callReadSkill invokes the read_skill tool and returns the raw result.
+func callReadSkill(t *testing.T, session *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
-	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_skill", Arguments: args})
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "read_skill", Arguments: args})
 	require.NoError(t, err)
 	return res
 }
 
-// decodeSkill asserts a successful get_skill result and returns the skill map.
-func decodeSkill(t *testing.T, res *mcp.CallToolResult) map[string]any {
-	t.Helper()
-	require.False(t, res.IsError, "unexpected tool error: %v", res.Content)
-	raw, err := json.Marshal(res.StructuredContent)
-	require.NoError(t, err)
-	var out map[string]any
-	require.NoError(t, json.Unmarshal(raw, &out))
-	return out
-}
-
-// TestMCPServer_GetSkill_ByName fetches a seeded skill by name and returns its
-// markdown body and metadata.
-func TestMCPServer_GetSkill_ByName(t *testing.T) {
+// TestMCPServer_ReadSkill_ByURI reads a seeded skill by its skill:// URI: the
+// text content is the rendered SKILL.md and the structured output carries its
+// frontmatter.
+func TestMCPServer_ReadSkill_ByURI(t *testing.T) {
 	_, ctx, c := setupTestSystemBackend(t)
 	seedTestSkill(t, c, ctx, "mcp")
+	stored, err := c.skillStore.Get(ctx, "mcp")
+	require.NoError(t, err)
 
 	srv := startMCPTestServer(t, c, nil)
 	session := connectMCP(t, srv, "eyJ.any.token")
 
-	got := decodeSkill(t, callGetSkill(t, session, map[string]any{"skill": "mcp"}))
-	assert.Equal(t, "mcp", got["name"])
-	assert.Contains(t, got["body"].(string), "Using mcp")
+	res := callReadSkill(t, session, map[string]any{"uri": "skill://mcp/SKILL.md"})
+	require.False(t, res.IsError, "unexpected tool error: %v", res.Content)
+	require.Len(t, res.Content, 1)
+	txt, ok := res.Content[0].(*mcp.TextContent)
+	require.True(t, ok)
+	md, err := renderSkillMarkdown(stored)
+	require.NoError(t, err)
+	assert.Equal(t, string(md), txt.Text)
+	assert.Contains(t, txt.Text, "Using mcp")
+
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	var out readSkillOutput
+	require.NoError(t, json.Unmarshal(raw, &out))
+	assert.Equal(t, "skill://mcp/SKILL.md", out.URI)
+	assert.Equal(t, frontmatterFor(stored), out.Frontmatter)
 }
 
-// TestMCPServer_GetSkill_Errors covers the tool-error paths: a missing/blank
-// skill name and an unknown skill name.
-func TestMCPServer_GetSkill_Errors(t *testing.T) {
+// TestMCPServer_ReadSkill_Errors covers the tool-error paths: a missing,
+// malformed or bare-name URI, and an unknown skill.
+func TestMCPServer_ReadSkill_Errors(t *testing.T) {
 	_, ctx, c := setupTestSystemBackend(t)
 	seedTestSkill(t, c, ctx, "mcp")
 
@@ -313,13 +318,14 @@ func TestMCPServer_GetSkill_Errors(t *testing.T) {
 		args map[string]any
 		want string
 	}{
-		{"missing", map[string]any{}, "skill is required"},
-		{"blank", map[string]any{"skill": "   "}, "skill is required"},
-		{"unknown", map[string]any{"skill": "nope"}, `skill "nope" not found`},
+		{"blank", map[string]any{"uri": "   "}, "invalid skill URI"},
+		{"bare name", map[string]any{"uri": "mcp"}, "invalid skill URI"},
+		{"not SKILL.md", map[string]any{"uri": "skill://mcp/README.md"}, "invalid skill URI"},
+		{"unknown", map[string]any{"uri": "skill://nope/SKILL.md"}, `skill "skill://nope/SKILL.md" not found`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			res := callGetSkill(t, session, tc.args)
+			res := callReadSkill(t, session, tc.args)
 			require.True(t, res.IsError, "expected a tool error")
 			require.NotEmpty(t, res.Content)
 			txt, ok := res.Content[0].(*mcp.TextContent)

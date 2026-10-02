@@ -1,11 +1,11 @@
 //go:build e2e
 
 // Package discovery exercises Warden's own MCP server — the discovery
-// interface at /v1/sys/mcp (list_roles + get_skill) — end to end against the
+// interface at /v1/sys/mcp (list_roles + read_skill) — end to end against the
 // live cluster, following the roles.md scenario: an agent connects, lists the
-// roles its identity can assume, reads a skill name out of a role description,
-// and fetches that skill — the recipe that teaches it how to drive the
-// provider through the gateway.
+// roles its identity can assume, takes a role's skill URI and URL, and reads
+// that skill — the recipe that teaches it how to drive the provider through
+// the gateway.
 package discovery
 
 import (
@@ -13,7 +13,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"net/http"
-	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,8 +85,34 @@ type rolesResult struct {
 	Roles []struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		Provider    string `json:"provider"`
+		Skill       string `json:"skill"`
+		URL         string `json:"url"`
 	} `json:"roles"`
 	Warnings []string `json:"warnings"`
+}
+
+// readSkillText calls read_skill and returns the SKILL.md it serves.
+func readSkillText(t *testing.T, session *mcp.ClientSession, uri string) string {
+	t.Helper()
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "read_skill",
+		Arguments: map[string]any{"uri": uri},
+	})
+	if err != nil {
+		t.Fatalf("read_skill{uri: %q}: %v", uri, err)
+	}
+	if res.IsError {
+		t.Fatalf("read_skill{uri: %q} returned a tool error: %v", uri, res.Content)
+	}
+	if len(res.Content) != 1 {
+		t.Fatalf("read_skill returned %d content items, want 1", len(res.Content))
+	}
+	txt, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("read_skill content is %T, want text", res.Content[0])
+	}
+	return txt.Text
 }
 
 // TestMCPDiscovery_ToolsAndListRoles connects to the discovery endpoint,
@@ -104,10 +130,13 @@ func TestMCPDiscovery_ToolsAndListRoles(t *testing.T) {
 	for _, tl := range tools.Tools {
 		got[tl.Name] = true
 	}
-	for _, want := range []string{"list_roles", "get_skill"} {
+	for _, want := range []string{"list_roles", "read_skill"} {
 		if !got[want] {
 			t.Errorf("tools/list missing %q; got %v", want, got)
 		}
+	}
+	if got["get_skill"] {
+		t.Errorf("tools/list still advertises the removed get_skill")
 	}
 
 	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "list_roles"})
@@ -119,7 +148,6 @@ func TestMCPDiscovery_ToolsAndListRoles(t *testing.T) {
 	if len(roles.Roles) == 0 {
 		t.Fatalf("expected at least one role for the default JWT; got none")
 	}
-	// The projection drops auth_path — each entry is {name, description}.
 	for _, r := range roles.Roles {
 		if r.Name == "" {
 			t.Errorf("role with empty name: %#v", r)
@@ -127,41 +155,28 @@ func TestMCPDiscovery_ToolsAndListRoles(t *testing.T) {
 	}
 }
 
-// TestMCPDiscovery_GetSkillByName fetches a skill by name. The e2e cluster
-// mounts the vault provider, which seeds the "vault" skill.
-func TestMCPDiscovery_GetSkillByName(t *testing.T) {
+// TestMCPDiscovery_ReadSkillByURI reads a skill by URI. The e2e cluster mounts
+// the vault provider, which seeds the "vault" skill.
+func TestMCPDiscovery_ReadSkillByURI(t *testing.T) {
 	session := connectDiscovery(t)
-	ctx := context.Background()
 
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "get_skill",
-		Arguments: map[string]any{"skill": "vault"},
-	})
-	if err != nil {
-		t.Fatalf("get_skill by name: %v", err)
+	md := readSkillText(t, session, "skill://vault/SKILL.md")
+	if !strings.HasPrefix(md, "---\nname: vault\n") {
+		t.Fatalf("SKILL.md does not open with the vault frontmatter:\n%s", md)
 	}
-	var skill map[string]any
-	decodeStructured(t, res, &skill)
-	if skill["name"] != "vault" {
-		t.Fatalf("skill vault resolved to %v, want vault", skill["name"])
-	}
-	if bodyStr, _ := skill["body"].(string); bodyStr == "" {
-		t.Errorf("resolved skill has an empty body")
+	if !strings.Contains(md, "\n---\n\n#") {
+		t.Errorf("SKILL.md has no body after its frontmatter:\n%s", md)
 	}
 }
 
-// skillNameRe extracts the skill name an operator embeds in a role
-// description, e.g. "read secrets (skill: vault)".
-var skillNameRe = regexp.MustCompile(`skill:\s*([A-Za-z0-9._-]+)`)
-
 // TestMCPDiscovery_FullLoop walks the roles.md discovery loop: create a role
-// whose description embeds a skill name, list roles, parse the name out of the
-// description, then fetch that skill.
+// wired to the vault provider, list roles, take the role's skill URI and URL,
+// then read that skill.
 func TestMCPDiscovery_FullLoop(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
 	const roleName = "e2e-mcp-discovery"
-	body := `{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"description":"read app secrets through Vault (skill: vault)"}`
+	body := `{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"description":"read app secrets through Vault","provider_path":"vault"}`
 	status, respBody := h.APIRequest(t, "POST", "auth/jwt/role/"+roleName, port, body)
 	if status != 200 && status != 201 && status != 204 {
 		t.Fatalf("create role failed: status %d, body %s", status, string(respBody))
@@ -180,34 +195,31 @@ func TestMCPDiscovery_FullLoop(t *testing.T) {
 	var roles rolesResult
 	decodeStructured(t, res, &roles)
 
-	var skillName string
+	found := false
 	for _, r := range roles.Roles {
 		if r.Name != roleName {
 			continue
 		}
-		m := skillNameRe.FindStringSubmatch(r.Description)
-		if m == nil {
-			t.Fatalf("role %q description %q had no parseable skill name", roleName, r.Description)
+		found = true
+		if r.Provider != "vault" {
+			t.Errorf("provider = %q, want vault", r.Provider)
 		}
-		skillName = m[1]
+		if want := "/v1/vault/role/" + roleName + "/gateway/"; r.URL != want {
+			t.Errorf("url = %q, want %q", r.URL, want)
+		}
+		if r.Skill != "skill://vault/SKILL.md" {
+			t.Fatalf("skill = %q, want the vault provider's skill://vault/SKILL.md", r.Skill)
+		}
+		if md := readSkillText(t, session, r.Skill); !strings.HasPrefix(md, "---\nname: vault\n") {
+			t.Errorf("the role's skill does not read back as vault:\n%s", md)
+		}
 	}
-	if skillName == "" {
-		t.Fatalf("role %q not found in list_roles output", roleName)
+	if !found {
+		t.Fatalf("role %q not found in list_roles output; warnings: %v", roleName, roles.Warnings)
 	}
-
-	skillRes, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "get_skill",
-		Arguments: map[string]any{"skill": skillName},
-	})
-	if err != nil {
-		t.Fatalf("get_skill{skill: %q}: %v", skillName, err)
-	}
-	var skill map[string]any
-	decodeStructured(t, skillRes, &skill)
-	if skill["name"] != "vault" {
-		t.Fatalf("parsed skill name %q resolved to skill %v, want vault", skillName, skill["name"])
-	}
-	if bodyStr, _ := skill["body"].(string); bodyStr == "" {
-		t.Errorf("resolved skill has an empty body")
+	for _, w := range roles.Warnings {
+		if strings.Contains(w, roleName) {
+			t.Errorf("unexpected warning for %q: %s", roleName, w)
+		}
 	}
 }

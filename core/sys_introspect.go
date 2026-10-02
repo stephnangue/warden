@@ -83,9 +83,11 @@ func (b *SystemBackend) pathIntrospectRoles() []*framework.Path {
 // aggregatedRole is the per-role payload returned by the system introspection
 // endpoint. auth_path is added by the aggregator (not supplied by backends).
 type aggregatedRole struct {
-	AuthPath    string `json:"auth_path"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	AuthPath     string `json:"auth_path"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	Skill        string `json:"skill,omitempty"`
+	ProviderPath string `json:"provider_path,omitempty"`
 }
 
 func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
@@ -228,8 +230,10 @@ func (b *SystemBackend) introspectMount(ctx context.Context, parent *logical.Req
 		return nil, fmt.Errorf("marshal roles: %w", err)
 	}
 	var parsed []struct {
-		Name        string `json:"name"`
-		Description string `json:"description,omitempty"`
+		Name         string `json:"name"`
+		Description  string `json:"description,omitempty"`
+		Skill        string `json:"skill,omitempty"`
+		ProviderPath string `json:"provider_path,omitempty"`
 	}
 	if err := json.Unmarshal(bytes, &parsed); err != nil {
 		return nil, fmt.Errorf("unmarshal roles: %w", err)
@@ -237,9 +241,11 @@ func (b *SystemBackend) introspectMount(ctx context.Context, parent *logical.Req
 	out := make([]aggregatedRole, len(parsed))
 	for i, p := range parsed {
 		out[i] = aggregatedRole{
-			AuthPath:    entry.Path,
-			Name:        p.Name,
-			Description: p.Description,
+			AuthPath:     entry.Path,
+			Name:         p.Name,
+			Description:  p.Description,
+			Skill:        p.Skill,
+			ProviderPath: p.ProviderPath,
 		}
 	}
 	return out, nil

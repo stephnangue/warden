@@ -30,6 +30,11 @@ type KubernetesRole struct {
 	TokenType     string   `json:"token_type,omitempty"`
 	CredSpecName  string   `json:"cred_spec_name,omitempty"`
 
+	// Skill and ProviderPath tell the discovery server which skill teaches
+	// an agent to use this role and which provider mount it is used with.
+	Skill        string `json:"skill,omitempty"`
+	ProviderPath string `json:"provider_path,omitempty"`
+
 	// MaxAge optionally caps the elapsed time since the JWT's iat claim.
 	// Empty = no freshness check. Same shape as JWTRole.MaxAge.
 	MaxAge string `json:"max_age,omitempty"`

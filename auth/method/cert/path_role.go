@@ -70,6 +70,14 @@ func (b *certAuthBackend) pathRole() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Credential spec name",
 			},
+			"skill": {
+				Type:        framework.TypeString,
+				Description: helper.SkillFieldDescription,
+			},
+			"provider_path": {
+				Type:        framework.TypeString,
+				Description: helper.ProviderPathFieldDescription,
+			},
 			"principal_claim": {
 				Type:          framework.TypeString,
 				Description:   "Identity source from certificate (overrides global config): cn, dns_san, email_san, uri_san, serial",
@@ -173,6 +181,8 @@ func (b *certAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reque
 			"token_policies":               role.TokenPolicies,
 			"token_ttl":                    role.TokenTTL,
 			"cred_spec_name":               role.CredSpecName,
+			"skill":                        role.Skill,
+			"provider_path":                role.ProviderPath,
 			"allowed_common_names":         role.AllowedCommonNames,
 			"allowed_dns_sans":             role.AllowedDNSSANs,
 			"allowed_email_sans":           role.AllowedEmailSANs,
@@ -232,6 +242,12 @@ func (b *certAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Req
 		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
+		}
+		if v, ok := d.GetOk("skill"); ok {
+			role.Skill = v.(string)
+		}
+		if v, ok := d.GetOk("provider_path"); ok {
+			role.ProviderPath = v.(string)
 		}
 		if v, ok := d.GetOk("principal_claim"); ok {
 			role.PrincipalClaim = v.(string)
@@ -368,6 +384,12 @@ func (b *certAuthBackend) validateRole(role *CertRole) error {
 		}
 	}
 
+	providerPath, err := helper.ValidateDiscoveryFields(role.Skill, role.ProviderPath)
+	if err != nil {
+		return err
+	}
+	role.ProviderPath = providerPath
+
 	return nil
 }
 
@@ -409,6 +431,12 @@ func (b *certAuthBackend) buildRoleFromFieldData(name string, d *framework.Field
 	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)
+	}
+	if v, ok := d.GetOk("skill"); ok {
+		role.Skill = v.(string)
+	}
+	if v, ok := d.GetOk("provider_path"); ok {
+		role.ProviderPath = v.(string)
 	}
 	if v, ok := d.GetOk("principal_claim"); ok {
 		role.PrincipalClaim = v.(string)

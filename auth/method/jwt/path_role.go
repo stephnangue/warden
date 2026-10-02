@@ -7,6 +7,7 @@ import (
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -56,6 +57,14 @@ func (b *jwtAuthBackend) pathRole() *framework.Path {
 			"cred_spec_name": {
 				Type:        framework.TypeString,
 				Description: "Credential spec name",
+			},
+			"skill": {
+				Type:        framework.TypeString,
+				Description: helper.SkillFieldDescription,
+			},
+			"provider_path": {
+				Type:        framework.TypeString,
+				Description: helper.ProviderPathFieldDescription,
 			},
 			"groups_claim": {
 				Type:        framework.TypeString,
@@ -171,6 +180,8 @@ func (b *jwtAuthBackend) handleRoleRead(ctx context.Context, req *logical.Reques
 			"token_ttl":           role.TokenTTL,
 			"user_claim":          role.UserClaim,
 			"cred_spec_name":      role.CredSpecName,
+			"skill":               role.Skill,
+			"provider_path":       role.ProviderPath,
 			"groups_claim":        role.GroupsClaim,
 			"group_policy_prefix": role.GroupPolicyPrefix,
 			"max_age":             role.MaxAge,
@@ -216,6 +227,12 @@ func (b *jwtAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.Requ
 		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
+		}
+		if v, ok := d.GetOk("skill"); ok {
+			role.Skill = v.(string)
+		}
+		if v, ok := d.GetOk("provider_path"); ok {
+			role.ProviderPath = v.(string)
 		}
 		if v, ok := d.GetOk("groups_claim"); ok {
 			role.GroupsClaim = v.(string)
@@ -290,6 +307,12 @@ func (b *jwtAuthBackend) handleRoleList(ctx context.Context, req *logical.Reques
 
 // validateRole validates role fields and sets defaults
 func (b *jwtAuthBackend) validateRole(role *JWTRole) error {
+	providerPath, err := helper.ValidateDiscoveryFields(role.Skill, role.ProviderPath)
+	if err != nil {
+		return err
+	}
+	role.ProviderPath = providerPath
+
 	// Default user claim
 	if role.UserClaim == "" {
 		role.UserClaim = "sub"
@@ -349,6 +372,12 @@ func (b *jwtAuthBackend) buildRoleFromFieldData(name string, d *framework.FieldD
 	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)
+	}
+	if v, ok := d.GetOk("skill"); ok {
+		role.Skill = v.(string)
+	}
+	if v, ok := d.GetOk("provider_path"); ok {
+		role.ProviderPath = v.(string)
 	}
 	if v, ok := d.GetOk("groups_claim"); ok {
 		role.GroupsClaim = v.(string)

@@ -19,6 +19,8 @@ type SPIFFERole struct {
 	TokenTTL          string   `json:"token_ttl"`
 	TokenType         string   `json:"token_type,omitempty"`
 	CredSpecName      string   `json:"cred_spec_name,omitempty"`
+	Skill             string   `json:"skill,omitempty"`               // skill teaching an agent to use this role (discovery)
+	ProviderPath      string   `json:"provider_path,omitempty"`       // provider mount this role is used with (discovery)
 	GroupsClaim       string   `json:"groups_claim,omitempty"`        // JWT-SVID group claim → policies
 	GroupPolicyPrefix string   `json:"group_policy_prefix,omitempty"` // prefix for group policies (default group-)
 

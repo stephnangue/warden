@@ -204,3 +204,10 @@ func TestAccessBackend_GetAutoAuthPath_NilCfg(t *testing.T) {
 	b := &AccessBackend{Backend: &Backend{}}
 	assert.Equal(t, "", b.GetAutoAuthPath())
 }
+
+// The role URL is the access path prefix, shared by every role (the role
+// travels as ?role=).
+func TestAccessBackend_RoleURLSuffix(t *testing.T) {
+	assert.Equal(t, "access/", (&AccessBackend{}).RoleURLSuffix("reader"))
+	assert.Equal(t, "grants/", (&AccessBackend{AccessPathPrefix: "grants/"}).RoleURLSuffix("reader"))
+}

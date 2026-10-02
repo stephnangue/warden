@@ -18,6 +18,8 @@ type CertRole struct {
 	TokenTTL                   string   `json:"token_ttl"`
 	TokenType                  string   `json:"token_type,omitempty"`
 	CredSpecName               string   `json:"cred_spec_name,omitempty"`
+	Skill                      string   `json:"skill,omitempty"`         // Skill teaching an agent to use this role (discovery)
+	ProviderPath               string   `json:"provider_path,omitempty"` // Provider mount this role is used with (discovery)
 	PrincipalClaim             string   `json:"principal_claim,omitempty"`
 
 	// MetadataMappings maps a certificate field selector to the token metadata
