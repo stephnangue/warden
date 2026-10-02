@@ -13,6 +13,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 //go:embed seed/skills/*.md
@@ -31,7 +32,8 @@ const (
 // shipped alongside the provider's Go code.
 //
 // providerType is the mount type the caller is registering (e.g., "aws").
-// The frontmatter's `name` field MUST equal providerType — this guards
+// The frontmatter's `name` field MUST equal the provider's skill name
+// (logical.SkillNameForProvider: mcp_aws ships "mcp-aws") — this guards
 // against wiring errors where a provider's skill markdown gets mapped to
 // the wrong type in CoreConfig.ProviderSkills.
 //
@@ -62,8 +64,8 @@ func (s *SkillStore) SeedProviderSkill(ctx context.Context, providerType, markdo
 	if err != nil {
 		return fmt.Errorf("parse provider skill: %w", err)
 	}
-	if skill.Name != providerType {
-		return fmt.Errorf("provider skill name %q does not match provider type %q (likely a wiring error in CoreConfig.ProviderSkills)", skill.Name, providerType)
+	if want := logical.SkillNameForProvider(providerType); skill.Name != want {
+		return fmt.Errorf("provider skill name %q does not match %q for provider type %q (likely a wiring error in CoreConfig.ProviderSkills)", skill.Name, want, providerType)
 	}
 	return s.seedOne(ctx, skill)
 }

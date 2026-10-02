@@ -243,6 +243,10 @@ func TestValidateSkill_Rejects(t *testing.T) {
 		{"empty name", func(s *Skill) { s.Name = "" }, "invalid skill name"},
 		{"bad name uppercase", func(s *Skill) { s.Name = "BadName" }, "invalid skill name"},
 		{"bad name leading hyphen", func(s *Skill) { s.Name = "-bad" }, "invalid skill name"},
+		{"bad name trailing hyphen", func(s *Skill) { s.Name = "bad-" }, "invalid skill name"},
+		{"bad name underscore", func(s *Skill) { s.Name = "mcp_aws" }, "invalid skill name"},
+		{"bad name consecutive hyphens", func(s *Skill) { s.Name = "a--b" }, "invalid skill name"},
+		{"bad name too long", func(s *Skill) { s.Name = strings.Repeat("a", 65) }, "invalid skill name"},
 		{"empty description", func(s *Skill) { s.Description = "" }, "description"},
 		{"unknown category", func(s *Skill) { s.Category = "weird" }, "invalid skill category"},
 		{"empty body", func(s *Skill) { s.Body = "" }, "body"},
@@ -254,6 +258,7 @@ func TestValidateSkill_Rejects(t *testing.T) {
 			}
 		}, "requires exceeds"},
 		{"bad require entry", func(s *Skill) { s.Requires = []string{"BAD"} }, "invalid requires entry"},
+		{"underscore require entry", func(s *Skill) { s.Requires = []string{"mcp_aws"} }, "invalid requires entry"},
 		{"provider-guide missing provider", func(s *Skill) {
 			s.Category = SkillCategoryProviderGuide
 			s.Provider = ""

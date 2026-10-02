@@ -1,5 +1,5 @@
 ---
-name: ansible_tower
+name: ansible-tower
 description: "Call the Ansible Tower / AWX / AAP REST API through Warden — launch job templates, read inventories, check job status — without holding a PAT."
 category: provider-guide
 provider: ansible_tower
