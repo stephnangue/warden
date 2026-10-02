@@ -642,7 +642,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 	})
 
@@ -662,7 +662,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		// Scalar leaf values are unchanged
@@ -685,7 +685,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		nested := req.Data["a"].(map[string]interface{})
@@ -701,7 +701,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		assert.Equal(t, "1h", req.Data["ttl"])
@@ -718,7 +718,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		assert.Equal(t, map[string]interface{}{}, req.Data["a"])
@@ -734,7 +734,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		assert.Equal(t, "test", req.Data["model"])
@@ -821,6 +821,59 @@ func TestParseRequestBody_ErrorsAreCodedAndOpaque(t *testing.T) {
 		req := &logical.Request{HTTPRequest: httpReq}
 
 		err := core.parseRequestBody(req)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(err))
+	})
+}
+
+// limitedBackend is a backend that reports a body cap, as a streaming backend does.
+type limitedBackend struct {
+	logical.Backend
+	limit int64
+}
+
+func (b limitedBackend) StreamBodyLimit(*http.Request) int64 { return b.limit }
+
+// A streamed body is parsed up to the backend's own cap, so core never buffers more
+// than the backend would forward, and a mount configured above core's default can
+// still have its larger bodies parsed.
+func TestStreamBodyParseLimit(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/bank-api/gateway/x", nil)
+
+	assert.Equal(t, int64(maxRequestBodySize), streamBodyParseLimit(struct{ logical.Backend }{}, r), "a backend reporting no cap keeps core's")
+	assert.Equal(t, int64(maxRequestBodySize), streamBodyParseLimit(limitedBackend{limit: 0}, r), "a zero cap keeps core's")
+	assert.Equal(t, int64(1024), streamBodyParseLimit(limitedBackend{limit: 1024}, r))
+	assert.Equal(t, int64(64<<20), streamBodyParseLimit(limitedBackend{limit: 64 << 20}, r), "a cap above core's default is honoured")
+}
+
+func TestParseRequestBodyLimit(t *testing.T) {
+	core := createTestCore(t)
+	const limit = 64
+
+	jsonReq := func(body string) *logical.Request {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		return &logical.Request{HTTPRequest: httpReq}
+	}
+
+	t.Run("under the cap is parsed", func(t *testing.T) {
+		req := jsonReq(`{"amount":50}`)
+		require.NoError(t, core.parseRequestBodyLimit(req, limit))
+		assert.Equal(t, float64(50), req.Data["amount"])
+	})
+
+	t.Run("over the cap is 413 and names the cap", func(t *testing.T) {
+		req := jsonReq(`{"amount":50,"memo":"` + strings.Repeat("x", limit) + `"}`)
+		err := core.parseRequestBodyLimit(req, limit)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(err))
+		assert.Contains(t, err.Error(), "64 bytes")
+	})
+
+	t.Run("form bodies use the same cap", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader("memo="+strings.Repeat("x", limit)))
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		err := core.parseRequestBodyLimit(&logical.Request{HTTPRequest: httpReq}, limit)
 		require.Error(t, err)
 		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(err))
 	})

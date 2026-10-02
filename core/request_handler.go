@@ -927,7 +927,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// populated before policy evaluation. The body is restored after parsing
 		// so the streaming handler can still read it.
 		if parser, ok := matchingBackend.(logical.StreamBodyParser); ok && parser.ShouldParseStreamBody(req.HTTPRequest) {
-			if err := c.parseRequestBody(req); err != nil {
+			if err := c.parseRequestBodyLimit(req, streamBodyParseLimit(matchingBackend, req.HTTPRequest)); err != nil {
 				return logical.ErrorResponse(err), nil, nil
 			}
 		}
@@ -1293,8 +1293,26 @@ func (c *Core) isStreamingRequest(ctx context.Context, path string) bool {
 	return c.router.StreamingPath(ctx, path)
 }
 
-// parseRequestBody parses query params and JSON body into req.Data
+// parseRequestBody parses query params and JSON body into req.Data, buffering at
+// most maxRequestBodySize of the body.
 func (c *Core) parseRequestBody(req *logical.Request) error {
+	return c.parseRequestBodyLimit(req, maxRequestBodySize)
+}
+
+// streamBodyParseLimit returns how much of a streamed request body core may buffer
+// to parse it for policy: the backend's own cap when it reports one, so core never
+// holds more than the backend would forward, else maxRequestBodySize.
+func streamBodyParseLimit(backend logical.Backend, r *http.Request) int64 {
+	if l, ok := backend.(logical.StreamBodyLimiter); ok {
+		if limit := l.StreamBodyLimit(r); limit > 0 {
+			return limit
+		}
+	}
+	return maxRequestBodySize
+}
+
+// parseRequestBodyLimit is parseRequestBody with the body cap supplied.
+func (c *Core) parseRequestBodyLimit(req *logical.Request, limit int64) error {
 	if req.HTTPRequest == nil {
 		return nil
 	}
@@ -1320,20 +1338,20 @@ func (c *Core) parseRequestBody(req *logical.Request) error {
 	}
 
 	// Parse body based on Content-Type (overwrites query params with same keys)
-	return c.parseBody(req)
+	return c.parseBody(req, limit)
 }
 
 // parseBody dispatches to the appropriate body parser based on Content-Type.
 // Supports application/json and application/x-www-form-urlencoded.
 // Unknown content types are silently skipped (body left untouched).
-func (c *Core) parseBody(req *logical.Request) error {
+func (c *Core) parseBody(req *logical.Request, limit int64) error {
 	contentType := req.HTTPRequest.Header.Get("Content-Type")
 
 	switch {
 	case strings.HasPrefix(contentType, "application/json") || contentType == "":
-		return c.parseJSONBody(req)
+		return c.parseJSONBody(req, limit)
 	case strings.HasPrefix(contentType, "application/x-www-form-urlencoded"):
-		return c.parseFormBody(req)
+		return c.parseFormBody(req, limit)
 	default:
 		return nil
 	}
@@ -1345,8 +1363,8 @@ func (c *Core) parseBody(req *logical.Request) error {
 //
 // Its errors are coded. A body Warden cannot buffer or parse is the caller's problem,
 // and an uncoded error reaches the wire as a 500 that blames Warden for it.
-func (c *Core) readAndRestoreBody(req *logical.Request) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(req.HTTPRequest.Body, maxRequestBodySize+1))
+func (c *Core) readAndRestoreBody(req *logical.Request, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(req.HTTPRequest.Body, limit+1))
 	if err != nil {
 		c.logger.Debug("failed to read request body",
 			logger.Err(err),
@@ -1356,8 +1374,8 @@ func (c *Core) readAndRestoreBody(req *logical.Request) ([]byte, error) {
 	}
 	req.HTTPRequest.Body.Close()
 
-	if int64(len(body)) > maxRequestBodySize {
-		return nil, logical.ErrRequestEntityTooLargef("request body exceeds maximum size of %d bytes", maxRequestBodySize)
+	if int64(len(body)) > limit {
+		return nil, logical.ErrRequestEntityTooLargef("request body exceeds maximum size of %d bytes", limit)
 	}
 
 	// Restore body for potential re-reading (audit, streaming, etc.)
@@ -1374,7 +1392,7 @@ func (c *Core) readAndRestoreBody(req *logical.Request) ([]byte, error) {
 // keeps the query params alone, and the body reaches the upstream as the bytes
 // restored above. Decoding straight into req.Data would instead fail those requests
 // against the map's shape, before they were even authorised.
-func (c *Core) parseJSONBody(req *logical.Request) error {
+func (c *Core) parseJSONBody(req *logical.Request, limit int64) error {
 	if req.HTTPRequest.Body == nil {
 		return nil
 	}
@@ -1384,7 +1402,7 @@ func (c *Core) parseJSONBody(req *logical.Request) error {
 		return nil // Not JSON, skip
 	}
 
-	body, err := c.readAndRestoreBody(req)
+	body, err := c.readAndRestoreBody(req, limit)
 	if err != nil {
 		return err
 	}
@@ -1417,12 +1435,12 @@ func (c *Core) parseJSONBody(req *logical.Request) error {
 
 // parseFormBody parses application/x-www-form-urlencoded body into req.Data.
 // Like parseJSONBody, it reads the body with a size limit and restores it for re-reading.
-func (c *Core) parseFormBody(req *logical.Request) error {
+func (c *Core) parseFormBody(req *logical.Request, limit int64) error {
 	if req.HTTPRequest.Body == nil {
 		return nil
 	}
 
-	body, err := c.readAndRestoreBody(req)
+	body, err := c.readAndRestoreBody(req, limit)
 	if err != nil {
 		return err
 	}

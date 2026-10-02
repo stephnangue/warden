@@ -698,3 +698,28 @@ func (b *proxyBackend) ShouldParseStreamBody(r *http.Request) bool {
 	}
 	return b.ParseStreamBody
 }
+
+// Compile-time assertion that proxyBackend reports its body cap to core.
+var _ logical.StreamBodyLimiter = (*proxyBackend)(nil)
+
+// StreamBodyLimit overrides the embedded StreamingBackend's mount-wide cap with
+// the cap the gateway will enforce for this request: a ResolveUpstream dispatch's
+// MaxBodySize when it sets one, else the mount's max_body_size, else the default.
+// It mirrors the gateway's own computation (handleGateway) so the bytes core
+// buffers to parse for policy never exceed what the gateway would forward.
+func (b *proxyBackend) StreamBodyLimit(r *http.Request) int64 {
+	limit := b.MaxBodySize()
+	if b.spec.ResolveUpstream != nil && r != nil {
+		b.mu.RLock()
+		providerURL := b.providerURL
+		state := b.extraState
+		b.mu.RUnlock()
+		if d, ok := b.spec.ResolveUpstream(r, providerURL, state); ok && d.MaxBodySize > 0 {
+			limit = d.MaxBodySize
+		}
+	}
+	if limit <= 0 {
+		limit = framework.DefaultMaxBodySize
+	}
+	return limit
+}

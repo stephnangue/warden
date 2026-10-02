@@ -291,9 +291,11 @@ func (b *StreamingBackend) SetTransport(t http.RoundTripper) {
 	b.ensureTransport().store(t)
 }
 
-// Ensure StreamingBackend implements logical.Backend and logical.StreamBodyParser
+// Ensure StreamingBackend implements logical.Backend, logical.StreamBodyParser and
+// logical.StreamBodyLimiter
 var _ logical.Backend = (*StreamingBackend)(nil)
 var _ logical.StreamBodyParser = (*StreamingBackend)(nil)
+var _ logical.StreamBodyLimiter = (*StreamingBackend)(nil)
 
 // initStreaming initializes the streaming path regex patterns
 func (b *StreamingBackend) initStreaming() {
@@ -891,6 +893,13 @@ func (b *StreamingBackend) IsUnauthenticatedPath(_ *http.Request, path string) b
 // override to inspect the request.
 func (b *StreamingBackend) ShouldParseStreamBody(_ *http.Request) bool {
 	return b.ParseStreamBody
+}
+
+// StreamBodyLimit implements logical.StreamBodyLimiter with the mount's
+// max_body_size. It is 0 for a backend that never set one, which leaves core's own
+// cap in force. Subtypes with per-request caps may override.
+func (b *StreamingBackend) StreamBodyLimit(_ *http.Request) int64 {
+	return b.MaxBodySize()
 }
 
 // matchWildcardSegments checks if path segments match a wildcard pattern
