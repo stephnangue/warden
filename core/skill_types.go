@@ -1,7 +1,6 @@
 package core
 
 import (
-	"regexp"
 	"time"
 
 	"github.com/stephnangue/warden/logical"
@@ -41,8 +40,8 @@ const (
 	SkillOriginUser = "user"
 )
 
-// Skill validation limits. Name length is enforced by skillNameRegex
-// directly (2-64 characters); the regex below is the authoritative bound.
+// Skill validation limits. Names follow the Agent Skills rule enforced by
+// logical.ValidSkillName.
 const (
 	maxSkillBodyBytes   = 256 * 1024
 	maxSkillRequiresLen = 32
@@ -50,8 +49,6 @@ const (
 	maxSkillProviderLen = 64
 	maxSkillDescription = 1024
 )
-
-var skillNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
 
 var skillCategories = map[string]struct{}{
 	SkillCategoryAgentFlow:       {},
@@ -75,10 +72,9 @@ func validateSkill(s *Skill) error {
 		return logical.ErrBadRequest("skill cannot be nil")
 	}
 
-	if !skillNameRegex.MatchString(s.Name) {
+	if !logical.ValidSkillName(s.Name) {
 		return logical.ErrBadRequestf(
-			"invalid skill name %q: must match %s",
-			s.Name, skillNameRegex.String())
+			"invalid skill name %q: %s", s.Name, logical.SkillNameRule)
 	}
 
 	if s.Description == "" {
@@ -105,8 +101,8 @@ func validateSkill(s *Skill) error {
 		return logical.ErrBadRequestf("skill requires exceeds %d entries", maxSkillRequiresLen)
 	}
 	for _, req := range s.Requires {
-		if !skillNameRegex.MatchString(req) {
-			return logical.ErrBadRequestf("invalid requires entry %q: must match %s", req, skillNameRegex.String())
+		if !logical.ValidSkillName(req) {
+			return logical.ErrBadRequestf("invalid requires entry %q: %s", req, logical.SkillNameRule)
 		}
 	}
 

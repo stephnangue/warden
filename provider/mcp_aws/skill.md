@@ -1,5 +1,5 @@
 ---
-name: mcp_aws
+name: mcp-aws
 description: "Talk to AWS-hosted MCP through Warden — without holding IAM keys. Your MCP client points at Warden under a role fixed at attach time (one attached server per role). Fronts both AWS's hosted MCP Server (aws-mcp.{region}.api.aws) and customer-owned MCP servers on Bedrock AgentCore."
 category: provider-guide
 provider: mcp_aws

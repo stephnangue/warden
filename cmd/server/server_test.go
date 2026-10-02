@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/config"
+	wardenlogical "github.com/stephnangue/warden/logical"
 )
 
 func TestResolveDevSpiffeTLS(t *testing.T) {
@@ -118,4 +120,23 @@ func TestBuildSpiffeSources_FailClosed(t *testing.T) {
 	assert.Nil(t, sources)
 	assert.Nil(t, closeFn)
 	assert.Contains(t, err.Error(), "SPIFFE serving identity")
+}
+
+// Every shipped provider skill must be named after its provider type under
+// the Agent Skills naming rule, or SeedProviderSkill rejects it on mount.
+func TestProviderSkills_NamedForProviderType(t *testing.T) {
+	nameLine := regexp.MustCompile(`(?m)^name:\s*(\S+)\s*$`)
+	for typ, md := range providerSkills {
+		m := nameLine.FindStringSubmatch(md)
+		if m == nil {
+			t.Errorf("%s: skill.md has no name field", typ)
+			continue
+		}
+		if want := wardenlogical.SkillNameForProvider(typ); m[1] != want {
+			t.Errorf("%s: skill.md name = %q, want %q", typ, m[1], want)
+		}
+		if !wardenlogical.ValidSkillName(m[1]) {
+			t.Errorf("%s: skill.md name %q is not a valid skill name", typ, m[1])
+		}
+	}
 }

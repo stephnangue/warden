@@ -2042,7 +2042,7 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 	if err := c.setupCredentialManager(ctx); err != nil {
 		return err
 	}
-	if err := c.setupSkillStore(ctx); err != nil {
+	if err := c.setupSkillStore(ctx, standby); err != nil {
 		return err
 	}
 

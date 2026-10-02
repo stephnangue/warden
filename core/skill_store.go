@@ -314,15 +314,25 @@ func (s *SkillStore) load(ctx context.Context, name string) (*Skill, error) {
 }
 
 // setupSkillStore is called during unseal to wire the SkillStore's
-// storage view to the unsealed barrier and seed the foundation skills
-// on first run. Provider-type skills follow a different lifecycle
-// (seeded at provider mount time) and are not handled here.
-func (c *Core) setupSkillStore(ctx context.Context) error {
+// storage view to the unsealed barrier and, on the active node, seed the
+// foundation skills on first run and migrate legacy skill names. Standby
+// nodes only wire the storage view: storage writes belong to the active
+// node. Provider-type skills follow a different lifecycle (seeded at
+// provider mount time) and are not handled here.
+func (c *Core) setupSkillStore(ctx context.Context, standby bool) error {
 	if c.skillStore == nil {
 		return fmt.Errorf("skill store not initialized")
 	}
 	if err := c.skillStore.LoadFromStorage(ctx); err != nil {
 		return err
+	}
+	if standby {
+		return nil
+	}
+	if err := c.skillStore.MigrateSkillNames(ctx); err != nil {
+		// Like seeding, a failed migration must not block unseal: the
+		// unmigrated skills stay readable under their old names.
+		c.logger.Warn("failed to migrate skill names", logger.Err(err))
 	}
 	if err := c.skillStore.SeedFoundation(ctx); err != nil {
 		// Seed failures must not block unseal: agents can still operate
