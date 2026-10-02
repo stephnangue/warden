@@ -137,7 +137,7 @@ func Scenarios() []Scenario {
 					}},
 					Shows: []string{
 						"Warden refuses: alice's may_act names agent-1. The rule is the policy condition user.metadata.may_act_sub == agent.principal.",
-						"The refusal covers initialize too, so the client lists bank as failed. `warden dev audit -decision deny -n 1` shows why.",
+						"The refusal covers initialize too, so the client lists bank as failed. `warden dev audit -decision deny -limit 1` shows why.",
 					},
 				},
 			},
@@ -145,7 +145,7 @@ func Scenarios() []Scenario {
 		{
 			Number:   5,
 			Title:    "Every call is audited",
-			Commands: []string{"warden dev audit -n 10", "warden dev audit -user alice"},
+			Commands: []string{"warden dev audit -limit 10", "warden dev audit -user alice"},
 			Shows: []string{
 				"Each entry has the agent and its role, the person it acted for, the tool and Warden's decision, including the refusals from scenarios 2 to 4.",
 				"Tokens are hashed, never written in the clear.",
