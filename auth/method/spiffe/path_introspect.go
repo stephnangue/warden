@@ -26,8 +26,10 @@ func (b *spiffeAuthBackend) pathIntrospect() *framework.Path {
 }
 
 type introspectedRole struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	Skill        string `json:"skill,omitempty"`
+	ProviderPath string `json:"provider_path,omitempty"`
 }
 
 // handleIntrospectRoles returns the subset of roles the presented SVID could
@@ -63,7 +65,12 @@ func (b *spiffeAuthBackend) handleIntrospectRoles(ctx context.Context, req *logi
 			continue
 		}
 		if b.roleAcceptsSVID(set, role, cert, jwtToken) {
-			matches = append(matches, introspectedRole{Name: role.Name, Description: role.Description})
+			matches = append(matches, introspectedRole{
+				Name:         role.Name,
+				Description:  role.Description,
+				Skill:        role.Skill,
+				ProviderPath: role.ProviderPath,
+			})
 		}
 	}
 

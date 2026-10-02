@@ -37,6 +37,8 @@ func (b *spiffeAuthBackend) pathRole() *framework.Path {
 			"token_policies": {Type: framework.TypeCommaStringSlice, Description: "Policies to assign to tokens"},
 			"token_ttl":      {Type: framework.TypeDurationSecond, Description: "Token TTL", Default: 3600},
 			"cred_spec_name": {Type: framework.TypeString, Description: "Credential spec name"},
+			"skill":          {Type: framework.TypeString, Description: helper.SkillFieldDescription},
+			"provider_path":  {Type: framework.TypeString, Description: helper.ProviderPathFieldDescription},
 			"groups_claim": {
 				Type:        framework.TypeString,
 				Description: "JWT-SVID claim containing group names for dynamic policy mapping (JWT-SVID only)",
@@ -122,6 +124,8 @@ func (b *spiffeAuthBackend) handleRoleRead(ctx context.Context, req *logical.Req
 			"token_policies":      role.TokenPolicies,
 			"token_ttl":           role.TokenTTL,
 			"cred_spec_name":      role.CredSpecName,
+			"skill":               role.Skill,
+			"provider_path":       role.ProviderPath,
 			"groups_claim":        role.GroupsClaim,
 			"group_policy_prefix": role.GroupPolicyPrefix,
 			"metadata_mappings":   role.MetadataMappings,
@@ -161,6 +165,12 @@ func (b *spiffeAuthBackend) handleRoleUpdate(ctx context.Context, req *logical.R
 		}
 		if v, ok := d.GetOk("cred_spec_name"); ok {
 			role.CredSpecName = v.(string)
+		}
+		if v, ok := d.GetOk("skill"); ok {
+			role.Skill = v.(string)
+		}
+		if v, ok := d.GetOk("provider_path"); ok {
+			role.ProviderPath = v.(string)
 		}
 		if v, ok := d.GetOk("groups_claim"); ok {
 			role.GroupsClaim = v.(string)
@@ -246,6 +256,12 @@ func (b *spiffeAuthBackend) validateRole(role *SPIFFERole) error {
 			return logical.ErrBadRequestf("invalid metadata_mappings field %q for metadata key %q; must be one of: trust_domain, spiffe_id, path", source, target)
 		}
 	}
+
+	providerPath, err := helper.ValidateDiscoveryFields(role.Skill, role.ProviderPath)
+	if err != nil {
+		return err
+	}
+	role.ProviderPath = providerPath
 	return nil
 }
 
@@ -279,6 +295,12 @@ func (b *spiffeAuthBackend) buildRoleFromFieldData(name string, d *framework.Fie
 	}
 	if v, ok := d.GetOk("cred_spec_name"); ok {
 		role.CredSpecName = v.(string)
+	}
+	if v, ok := d.GetOk("skill"); ok {
+		role.Skill = v.(string)
+	}
+	if v, ok := d.GetOk("provider_path"); ok {
+		role.ProviderPath = v.(string)
 	}
 	if v, ok := d.GetOk("groups_claim"); ok {
 		role.GroupsClaim = v.(string)

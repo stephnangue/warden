@@ -9,7 +9,7 @@ import (
 
 // handleSysMCP returns the HTTP handler for the /v1/sys/mcp discovery
 // interface — Warden answering MCP for its own capabilities (list_roles,
-// get_skill).
+// read_skill).
 //
 // The MCP server, its tools, and the identity/namespace middleware are built
 // in the core package because they reuse core-internal machinery (the

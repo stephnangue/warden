@@ -6,28 +6,29 @@ import (
 	"testing"
 )
 
-// projectRoles mirrors the per-record projection runRoles applies to the
-// raw aggregator response. Extracted as a pure function so we can table-test
-// the shape (name first, description, auth_path) without round-tripping
-// through the API client.
-func projectRoles(rawRoles []any, authPathFilter string) []map[string]any {
-	items := make([]map[string]any, 0, len(rawRoles))
-	for _, r := range rawRoles {
-		rm, ok := r.(map[string]any)
-		if !ok {
-			continue
-		}
-		ap, _ := rm["auth_path"].(string)
-		if authPathFilter != "" && ap != authPathFilter {
-			continue
-		}
-		items = append(items, map[string]any{
-			"name":        rm["name"],
-			"description": rm["description"],
-			"auth_path":   ap,
-		})
+func TestProjectRoles_DiscoveryFieldsOnlyWhenSet(t *testing.T) {
+	in := []any{
+		map[string]any{
+			"auth_path":     "jwt/",
+			"name":          "repo-creator",
+			"provider_path": "github/",
+			"skill":         "gh-repo-creator",
+		},
+		map[string]any{"auth_path": "jwt/", "name": "plain"},
 	}
-	return items
+	got := projectRoles(in, "")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 roles; got %d", len(got))
+	}
+	if got[0]["provider_path"] != "github/" || got[0]["skill"] != "gh-repo-creator" {
+		t.Errorf("discovery fields not carried: %#v", got[0])
+	}
+	if _, ok := got[1]["provider_path"]; ok {
+		t.Errorf("provider_path present on a role without it: %#v", got[1])
+	}
+	if _, ok := got[1]["skill"]; ok {
+		t.Errorf("skill present on a role without it: %#v", got[1])
+	}
 }
 
 func TestProjectRoles_PreservesAllFields(t *testing.T) {

@@ -29,10 +29,9 @@ runtime: an MCP client sends a fixed set of headers, and the role cannot be
 passed in a tool call. This attached server *is* that role.
 
 To act under a **different** role, call the MCP server the operator attached for
-*that* role. The operator attaches **one server per role** — each at its own
-`…/role/<role>/gateway/` URL, named or described so you can match it to a role
-from the `list_roles` discovery tool. Pick the attached server whose role fits
-the task.
+*that* role. The operator attaches **one server per role**, each at that role's
+`url` from the `list_roles` discovery tool — match an attached server to a role
+by its URL. Pick the attached server whose role fits the task.
 
 ## Attaching the client
 

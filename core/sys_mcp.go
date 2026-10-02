@@ -13,7 +13,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/stephnangue/warden/internal/namespace"
-	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -29,10 +28,11 @@ import (
 // sys/introspect/roles and sys/skills reads.
 //
 // Two tools are exposed:
-//   - list_roles: the roles the caller's identity can assume, each with its
-//     operator-written description (the agent's "menu").
-//   - get_skill:  the skill (markdown recipe) named in a role description,
-//     teaching the agent how to drive that provider through the gateway.
+//   - list_roles: the roles the caller's identity can assume (the agent's
+//     "menu"), each with its description, provider, skill URI and the URL to
+//     act under it.
+//   - read_skill: the SKILL.md at a role's skill:// URI, teaching the agent
+//     how to drive that provider through the gateway.
 
 // mcpServerVersion is the implementation version advertised in the MCP
 // initialize handshake. It is informational only; the wire protocol revision
@@ -49,7 +49,7 @@ const mcpServerVersion = "1.0.0"
 type mcpRequestKey struct{}
 
 // maxSysMCPBody caps a discovery request body. The two tools this endpoint
-// exposes take an empty input and a single skill name, so anything near this
+// exposes take an empty input and a single skill URI, so anything near this
 // is already pathological; the cap exists so buffering the body cannot be
 // turned into a memory cost.
 const maxSysMCPBody = 1 << 20 // 1 MiB
@@ -132,7 +132,7 @@ func (c *Core) MCPServerHandler() http.Handler {
 	}, nil)
 
 	c.registerListRolesTool(server)
-	c.registerGetSkillTool(server)
+	c.registerReadSkillTool(server)
 
 	streamable := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
@@ -202,14 +202,6 @@ func (c *Core) MCPServerHandler() http.Handler {
 	})
 }
 
-// mcpRole is a single role projected for the list_roles tool. The aggregator's
-// auth_path is deliberately dropped — the agent reads the skill name out of the
-// description verbatim and never needs the auth mount path.
-type mcpRole struct {
-	Name        string `json:"name" jsonschema:"the role name the identity can assume"`
-	Description string `json:"description,omitempty" jsonschema:"operator-written description; the skill name is embedded here for the agent to parse and feed to get_skill"`
-}
-
 // listRolesInput is the (empty) input for the list_roles tool.
 type listRolesInput struct{}
 
@@ -220,94 +212,78 @@ type listRolesOutput struct {
 }
 
 // registerListRolesTool wires the list_roles tool onto the MCP server. It
-// reuses the sys/introspect/roles aggregator in full — no discovery logic is
-// duplicated — and projects each role down to {name, description}.
+// reuses the sys/introspect/roles aggregator in full and resolves each role's
+// provider_path and skill (resolveDiscovery).
 func (c *Core) registerListRolesTool(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "list_roles",
-		Description: "List the roles the presented identity can assume, each with its " +
-			"operator-written description. This is the agent's discovery menu: the " +
-			"skill name is embedded in each role's description for the agent to read " +
-			"and feed to get_skill. Authorizes on the presented identity " +
+		Description: "List the roles the presented identity can assume. This is the agent's " +
+			"discovery menu: pick the role whose description fits the task, read its " +
+			"skill (a skill:// URI) with read_skill or resources/read, then act on " +
+			"Warden's address plus the role's url. Authorizes on the presented identity " +
 			"(JWT bearer token or TLS client certificate); no role is required.",
 	}, c.handleMCPListRoles)
 }
 
 func (c *Core) handleMCPListRoles(ctx context.Context, _ *mcp.CallToolRequest, _ listRolesInput) (*mcp.CallToolResult, listRolesOutput, error) {
-	if c.systemBackend == nil {
-		return nil, listRolesOutput{}, fmt.Errorf("system backend not initialized")
-	}
-	httpReq := mcpRequestFromContext(ctx)
-	if httpReq == nil {
-		return nil, listRolesOutput{}, fmt.Errorf("internal: request context missing")
-	}
-
-	lreq := &logical.Request{
-		HTTPRequest: httpReq,
-		ClientIP:    listener.ClientIP(httpReq),
-	}
-
-	// FieldData is ignored by the aggregator, so pass nil.
-	resp, err := c.systemBackend.handleIntrospectRoles(ctx, lreq, nil)
+	roles, warnings, err := c.resolveDiscovery(ctx)
 	if err != nil {
 		return nil, listRolesOutput{}, err
 	}
-	// A no-credential call comes back as a 401 with Err set (mirrors the
-	// endpoint). Surface it as an MCP tool error so the model can see it.
-	if resp != nil && resp.Err != nil {
-		return nil, listRolesOutput{}, resp.Err
+	if roles == nil {
+		roles = []mcpRole{}
 	}
-
-	out := listRolesOutput{Roles: []mcpRole{}, Warnings: []string{}}
-	if resp != nil && resp.Data != nil {
-		if raw, ok := resp.Data["roles"].([]aggregatedRole); ok {
-			out.Roles = make([]mcpRole, len(raw))
-			for i, r := range raw {
-				out.Roles[i] = mcpRole{Name: r.Name, Description: r.Description}
-			}
-		}
-		if w, ok := resp.Data["warnings"].([]string); ok {
-			out.Warnings = w
-		}
-	}
-
-	return nil, out, nil
+	return nil, listRolesOutput{Roles: roles, Warnings: warnings}, nil
 }
 
-// getSkillInput is the input for the get_skill tool: a skill name. The name is
-// the one the operator embeds in a role description (surfaced by list_roles),
-// so the agent reads it out of the menu and feeds it back verbatim.
-type getSkillInput struct {
-	Skill string `json:"skill,omitempty" jsonschema:"the skill name to fetch, as embedded in a role description"`
+// readSkillInput is the input for the read_skill tool: a skill URI as
+// list_roles returns it.
+type readSkillInput struct {
+	URI string `json:"uri" jsonschema:"the skill's URI, skill://<name>/SKILL.md, as returned in a role's skill field by list_roles"`
 }
 
-// registerGetSkillTool wires the get_skill tool onto the MCP server. It reuses
-// the skill store directly — a skill is fetched by name, no mount resolution.
-func (c *Core) registerGetSkillTool(server *mcp.Server) {
+// readSkillOutput is the structured output of read_skill; the SKILL.md itself
+// is the text content.
+type readSkillOutput struct {
+	URI         string           `json:"uri" jsonschema:"the skill's URI"`
+	Frontmatter skillFrontmatter `json:"frontmatter" jsonschema:"the SKILL.md frontmatter"`
+}
+
+// registerReadSkillTool wires the read_skill tool onto the MCP server. It
+// reads the skill store directly — a skill is fetched by URI, no mount
+// resolution.
+func (c *Core) registerReadSkillTool(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "get_skill",
-		Description: "Fetch an agent skill as markdown by name. The name is the one " +
-			"embedded in a role description (list_roles); it identifies the recipe " +
-			"teaching the agent how to drive that role through Warden's gateway.",
-	}, c.handleMCPGetSkill)
+		Name: "read_skill",
+		Description: "Read an agent skill (SKILL.md) by its skill:// URI, as returned in a " +
+			"role's skill field by list_roles. The skill teaches how to drive that role's " +
+			"provider through Warden. Returns the same bytes as resources/read on the URI.",
+	}, c.handleMCPReadSkill)
 }
 
-func (c *Core) handleMCPGetSkill(ctx context.Context, _ *mcp.CallToolRequest, in getSkillInput) (*mcp.CallToolResult, map[string]any, error) {
-	name := strings.TrimSpace(in.Skill)
-	if name == "" {
-		return nil, nil, fmt.Errorf("skill is required")
+func (c *Core) handleMCPReadSkill(ctx context.Context, _ *mcp.CallToolRequest, in readSkillInput) (*mcp.CallToolResult, readSkillOutput, error) {
+	uri := strings.TrimSpace(in.URI)
+	name, err := parseSkillURI(uri)
+	if err != nil {
+		return nil, readSkillOutput{}, err
 	}
 	if c.skillStore == nil {
-		return nil, nil, fmt.Errorf("skill store not initialized")
+		return nil, readSkillOutput{}, fmt.Errorf("skill store not initialized")
 	}
 
 	skill, err := c.skillStore.Get(ctx, name)
 	if err != nil {
 		if errors.Is(err, ErrSkillNotFound) {
-			return nil, nil, fmt.Errorf("skill %q not found", name)
+			return nil, readSkillOutput{}, fmt.Errorf("skill %q not found", uri)
 		}
-		return nil, nil, err
+		return nil, readSkillOutput{}, err
 	}
 
-	return nil, skillToMap(skill, false), nil
+	md, err := renderSkillMarkdown(skill)
+	if err != nil {
+		return nil, readSkillOutput{}, err
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(md)}},
+	}, readSkillOutput{URI: uri, Frontmatter: frontmatterFor(skill)}, nil
 }

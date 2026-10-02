@@ -30,8 +30,10 @@ func (b *kubernetesAuthBackend) pathIntrospect() *framework.Path {
 
 // introspectedRole is the per-role payload returned by introspection.
 type introspectedRole struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	Skill        string `json:"skill,omitempty"`
+	ProviderPath string `json:"provider_path,omitempty"`
 }
 
 // handleIntrospectRoles returns the subset of this mount's roles that
@@ -120,8 +122,10 @@ func (b *kubernetesAuthBackend) handleIntrospectRoles(ctx context.Context, req *
 			continue
 		}
 		matches = append(matches, introspectedRole{
-			Name:        role.Name,
-			Description: role.Description,
+			Name:         role.Name,
+			Description:  role.Description,
+			Skill:        role.Skill,
+			ProviderPath: role.ProviderPath,
 		})
 	}
 

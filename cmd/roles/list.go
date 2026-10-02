@@ -90,22 +90,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		rawWarnings, _ = resource.Data["warnings"].([]any)
 	}
 
-	items := make([]map[string]any, 0, len(rawRoles))
-	for _, r := range rawRoles {
-		rm, ok := r.(map[string]any)
-		if !ok {
-			continue
-		}
-		ap, _ := rm["auth_path"].(string)
-		if authPathFilter != "" && ap != authPathFilter {
-			continue
-		}
-		items = append(items, map[string]any{
-			"name":        rm["name"],
-			"description": rm["description"],
-			"auth_path":   ap,
-		})
-	}
+	items := projectRoles(rawRoles, authPathFilter)
 
 	// Per-mount failures are surfaced on stderr without changing the exit
 	// code: the central design is that a single mount erroring shouldn't
@@ -123,18 +108,55 @@ func runList(cmd *cobra.Command, args []string) error {
 	})
 }
 
+// projectRoles shapes the aggregator's raw roles for output, keeping only
+// those on authPathFilter when it is set. The discovery fields (skill,
+// provider_path) appear only on roles that set them.
+func projectRoles(rawRoles []any, authPathFilter string) []map[string]any {
+	items := make([]map[string]any, 0, len(rawRoles))
+	for _, r := range rawRoles {
+		rm, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		ap, _ := rm["auth_path"].(string)
+		if authPathFilter != "" && ap != authPathFilter {
+			continue
+		}
+		item := map[string]any{
+			"name":        rm["name"],
+			"description": rm["description"],
+			"auth_path":   ap,
+		}
+		for _, k := range []string{"provider_path", "skill"} {
+			if v, ok := rm[k]; ok && v != nil && v != "" {
+				item[k] = v
+			}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
 func printRolesTable(items []map[string]any) {
 	if len(items) == 0 {
 		fmt.Println("No roles available for the presented identity.")
 		return
 	}
+	cell := func(v any) string {
+		if v == nil {
+			return ""
+		}
+		return fmt.Sprintf("%v", v)
+	}
 	rows := make([][]any, len(items))
 	for i, it := range items {
 		rows[i] = []any{
-			fmt.Sprintf("%v", it["name"]),
-			fmt.Sprintf("%v", it["description"]),
-			fmt.Sprintf("%v", it["auth_path"]),
+			cell(it["name"]),
+			cell(it["description"]),
+			cell(it["auth_path"]),
+			cell(it["provider_path"]),
+			cell(it["skill"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Description", "Auth Path"}, rows)
+	helpers.PrintTable([]string{"Name", "Description", "Auth Path", "Provider Path", "Skill"}, rows)
 }

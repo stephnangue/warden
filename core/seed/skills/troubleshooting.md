@@ -8,18 +8,19 @@ requires: []
 # Troubleshooting
 
 You reach Warden two ways: the **discovery** MCP server (`/v1/sys/mcp`,
-tools `list_roles` and `get_skill`) and the **gateways** that do the work
+tools `list_roles` and `read_skill`) and the **gateways** that do the work
 (an MCP gateway pre-attached to your MCP client, or a non-MCP gateway you
 call over HTTP). Errors surface as MCP tool errors or HTTP status codes —
 branch on those, not on prose.
 
-## Discovery errors (`list_roles` / `get_skill`)
+## Discovery errors (`list_roles` / `read_skill`)
 
 | Symptom | Meaning | Action |
 |---|---|---|
 | `list_roles` errors: *"requires a JWT bearer token or TLS client certificate"* | no identity reached the endpoint | the identity is configured on the MCP client connection (the `Authorization` header set at attach time); it is missing or the JWT expired — refresh/re-attach |
 | `list_roles` returns an empty list | your identity is bound to no role in this namespace | ask the operator to bind your identity; don't guess role names |
-| `get_skill` returns *skill "&lt;x&gt;" not found* | no provider of that type is enabled, or the name is wrong | the capability doesn't exist — surface it, don't fabricate an endpoint. The name is the one embedded in a role's description |
+| a role has no `url` or no `skill` (and `warnings` says why) | the operator has not wired that role to a provider, or its skill is missing | don't use that role or construct a URL for it — pick another role or ask the operator |
+| `read_skill` returns *skill "&lt;uri&gt;" not found* | the skill was removed after `list_roles` ran | call `list_roles` again; if the role still names it, ask the operator — don't fabricate an endpoint |
 
 Discovery authorizes on identity alone (no role), so a failure here is
 almost always the presented credential, not a policy.
@@ -34,7 +35,7 @@ role's policy decides. Branch on the status:
 |---|---|---|
 | **401** (or MCP *"unauthorized"*) | identity missing or **JWT expired** (typical TTL 5–60 min; agents that hold a token for hours WILL hit this) | yes, after refreshing the token / re-attaching |
 | **403** with `WWW-Authenticate: Bearer` and an `error_description` naming a tool/method | the role's policy doesn't allow that call | only after switching to a role whose description matches the operation; if none fits, ask the operator — don't escalate |
-| **404** | wrong gateway URL, mount, or namespace | no — re-read the gateway URL from the role's description (non-MCP) or the client config (MCP) before retrying |
+| **404** | wrong gateway URL, mount, or namespace | no — re-read the role's `url` from `list_roles` (non-MCP) or the client config (MCP) before retrying |
 | **5xx** | Warden or the upstream failed; the body often carries the upstream's text verbatim | bounded retry with backoff on transient upstream errors; a genuine Warden 500 is a bug to report |
 
 **Policy-filtered `tools/list`:** an MCP gateway lists only the tools the
