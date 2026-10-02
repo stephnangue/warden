@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1342,19 +1343,48 @@ func (c *Core) parseRequestBodyLimit(req *logical.Request, limit int64) error {
 }
 
 // parseBody dispatches to the appropriate body parser based on Content-Type.
-// Supports application/json and application/x-www-form-urlencoded.
+// Supports JSON (see isJSONMediaType) and application/x-www-form-urlencoded.
 // Unknown content types are silently skipped (body left untouched).
 func (c *Core) parseBody(req *logical.Request, limit int64) error {
-	contentType := req.HTTPRequest.Header.Get("Content-Type")
+	mediaType := bodyMediaType(req.HTTPRequest.Header.Get("Content-Type"))
 
 	switch {
-	case strings.HasPrefix(contentType, "application/json") || contentType == "":
+	case isJSONMediaType(mediaType):
 		return c.parseJSONBody(req, limit)
-	case strings.HasPrefix(contentType, "application/x-www-form-urlencoded"):
+	case mediaType == "application/x-www-form-urlencoded":
 		return c.parseFormBody(req, limit)
 	default:
 		return nil
 	}
+}
+
+// bodyMediaType returns the media type of a Content-Type value: lowercased, with
+// its parameters dropped, and "" for an absent header. Media types are
+// case-insensitive (RFC 9110 §8.3.1). A value mime.ParseMediaType rejects (a
+// malformed parameter, say) still yields the part before ';', so a sloppy
+// parameter cannot turn a JSON body into one policy never sees.
+func bodyMediaType(contentType string) string {
+	if strings.TrimSpace(contentType) == "" {
+		return ""
+	}
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
+		return mediaType
+	}
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
+// isJSONMediaType reports whether a body labelled mediaType is parsed as JSON for
+// policy. That is any spelling an upstream may decode as JSON, so a caller cannot
+// relabel a body to slip it past a condition: application/json, text/json, any
+// structured-syntax +json type (RFC 6839, e.g. application/vnd.api+json or
+// application/merge-patch+json), and an absent type, which core has always read as
+// JSON. A body that then fails to parse is refused.
+func isJSONMediaType(mediaType string) bool {
+	return mediaType == "" ||
+		mediaType == "application/json" ||
+		mediaType == "text/json" ||
+		strings.HasSuffix(mediaType, "+json")
 }
 
 // readAndRestoreBody buffers the request body under the size cap and puts it back, so
@@ -1397,8 +1427,7 @@ func (c *Core) parseJSONBody(req *logical.Request, limit int64) error {
 		return nil
 	}
 
-	contentType := req.HTTPRequest.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "application/json") && contentType != "" {
+	if !isJSONMediaType(bodyMediaType(req.HTTPRequest.Header.Get("Content-Type"))) {
 		return nil // Not JSON, skip
 	}
 

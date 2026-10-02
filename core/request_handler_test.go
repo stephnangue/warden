@@ -826,6 +826,70 @@ func TestParseRequestBody_ErrorsAreCodedAndOpaque(t *testing.T) {
 	})
 }
 
+// Media types are case-insensitive and +json types are JSON, so a caller cannot
+// relabel a JSON body to keep policy from reading it.
+func TestBodyMediaType(t *testing.T) {
+	tests := []struct {
+		contentType string
+		mediaType   string
+		json        bool
+	}{
+		{"", "", true},
+		{"application/json", "application/json", true},
+		{"Application/JSON", "application/json", true},
+		{"application/json; charset=utf-8", "application/json", true},
+		{"application/json;;", "application/json", true}, // malformed parameter
+		{"text/json", "text/json", true},
+		{"application/vnd.api+json", "application/vnd.api+json", true},
+		{"application/merge-patch+json", "application/merge-patch+json", true},
+		{"application/x-www-form-urlencoded", "application/x-www-form-urlencoded", false},
+		{"text/plain", "text/plain", false},
+		{"application/jsonl", "application/jsonl", false}, // a stream of documents, not one
+		{"multipart/form-data; boundary=x", "multipart/form-data", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.contentType, func(t *testing.T) {
+			got := bodyMediaType(tt.contentType)
+			assert.Equal(t, tt.mediaType, got)
+			assert.Equal(t, tt.json, isJSONMediaType(got))
+		})
+	}
+}
+
+func TestParseRequestBody_MediaTypeSpellings(t *testing.T) {
+	core := createTestCore(t)
+	post := func(contentType, body string) *logical.Request {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", contentType)
+		return &logical.Request{HTTPRequest: httpReq}
+	}
+
+	for _, ct := range []string{"Application/JSON", "text/json", "application/vnd.api+json"} {
+		t.Run(ct+" is parsed", func(t *testing.T) {
+			req := post(ct, `{"amount":500}`)
+			require.NoError(t, core.parseRequestBody(req))
+			assert.Equal(t, float64(500), req.Data["amount"])
+		})
+		t.Run(ct+" that is not JSON is refused", func(t *testing.T) {
+			err := core.parseRequestBody(post(ct, "not json"))
+			require.Error(t, err)
+			assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+		})
+	}
+
+	t.Run("Application/X-WWW-Form-Urlencoded is parsed", func(t *testing.T) {
+		req := post("Application/X-WWW-Form-Urlencoded", "amount=500")
+		require.NoError(t, core.parseRequestBody(req))
+		assert.Equal(t, "500", req.Data["amount"])
+	})
+
+	t.Run("text/plain is left alone", func(t *testing.T) {
+		req := post("text/plain", `{"amount":500}`)
+		require.NoError(t, core.parseRequestBody(req))
+		assert.NotContains(t, req.Data, "amount")
+	})
+}
+
 // limitedBackend is a backend that reports a body cap, as a streaming backend does.
 type limitedBackend struct {
 	logical.Backend
@@ -2127,6 +2191,56 @@ func TestHandleNonLoginRequest_StreamingBodyParsing(t *testing.T) {
 		assert.True(t, req.Streamed)
 		// Data map is initialized (for query params) but binary body is not parsed into it
 		assert.Empty(t, req.Data)
+	})
+}
+
+// limitedStreamBodyParserBackend is a body-parsing streaming backend that reports its
+// own body cap, as an httpproxy mount does.
+type limitedStreamBodyParserBackend struct {
+	mockStreamBodyParserBackend
+	limit int64
+}
+
+func (b *limitedStreamBodyParserBackend) StreamBodyLimit(*http.Request) int64 { return b.limit }
+
+// Through handleNonLoginRequest: the backend's own cap, not core's 32 MB, governs how
+// much of a streamed body is buffered for policy, in both directions.
+func TestHandleNonLoginRequest_StreamingBodyParsingUsesTheBackendCap(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	mount := func(t *testing.T, name string, limit int64) {
+		t.Helper()
+		backend := &limitedStreamBodyParserBackend{mockStreamBodyParserBackend: mockStreamBodyParserBackend{parseStreamBody: true}, limit: limit}
+		entry := &MountEntry{
+			Path: name + "/", Type: "rest", Class: mountClassProvider,
+			UUID: name + "-uuid", Accessor: "rest_" + name,
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		}
+		require.NoError(t, core.router.Mount(name+"/", backend, entry, &mockBarrierView{prefix: "provider/" + name + "-uuid/"}))
+	}
+	streamed := func(path, body string) *logical.Request {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/"+path, strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		return &logical.Request{Path: path, Operation: logical.CreateOperation, HTTPRequest: httpReq}
+	}
+
+	t.Run("a cap below core's refuses what it would have parsed", func(t *testing.T) {
+		mount(t, "small", 64)
+		req := streamed("small/gateway/x", `{"memo":"`+strings.Repeat("x", 128)+`"}`)
+		resp, _, _ := core.handleNonLoginRequest(ctx, req)
+		require.NotNil(t, resp)
+		require.Error(t, resp.Error())
+		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(resp.Error()))
+		assert.Contains(t, resp.Error().Error(), "64 bytes")
+	})
+
+	t.Run("a cap above core's parses a body core's would have refused", func(t *testing.T) {
+		mount(t, "large", 40<<20)
+		pad := strings.Repeat("x", 33<<20)
+		req := streamed("large/gateway/x", `{"amount":50,"pad":"`+pad+`"}`)
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.Equal(t, float64(50), req.Data["amount"], "a 33 MB body on a 40 MB mount reaches policy")
 	})
 }
 

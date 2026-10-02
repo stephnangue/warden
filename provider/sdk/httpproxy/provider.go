@@ -154,6 +154,10 @@ type ProviderSpec struct {
 	// map (concurrent writers replace the reference under the write lock, so
 	// in-place mutation here would race). Reads are safe because OnConfigWrite
 	// receives a clone, so the live map is never mutated in place.
+	//
+	// It may run several times for one request (ShouldParseStreamBody,
+	// StreamBodyLimit and the gateway each resolve it), so it must be cheap,
+	// deterministic for a given request and state, and free of side effects.
 	ResolveUpstream func(r *http.Request, providerURL string, state map[string]any) (Dispatch, bool)
 
 	// GetAuthRoleFromRequest optionally extracts the auth role from request
