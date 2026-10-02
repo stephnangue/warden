@@ -278,8 +278,9 @@ func callReadSkill(t *testing.T, session *mcp.ClientSession, args map[string]any
 // text content is the rendered SKILL.md and the structured output carries its
 // frontmatter.
 func TestMCPServer_ReadSkill_ByURI(t *testing.T) {
-	_, ctx, c := setupTestSystemBackend(t)
+	c, ctx, ctrl := setupDiscovery(t)
 	seedTestSkill(t, c, ctx, "mcp")
+	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{{"name": "agent", "skill": "mcp"}}
 	stored, err := c.skillStore.Get(ctx, "mcp")
 	require.NoError(t, err)
 
@@ -307,8 +308,9 @@ func TestMCPServer_ReadSkill_ByURI(t *testing.T) {
 // TestMCPServer_ReadSkill_Errors covers the tool-error paths: a missing,
 // malformed or bare-name URI, and an unknown skill.
 func TestMCPServer_ReadSkill_Errors(t *testing.T) {
-	_, ctx, c := setupTestSystemBackend(t)
+	c, ctx, ctrl := setupDiscovery(t)
 	seedTestSkill(t, c, ctx, "mcp")
+	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{{"name": "agent", "skill": "mcp"}}
 
 	srv := startMCPTestServer(t, c, nil)
 	session := connectMCP(t, srv, "eyJ.any.token")

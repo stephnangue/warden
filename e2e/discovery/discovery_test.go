@@ -10,13 +10,17 @@ package discovery
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
@@ -42,6 +46,12 @@ func connectDiscovery(t *testing.T) *mcp.ClientSession {
 	jwt := h.GetDefaultJWT(t)
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-agent", Version: "1.0.0"}, nil)
+	if err := mcp.AddSendingCustomMethod[*skillsListParams, *skillsListResult](client, "skills/list"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mcp.AddSendingCustomMethod[*skillsGetParams, *skillsGetResult](client, "skills/get"); err != nil {
+		t.Fatal(err)
+	}
 	transport := &mcp.StreamableClientTransport{
 		Endpoint: h.NodeURL(port) + "/v1/sys/mcp",
 		HTTPClient: &http.Client{
@@ -90,6 +100,36 @@ type rolesResult struct {
 		URL         string `json:"url"`
 	} `json:"roles"`
 	Warnings []string `json:"warnings"`
+}
+
+// Skills extension (io.modelcontextprotocol/skills) wire types.
+type skillEntry struct {
+	URI         string         `json:"uri"`
+	Frontmatter map[string]any `json:"frontmatter"`
+	Resources   []struct {
+		URI    string `json:"uri"`
+		Digest string `json:"digest"`
+		Size   int    `json:"size"`
+	} `json:"resources"`
+}
+
+type skillsListParams struct {
+	mcp.ParamsBase
+}
+
+type skillsListResult struct {
+	mcp.ResultBase
+	Skills []skillEntry `json:"skills"`
+}
+
+type skillsGetParams struct {
+	mcp.ParamsBase
+	URI string `json:"uri"`
+}
+
+type skillsGetResult struct {
+	mcp.ResultBase
+	Skill skillEntry `json:"skill"`
 }
 
 // readSkillText calls read_skill and returns the SKILL.md it serves.
@@ -155,27 +195,11 @@ func TestMCPDiscovery_ToolsAndListRoles(t *testing.T) {
 	}
 }
 
-// TestMCPDiscovery_ReadSkillByURI reads a skill by URI. The e2e cluster mounts
-// the vault provider, which seeds the "vault" skill.
-func TestMCPDiscovery_ReadSkillByURI(t *testing.T) {
-	session := connectDiscovery(t)
-
-	md := readSkillText(t, session, "skill://vault/SKILL.md")
-	if !strings.HasPrefix(md, "---\nname: vault\n") {
-		t.Fatalf("SKILL.md does not open with the vault frontmatter:\n%s", md)
-	}
-	if !strings.Contains(md, "\n---\n\n#") {
-		t.Errorf("SKILL.md has no body after its frontmatter:\n%s", md)
-	}
-}
-
-// TestMCPDiscovery_FullLoop walks the roles.md discovery loop: create a role
-// wired to the vault provider, list roles, take the role's skill URI and URL,
-// then read that skill.
-func TestMCPDiscovery_FullLoop(t *testing.T) {
-	port := h.GetLeaderPort(t)
-
-	const roleName = "e2e-mcp-discovery"
+// createDiscoveryRole creates a JWT role the default identity can assume,
+// wired to the vault provider (the e2e cluster mounts it, which seeds the
+// "vault" skill), and removes it when the test ends.
+func createDiscoveryRole(t *testing.T, port int, roleName string) {
+	t.Helper()
 	body := `{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"description":"read app secrets through Vault","provider_path":"vault"}`
 	status, respBody := h.APIRequest(t, "POST", "auth/jwt/role/"+roleName, port, body)
 	if status != 200 && status != 201 && status != 204 {
@@ -184,6 +208,79 @@ func TestMCPDiscovery_FullLoop(t *testing.T) {
 	t.Cleanup(func() {
 		h.APIRequest(t, "DELETE", "auth/jwt/role/"+roleName, port, "")
 	})
+}
+
+// TestMCPDiscovery_SkillsExtension drives the Skills extension: the identity
+// sees the skill its role reaches, the listed digest matches the bytes served,
+// and a skill no role of the identity reaches is unknown to it.
+func TestMCPDiscovery_SkillsExtension(t *testing.T) {
+	port := h.GetLeaderPort(t)
+	createDiscoveryRole(t, port, "e2e-mcp-skills")
+
+	const hidden = "e2e-unreferenced-skill"
+	status, respBody := h.APIRequest(t, "POST", "sys/skills/"+hidden, port,
+		`{"name":"`+hidden+`","description":"no role points here","category":"custom","body":"# hidden"}`)
+	if status != 200 && status != 201 && status != 204 {
+		t.Fatalf("create skill failed: status %d, body %s", status, string(respBody))
+	}
+	t.Cleanup(func() { h.APIRequest(t, "DELETE", "sys/skills/"+hidden, port, "") })
+
+	session := connectDiscovery(t)
+	ctx := context.Background()
+
+	if _, ok := session.InitializeResult().Capabilities.Extensions["io.modelcontextprotocol/skills"]; !ok {
+		t.Fatalf("the skills extension is not declared: %+v", session.InitializeResult().Capabilities)
+	}
+
+	list, err := mcp.CallCustomMethod[*skillsListParams, *skillsListResult](ctx, session, "skills/list", &skillsListParams{})
+	if err != nil {
+		t.Fatalf("skills/list: %v", err)
+	}
+	var vault *skillEntry
+	for i, s := range list.Skills {
+		switch s.URI {
+		case "skill://vault/SKILL.md":
+			vault = &list.Skills[i]
+		case "skill://" + hidden + "/SKILL.md":
+			t.Errorf("skills/list shows %s, which no role of this identity reaches", hidden)
+		}
+	}
+	if vault == nil {
+		t.Fatalf("skills/list misses the vault skill its role reaches: %+v", list.Skills)
+	}
+
+	read, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: vault.URI})
+	if err != nil {
+		t.Fatalf("resources/read %s: %v", vault.URI, err)
+	}
+	md := read.Contents[0].Text
+	if !strings.HasPrefix(md, "---\nname: vault\n") {
+		t.Fatalf("SKILL.md does not open with the vault frontmatter:\n%s", md)
+	}
+	sum := sha256.Sum256([]byte(md))
+	if want := "sha256:" + hex.EncodeToString(sum[:]); len(vault.Resources) != 1 ||
+		vault.Resources[0].Digest != want || vault.Resources[0].Size != len(md) {
+		t.Errorf("listed resources %+v do not describe the %d bytes served (digest %s)", vault.Resources, len(md), want)
+	}
+	if tool := readSkillText(t, session, vault.URI); tool != md {
+		t.Errorf("read_skill and resources/read serve different bytes")
+	}
+
+	_, err = mcp.CallCustomMethod[*skillsGetParams, *skillsGetResult](ctx, session, "skills/get",
+		&skillsGetParams{URI: "skill://" + hidden + "/SKILL.md"})
+	var rpcErr *jsonrpc.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc.CodeInvalidParams {
+		t.Errorf("skills/get for %s, which no role of this identity reaches: got %v, want a -32602 error", hidden, err)
+	}
+}
+
+// TestMCPDiscovery_FullLoop walks the roles.md discovery loop: create a role
+// wired to the vault provider, list roles, take the role's skill URI and URL,
+// then read that skill.
+func TestMCPDiscovery_FullLoop(t *testing.T) {
+	port := h.GetLeaderPort(t)
+	const roleName = "e2e-mcp-discovery"
+	createDiscoveryRole(t, port, roleName)
 
 	session := connectDiscovery(t)
 	ctx := context.Background()

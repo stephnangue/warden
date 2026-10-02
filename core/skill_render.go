@@ -2,8 +2,12 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -53,4 +57,56 @@ func renderSkillMarkdown(s *Skill) ([]byte, error) {
 	b.WriteString("---\n\n")
 	b.WriteString(s.Body)
 	return b.Bytes(), nil
+}
+
+// renderedSkill is a skill's SKILL.md as the discovery server serves it, with
+// the digest a Skills extension listing carries for it.
+type renderedSkill struct {
+	version   int
+	updatedAt time.Time
+	markdown  []byte
+	digest    string // "sha256:<64 lowercase hex>"
+}
+
+// skillRenderCache memoises rendered SKILL.md bytes and their digests per
+// skill name, so a skills/list does not re-render and re-hash every body on
+// every call. An entry is reused only while the skill's version and update
+// time still match; every write to a skill changes at least one of them, so
+// an edited, renamed or recreated skill is re-rendered. The zero value is
+// ready to use and safe for concurrent use.
+type skillRenderCache struct {
+	m sync.Map // skill name → *renderedSkill
+}
+
+// get returns s rendered, from the cache when it is still current.
+func (c *skillRenderCache) get(s *Skill) (*renderedSkill, error) {
+	if v, ok := c.m.Load(s.Name); ok {
+		r := v.(*renderedSkill)
+		if r.version == s.Version && r.updatedAt.Equal(s.UpdatedAt) {
+			return r, nil
+		}
+	}
+	md, err := renderSkillMarkdown(s)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(md)
+	r := &renderedSkill{
+		version:   s.Version,
+		updatedAt: s.UpdatedAt,
+		markdown:  md,
+		digest:    "sha256:" + hex.EncodeToString(sum[:]),
+	}
+	c.m.Store(s.Name, r)
+	return r, nil
+}
+
+// forget drops the entry for a skill that no longer exists under name.
+func (c *skillRenderCache) forget(name string) {
+	c.m.Delete(name)
+}
+
+// reset drops every entry.
+func (c *skillRenderCache) reset() {
+	c.m.Clear()
 }

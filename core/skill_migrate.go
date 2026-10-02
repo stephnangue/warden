@@ -94,6 +94,7 @@ func (s *SkillStore) MigrateSkillNames(ctx context.Context) error {
 		if err := s.storage.Delete(ctx, oldName); err != nil {
 			return fmt.Errorf("delete %q: %w", oldName, err)
 		}
+		s.core.skillRenders.forget(oldName)
 		delete(byName, oldName)
 		renamed[oldName] = newName
 		s.logger.Info("migrated skill name", logger.String("from", oldName), logger.String("to", newName))

@@ -33,6 +33,9 @@ import (
 //     act under it.
 //   - read_skill: the SKILL.md at a role's skill:// URI, teaching the agent
 //     how to drive that provider through the gateway.
+//
+// The same skills are served through the MCP Skills extension
+// (sys_mcp_skills.go) for clients that support it.
 
 // mcpServerVersion is the implementation version advertised in the MCP
 // initialize handshake. It is informational only; the wire protocol revision
@@ -40,17 +43,18 @@ import (
 const mcpServerVersion = "1.0.0"
 
 // mcpRequestKey is the private context key under which the middleware stashes
-// the inbound *http.Request so tool handlers can recover the caller's
-// credentials (Authorization header and forwarded client certificate). The
-// SDK does not hand the raw request to tool handlers — it surfaces only
+// the inbound *http.Request so handlers — tools, the skill:// resource and the
+// skills/* methods — can recover the caller's credentials (Authorization
+// header and forwarded client certificate). The SDK does not hand the raw
+// request to handlers — it surfaces only
 // headers via req.Extra.Header and, notably, not the TLS client certificate —
 // so credential detection (detectIntrospectCredentialFormat) needs the
 // request threaded through the context.
 type mcpRequestKey struct{}
 
-// maxSysMCPBody caps a discovery request body. The two tools this endpoint
-// exposes take an empty input and a single skill URI, so anything near this
-// is already pathological; the cap exists so buffering the body cannot be
+// maxSysMCPBody caps a discovery request body. Every request this endpoint
+// serves carries at most a skill URI or a cursor, so anything near this is
+// already pathological; the cap exists so buffering the body cannot be
 // turned into a memory cost.
 const maxSysMCPBody = 1 << 20 // 1 MiB
 
@@ -124,15 +128,21 @@ func mcpRequestFromContext(ctx context.Context) *http.Request {
 // A modern client needs no handshake to get there — under 2026-07-28 the
 // per-request _meta carries what initialize used to negotiate — while a legacy
 // client's initialize is still answered, with an ephemeral session, so both
-// eras reach the same two tools.
+// eras reach the same tools and skills.
 func (c *Core) MCPServerHandler() http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "warden",
 		Version: mcpServerVersion,
-	}, nil)
+	}, &mcp.ServerOptions{Capabilities: discoveryServerCapabilities()})
 
 	c.registerListRolesTool(server)
 	c.registerReadSkillTool(server)
+	if err := c.registerSkillsExtension(server); err != nil {
+		// Only possible if a method name shadowed a standard MCP method — a
+		// programming error. Serving on would declare the extension without
+		// implementing it.
+		panic(fmt.Sprintf("register MCP skills extension: %v", err))
+	}
 
 	streamable := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
@@ -171,9 +181,10 @@ func (c *Core) MCPServerHandler() http.Handler {
 		// stashing r preserves both for detectIntrospectCredentialFormat.
 		// JSONResponse does not make every response here a buffered one: the
 		// SDK forces SSE for subscriptions/listen, which has no synchronous
-		// result and stays open until the client cancels, and a v1.7.0 client
+		// result and stays open until the client cancels, and an SDK client
 		// opens one during Connect whenever it registers a list-changed
-		// handler. Under the listener's deadlines such a stream is severed
+		// handler the server's capabilities announce (tools here). Under the
+		// listener's deadlines such a stream is severed
 		// seconds in — and not only by the write deadline: once the body is
 		// drained, an armed read deadline cancels the request context, which
 		// is exactly what the SDK blocks on.
@@ -249,9 +260,9 @@ type readSkillOutput struct {
 	Frontmatter skillFrontmatter `json:"frontmatter" jsonschema:"the SKILL.md frontmatter"`
 }
 
-// registerReadSkillTool wires the read_skill tool onto the MCP server. It
-// reads the skill store directly — a skill is fetched by URI, no mount
-// resolution.
+// registerReadSkillTool wires the read_skill tool onto the MCP server: the
+// Skills extension's resources/read for clients without it, with the same
+// identity-bound visibility (visibleSkill).
 func (c *Core) registerReadSkillTool(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "read_skill",
@@ -263,27 +274,24 @@ func (c *Core) registerReadSkillTool(server *mcp.Server) {
 
 func (c *Core) handleMCPReadSkill(ctx context.Context, _ *mcp.CallToolRequest, in readSkillInput) (*mcp.CallToolResult, readSkillOutput, error) {
 	uri := strings.TrimSpace(in.URI)
-	name, err := parseSkillURI(uri)
+	if _, err := parseSkillURI(uri); err != nil {
+		return nil, readSkillOutput{}, err
+	}
+	// Same visibility as resources/read: a skill the identity cannot see is
+	// answered like one that does not exist.
+	skill, err := c.visibleSkill(ctx, uri)
 	if err != nil {
 		return nil, readSkillOutput{}, err
 	}
-	if c.skillStore == nil {
-		return nil, readSkillOutput{}, fmt.Errorf("skill store not initialized")
+	if skill == nil {
+		return nil, readSkillOutput{}, fmt.Errorf("skill %q not found", uri)
 	}
 
-	skill, err := c.skillStore.Get(ctx, name)
-	if err != nil {
-		if errors.Is(err, ErrSkillNotFound) {
-			return nil, readSkillOutput{}, fmt.Errorf("skill %q not found", uri)
-		}
-		return nil, readSkillOutput{}, err
-	}
-
-	md, err := renderSkillMarkdown(skill)
+	r, err := c.skillRenders.get(skill)
 	if err != nil {
 		return nil, readSkillOutput{}, err
 	}
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(md)}},
+		Content: []mcp.Content{&mcp.TextContent{Text: string(r.markdown)}},
 	}, readSkillOutput{URI: uri, Frontmatter: frontmatterFor(skill)}, nil
 }

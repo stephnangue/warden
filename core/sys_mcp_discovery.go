@@ -67,6 +67,12 @@ type discoveryProvider struct {
 // returned warnings; the call fails only when introspection does (for
 // example, no credential was presented).
 func (c *Core) resolveDiscovery(ctx context.Context) ([]mcpRole, []string, error) {
+	return c.resolveDiscoveryWith(ctx, c.discoverySkillChecker(ctx))
+}
+
+// resolveDiscoveryWith is resolveDiscovery with the skill-existence check
+// supplied, for callers that already hold the skill catalog.
+func (c *Core) resolveDiscoveryWith(ctx context.Context, skillExists func(name string) bool) ([]mcpRole, []string, error) {
 	if c.systemBackend == nil {
 		return nil, nil, fmt.Errorf("system backend not initialized")
 	}
@@ -106,7 +112,6 @@ func (c *Core) resolveDiscovery(ctx context.Context) ([]mcpRole, []string, error
 	if err != nil {
 		return nil, nil, err
 	}
-	skillExists := c.discoverySkillChecker(ctx)
 
 	roles := make([]mcpRole, len(aggregated))
 	for i, r := range aggregated {

@@ -31,12 +31,14 @@ var (
 //
 // Storage layout (under barrier view at "core/skills/"):
 //
-//	{skill-name}        -> JSON-encoded storedSkill
-//	_meta/seeded        -> sentinel byte set after the one-time seed runs
+//	{skill-name}            -> JSON-encoded storedSkill
+//	_meta/seeded            -> sentinel byte set after the one-time seed runs
+//	_meta/names-agentskills -> sentinel byte set after the name migration runs
 //
-// Skills are read-light and written rarely; no in-memory cache is
-// maintained. Skill bodies are bounded (see maxSkillBodyBytes) so a
-// straight List-then-Get is acceptable.
+// Skills are read-light and written rarely; the store keeps no in-memory
+// copy of the records. Skill bodies are bounded (see maxSkillBodyBytes) so a
+// straight List-then-Get is acceptable. The discovery server memoises each
+// skill's rendered SKILL.md on Core.skillRenders; Delete drops its entry.
 type SkillStore struct {
 	core    *Core
 	logger  *logger.GatedLogger
@@ -249,6 +251,7 @@ func (s *SkillStore) Delete(ctx context.Context, name string) error {
 	if err := s.storage.Delete(ctx, name); err != nil {
 		return fmt.Errorf("failed to delete skill: %w", err)
 	}
+	s.core.skillRenders.forget(name)
 
 	s.logger.Info("deleted skill", logger.String("name", name))
 	return nil
@@ -348,6 +351,7 @@ func (c *Core) teardownSkillStore() error {
 	if c.skillStore != nil {
 		c.skillStore.UnloadFromCache()
 	}
+	c.skillRenders.reset()
 	return nil
 }
 

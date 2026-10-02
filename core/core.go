@@ -208,6 +208,10 @@ type Core struct {
 	// across namespaces; root-only mutations are enforced at the HTTP layer).
 	skillStore *SkillStore
 
+	// skillRenders memoises each skill's SKILL.md as the discovery server
+	// serves it, with its digest (Skills extension listings carry one).
+	skillRenders skillRenderCache
+
 	// policy store is used to manage named CBP policies
 	policyStore *PolicyStore
 
