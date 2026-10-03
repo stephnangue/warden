@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
@@ -32,15 +33,24 @@ const (
 //   - token_header  the header the brokered token is injected into (default Authorization)
 //   - token_prefix  prepended to the token (default "Bearer "; set "" for a raw token)
 //   - headers       additional static headers injected on every proxied request
+//   - parse_request_body  whether policy sees the request body (see below)
 //
 // The token value itself is brokered per request from the credential subsystem
 // exactly like every other provider; only its placement is configurable.
+//
+// Request bodies are parsed into request.data so policy conditions can read them,
+// exactly as core does for every other HTTP provider: JSON and form bodies are
+// parsed, an unlabelled body is read as JSON, and one that does not parse is refused
+// rather than streamed past policy unseen. A REST mount fronts arbitrary APIs, so
+// the parse is switchable per mount, for upload and binary APIs. A mount created
+// before the switch existed has no parse_request_body in its stored config and keeps
+// not parsing; new mounts get it on at creation (OnFirstConfig).
 var Spec = &httpproxy.ProviderSpec{
 	Name:            "rest",
 	DefaultURL:      "", // operator must configure base_url
 	URLConfigKey:    "base_url",
 	DefaultTimeout:  DefaultRESTTimeout,
-	ParseStreamBody: false,
+	ParseStreamBody: true,
 	UserAgent:       "warden-rest-proxy",
 	HelpText:        restBackendHelp,
 
@@ -64,17 +74,32 @@ var Spec = &httpproxy.ProviderSpec{
 			Type:        framework.TypeKVPairs,
 			Description: "Additional static headers (name=value) injected on every proxied request; these override client-supplied headers of the same name",
 		},
+		parseRequestBodyKey: {
+			Type:        framework.TypeBool,
+			Description: "Parse JSON and form request bodies so policy conditions can read them as request.data (default true for new mounts); turn off for upload or binary APIs",
+		},
 	},
 
 	// Single state-aware injection point: token header + static headers are
 	// returned together by the credential extractor so both are applied with
 	// override (Header.Set) semantics — operator-pinned headers cannot be
-	// suppressed by a client sending the same header name.
+	// suppressed by a client sending the same header name. The same dispatch
+	// decides, per request, whether the body is parsed for policy.
 	ResolveUpstream: func(_ *http.Request, _ string, state map[string]any) (httpproxy.Dispatch, bool) {
 		header := stateString(state, "token_header", defaultTokenHeader)
 		prefix := statePrefix(state)
 		static := stateHeaders(state)
-		return httpproxy.Dispatch{ExtractCredentials: tokenExtractor(header, prefix, static)}, true
+		return httpproxy.Dispatch{
+			ExtractCredentials: tokenExtractor(header, prefix, static),
+			BypassBodyParsing:  !stateParseBody(state),
+		}, true
+	},
+
+	OnFirstConfig: func(state map[string]any) map[string]any {
+		if _, set := state[parseRequestBodyKey]; !set {
+			state[parseRequestBodyKey] = true
+		}
+		return state
 	},
 
 	OnConfigWrite: func(d *framework.FieldData, state map[string]any) (map[string]any, error) {
@@ -104,14 +129,18 @@ var Spec = &httpproxy.ProviderSpec{
 		if _, ok := d.GetOk("headers"); ok {
 			state["headers"] = headers
 		}
+		if v, ok := d.GetOk(parseRequestBodyKey); ok {
+			state[parseRequestBodyKey] = v.(bool)
+		}
 		return state, nil
 	},
 
 	OnConfigRead: func(state map[string]any) map[string]any {
 		return map[string]any{
-			"token_header": stateString(state, "token_header", defaultTokenHeader),
-			"token_prefix": statePrefix(state),
-			"headers":      stateHeaders(state),
+			"token_header":      stateString(state, "token_header", defaultTokenHeader),
+			"token_prefix":      statePrefix(state),
+			"headers":           stateHeaders(state),
+			parseRequestBodyKey: stateParseBody(state),
 		}
 	},
 
@@ -129,13 +158,48 @@ var Spec = &httpproxy.ProviderSpec{
 		if h := coerceStringMap(config["headers"]); len(h) > 0 {
 			state["headers"] = h
 		}
+		// Only a present key is copied: its absence is how a mount created before
+		// the switch existed keeps not parsing.
+		if v, ok := config[parseRequestBodyKey]; ok {
+			if b, ok := coerceBool(v); ok {
+				state[parseRequestBodyKey] = b
+			}
+		}
 		return state
 	},
 
 	ValidateExtraConfig: func(conf map[string]any) error {
+		if v, ok := conf[parseRequestBodyKey]; ok {
+			if _, ok := coerceBool(v); !ok {
+				return fmt.Errorf("invalid %s %v: must be a boolean", parseRequestBodyKey, v)
+			}
+		}
 		headerName, hasHeaderName := conf["token_header"].(string)
 		return validateRESTConfig(headerName, hasHeaderName, coerceStringMap(conf["headers"]))
 	},
+}
+
+// parseRequestBodyKey is the mount setting that lets policy see request bodies.
+const parseRequestBodyKey = "parse_request_body"
+
+// stateParseBody reports whether the mount parses request bodies. An absent key
+// means off: it is how a mount created before the setting existed is recognised.
+func stateParseBody(state map[string]any) bool {
+	b, _ := state[parseRequestBodyKey].(bool)
+	return b
+}
+
+// coerceBool accepts the shapes a boolean setting arrives in: a bool from JSON
+// storage or the API, or its string form from mount-time config.
+func coerceBool(v any) (bool, bool) {
+	switch b := v.(type) {
+	case bool:
+		return b, true
+	case string:
+		parsed, err := strconv.ParseBool(b)
+		return parsed, err == nil
+	}
+	return false, false
 }
 
 // Factory creates a new generic REST provider backend.
@@ -254,6 +318,9 @@ Configuration:
 - token_header:   Header the brokered token is injected into (default: Authorization)
 - token_prefix:   Prefix prepended to the token (default: "Bearer "; set "" for a raw token)
 - headers:        Additional static headers (name=value) injected on every request
+- parse_request_body: Parse JSON and form request bodies so policy conditions can
+                  read them as request.data (default: true for new mounts; mounts
+                  created before this setting existed keep it off until set)
 - max_body_size:  Maximum request body size (default: 10MB, max: 100MB)
 - timeout:        Request timeout duration (default: 30s)
 - auto_auth_path: Auth mount path for implicit authentication (e.g. 'auth/jwt/')
@@ -266,4 +333,16 @@ The gateway path format is:
 
 Supported credential types: api_key (apikey/grafana/elastic sources)
 and oauth_bearer_token (oauth2 source). Both carry the token in the api_key field.
+
+Request bodies and policy:
+  With parse_request_body on, a JSON or form body is parsed before policy runs,
+  so a condition can read its fields (request.data.<field>). A body with no
+  Content-Type is read as JSON. A body that does not parse as its label says -
+  invalid JSON, unlabelled non-JSON, form-labelled bytes that are not form data -
+  is refused with 400, so it never reaches the upstream unseen by policy. Other
+  content types (multipart, octet-stream, text, XML) are streamed untouched and
+  contribute no body fields. Turn parse_request_body off on a mount that fronts an
+  upload or binary API. Write body conditions to fail closed -
+  has(request.data.amount) && request.data.amount <= 100 - so a body Warden did
+  not read is refused rather than let through.
 `

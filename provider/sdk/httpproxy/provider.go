@@ -123,6 +123,15 @@ type ProviderSpec struct {
 	// OnInitialize is called during Initialize to load extra fields from persisted config.
 	OnInitialize func(config map[string]any, state map[string]any) map[string]any
 
+	// OnFirstConfig is called once in a mount's life: when Initialize finds no
+	// persisted config, just before it persists the defaults. It stamps
+	// create-time defaults into state, and only there, so a setting a new mount
+	// gets on by default can stay off for a mount created before the setting
+	// existed (whose persisted config simply lacks the key). It receives a copy
+	// of the state and must leave keys already set (from mount-time config)
+	// alone.
+	OnFirstConfig func(state map[string]any) map[string]any
+
 	// ValidateExtraConfig is called during config validation for extra fields.
 	// If nil, no extra validation is performed beyond the standard fields.
 	ValidateExtraConfig func(conf map[string]any) error
@@ -493,6 +502,14 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		}
 		b.mu.Unlock()
 	} else {
+		// No persisted config: this mount is new. Stamp the spec's create-time
+		// defaults before persisting, so they land in storage and survive reloads.
+		if b.spec.OnFirstConfig != nil {
+			b.mu.Lock()
+			b.extraState = b.spec.OnFirstConfig(cloneExtraState(b.extraState))
+			b.mu.Unlock()
+		}
+
 		// No persisted config — persist defaults
 		tc := b.TransparentConfig()
 		b.mu.RLock()
