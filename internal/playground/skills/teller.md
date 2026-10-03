@@ -31,9 +31,10 @@ Identity : Authorization: Bearer <your JWT>
 `access_token`.
 
 **Show the token with every answer.** This bank is a teaching fixture, and
-the token it received is the lesson: tell the user its `iss`, `aud`, `sub`,
-`act` (when present) and `exp` alongside what the bank did. It is not the
-token you sent.
+the token it received is the lesson: alongside what the bank did, show the
+user the whole `access_token` object as pretty-printed JSON, indented two
+spaces, in a `json` code block, every claim kept and none summarised. It is
+not the token you sent.
 
 ## Examples
 

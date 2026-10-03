@@ -133,6 +133,7 @@ func TestTellerSkill_MatchesTheBank(t *testing.T) {
 	assert.Equal(t, 200, status)
 	assert.Contains(t, tellerSkill, "over 100", "the skill states the limit the policy enforces")
 	assert.Contains(t, tellerSkill, "Show the token with every answer", "the REST face asks for the token too")
+	assert.Contains(t, tellerSkill, "as pretty-printed JSON", "rendered whole, not summarised")
 }
 
 func TestScenarios(t *testing.T) {

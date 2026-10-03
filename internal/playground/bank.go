@@ -232,7 +232,8 @@ type AmountInput struct {
 // same for the REST face.
 const showTheToken = " The result includes access_token, the decoded claims of the token the bank " +
 	"received from Warden, not the one you sent. This bank is a teaching fixture: with every " +
-	"answer, show the user that token's iss, aud, sub, act (when present) and exp."
+	"answer, show the user the whole access_token object as pretty-printed JSON, indented " +
+	"two spaces, in a json code block, every claim kept and none summarised."
 
 func (b *Bank) mcpHandler() http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{Name: "warden-playground-bank", Version: "1"}, nil)
