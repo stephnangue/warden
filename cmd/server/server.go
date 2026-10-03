@@ -261,9 +261,6 @@ func run(cmd *cobra.Command, args []string) error {
 	if flagDevPlayground {
 		flagDev = true
 	}
-	if !flagDevPlayground && (cmd.Flags().Changed("dev-playground-as-addr") || cmd.Flags().Changed("dev-playground-bank-addr")) {
-		return fmt.Errorf("-dev-playground-as-addr and -dev-playground-bank-addr can only be used with -dev-playground")
-	}
 
 	// Validate flag combinations
 	if flagDevRootToken != "" && !flagDev {
@@ -320,14 +317,14 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	flagDevTLSSpiffe = resolvedSpiffe
 
-	// The playground's authorization server fetches Warden's JWKS from the dev
-	// listener, so that listener has to be one it can reach: no SPIFFE-only
-	// trust, and no client certificate required.
-	if flagDevPlayground && flagDevTLSSpiffe {
-		return fmt.Errorf("-dev-playground cannot be used with -dev-tls-spiffe")
-	}
-	if flagDevPlayground && flagDevTLSRequireClientCert {
-		return fmt.Errorf("-dev-playground cannot be used with -dev-tls-require-client-cert")
+	if err := checkPlaygroundFlags(playgroundFlags{
+		playground:        flagDevPlayground,
+		addrSet:           cmd.Flags().Changed("dev-playground-as-addr") || cmd.Flags().Changed("dev-playground-bank-addr"),
+		spiffe:            flagDevTLSSpiffe,
+		requireClientCert: flagDevTLSRequireClientCert,
+		clientCAFile:      flagDevTLSCACertFile,
+	}); err != nil {
+		return err
 	}
 
 	// Load configuration: dev mode builds defaults, otherwise requires config file or dir
@@ -522,6 +519,9 @@ func run(cmd *cobra.Command, args []string) error {
 	// user will be told to expect.
 	if pg != nil {
 		if err := bootstrapPlayground(cmd.Context(), newCore, devInitResult.RootToken, pg); err != nil {
+			// Shut the core down before the deferred cleanup removes the audit
+			// directory, so the audit device closes its file first.
+			_ = newCore.Shutdown()
 			return err
 		}
 	}

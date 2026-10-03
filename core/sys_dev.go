@@ -1,7 +1,6 @@
 package core
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -147,17 +146,16 @@ func readDevAudit(path string, n int, filter devAuditFilter) ([]map[string]any, 
 		return nil, fmt.Errorf("read the playground audit log: %w", err)
 	}
 
-	var lines [][]byte
-	sc := bufio.NewScanner(bytes.NewReader(tail))
-	sc.Buffer(make([]byte, 0, 64<<10), devAuditTailBytes)
-	for sc.Scan() {
-		if line := bytes.TrimSpace(sc.Bytes()); len(line) > 0 {
-			lines = append(lines, append([]byte(nil), line...))
-		}
-	}
+	// The tail is already in memory and outlives the loop, so lines are slices
+	// of it rather than copies.
+	lines := bytes.Split(tail, []byte{'\n'})
 
 	out := []map[string]any{}
 	for i := len(lines) - 1; i >= 0 && len(out) < n; i-- {
+		lines[i] = bytes.TrimSpace(lines[i])
+		if len(lines[i]) == 0 {
+			continue
+		}
 		var entry map[string]any
 		if json.Unmarshal(lines[i], &entry) != nil {
 			continue
@@ -181,7 +179,7 @@ func readDevAudit(path string, n int, filter devAuditFilter) ([]map[string]any, 
 }
 
 // readFileTail reads at most limit bytes from the end of path, starting on a line
-// boundary.
+// boundary. The limit holds even while the file grows under the read.
 func readFileTail(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -196,7 +194,7 @@ func readFileTail(path string, limit int64) ([]byte, error) {
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, limit))
 	if err != nil {
 		return nil, err
 	}
@@ -257,8 +255,12 @@ func summarizeDevAuditEntry(entry map[string]any) map[string]any {
 }
 
 func (f devAuditFilter) matches(summary map[string]any) bool {
-	for want, key := range map[string]string{f.principal: "agent", f.user: "user", f.role: "role", f.decision: "decision"} {
-		if want != "" && summary[key] != want {
+	// Pairs, not a map keyed by the wanted value: two filters asking for the
+	// same value would collapse into one, and only one would be checked.
+	for _, c := range [...]struct{ key, want string }{
+		{"agent", f.principal}, {"user", f.user}, {"role", f.role}, {"decision", f.decision},
+	} {
+		if c.want != "" && summary[c.key] != c.want {
 			return false
 		}
 	}
@@ -311,7 +313,7 @@ func (c *Core) CheckDevPlaygroundDiscovery(ctx context.Context, wantRoles []stri
 // same write from the CLI would, so a step that works here works by hand. The
 // first failure stops the bootstrap and names the step.
 func (c *Core) RunDevBootstrap(ctx context.Context, rootToken string, steps []playground.Step) error {
-	for _, step := range steps {
+	for i, step := range steps {
 		method := http.MethodPost
 		op := logical.CreateOperation
 		if step.Operation == "update" {
@@ -324,11 +326,16 @@ func (c *Core) RunDevBootstrap(ctx context.Context, rootToken string, steps []pl
 		httpReq := httptest.NewRequest(method, "/v1/"+step.Path, bytes.NewReader(body)).WithContext(ctx)
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("X-Warden-Token", rootToken)
+		// The bootstrap runs in-process; the audit names it as such rather than
+		// as httptest's placeholder peer.
+		httpReq.RemoteAddr = "127.0.0.1:0"
 
 		resp, err := c.HandleRequest(ctx, &logical.Request{
 			Path:        step.Path,
 			Operation:   op,
 			HTTPRequest: httpReq,
+			ClientIP:    "127.0.0.1",
+			RequestID:   fmt.Sprintf("playground-bootstrap-%02d", i+1),
 		})
 		if err != nil {
 			return fmt.Errorf("playground bootstrap %s: %w", step.Path, err)

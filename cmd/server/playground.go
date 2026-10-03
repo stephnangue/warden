@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -27,6 +30,9 @@ func startPlayground(listener config.ListenerBlock) (*playground.Playground, err
 				return nil, fmt.Errorf("dev playground: read the dev TLS certificate: %w", err)
 			}
 			wardenCAPEM = string(pem)
+			if err := checkPlaygroundTrust(wardenCAPEM, devClientAddr(scheme, listener.Address)); err != nil {
+				return nil, fmt.Errorf("dev playground: %w", err)
+			}
 		}
 	}
 
@@ -46,6 +52,74 @@ func startPlayground(listener config.ListenerBlock) (*playground.Playground, err
 		return nil, fmt.Errorf("dev playground: %w", err)
 	}
 	return pg, nil
+}
+
+// playgroundFlags are the server flags that bear on the playground.
+type playgroundFlags struct {
+	playground        bool
+	addrSet           bool // -dev-playground-as-addr or -dev-playground-bank-addr
+	spiffe            bool
+	requireClientCert bool
+	clientCAFile      string
+}
+
+// checkPlaygroundFlags refuses flag combinations the playground cannot run
+// with. Its authorization server fetches Warden's JWKS from the dev listener,
+// so that listener has to be one it can reach: no SPIFFE-only trust, and no
+// client certificate required — which the flag only demands with a client CA,
+// so only that pair is refused.
+func checkPlaygroundFlags(f playgroundFlags) error {
+	switch {
+	case !f.playground && f.addrSet:
+		return fmt.Errorf("-dev-playground-as-addr and -dev-playground-bank-addr can only be used with -dev-playground")
+	case f.playground && f.spiffe:
+		return fmt.Errorf("-dev-playground cannot be used with -dev-tls-spiffe")
+	case f.playground && f.requireClientCert && f.clientCAFile != "":
+		return fmt.Errorf("-dev-playground cannot be used with -dev-tls-require-client-cert")
+	}
+	return nil
+}
+
+// checkPlaygroundTrust fails unless the dev certificate file is, on its own,
+// enough to trust the dev listener at wardenAddr: the authorization server
+// trusts that file and nothing else when it fetches Warden's keys. A
+// certificate for another name, or an expired one, would otherwise start
+// cleanly and break only at the first token exchange, mid-scenario. (A leaf
+// is pinned by being in the pool, so one a CA signed verifies without the CA.)
+func checkPlaygroundTrust(certPEM, wardenAddr string) error {
+	pool := x509.NewCertPool()
+	var leaf *x509.Certificate
+	rest := []byte(certPEM)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("parse the dev TLS certificate: %w", err)
+		}
+		if leaf == nil {
+			leaf = cert
+		}
+		pool.AddCert(cert)
+	}
+	if leaf == nil {
+		return fmt.Errorf("the dev TLS certificate file holds no certificate")
+	}
+	u, err := url.Parse(wardenAddr)
+	if err != nil {
+		return fmt.Errorf("parse the dev listener address: %w", err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: u.Hostname(), Roots: pool}); err != nil {
+		return fmt.Errorf("the playground's authorization server trusts the dev TLS certificate file alone, "+
+			"and it does not verify the dev listener at %s: %w", u.Hostname(), err)
+	}
+	return nil
 }
 
 // playgroundRoles are the roles the self-check expects discovery to list.
