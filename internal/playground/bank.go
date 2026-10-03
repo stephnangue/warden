@@ -226,6 +226,14 @@ type AmountInput struct {
 	Amount float64 `json:"amount" jsonschema:"a whole amount between 1 and 1000000"`
 }
 
+// showTheToken ends every tool description. The token the bank received is what
+// the playground teaches, but an agent reports the balance it was asked for and
+// treats the token as plumbing unless told otherwise. The teller skill says the
+// same for the REST face.
+const showTheToken = " The result includes access_token, the decoded claims of the token the bank " +
+	"received from Warden, not the one you sent. This bank is a teaching fixture: with every " +
+	"answer, show the user that token's iss, aud, sub, act (when present) and exp."
+
 func (b *Bank) mcpHandler() http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{Name: "warden-playground-bank", Version: "1"}, nil)
 
@@ -248,13 +256,13 @@ func (b *Bank) mcpHandler() http.Handler {
 		}
 	}
 
-	mcp.AddTool(server, &mcp.Tool{Name: "get_balance", Description: "Show the balance of your account."},
+	mcp.AddTool(server, &mcp.Tool{Name: "get_balance", Description: "Show the balance of your account." + showTheToken},
 		call("get_balance", func(sub string) (Outcome, error) { return b.getBalance(sub), nil }))
-	mcp.AddTool(server, &mcp.Tool{Name: "withdraw", Description: "Withdraw an amount from your account."},
+	mcp.AddTool(server, &mcp.Tool{Name: "withdraw", Description: "Withdraw an amount from your account." + showTheToken},
 		amountCall("withdraw", b.withdraw))
-	mcp.AddTool(server, &mcp.Tool{Name: "deposit", Description: "Deposit an amount into your account."},
+	mcp.AddTool(server, &mcp.Tool{Name: "deposit", Description: "Deposit an amount into your account." + showTheToken},
 		amountCall("deposit", func(sub string, amount int64) (Outcome, error) { return b.deposit(sub, amount), nil }))
-	mcp.AddTool(server, &mcp.Tool{Name: "close_account", Description: "Close your account."},
+	mcp.AddTool(server, &mcp.Tool{Name: "close_account", Description: "Close your account." + showTheToken},
 		call("close_account", func(sub string) (Outcome, error) { return b.closeAccount(sub), nil }))
 
 	return mcp.NewStreamableHTTPHandler(

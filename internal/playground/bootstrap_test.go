@@ -132,6 +132,7 @@ func TestTellerSkill_MatchesTheBank(t *testing.T) {
 	status, _ = f.rest(t, "POST", "/accounts/me/withdraw", token, "application/json", `{"amount": 1}`)
 	assert.Equal(t, 200, status)
 	assert.Contains(t, tellerSkill, "over 100", "the skill states the limit the policy enforces")
+	assert.Contains(t, tellerSkill, "Show the token with every answer", "the REST face asks for the token too")
 }
 
 func TestScenarios(t *testing.T) {

@@ -199,6 +199,9 @@ func TestBank_MCP(t *testing.T) {
 	var names []string
 	for _, tool := range tools.Tools {
 		names = append(names, tool.Name)
+		// An agent reports what it was asked for; the token is the lesson, so
+		// every tool asks for it to be shown.
+		assert.Contains(t, tool.Description, "show the user that token's iss, aud, sub, act", tool.Name)
 	}
 	assert.ElementsMatch(t, []string{"get_balance", "withdraw", "deposit", "close_account"}, names,
 		"the bank offers all four; Warden's policy is what hides close_account")

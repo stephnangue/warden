@@ -89,6 +89,7 @@ func Scenarios() []Scenario {
 				"The bank received a different token: access_token.iss is the bank's authorization server, aud is the bank, exp is five minutes away.",
 				"Warden got that token by proving the agent's identity with an assertion signed by its own OIDC issuer. No secret is stored anywhere: `warden cred source read " + SourceBankAS + "` shows none.",
 				"The agent never saw the bank token.",
+				"The agent is asked to show the token's claims with every answer. If it does not, expand the raw tool result (ctrl+o in Claude Code) and read access_token.",
 			},
 		},
 		{
@@ -98,7 +99,7 @@ func Scenarios() []Scenario {
 			Shows: []string{
 				"The bank has four tools; the agent sees three. The atm role's MCP policy does not allow close_account, so Warden removes it from tools/list.",
 				"A client that calls it anyway is refused by Warden, before the bank sees it.",
-				"`warden policy read atm-tools` shows the rule.",
+				"`warden policy -type mcp read atm-tools` shows the rule.",
 			},
 		},
 		{

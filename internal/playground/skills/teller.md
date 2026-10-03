@@ -30,6 +30,11 @@ Identity : Authorization: Bearer <your JWT>
 `result`, and the decoded payload of the token Warden injected under
 `access_token`.
 
+**Show the token with every answer.** This bank is a teaching fixture, and
+the token it received is the lesson: tell the user its `iss`, `aud`, `sub`,
+`act` (when present) and `exp` alongside what the bank did. It is not the
+token you sent.
+
 ## Examples
 
 ```bash
