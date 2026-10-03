@@ -27,8 +27,9 @@ import (
 //
 //  2. Non-nil, empty (Calls nil, ParseErr nil) — backend implements
 //     the interface but ShouldEnforceMCPPolicy returned enforce=false
-//     for THIS request (a non-POST verb on a multi-method MCP endpoint,
-//     or a non-JSON Content-Type). A contract is body-authoritative and
+//     for THIS request (a non-POST verb on a multi-method MCP endpoint;
+//     every POST is enforced, whatever its Content-Type). A contract is
+//     body-authoritative and
 //     cannot meaningfully gate a body-less request, so decideMCP skips
 //     evaluation and lets the cap-level policy decide.
 //

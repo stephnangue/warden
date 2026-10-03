@@ -351,7 +351,7 @@ func mcpDescriptorPopulated(req *logical.Request) bool {
 //
 //   - Non-nil, empty descriptor (Calls nil, ParseErr nil) — the
 //     backend is MCP-aware but ShouldEnforceMCPPolicy declined for
-//     this request (a non-POST verb, or a non-JSON Content-Type). A
+//     this request (a non-POST verb; every POST is enforced). A
 //     contract is body-authoritative; a verb with no body cannot be
 //     governed by method/tool allow-lists, so we return nil to skip
 //     evaluation and let the cap-level check decide. This is what
