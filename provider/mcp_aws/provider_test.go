@@ -308,13 +308,15 @@ func TestShouldEnforceMCPPolicy_DeclinesNonPOST(t *testing.T) {
 	}
 }
 
-func TestShouldEnforceMCPPolicy_DeclinesNonJSON(t *testing.T) {
+// A POST is enforced whatever its label: a relabelled tools/call must not slip
+// past the MCP rules, and the strict parser refuses a body that is not JSON-RPC.
+func TestShouldEnforceMCPPolicy_EnforcesEveryPost(t *testing.T) {
 	b := setupBackend(t)
 	for _, ct := range []string{"", "text/plain", "application/octet-stream", "text/event-stream", "application/x-www-form-urlencoded"} {
 		t.Run(ct, func(t *testing.T) {
 			enforce, capBytes := b.ShouldEnforceMCPPolicy(mustGateReq("POST", ct))
-			assert.False(t, enforce)
-			assert.Equal(t, int64(0), capBytes, "declined requests must return cap=0; a later behavior change that returned MaxBodySize on decline would mislead core")
+			assert.True(t, enforce)
+			assert.Positive(t, capBytes, "an enforced request carries the body cap the extractor reads under")
 		})
 	}
 }

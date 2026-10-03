@@ -3,7 +3,6 @@ package mcp
 import (
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -121,30 +120,22 @@ func extractBearerToken(req *logical.Request) (map[string]string, error) {
 	return map[string]string{"Authorization": "Bearer " + token}, nil
 }
 
-// shouldEnforceMCPPolicy opts the generic mcp provider into
-// body-authoritative MCP policy enforcement for the subset of traffic where it
-// is meaningful: JSON-RPC POSTs. GET (SSE reconnect) and DELETE (session close),
-// and any non-JSON Content-Type, decline and pass through under
-// token-scope-only enforcement.
+// shouldEnforceMCPPolicy opts the generic mcp provider into body-authoritative
+// MCP policy enforcement for every POST, the only verb that carries JSON-RPC.
+// GET (SSE reconnect) and DELETE (session close) carry no method to authorise
+// and pass through under token-scope-only enforcement.
+//
+// The Content-Type is deliberately not consulted. Deciding by the label let a
+// caller relabel a tools/call (text/plain, no type at all) past every MCP rule
+// and on to an upstream that parses JSON whatever the header says. Enforcing
+// every POST hands the body to the strict JSON-RPC parser, so a body that is
+// not JSON-RPC is refused as malformed, and one that is is judged on what it
+// asks for.
 func shouldEnforceMCPPolicy(req *logical.Request) bool {
 	if req == nil || req.HTTPRequest == nil {
 		return false
 	}
-	r := req.HTTPRequest
-	if r.Method != http.MethodPost {
-		return false
-	}
-	ct := r.Header.Get("Content-Type")
-	if ct == "" {
-		return false
-	}
-	// Trim a charset / boundary parameter (e.g. "application/json; charset=utf-8")
-	// before comparing to the bare media type.
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	ct = strings.TrimSpace(strings.ToLower(ct))
-	return ct == "application/json"
+	return req.HTTPRequest.Method == http.MethodPost
 }
 
 // Factory creates a new generic mcp provider backend.
@@ -242,11 +233,10 @@ whether the caller subscribes with the modern subscriptions/listen or the
 legacy resources/subscribe — the content never arrives either way, but the
 resource's existence and the timing of every change would.
 
-Body parsing runs only for POST requests carrying Content-Type
-application/json. Other request shapes do not produce a parsed body descriptor:
-when an MCP policy stanza covers a path that also receives non-POST or non-JSON
-traffic, those requests deny with rule_type missing_body. Operators scope MCP
-stanzas to paths they expect to carry JSON-RPC POSTs.
+Body parsing runs for every POST, whatever its Content-Type: a POST whose body
+is not well-formed JSON-RPC is refused, so a relabelled call cannot slip past the
+rules. GET (SSE reconnect) and DELETE (session close) carry no body to parse and
+are judged by capability policy alone.
 
 Paths with no MCP stanza in scope skip the strict parser entirely — no body
 buffering or parsing is performed on them.

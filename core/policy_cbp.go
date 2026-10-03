@@ -329,8 +329,7 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 // otherwise the shared wildcard resolver picks one candidate by the same
 // ranking. The List/Scan trailing-slash retries AllowOperation performs are
 // deliberately absent — a populated MCP descriptor only ever exists on a POST,
-// because every MCPPolicyEnforced implementer gates on POST plus a JSON
-// content type.
+// because every MCPPolicyEnforced implementer gates on POST.
 //
 // The returned slice is owned by the compiled index and shared by every request
 // evaluated against it. Callers must treat it as read-only: sorting or

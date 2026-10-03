@@ -319,6 +319,25 @@ func TestPlayground(t *testing.T) {
 
 		_, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "close_account", nil)
 		assert.Error(t, err, "a direct call to the hidden tool is refused")
+
+		// Relabelling the call must not slip it past the tool rules: Warden
+		// refuses it on policy, before the bank (which would answer 415) sees it.
+		call := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"close_account","arguments":{}}}`
+		for _, contentType := range []string{"text/plain", ""} {
+			req, err := http.NewRequest(http.MethodPost, e.addr+"/v1/bank/role/atm/gateway/", strings.NewReader(call))
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+agent)
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			if contentType != "" {
+				req.Header.Set("Content-Type", contentType)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode, "Content-Type %q: %s", contentType, body)
+			assert.Contains(t, string(body), "close_account", "refused by the tool rule, Content-Type %q", contentType)
+		}
 	})
 
 	t.Run("3 policy decides which arguments", func(t *testing.T) {

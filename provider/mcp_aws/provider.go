@@ -27,9 +27,12 @@ var _ logical.MCPPolicyEnforced = (*mcpAWSBackend)(nil)
 
 // ShouldEnforceMCPPolicy reports whether this request is subject to
 // body-authoritative MCP policy enforcement. The gate matches the generic mcp
-// provider exactly: JSON-RPC POSTs only. GET (SSE reconnect) and DELETE (session
-// close), and any non-JSON Content-Type, decline and pass through under
-// credential-scope-only enforcement (IAM here, bearer-token scopes there).
+// provider exactly: every POST, the only verb that carries JSON-RPC. GET (SSE
+// reconnect) and DELETE (session close) decline and pass through under
+// credential-scope-only enforcement (IAM here, bearer-token scopes there). The
+// Content-Type is not consulted: a POST labelled anything else is still handed to
+// the strict JSON-RPC parser, which refuses a body that is not JSON-RPC, so a
+// relabelled tools/call cannot slip past the MCP rules.
 //
 // The body cap returned is the backend's MaxBodySize as of THIS call, read
 // through snapshot() to match the rest of the hot path. A config-write that
@@ -42,21 +45,7 @@ func (b *mcpAWSBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int6
 	if req == nil || req.HTTPRequest == nil {
 		return false, 0
 	}
-	r := req.HTTPRequest
-	if r.Method != http.MethodPost {
-		return false, 0
-	}
-	ct := r.Header.Get("Content-Type")
-	if ct == "" {
-		return false, 0
-	}
-	// Strip a charset / boundary parameter (e.g. "application/json; charset=utf-8")
-	// before comparing to the bare media type.
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	ct = strings.TrimSpace(strings.ToLower(ct))
-	if ct != "application/json" {
+	if req.HTTPRequest.Method != http.MethodPost {
 		return false, 0
 	}
 	return true, b.snapshot().maxBody

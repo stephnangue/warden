@@ -102,9 +102,10 @@ func TestExtractBearerToken_UnsupportedType(t *testing.T) {
 }
 
 // The enforcement gate decides whether a request is subject to body-authoritative
-// MCP rules. It has to decline anything whose body is not a JSON-RPC call —
-// SSE reconnects and session closes carry no method to authorise — while
-// admitting every shape a real client's POST takes.
+// MCP rules. SSE reconnects and session closes carry no method to authorise and
+// are declined. Every POST is admitted whatever its label: a relabelled tools/call
+// must not slip past the rules, and the strict parser refuses a body that is not
+// JSON-RPC.
 
 func TestShouldEnforceMCPPolicy(t *testing.T) {
 	cases := []struct {
@@ -117,8 +118,9 @@ func TestShouldEnforceMCPPolicy(t *testing.T) {
 		{"json-rpc post with charset", http.MethodPost, "application/json; charset=utf-8", true},
 		{"sse reconnect", http.MethodGet, "application/json", false},
 		{"session close", http.MethodDelete, "application/json", false},
-		{"post with no content type", http.MethodPost, "", false},
-		{"post with a non-json body", http.MethodPost, "text/plain", false},
+		{"post with no content type", http.MethodPost, "", true},
+		{"post labelled text/plain", http.MethodPost, "text/plain", true},
+		{"post labelled with a +json type", http.MethodPost, "application/vnd.api+json", true},
 	}
 
 	for _, tc := range cases {
