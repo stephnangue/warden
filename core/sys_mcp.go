@@ -231,8 +231,10 @@ func (c *Core) registerListRolesTool(server *mcp.Server) {
 		Description: "List the roles the presented identity can assume. This is the agent's " +
 			"discovery menu: pick the role whose description fits the task, read its " +
 			"skill (a skill:// URI) with read_skill or resources/read, then act on " +
-			"Warden's address plus the role's url. Authorizes on the presented identity " +
-			"(JWT bearer token or TLS client certificate); no role is required.",
+			"Warden's address plus the role's url. The descriptions are enough to choose " +
+			"a role or to say what you can do; read a skill only for the role you are " +
+			"about to use. Authorizes on the presented identity (JWT bearer token or TLS " +
+			"client certificate); no role is required.",
 	}, c.handleMCPListRoles)
 }
 
@@ -274,7 +276,9 @@ func (c *Core) registerReadSkillTool(server *mcp.Server) {
 		Name: "read_skill",
 		Description: "Read an agent skill (SKILL.md) by its skill:// URI, as returned in a " +
 			"role's skill field by list_roles. The skill teaches how to drive that role's " +
-			"provider through Warden. Returns the same bytes as resources/read on the URI.",
+			"provider through Warden. Read it once you have chosen the role, before " +
+			"calling it: skills of roles you are not using cost context and teach " +
+			"nothing. Returns the same bytes as resources/read on the URI.",
 	}, c.handleMCPReadSkill)
 }
 
