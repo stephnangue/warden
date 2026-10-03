@@ -50,11 +50,17 @@ func TokenExchangeSupportsActor(sourceCfg credential.Config) bool {
 // never sees it. It is a separate method rather than a modifier because the two are
 // configured from opposite ends: one takes a key, the other takes a reference to a
 // capability, and nothing an operator sets for one is meaningful for the other.
+//
+// none makes Warden a public client (RFC 6749 §2.1): it presents no client credential,
+// only its client_id when one is set (§2.3), and the token endpoint identifies the
+// caller by the subject token alone. With a warden_identity subject that token is
+// Warden's own signed assertion, so the source stores no secret at all.
 const (
 	clientAuthSecretBasic      = "client_secret_basic"
 	clientAuthSecretPost       = "client_secret_post"
 	clientAuthPrivateKeyJWT    = "private_key_jwt"
 	clientAuthKMSPrivateKeyJWT = "kms_private_key_jwt"
+	clientAuthNone             = "none"
 )
 
 // clientAssertionType is the RFC 7523 client-assertion type for private_key_jwt.
@@ -140,8 +146,8 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 			Example("https://auth.resourceapp.example.com/oauth2/token"),
 
 		credential.StringField("client_auth").
-			OneOf(clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT).
-			Describe("How Warden authenticates to the token endpoint; kms_private_key_jwt signs the same assertion with a key held in a KMS, reached through secret_spec").
+			OneOf(clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT, clientAuthNone).
+			Describe("How Warden authenticates to the token endpoint; kms_private_key_jwt signs the same assertion with a key held in a KMS, reached through secret_spec; none presents no client credential (a public client identified by its subject token)").
 			Example("client_secret_post"),
 
 		credential.StringField("client_id").
@@ -267,6 +273,16 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 		// is minted. Naming it again here could only ever disagree.
 		if credential.GetString(config, "client_assertion_alg", "") != "" {
 			return fmt.Errorf("client_assertion_alg must be omitted for client_auth=%s; the algorithm travels with the key in the referenced payload", clientAuthKMSPrivateKeyJWT)
+		}
+	case clientAuthNone:
+		// A public client has no credential to store or to fetch. Anything that would
+		// supply one is refused rather than ignored: a secret left here would still be
+		// stored, and still be reported as stored, while never being sent.
+		for _, key := range []string{"client_secret", "private_key", "client_assertion_alg", "client_assertion_kid",
+			credential.ConfigSecretSpec, credential.ConfigSecretField, "secret_cache_ttl"} {
+			if credential.GetString(config, key, "") != "" {
+				return fmt.Errorf("%s must be omitted for client_auth=%s; a public client presents no client credential", key, clientAuthNone)
+			}
 		}
 	}
 
@@ -652,6 +668,12 @@ func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Valu
 		form.Set("client_id", clientID)
 		form.Set("client_assertion_type", clientAssertionType)
 		form.Set("client_assertion", assertion)
+	case clientAuthNone:
+		// RFC 6749 §2.3: a public client identifies itself with client_id alone, and only
+		// when the endpoint knows it by one.
+		if clientID != "" {
+			form.Set("client_id", clientID)
+		}
 	default:
 		return fmt.Errorf("token_exchange: unsupported client_auth %q", credential.GetString(cfg, "client_auth", ""))
 	}

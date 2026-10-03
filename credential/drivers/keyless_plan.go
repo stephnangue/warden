@@ -222,6 +222,15 @@ func (f *OAuth2DriverFactory) KeylessPrerequisites(keyless credential.Config, _ 
 // TokenExchangeDriverFactory
 
 func (f *TokenExchangeDriverFactory) PlanKeyless(current credential.Config, inputs map[string]string) (*credential.KeylessSourcePlan, error) {
+	// A public client stores no client credential: there is nothing to move to
+	// chaining, and secret_spec is refused for it. Planning the secret-based migration
+	// would clear the client_id it may need and ask for an input it cannot take.
+	if credential.GetString(current, "client_auth", "") == clientAuthNone {
+		return &credential.KeylessSourcePlan{
+			Delta: withInputs(map[string]string{}, inputs),
+			Notes: []string{"client_auth=none is already keyless: a public client stores no client credential"},
+		}, nil
+	}
 	clear := []string{"client_id", "client_secret"}
 	kind := "OAuth2 client secret"
 	if credential.GetString(current, "client_auth", clientAuthSecretPost) == clientAuthPrivateKeyJWT {
@@ -237,7 +246,10 @@ func (f *TokenExchangeDriverFactory) PlanKeylessSpec(_ string, _, _, _ credentia
 }
 
 func (f *TokenExchangeDriverFactory) KeylessPrerequisites(keyless credential.Config, _ []credential.PlannedSpec, _ credential.TrustEnv) []credential.Prerequisite {
-	if credential.GetString(keyless, "client_auth", clientAuthSecretPost) == clientAuthPrivateKeyJWT {
+	switch credential.GetString(keyless, "client_auth", clientAuthSecretPost) {
+	case clientAuthNone:
+		return nil // no referenced secret to prepare
+	case clientAuthPrivateKeyJWT:
 		return chainedPrerequisites(keyless, "client_id and private_key (with client_assertion_kid or kid when the authorization server selects keys by id)")
 	}
 	return chainedPrerequisites(keyless, "client_id and client_secret")
