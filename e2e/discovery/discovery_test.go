@@ -159,6 +159,21 @@ func readSkillText(t *testing.T, session *mcp.ClientSession, uri string) string 
 	if !ok {
 		t.Fatalf("read_skill content is %T, want text", res.Content[0])
 	}
+	// A client may read only the structured output, so it must carry the same
+	// SKILL.md.
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("read_skill structured output: %v", err)
+	}
+	var out struct {
+		Markdown string `json:"markdown"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("read_skill structured output: %v", err)
+	}
+	if out.Markdown != txt.Text {
+		t.Errorf("read_skill's structured markdown differs from its text content")
+	}
 	return txt.Text
 }
 

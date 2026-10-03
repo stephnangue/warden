@@ -230,9 +230,12 @@ func (c *Core) registerListRolesTool(server *mcp.Server) {
 		Name: "list_roles",
 		Description: "List the roles the presented identity can assume. This is the agent's " +
 			"discovery menu: pick the role whose description fits the task, read its " +
-			"skill (a skill:// URI) with read_skill or resources/read, then act on " +
-			"Warden's address plus the role's url. Authorizes on the presented identity " +
-			"(JWT bearer token or TLS client certificate); no role is required.",
+			"skill (a skill:// URI), and the skills that one lists in its frontmatter " +
+			"requires, with read_skill or resources/read, then act on Warden's address " +
+			"plus the role's url. The descriptions are enough to choose " +
+			"a role or to say what you can do; read a skill only for the role you are " +
+			"about to use. Authorizes on the presented identity (JWT bearer token or TLS " +
+			"client certificate); no role is required.",
 	}, c.handleMCPListRoles)
 }
 
@@ -253,11 +256,17 @@ type readSkillInput struct {
 	URI string `json:"uri" jsonschema:"the skill's URI, skill://<name>/SKILL.md, as returned in a role's skill field by list_roles"`
 }
 
-// readSkillOutput is the structured output of read_skill; the SKILL.md itself
-// is the text content.
+// readSkillOutput is the structured output of read_skill.
+//
+// It carries the whole SKILL.md as well as the text content does. A client may
+// read a tool that declares an output schema through its structured output
+// alone, and treat the text as a serialisation of it — Claude Code does — so a
+// body served only as text never reaches the agent, and the one tool meant to
+// hand over instructions hands over a name and a description.
 type readSkillOutput struct {
 	URI         string           `json:"uri" jsonschema:"the skill's URI"`
 	Frontmatter skillFrontmatter `json:"frontmatter" jsonschema:"the SKILL.md frontmatter"`
+	Markdown    string           `json:"markdown" jsonschema:"the whole SKILL.md, frontmatter included: the same bytes as resources/read on the URI"`
 }
 
 // registerReadSkillTool wires the read_skill tool onto the MCP server: the
@@ -268,7 +277,10 @@ func (c *Core) registerReadSkillTool(server *mcp.Server) {
 		Name: "read_skill",
 		Description: "Read an agent skill (SKILL.md) by its skill:// URI, as returned in a " +
 			"role's skill field by list_roles. The skill teaches how to drive that role's " +
-			"provider through Warden. Returns the same bytes as resources/read on the URI.",
+			"provider through Warden. Read it once you have chosen the role, before " +
+			"calling it: skills of roles you are not using cost context and teach " +
+			"nothing. A skill's requires (in its frontmatter metadata) are part of it: " +
+			"read each one before acting. Returns the same bytes as resources/read on the URI.",
 	}, c.handleMCPReadSkill)
 }
 
@@ -291,7 +303,8 @@ func (c *Core) handleMCPReadSkill(ctx context.Context, _ *mcp.CallToolRequest, i
 	if err != nil {
 		return nil, readSkillOutput{}, err
 	}
+	md := string(r.markdown)
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(r.markdown)}},
-	}, readSkillOutput{URI: uri, Frontmatter: frontmatterFor(skill)}, nil
+		Content: []mcp.Content{&mcp.TextContent{Text: md}},
+	}, readSkillOutput{URI: uri, Frontmatter: frontmatterFor(skill), Markdown: md}, nil
 }
