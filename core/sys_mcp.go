@@ -278,7 +278,8 @@ func (c *Core) registerReadSkillTool(server *mcp.Server) {
 			"role's skill field by list_roles. The skill teaches how to drive that role's " +
 			"provider through Warden. Read it once you have chosen the role, before " +
 			"calling it: skills of roles you are not using cost context and teach " +
-			"nothing. Returns the same bytes as resources/read on the URI.",
+			"nothing. A skill's requires (in its frontmatter metadata) are part of it: " +
+			"read each one before acting. Returns the same bytes as resources/read on the URI.",
 	}, c.handleMCPReadSkill)
 }
 
