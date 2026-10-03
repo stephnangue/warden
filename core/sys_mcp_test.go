@@ -275,8 +275,8 @@ func callReadSkill(t *testing.T, session *mcp.ClientSession, args map[string]any
 }
 
 // TestMCPServer_ReadSkill_ByURI reads a seeded skill by its skill:// URI: the
-// text content is the rendered SKILL.md and the structured output carries its
-// frontmatter.
+// text content is the rendered SKILL.md, and the structured output carries its
+// frontmatter and the same SKILL.md, so a client reading either gets the body.
 func TestMCPServer_ReadSkill_ByURI(t *testing.T) {
 	c, ctx, ctrl := setupDiscovery(t)
 	seedTestSkill(t, c, ctx, "mcp")
@@ -303,6 +303,7 @@ func TestMCPServer_ReadSkill_ByURI(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &out))
 	assert.Equal(t, "skill://mcp/SKILL.md", out.URI)
 	assert.Equal(t, frontmatterFor(stored), out.Frontmatter)
+	assert.Equal(t, string(md), out.Markdown, "the body reaches a client that reads only the structured output")
 }
 
 // TestMCPServer_ReadSkill_Errors covers the tool-error paths: a missing,

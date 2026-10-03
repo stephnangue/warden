@@ -458,6 +458,14 @@ func TestPlayground(t *testing.T) {
 			res, err := discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "read_skill", Arguments: map[string]any{"uri": uri}})
 			require.NoError(t, err, uri)
 			assert.False(t, res.IsError, "%s is readable", uri)
+			// Claude Code reads only the structured output of a tool that
+			// declares one, so the instructions must be there too.
+			raw, _ := json.Marshal(res.StructuredContent)
+			var out struct {
+				Markdown string `json:"markdown"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &out), uri)
+			assert.Contains(t, out.Markdown, "\n# ", "%s: the body, not only the frontmatter", uri)
 		}
 
 		// A skill that exists, but that no role this identity can assume names,
