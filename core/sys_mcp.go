@@ -230,8 +230,9 @@ func (c *Core) registerListRolesTool(server *mcp.Server) {
 		Name: "list_roles",
 		Description: "List the roles the presented identity can assume. This is the agent's " +
 			"discovery menu: pick the role whose description fits the task, read its " +
-			"skill (a skill:// URI) with read_skill or resources/read, then act on " +
-			"Warden's address plus the role's url. The descriptions are enough to choose " +
+			"skill (a skill:// URI), and the skills that one lists in its frontmatter " +
+			"requires, with read_skill or resources/read, then act on Warden's address " +
+			"plus the role's url. The descriptions are enough to choose " +
 			"a role or to say what you can do; read a skill only for the role you are " +
 			"about to use. Authorizes on the presented identity (JWT bearer token or TLS " +
 			"client certificate); no role is required.",
