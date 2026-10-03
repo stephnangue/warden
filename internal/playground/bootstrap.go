@@ -2,6 +2,7 @@ package playground
 
 import (
 	_ "embed"
+	"fmt"
 	"strings"
 )
 
@@ -70,12 +71,10 @@ var (
 	policyBankAccess = gatewayCBP(MountBank, "")
 
 	// The withdrawal limit runs on every MCP call, initialize and tools/list
-	// included, so it reads the amount optionally and only judges withdraw: a bare
-	// call.args.amount would error, and an erroring condition denies.
-	policyATMTools = gatewayMCP(MountBank,
-		`  methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
-  condition = "call.tool != 'withdraw' || call.args.?amount.orValue(0) <= 100"`)
+	// included, so it judges withdraw only. It fails closed: a withdrawal whose
+	// amount Warden cannot read — missing, null, a list — has no scalar amount, so
+	// has() is false and it is refused rather than let through.
+	policyATMTools = gatewayMCP(MountBank, atmToolRules(100))
 
 	// The person must have let this very agent act for them: may_act on their
 	// token names it. The binding is policy, readable and changeable, not a rule
@@ -94,6 +93,18 @@ var (
 		restRouteCBP("accounts/me/withdraw", `["create", "update"]`,
 			`has(request.data.amount) && request.data.amount <= 100`)
 )
+
+// atmWithdrawCondition is the ATM's withdrawal limit, as a policy condition.
+func atmWithdrawCondition(limit int) string {
+	return fmt.Sprintf("call.tool != 'withdraw' || (has(call.args.amount) && call.args.amount <= %d)", limit)
+}
+
+// atmToolRules is the body of the ATM's tool policy, with the given limit.
+func atmToolRules(limit int) string {
+	return `  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
+  condition = "` + atmWithdrawCondition(limit) + `"`
+}
 
 const gatewayCapabilities = `["read", "create", "update", "delete", "list"]`
 

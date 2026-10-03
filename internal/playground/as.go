@@ -16,14 +16,24 @@ import (
 const (
 	grantTypeTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
 	tokenTypeAccessToken   = "urn:ietf:params:oauth:token-type:access_token"
+	tokenTypeJWT           = "urn:ietf:params:oauth:token-type:jwt"
 )
 
 // DefaultAccessTokenTTL is how long a bank token lives: short, so a token is
 // worth little outside the call Warden minted it for.
 const DefaultAccessTokenTTL = 5 * time.Minute
 
-// defaultScope is granted when a token request names none.
+// defaultScope is the one scope the server grants, and what it grants when a
+// token request names none.
 const defaultScope = "bank"
+
+// subjectTokenTypes are the RFC 8693 types a Warden assertion may be sent as.
+var subjectTokenTypes = []string{tokenTypeJWT, tokenTypeAccessToken}
+
+// clockSkewLeeway is how far past expiry a token is still honoured. Left zero,
+// the JWT library allows a full minute, which would stretch a five-minute bank
+// token by a fifth.
+const clockSkewLeeway = 10 * time.Second
 
 // AuthServerConfig configures the bank's authorization server.
 type AuthServerConfig struct {
@@ -161,20 +171,38 @@ func (a *AuthServer) exchange(ctx context.Context, form map[string][]string) (*t
 	if grant := get("grant_type"); grant != grantTypeTokenExchange {
 		return nil, &oauthError{"unsupported_grant_type", fmt.Sprintf("only %s is supported, got %q", grantTypeTokenExchange, grant)}
 	}
+	// A public client is identified by its client_id alone (RFC 6749 §2.1), and
+	// this server has exactly one: Warden.
+	if clientID := get("client_id"); clientID != wardenClientID {
+		return nil, &oauthError{"invalid_client", fmt.Sprintf("the only client is %q, got %q", wardenClientID, clientID)}
+	}
 	subjectToken := get("subject_token")
 	if subjectToken == "" {
 		return nil, &oauthError{"invalid_request", "subject_token is required"}
+	}
+	if typ := get("subject_token_type"); !slices.Contains(subjectTokenTypes, typ) {
+		return nil, &oauthError{"invalid_request", fmt.Sprintf("subject_token_type must be one of %s, got %q", strings.Join(subjectTokenTypes, ", "), typ)}
 	}
 	audience := get("audience")
 	if !slices.Contains(a.audiences, audience) {
 		return nil, &oauthError{"invalid_target", fmt.Sprintf("audience must be one of %s, got %q", strings.Join(a.audiences, ", "), audience)}
 	}
+	scope := get("scope")
+	if scope == "" {
+		scope = defaultScope
+	}
+	if scope != defaultScope {
+		return nil, &oauthError{"invalid_scope", fmt.Sprintf("the only scope is %q, got %q", defaultScope, scope)}
+	}
 
-	// The subject must be an assertion Warden signed for this server.
+	// The subject must be an assertion Warden signed for this server. One
+	// assertion can be exchanged more than once while it lives: there is no jti
+	// replay cache, which a production server would keep.
 	subject, err := a.wardenKeys.Validate(ctx, subjectToken, capjwt.Expected{
 		Issuer:            a.wardenIssuer,
 		Audiences:         []string{a.idp.Issuer()},
 		SigningAlgorithms: []capjwt.Alg{capjwt.RS256, capjwt.ES256},
+		ClockSkewLeeway:   clockSkewLeeway,
 	})
 	if err != nil {
 		return nil, &oauthError{"invalid_grant", fmt.Sprintf("subject_token is not a valid Warden assertion for %s: %v", a.idp.Issuer(), err)}
@@ -184,19 +212,12 @@ func (a *AuthServer) exchange(ctx context.Context, form map[string][]string) (*t
 		return nil, &oauthError{"invalid_grant", "subject_token carries no sub"}
 	}
 
-	scope := get("scope")
-	if scope == "" {
-		scope = defaultScope
-	}
-	claims := map[string]any{"sub": sub, "aud": audience, "scope": scope}
+	claims := map[string]any{"sub": sub, "aud": audience, "scope": scope, "client_id": wardenClientID}
 	// A delegation assertion names the person as sub and the agent in act. The
 	// bank token carries both, so the bank acts for the person and can see who
 	// asked.
 	if act, ok := subject["act"].(map[string]any); ok {
 		claims["act"] = act
-	}
-	if clientID := get("client_id"); clientID != "" {
-		claims["client_id"] = clientID
 	}
 	token, err := a.idp.sign(claims, a.ttl)
 	if err != nil {

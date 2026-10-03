@@ -69,10 +69,7 @@ func gatewayPath(mount, role string) string {
 
 // liveLimitPolicy is scenario 3's live edit: the same tool policy with a larger
 // withdrawal limit.
-var liveLimitPolicy = gatewayMCP(MountBank,
-	`  methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
-  condition = "call.tool != 'withdraw' || call.args.?amount.orValue(0) <= 1000"`)
+var liveLimitPolicy = gatewayMCP(MountBank, atmToolRules(1000))
 
 // Scenarios is the playground's tour, one idea at a time.
 func Scenarios() []Scenario {
@@ -109,8 +106,8 @@ func Scenarios() []Scenario {
 			Title:  "Policy decides which arguments",
 			Ask:    []string{"Withdraw 50.", "Withdraw 500."},
 			Shows: []string{
-				"50 goes through; 500 is refused by Warden before the bank sees it, by the condition call.tool != 'withdraw' || call.args.?amount.orValue(0) <= 100.",
-				"The condition runs on every MCP call, so it reads the amount optionally and only judges withdraw: an erroring condition denies.",
+				"50 goes through; 500 is refused by Warden before the bank sees it, by the condition " + atmWithdrawCondition(100) + ".",
+				"The condition runs on every MCP call, so it only judges withdraw, and it fails closed: a withdrawal without a readable amount is refused.",
 				"Raise the limit with the command below; the next call follows it, with no change to the agent or the bank.",
 			},
 			Commands: []string{"warden policy write -type mcp atm-tools - <<EOF\n" + liveLimitPolicy + "EOF"},

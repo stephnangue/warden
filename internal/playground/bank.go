@@ -123,6 +123,7 @@ func (b *Bank) verify(ctx context.Context, header http.Header, audience string) 
 		Issuer:            b.issuer,
 		Audiences:         []string{audience},
 		SigningAlgorithms: []capjwt.Alg{capjwt.ES256},
+		ClockSkewLeeway:   clockSkewLeeway,
 	})
 }
 
@@ -141,16 +142,35 @@ func (b *Bank) requireToken(audience string, next http.Handler) http.Handler {
 	})
 }
 
-// accountLabel shows the trailing principal of a Warden workload identity
-// (wid:<namespace>:<mount accessor>:<principal>), so results read "agent-1"
-// rather than the full subject. The account is still keyed by the full sub.
-func accountLabel(sub string) string {
-	if rest, ok := strings.CutPrefix(sub, "wid:"); ok {
+// personAccountPrefix marks the account of a person an agent acts for.
+const personAccountPrefix = "person:"
+
+// accountKey is the account a token's caller owns. A token with act is a
+// person's, keyed apart from every agent's own account: a person whose sub
+// happens to spell an agent's workload identity opens their own account, not
+// the agent's.
+func accountKey(claims map[string]any) string {
+	sub, _ := claims["sub"].(string)
+	if _, delegated := claims["act"]; delegated {
+		return personAccountPrefix + sub
+	}
+	return sub
+}
+
+// accountLabel is how results name an account: a person by their sub, and a
+// Warden workload identity (wid:<namespace>:<mount accessor>:<principal>) by
+// its trailing principal, so results read "agent-1" rather than the full
+// subject.
+func accountLabel(key string) string {
+	if person, ok := strings.CutPrefix(key, personAccountPrefix); ok {
+		return person
+	}
+	if rest, ok := strings.CutPrefix(key, "wid:"); ok {
 		if i := strings.LastIndexByte(rest, ':'); i >= 0 {
 			return rest[i+1:]
 		}
 	}
-	return sub
+	return key
 }
 
 func (b *Bank) balanceOf(sub string) int64 {
@@ -254,8 +274,7 @@ func (b *Bank) runTool(ctx context.Context, req *mcp.CallToolRequest, tool strin
 	if err != nil {
 		return nil, ToolResult{}, fmt.Errorf("unauthorized: %w", err)
 	}
-	sub, _ := claims["sub"].(string)
-	out, err := op(sub)
+	out, err := op(accountKey(claims))
 	res := ToolResult{Tool: tool, Result: &out, AccessToken: claims}
 	if err != nil {
 		res.Error = err.Error()
@@ -289,7 +308,7 @@ func (b *Bank) serveRoute(w http.ResponseWriter, r *http.Request, route string, 
 		return
 	}
 	res := RouteResult{Route: route, AccessToken: claims}
-	sub, _ := claims["sub"].(string)
+	account := accountKey(claims)
 
 	var amount int64
 	if withAmount {
@@ -313,7 +332,7 @@ func (b *Bank) serveRoute(w http.ResponseWriter, r *http.Request, route string, 
 		}
 	}
 
-	out, err := op(sub, amount)
+	out, err := op(account, amount)
 	res.Result = &out
 	if errors.Is(err, errInsufficientFunds) {
 		res.Error = err.Error()

@@ -98,6 +98,15 @@ func TestAuthServer_ExchangesAWardenAssertion(t *testing.T) {
 	assert.Equal(t, "bank", claims["scope"])
 	assert.Equal(t, "warden", claims["client_id"])
 	assert.NotContains(t, claims, "act")
+
+	// The scope it grants may be asked for by name, and an access_token-typed
+	// subject is the same assertion.
+	form := exchangeForm(subject, testBankMCP)
+	form.Set("scope", "bank")
+	form.Set("subject_token_type", tokenTypeAccessToken)
+	status, body = f.exchange(t, form)
+	require.Equal(t, http.StatusOK, status, "%v", body)
+	assert.Equal(t, "bank", body["scope"])
 }
 
 // A delegation assertion's person and agent both reach the bank token.
@@ -123,20 +132,33 @@ func TestAuthServer_Refuses(t *testing.T) {
 	selfSigned, err := f.idp.Mint(Identity{Kind: KindAgent, Subject: "agent-1"})
 	require.NoError(t, err)
 	wrongAudience := f.assertion(t, map[string]any{"sub": "agent-1", "aud": "https://elsewhere.test"})
-	expired, err := f.warden.sign(map[string]any{"sub": "agent-1", "aud": f.idp.Issuer()}, -time.Minute)
+	expired, err := f.warden.sign(map[string]any{"sub": "agent-1", "aud": f.idp.Issuer()}, -2*time.Minute)
+	require.NoError(t, err)
+	// Within the JWT library's default minute of leeway, past the server's own.
+	justExpired, err := f.warden.sign(map[string]any{"sub": "agent-1", "aud": f.idp.Issuer()}, -30*time.Second)
 	require.NoError(t, err)
 
+	with := func(form url.Values, key, value string) url.Values {
+		form.Set(key, value)
+		return form
+	}
 	tests := []struct {
 		name    string
 		form    url.Values
 		wantErr string
 	}{
 		{"client credentials grant", url.Values{"grant_type": {"client_credentials"}}, "unsupported_grant_type"},
+		{"no client id", with(exchangeForm(valid, testBankMCP), "client_id", ""), "invalid_client"},
+		{"another client", with(exchangeForm(valid, testBankMCP), "client_id", "mallory"), "invalid_client"},
 		{"no subject", exchangeForm("", testBankMCP), "invalid_request"},
+		{"subject sent as a SAML assertion", with(exchangeForm(valid, testBankMCP), "subject_token_type", "urn:ietf:params:oauth:token-type:saml2"), "invalid_request"},
+		{"no subject token type", with(exchangeForm(valid, testBankMCP), "subject_token_type", ""), "invalid_request"},
 		{"unknown audience", exchangeForm(valid, "https://other.test"), "invalid_target"},
+		{"a scope it does not grant", with(exchangeForm(valid, testBankMCP), "scope", "bank admin"), "invalid_scope"},
 		{"not signed by Warden", exchangeForm(selfSigned, testBankMCP), "invalid_grant"},
 		{"assertion for another server", exchangeForm(wrongAudience, testBankMCP), "invalid_grant"},
 		{"expired assertion", exchangeForm(expired, testBankMCP), "invalid_grant"},
+		{"assertion expired 30s ago", exchangeForm(justExpired, testBankMCP), "invalid_grant"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

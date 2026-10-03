@@ -112,6 +112,19 @@ func TestBank_REST(t *testing.T) {
 		_, out := f.rest(t, http.MethodGet, "/accounts/me", agent, "", "")
 		assert.Equal(t, "agent-1", out.Result.Account)
 	})
+
+	t.Run("a person never opens an agent's own account", func(t *testing.T) {
+		const wid = "wid:root:auth_jwt_1:agent-9"
+		agent := f.token(t, f.bank.APIURL(), map[string]any{"sub": wid})
+		status, _ := f.rest(t, http.MethodPost, "/accounts/me/withdraw", agent, "application/json", `{"amount": 100}`)
+		require.Equal(t, http.StatusOK, status)
+
+		// A person whose sub spells the agent's workload identity, acted for.
+		person := f.token(t, f.bank.APIURL(), map[string]any{"sub": wid, "act": map[string]any{"sub": "wid:root:auth_jwt_1:agent-1"}})
+		_, out := f.rest(t, http.MethodGet, "/accounts/me", person, "", "")
+		assert.Equal(t, OpeningBalance, out.Result.Balance, "their own account, untouched")
+		assert.Equal(t, wid, out.Result.Account, "named by their sub")
+	})
 }
 
 // The bank accepts only a token its authorization server issued for that face:
@@ -125,12 +138,16 @@ func TestBank_RefusesForeignTokens(t *testing.T) {
 	require.NoError(t, err)
 	forged, err := other.sign(map[string]any{"sub": "agent-1", "aud": f.bank.APIURL()}, time.Minute)
 	require.NoError(t, err)
+	// Within the JWT library's default minute of leeway, past the bank's own.
+	expired, err := f.idp.sign(map[string]any{"sub": "agent-1", "aud": f.bank.APIURL()}, -30*time.Second)
+	require.NoError(t, err)
 
 	for name, token := range map[string]string{
 		"no token":                      "",
 		"the agent's identity":          identity,
 		"a token for the MCP face":      mcpToken,
 		"a token signed by another key": forged,
+		"a token expired 30s ago":       expired,
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, _ := f.rest(t, http.MethodGet, "/accounts/me", token, "", "")
@@ -211,15 +228,63 @@ func TestBank_MCP(t *testing.T) {
 	assert.Equal(t, OpeningBalance, toolResult(t, res).Result.Balance, "a closed account reopens")
 }
 
-func TestBank_MCPRefusesAnAPIToken(t *testing.T) {
+// The MCP face, like the REST one, takes only a token issued for it.
+func TestBank_MCPRefusesForeignTokens(t *testing.T) {
 	f := newBankFixture(t)
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
-	_, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint:   f.server.URL + BankMCPPath,
-		HTTPClient: &http.Client{Transport: bearerTransport{f.token(t, f.bank.APIURL(), map[string]any{"sub": "alice"})}},
-		MaxRetries: -1,
-	}, nil)
-	require.Error(t, err)
+	identity, err := f.idp.Mint(Identity{Kind: KindAgent, Subject: "agent-1"})
+	require.NoError(t, err)
+
+	for name, token := range map[string]string{
+		"the agent's identity":      identity,
+		"a token for the REST face": f.token(t, f.bank.APIURL(), map[string]any{"sub": "alice"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			_, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+				Endpoint:   f.server.URL + BankMCPPath,
+				HTTPClient: &http.Client{Transport: bearerTransport{token}},
+				MaxRetries: -1,
+			}, nil)
+			require.Error(t, err)
+		})
+	}
+}
+
+// The bank refuses an amount it cannot use, whatever Warden's policy let
+// through: it is the last line, not the only one.
+func TestBank_MCPAmounts(t *testing.T) {
+	f := newBankFixture(t)
+	session := f.mcpSession(t, f.token(t, f.bank.MCPURL(), map[string]any{"sub": "wid:root:auth_jwt_1:agent-1"}))
+	ctx := context.Background()
+
+	for name, amount := range map[string]any{
+		"zero":         0,
+		"negative":     -5,
+		"fractional":   1.5,
+		"over the max": maxAmount + 1,
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "withdraw", Arguments: map[string]any{"amount": amount}})
+			require.NoError(t, err)
+			assert.True(t, res.IsError)
+			assert.Contains(t, toolResult(t, res).Error, "whole number")
+		})
+	}
+
+	for name, args := range map[string]map[string]any{
+		"not a number": {"amount": "500"},
+		"a list":       {"amount": []any{500}},
+		"missing":      {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "withdraw", Arguments: args})
+			assert.True(t, err != nil || res.IsError, "refused by the input schema")
+		})
+	}
+
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_balance"})
+	require.NoError(t, err)
+	assert.Equal(t, OpeningBalance, toolResult(t, res).Result.Balance, "nothing moved")
 }
 
 // Concurrent operations on one account never lose an update.
