@@ -84,7 +84,8 @@ convention. A `401` means the JWT expired (typical TTL 5–60 min) — refresh i
   policy is required: on an MCP mount with none in scope every call is denied. A
   deny is HTTP 403 with an RFC 6750 `WWW-Authenticate: Bearer
   error="insufficient_permissions", error_description="..."` header naming the
-  offender — **independent** of IAM `AccessDenied` (a native AWS error streamed
+  offender, and a JSON-RPC error for that call (code `-32090`); the session
+  stays open. It is **independent** of IAM `AccessDenied` (a native AWS error streamed
   back). Read the `error_description` to tell them apart. Structural problems
   (malformed JSON-RPC, duplicate keys, oversized body) also fail closed.
 - **Streamable HTTP / SSE flows through transparently.** The `Mcp-Session-Id`

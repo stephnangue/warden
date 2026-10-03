@@ -25,6 +25,15 @@ import (
 // the test, not as a quiet over-permission at runtime.
 var _ logical.MCPPolicyEnforced = (*mcpAWSBackend)(nil)
 
+var _ logical.GatewayErrorRenderer = (*mcpAWSBackend)(nil)
+
+// RenderGatewayError answers a call Warden failed itself — a policy refusal
+// above all — as a JSON-RPC error for that call, so the client keeps its
+// session. Same answer as the generic mcp provider's.
+func (b *mcpAWSBackend) RenderGatewayError(req *logical.Request, f *logical.GatewayFailure) *logical.Response {
+	return httpproxy.RenderMCPGatewayError(httpproxy.WithMCPCallID(req), f)
+}
+
 // ShouldEnforceMCPPolicy reports whether this request is subject to
 // body-authoritative MCP policy enforcement. The gate matches the generic mcp
 // provider exactly: every POST, the only verb that carries JSON-RPC. GET (SSE

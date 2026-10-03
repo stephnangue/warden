@@ -3,6 +3,7 @@ package mcp_aws
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -319,6 +320,34 @@ func TestShouldEnforceMCPPolicy_EnforcesEveryPost(t *testing.T) {
 			assert.Positive(t, capBytes, "an enforced request carries the body cap the extractor reads under")
 		})
 	}
+}
+
+// A call Warden refuses is answered as that call's JSON-RPC error, so the
+// client keeps its session — the same answer the generic mcp provider gives.
+func TestRenderGatewayError_AnswersTheCall(t *testing.T) {
+	var b mcpAWSBackend
+	req := &logical.Request{
+		HTTPRequest: httptest.NewRequest(http.MethodPost, "/v1/aws/gateway/", nil),
+		MCPDescriptor: &logical.MCPRequestDescriptor{Calls: []logical.MCPCall{{
+			Method: "tools/call", RawID: json.RawMessage(`4`), IDPresent: true,
+		}}},
+	}
+	resp := b.RenderGatewayError(req, &logical.GatewayFailure{
+		Status: http.StatusForbidden,
+		Err:    sdklogical.ErrPermissionDenied,
+	})
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	var got struct {
+		ID    json.RawMessage `json:"id"`
+		Error struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &got))
+	assert.JSONEq(t, `4`, string(got.ID))
+	assert.NotZero(t, got.Error.Code)
 }
 
 func TestShouldEnforceMCPPolicy_NilSafe(t *testing.T) {

@@ -127,6 +127,14 @@ func (e *ErrMCPPolicyDenied) Unwrap() error {
 	return sdklogical.ErrPermissionDenied
 }
 
+// MCPDenyDescription lets a provider's gateway error renderer, which cannot
+// import core, word the refusal as the HTTP layer would.
+func (e *ErrMCPPolicyDenied) MCPDenyDescription() string {
+	return BuildMCPDenyDescription(e.Decision)
+}
+
+var _ logical.MCPPolicyRefusal = (*ErrMCPPolicyDenied)(nil)
+
 // ErrMCPHeaderMismatch carries a transport-header refusal, which the HTTP
 // layer renders as a protocol-level JSON-RPC error rather than the
 // OAuth-shaped 403 a policy denial gets.
@@ -153,6 +161,13 @@ func (e *ErrMCPHeaderMismatch) Error() string {
 func (e *ErrMCPHeaderMismatch) Unwrap() error {
 	return sdklogical.ErrPermissionDenied
 }
+
+// MCPHeaderMismatch marks the error for a provider's gateway error renderer,
+// which cannot import core. The renderer takes the id to echo from the
+// request's descriptor, the same place RawID came from.
+func (e *ErrMCPHeaderMismatch) MCPHeaderMismatch() {}
+
+var _ logical.MCPHeaderRefusal = (*ErrMCPHeaderMismatch)(nil)
 
 // matchMCPGlob matches a request value against a single canonicalised
 // pattern. Patterns use trailing-`*` only (validated at parse time); a

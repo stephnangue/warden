@@ -62,6 +62,14 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
 	}
 
+	// The failures written below, and the proxy's 502 and 504, answer the
+	// call by its id on an MCP mount. Done after the timeout, whose context
+	// is not derived from the request's own. Costs an allocation only on a
+	// request that has a single call with an id.
+	if b.spec.RenderGatewayError != nil {
+		req.HTTPRequest = WithMCPCallID(req)
+	}
+
 	// Enforce max body size
 	if maxBody <= 0 {
 		maxBody = framework.DefaultMaxBodySize

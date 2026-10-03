@@ -68,6 +68,28 @@ type GatewayErrorRenderer interface {
 	RenderGatewayError(req *Request, failure *GatewayFailure) *Response
 }
 
+// MCPPolicyRefusal is implemented by the error core raises when an MCP rule
+// refuses a request. A renderer finds it with errors.As on GatewayFailure.Err,
+// which may wrap it in a multierror.
+type MCPPolicyRefusal interface {
+	error
+	// MCPDenyDescription is the client-facing reason, the same text the
+	// WWW-Authenticate challenge carries. It names the refused method, tool,
+	// resource or parameter and nothing of the policy that refused it.
+	MCPDenyDescription() string
+}
+
+// MCPHeaderRefusal is implemented by the error core raises when an MCP
+// request's transport headers contradict its body. That is a protocol fault
+// rather than an authorization decision, and is answered as one: a 400 with
+// JSON-RPC error -32020, so a dual-era client corrects its headers instead of
+// downgrading. It unwraps to the same permission-denied error as a policy
+// refusal, so a renderer must check for it first.
+type MCPHeaderRefusal interface {
+	error
+	MCPHeaderMismatch()
+}
+
 // ClassifyGatewayFailure classifies a gateway failure from the HTTP status Warden
 // derived for it and its error.
 //

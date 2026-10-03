@@ -3,8 +3,13 @@
 package httpproxy_test
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/hashicorp/go-multierror"
+	"github.com/stephnangue/warden/core"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/ansible_tower"
 	"github.com/stephnangue/warden/provider/anthropic"
 	"github.com/stephnangue/warden/provider/atlassian"
@@ -31,6 +36,7 @@ import (
 	"github.com/stephnangue/warden/provider/splunk"
 	"github.com/stephnangue/warden/provider/tfe"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRegisteredProviderSpecsValid asserts every shipped spec satisfies the
@@ -72,11 +78,33 @@ func TestRegisteredProviderSpecsValid(t *testing.T) {
 	}
 }
 
-// TestMCPKeepsWardenGatewayErrors pins that the mcp spec does not render gateway
-// failures. Its policy-deny and header-mismatch answers are shaped by the HTTP
-// layer from the error core returns, and a rendered response would replace that
-// error — so they survive only while mcp declines. Rendering MCP failures as
-// JSON-RPC errors would be its own decision, made here.
-func TestMCPKeepsWardenGatewayErrors(t *testing.T) {
-	assert.Nil(t, mcp.Spec.RenderGatewayError)
+// TestMCPRendersCoreRefusals pins that the mcp spec renders gateway failures as
+// JSON-RPC errors, so a refused call fails alone instead of ending the client's
+// session. A rendered response replaces the error the HTTP layer would have
+// shaped its answers from, so this holds the renderer to those answers, from
+// core's real error types: a policy refusal keeps its challenge and its
+// wording, and a header mismatch keeps its 400 and -32020.
+func TestMCPRendersCoreRefusals(t *testing.T) {
+	require.NotNil(t, mcp.Spec.RenderGatewayError)
+	r := httptest.NewRequest(http.MethodPost, "/v1/mcp/gateway/", nil)
+
+	deny := &logical.MCPDecision{Decision: "deny", RuleType: "allowed_tools", Method: "tools/call", Name: "close_account"}
+	desc := core.BuildMCPDenyDescription(deny)
+	resp := mcp.Spec.RenderGatewayError(r, &logical.GatewayFailure{
+		Status: http.StatusForbidden,
+		Err:    multierror.Append(nil, &core.ErrMCPPolicyDenied{Decision: deny}),
+	})
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, `Bearer error="insufficient_permissions", error_description="`+desc+`"`,
+		resp.Headers.Get("WWW-Authenticate"))
+	assert.Contains(t, string(resp.Body), `"error_description":"`+desc+`"`)
+
+	resp = mcp.Spec.RenderGatewayError(r, &logical.GatewayFailure{
+		Status: http.StatusForbidden,
+		Err:    multierror.Append(nil, &core.ErrMCPHeaderMismatch{}),
+	})
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, string(resp.Body), `"code":-32020`)
 }

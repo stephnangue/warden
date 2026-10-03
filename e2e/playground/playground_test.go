@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -218,17 +219,14 @@ func callTool(t *testing.T, s *mcp.ClientSession, name string, args map[string]a
 	return out, nil
 }
 
-// callOnce attaches, calls one tool, and detaches. Warden answers a refused call
-// with HTTP 403, which the go-sdk client takes as a transport failure and closes
-// the session on, so each call that may be refused gets a session of its own.
-func (e *env) callOnce(t *testing.T, path string, headers map[string]string, name string, args map[string]any) (bankResult, error) {
+// requireRefused asserts err is Warden refusing the call: a JSON-RPC error the
+// client reads as that call's answer, which leaves the session open.
+func requireRefused(t *testing.T, err error, msgAndArgs ...any) {
 	t.Helper()
-	s, err := e.attach(t, path, headers)
-	if err != nil {
-		return bankResult{}, err
-	}
-	defer s.Close()
-	return callTool(t, s, name, args)
+	var rpcErr *jsonrpc.Error
+	require.ErrorAs(t, err, &rpcErr, msgAndArgs...)
+	assert.Equal(t, int64(-32090), rpcErr.Code, msgAndArgs...)
+	assert.True(t, strings.HasPrefix(rpcErr.Message, "Warden: "), "%q", rpcErr.Message)
 }
 
 // isAgent reports whether sub is the playground workload identity of principal.
@@ -317,8 +315,10 @@ func TestPlayground(t *testing.T) {
 		}
 		assert.ElementsMatch(t, []string{"get_balance", "withdraw", "deposit"}, names, "close_account is hidden")
 
-		_, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "close_account", nil)
-		assert.Error(t, err, "a direct call to the hidden tool is refused")
+		_, err = callTool(t, bank, "close_account", nil)
+		requireRefused(t, err, "a direct call to the hidden tool is refused")
+		_, err = callTool(t, bank, "get_balance", nil)
+		require.NoError(t, err, "the refusal failed one call, not the session")
 
 		// Relabelling the call must not slip it past the tool rules: Warden
 		// refuses it on policy, before the bank (which would answer 415) sees it.
@@ -336,21 +336,33 @@ func TestPlayground(t *testing.T) {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			assert.Equal(t, http.StatusForbidden, resp.StatusCode, "Content-Type %q: %s", contentType, body)
-			assert.Contains(t, string(body), "close_account", "refused by the tool rule, Content-Type %q", contentType)
+			var answer struct {
+				ID    int `json:"id"`
+				Error struct {
+					Code    int    `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(body, &answer), "Content-Type %q: %s", contentType, body)
+			assert.Equal(t, 7, answer.ID, "the call's id is echoed")
+			assert.Equal(t, -32090, answer.Error.Code)
+			assert.Contains(t, answer.Error.Message, "close_account", "refused by the tool rule, Content-Type %q", contentType)
 		}
 	})
 
 	t.Run("3 policy decides which arguments", func(t *testing.T) {
-		out, err := e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "withdraw", map[string]any{"amount": 50})
+		bank, err := e.attach(t, "/v1/bank/role/atm/gateway/", atmHeaders)
+		require.NoError(t, err)
+		out, err := callTool(t, bank, "withdraw", map[string]any{"amount": 50})
 		require.NoError(t, err)
 		assert.Equal(t, int64(50), out.Result.Withdrawn)
-		_, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "withdraw", map[string]any{"amount": 500})
-		assert.Error(t, err, "500 is over the limit")
+		_, err = callTool(t, bank, "withdraw", map[string]any{"amount": 500})
+		requireRefused(t, err, "500 is over the limit")
 
 		// The limit judges withdraw only, and never errors on a call without an amount.
-		_, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "get_balance", nil)
+		_, err = callTool(t, bank, "get_balance", nil)
 		assert.NoError(t, err)
-		_, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "deposit", map[string]any{"amount": 500})
+		_, err = callTool(t, bank, "deposit", map[string]any{"amount": 500})
 		assert.NoError(t, err)
 
 		// A withdrawal whose amount Warden cannot read is refused by the
@@ -359,13 +371,14 @@ func TestPlayground(t *testing.T) {
 			status, body := e.rawCall(t, "/v1/bank/role/atm/gateway/", agent,
 				`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"withdraw","arguments":{"amount":`+amount+`}}}`)
 			assert.Equal(t, http.StatusForbidden, status, "amount %s: %s", amount, body)
+			assert.Contains(t, body, `"code":-32090`, "amount %s", amount)
 		}
 
 		// Raise the limit live, with the command the scenario prints, run by a
 		// shell as the reader would.
 		e.sh(t, playground.Scenarios()[2].Commands[0])
-		out, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "withdraw", map[string]any{"amount": 500})
-		require.NoError(t, err, "the next call follows the new limit")
+		out, err = callTool(t, bank, "withdraw", map[string]any{"amount": 500})
+		require.NoError(t, err, "the next call, on the same session, follows the new limit")
 		assert.Equal(t, int64(500), out.Result.Withdrawn)
 	})
 
