@@ -72,9 +72,11 @@ JWT expired (typical TTL 5–60 min) — refresh it in the client config.
   matches against it. Such a policy is required: on an MCP mount with none in
   scope every call is denied. A deny is HTTP 403 with an RFC 6750
   `WWW-Authenticate: Bearer error="insufficient_permissions",
-  error_description="..."` header naming the offending method/tool/parameter.
-  Read the `error_description` to tell a Warden policy deny from an upstream
-  scope error. Structural problems (malformed JSON-RPC, duplicate keys, oversized
+  error_description="..."` header naming the offending method/tool/parameter,
+  and a JSON-RPC error for that call (code `-32090`, message starting
+  `Warden:`); the session stays open, so carry on with other calls. Read the
+  `error_description` to tell a Warden policy deny from an upstream scope
+  error. Structural problems (malformed JSON-RPC, duplicate keys, oversized
   body) also fail closed.
 - **Streamable HTTP / SSE flows through transparently.** The server's framing
   comes back unchanged, and the `Mcp-Session-Id` response header round-trips

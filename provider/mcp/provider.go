@@ -63,6 +63,10 @@ var Spec = &httpproxy.ProviderSpec{
 
 	ShouldEnforceMCPPolicy: shouldEnforceMCPPolicy,
 
+	// A call Warden fails — a policy refusal above all — is answered as a
+	// JSON-RPC error for that call, so the client keeps its session.
+	RenderGatewayError: httpproxy.RenderMCPGatewayError,
+
 	// A subscriptions/listen stream is open-ended by design and answers to
 	// listen_timeout; every other call keeps the unary ceiling above.
 	SelectTimeout: httpproxy.SelectListenTimeout,
@@ -211,8 +215,10 @@ parser rejects malformed bodies, duplicate keys at any depth, empty batches, and
 oversized payloads; on any structural failure the request denies with a specific
 rule_type (malformed_jsonrpc, duplicate_key, oversized_body, batch_empty,
 missing_body, malformed_params, batch_unsupported, header_mismatch). Denied
-requests return HTTP 403 with an RFC 6750 WWW-Authenticate header and a small
-JSON body the agent SDK surfaces as a structured tool-call failure.
+requests return HTTP 403 with an RFC 6750 WWW-Authenticate header and a
+JSON-RPC error (code -32090) carrying the call's id, which the agent SDK
+surfaces as that one call failing; the session stays open. Every other failure
+Warden raises itself is answered as a JSON-RPC error the same way.
 
 Two refusals are protocol faults rather than authorization decisions and are
 answered differently. A request whose transport headers contradict its body

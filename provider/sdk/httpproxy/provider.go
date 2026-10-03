@@ -237,11 +237,14 @@ type ProviderSpec struct {
 	// the hook is unset, so a provider that does not set it is untouched. The
 	// response must carry StatusCode, Headers and Body, and StatusCode must be
 	// f.Status: the status is Warden's decision about retryability, and the
-	// renderer only changes how it is worded.
+	// renderer only changes how it is worded. The one exception is a failure
+	// whose protocol prescribes its own status, as MCP does a header
+	// mismatch's 400; core only ever raises those itself, never the gateway.
 	//
 	// It takes the HTTP request rather than the logical one so the gateway's
 	// own failures, which have only the HTTP request, can be rendered by the
-	// same hook.
+	// same hook. On an MCP mount that request carries the id of the call
+	// being answered; see WithMCPCallID.
 	RenderGatewayError func(r *http.Request, f *logical.GatewayFailure) *logical.Response
 }
 
@@ -592,8 +595,7 @@ var _ logical.TransparentModeProvider = (*proxyBackend)(nil)
 
 // Compile-time assertion that proxyBackend satisfies GatewayErrorRenderer. The
 // implementation delegates to spec.RenderGatewayError; providers that leave the
-// hook nil decline, which keeps Warden's generic error exactly as before —
-// including the MCP-specific deny bodies, which the mcp spec does not render.
+// hook nil decline, which keeps Warden's generic error exactly as before.
 var _ logical.GatewayErrorRenderer = (*proxyBackend)(nil)
 
 // RenderGatewayError delegates to the optional spec hook. See
@@ -604,7 +606,7 @@ func (b *proxyBackend) RenderGatewayError(req *logical.Request, f *logical.Gatew
 	if b.spec.RenderGatewayError == nil {
 		return nil
 	}
-	return b.spec.RenderGatewayError(req.HTTPRequest, f)
+	return b.spec.RenderGatewayError(WithMCPCallID(req), f)
 }
 
 // GetAuthRoleFromRequest delegates to the optional spec hook. See

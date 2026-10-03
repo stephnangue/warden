@@ -150,6 +150,8 @@ func TestSpec(t *testing.T) {
 	assert.Equal(t, "mcp_url", Spec.URLConfigKey)
 	assert.NotNil(t, Spec.ExtractCredentials)
 	assert.NotNil(t, Spec.ShouldEnforceMCPPolicy)
+	// A refusal must answer the call, not end the client's session.
+	assert.NotNil(t, Spec.RenderGatewayError)
 	assert.NotNil(t, Factory)
 	// Streaming bodies must not be parsed: MCP responses may be SSE, and buffering
 	// one would stall a session rather than proxy it.

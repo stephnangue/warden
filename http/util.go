@@ -50,9 +50,13 @@ type mcpDenyResponse struct {
 // JSON body. Body and header carry the same error_description text so
 // SDKs that surface one or the other see identical messages.
 //
-// The MCP spec handles permission denial at the HTTP layer (not in-band
-// JSON-RPC), so this body is NOT a JSON-RPC envelope — no jsonrpc
-// field, no error.code, no id. The error value is
+// It is the fallback for a backend that does not render its own gateway
+// errors. The MCP providers do: they answer a refusal as a JSON-RPC
+// error carrying the call's id, with this same header and these fields
+// under error.data, because an MCP client treats a body that is not a
+// JSON-RPC response as a transport failure and closes its session. This
+// body is NOT a JSON-RPC envelope — no jsonrpc field, no error.code, no
+// id. The error value is
 // "insufficient_permissions" (Cloudflare-style RFC 6750 extension) to
 // distinguish from "insufficient_scope" which implies an OAuth scope
 // the client could go fetch — this isn't an OAuth scope mismatch,
@@ -61,6 +65,7 @@ type mcpDenyResponse struct {
 // Description templates per RuleType live in core/policy_mcp.go's
 // BuildMCPDenyDescription so the wire shape and the audit JSON tags
 // stay in lockstep.
+
 // jsonRPCCodeHeaderMismatch is the spec's error code for a request whose
 // transport headers contradict its body.
 const jsonRPCCodeHeaderMismatch = -32020
