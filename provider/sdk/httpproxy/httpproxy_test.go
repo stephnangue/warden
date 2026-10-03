@@ -644,6 +644,40 @@ func TestInitialize_OnFirstConfig(t *testing.T) {
 	})
 }
 
+// StreamBodyLimit reports the cap the gateway will enforce for the request, so core
+// parses no more than would be forwarded.
+func TestStreamBodyLimit(t *testing.T) {
+	upload := httptest.NewRequest(http.MethodPost, "/v1/test/gateway/upload", nil)
+	other := httptest.NewRequest(http.MethodPost, "/v1/test/gateway/items", nil)
+
+	t.Run("mount max_body_size", func(t *testing.T) {
+		pb := setupBackend(t, testSpec()).(*proxyBackend)
+		pb.SetMaxBodySize(2048)
+		assert.Equal(t, int64(2048), pb.StreamBodyLimit(other))
+	})
+
+	t.Run("default when the mount sets none", func(t *testing.T) {
+		pb := setupBackend(t, testSpec()).(*proxyBackend)
+		pb.SetMaxBodySize(0)
+		assert.Equal(t, framework.DefaultMaxBodySize, pb.StreamBodyLimit(other))
+	})
+
+	t.Run("dispatch override for this request", func(t *testing.T) {
+		spec := testSpec()
+		spec.ResolveUpstream = func(r *http.Request, _ string, _ map[string]any) (Dispatch, bool) {
+			if strings.HasSuffix(r.URL.Path, "/upload") {
+				return Dispatch{MaxBodySize: 50 << 20}, true
+			}
+			return Dispatch{}, true
+		}
+		pb := setupBackend(t, spec).(*proxyBackend)
+		pb.SetMaxBodySize(2048)
+		assert.Equal(t, int64(50<<20), pb.StreamBodyLimit(upload))
+		assert.Equal(t, int64(2048), pb.StreamBodyLimit(other))
+		assert.Equal(t, int64(2048), pb.StreamBodyLimit(nil), "no request: the mount cap")
+	})
+}
+
 // --- SensitiveConfigFields tests ---
 
 func TestSensitiveConfigFields(t *testing.T) {

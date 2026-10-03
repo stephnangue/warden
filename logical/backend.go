@@ -252,8 +252,17 @@ type RoleURLProvider interface {
 // the argument and return a static per-backend value.
 //
 // When enabled, the core parses application/json and application/x-www-form-urlencoded
-// bodies (up to maxRequestBodySize), restores the body for the provider to re-read,
-// and populates req.Data before CheckToken runs.
+// bodies (up to the backend's StreamBodyLimit when it reports one, else
+// maxRequestBodySize), restores the body for the provider to re-read, and populates
+// req.Data before CheckToken runs.
 type StreamBodyParser interface {
 	ShouldParseStreamBody(r *http.Request) bool
+}
+
+// StreamBodyLimiter is optionally implemented by a streaming backend that caps request
+// bodies. It reports the cap that applies to r, which core then uses when it buffers
+// the body to parse it for policy, so it never holds more than the backend would
+// forward. A value <= 0 means the backend reports no cap and core's own applies.
+type StreamBodyLimiter interface {
+	StreamBodyLimit(r *http.Request) int64
 }
