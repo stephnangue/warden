@@ -13,11 +13,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/e2e/helpers"
+	"github.com/stephnangue/warden/internal/playground"
 )
 
 const rootToken = "root"
@@ -55,17 +59,20 @@ func startPlayground(t *testing.T) *env {
 		"-dev-playground-as-addr="+freeAddr(t),
 		"-dev-playground-bank-addr="+freeAddr(t),
 	)
-	var out bytes.Buffer
+	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	require.NoError(t, cmd.Start())
+	// One Wait, started now, so a server that exits during startup is noticed
+	// at once rather than after the whole deadline.
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() { _ = cmd.Wait(); close(done) }()
 		select {
-		case <-done:
+		case <-exited:
 		case <-time.After(10 * time.Second):
 			_ = cmd.Process.Kill()
+			<-exited
 		}
 		if t.Failed() {
 			t.Logf("server output:\n%s", out.String())
@@ -73,8 +80,10 @@ func startPlayground(t *testing.T) *env {
 	})
 
 	e := &env{addr: "http://" + listen}
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.After(60 * time.Second)
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
 		// Health answers once the listener is up, which happens after the
 		// bootstrap and its self-check have passed.
 		if resp, err := http.Get(e.addr + "/v1/sys/health"); err == nil {
@@ -83,13 +92,33 @@ func startPlayground(t *testing.T) *env {
 				return e
 			}
 		}
-		if cmd.ProcessState != nil {
-			break
+		select {
+		case <-exited:
+			t.Fatalf("the playground server exited during startup:\n%s", out.String())
+		case <-deadline:
+			t.Fatalf("the playground server did not start within 60s:\n%s", out.String())
+		case <-tick.C:
 		}
-		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatalf("the playground server did not start:\n%s", out.String())
-	return nil
+}
+
+// syncBuffer is a bytes.Buffer the server's output goroutines and the test can
+// share.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // cli runs the warden CLI against the playground and returns its stdout.
@@ -104,6 +133,36 @@ func (e *env) cli(t *testing.T, stdin string, args ...string) string {
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	require.NoError(t, cmd.Run(), "warden %s: %s", strings.Join(args, " "), stderr.String())
 	return strings.TrimSpace(stdout.String())
+}
+
+// sh runs a command line the tour prints, in a shell, with the warden binary
+// on the PATH, so heredocs and quoting are exercised as a reader runs them.
+func (e *env) sh(t *testing.T, line string) string {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", line)
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(helpers.WardenBin())+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"WARDEN_ADDR="+e.addr, "WARDEN_TOKEN="+rootToken)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	require.NoError(t, cmd.Run(), "%s: %s", line, stderr.String())
+	return strings.TrimSpace(stdout.String())
+}
+
+// rawCall POSTs one JSON-RPC message to an MCP gateway path, as a client that
+// skips its SDK's checks would.
+func (e *env) rawCall(t *testing.T, path, token, message string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, e.addr+path, strings.NewReader(message))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }
 
 // headerTransport sets fixed headers on every request, as an attached MCP
@@ -207,6 +266,16 @@ func TestPlayground(t *testing.T) {
 
 	asURL, bankURL := "", ""
 
+	t.Run("0 the tour prints commands for this server", func(t *testing.T) {
+		// Captured output is not a terminal, so ask for the tour by name.
+		tour := e.cli(t, "", "dev", "scenarios", "-o", "table")
+		assert.Contains(t, tour, "export WARDEN_ADDR="+e.addr)
+		assert.Contains(t, tour, `claude mcp add --transport http bank "`+e.addr+`/v1/bank/role/atm/gateway/"`)
+		for _, s := range playground.Scenarios() {
+			assert.Contains(t, tour, fmt.Sprintf("%d. %s", s.Number, s.Title))
+		}
+	})
+
 	t.Run("1 the agent shows only its identity; Warden brings the credential", func(t *testing.T) {
 		bank, err := e.attach(t, "/v1/bank/role/atm/gateway/", map[string]string{"Authorization": "Bearer " + agent})
 		require.NoError(t, err)
@@ -223,12 +292,18 @@ func TestPlayground(t *testing.T) {
 		assert.True(t, strings.HasSuffix(aud, "/mcp"), "for the bank's MCP face")
 		assert.Equal(t, "warden", tok["client_id"])
 		assert.InDelta(t, 300, tok["exp"].(float64)-tok["iat"].(float64), 1, "five minutes")
-		assert.NotEqual(t, agent, tok["jti"], "the bank never sees the agent's own token")
 
-		source := e.cli(t, "", "cred", "source", "read", "bank-as", "-o", "json")
-		for _, secret := range []string{"client_secret", "private_key", "secret_spec"} {
-			assert.NotContains(t, source, secret, "no secret is stored anywhere")
+		// Keyless: Warden proves itself with its own assertion, and the source
+		// stores nothing.
+		var source struct {
+			Type          string         `json:"type"`
+			Config        map[string]any `json:"config"`
+			StoredSecrets []string       `json:"stored_secrets"`
 		}
+		require.NoError(t, json.Unmarshal([]byte(e.cli(t, "", "cred", "source", "read", "bank-as", "-o", "json")), &source))
+		assert.Equal(t, "token_exchange", source.Type)
+		assert.Equal(t, "none", source.Config["client_auth"])
+		assert.Empty(t, source.StoredSecrets, "no secret is stored anywhere")
 	})
 
 	t.Run("2 policy decides which tools", func(t *testing.T) {
@@ -259,19 +334,17 @@ func TestPlayground(t *testing.T) {
 		_, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "deposit", map[string]any{"amount": 500})
 		assert.NoError(t, err)
 
-		// Raise the limit live, as the scenario shows.
-		policy := `path "bank/gateway*" {
-  methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
-  condition = "call.tool != 'withdraw' || call.args.?amount.orValue(0) <= 1000"
-}
-path "bank/role/+/gateway*" {
-  methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
-  condition = "call.tool != 'withdraw' || call.args.?amount.orValue(0) <= 1000"
-}
-`
-		e.cli(t, policy, "policy", "write", "-type", "mcp", "atm-tools", "-")
+		// A withdrawal whose amount Warden cannot read is refused by the
+		// condition, before the bank's own input check would see it.
+		for _, amount := range []string{`null`, `[500]`, `"500"`} {
+			status, body := e.rawCall(t, "/v1/bank/role/atm/gateway/", agent,
+				`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"withdraw","arguments":{"amount":`+amount+`}}}`)
+			assert.Equal(t, http.StatusForbidden, status, "amount %s: %s", amount, body)
+		}
+
+		// Raise the limit live, with the command the scenario prints, run by a
+		// shell as the reader would.
+		e.sh(t, playground.Scenarios()[2].Commands[0])
 		out, err = e.callOnce(t, "/v1/bank/role/atm/gateway/", atmHeaders, "withdraw", map[string]any{"amount": 500})
 		require.NoError(t, err, "the next call follows the new limit")
 		assert.Equal(t, int64(500), out.Result.Withdrawn)
@@ -354,9 +427,19 @@ path "bank/role/+/gateway*" {
 			require.NoError(t, err, uri)
 			assert.False(t, res.IsError, "%s is readable", uri)
 		}
-		res, err = discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "read_skill", Arguments: map[string]any{"uri": "skill://vault/SKILL.md"}})
-		if err == nil {
-			assert.True(t, res.IsError, "a skill outside the identity's set reads as not found")
+
+		// A skill that exists, but that no role this identity can assume names,
+		// reads exactly as one that does not exist.
+		e.cli(t, "", "skill", "create", "vault-runbook", "-json",
+			`{"description": "The operators' runbook.", "category": "custom", "body": "# Runbook\n\nFor operators only."}`)
+		for _, uri := range []string{"skill://vault-runbook/SKILL.md", "skill://no-such-skill/SKILL.md"} {
+			res, err := discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "read_skill", Arguments: map[string]any{"uri": uri}})
+			require.NoError(t, err, "a refused read is a tool error, and the session stays up: %s", uri)
+			require.True(t, res.IsError, uri)
+			require.NotEmpty(t, res.Content, uri)
+			text, _ := res.Content[0].(*mcp.TextContent)
+			require.NotNil(t, text, uri)
+			assert.Contains(t, text.Text, "not found", uri)
 		}
 	})
 
