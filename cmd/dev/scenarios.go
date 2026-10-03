@@ -117,8 +117,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		cmds = append(cmds, s.Commands...)
 		printCommands(w, cmds)
 		if s.Attach != nil && s.Number > 1 || len(s.Detach) > 0 {
-			fmt.Fprintln(w, "   Then reconnect the server in your agent (/mcp in Claude Code), or restart it.")
-			fmt.Fprintln(w)
+			printReconnectHint(w)
 		}
 		for _, ask := range s.Ask {
 			fmt.Fprintf(w, "   Ask: %q\n", ask)
@@ -135,6 +134,9 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 			fmt.Fprintf(w, "   Optional: %s\n\n", v.Label)
 			if v.Attach != nil {
 				printCommands(w, []string{"claude mcp remove bank", playground.ClaudeAddCommand(v.Attach, wardenAddr)})
+				// A running agent keeps the old headers until it reconnects, and
+				// would go on acting as the previous person.
+				printReconnectHint(w)
 			}
 			if v.Ask != "" {
 				fmt.Fprintf(w, "   Ask: %q\n\n", v.Ask)
@@ -145,6 +147,11 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 			fmt.Fprintln(w)
 		}
 	}
+}
+
+func printReconnectHint(w io.Writer) {
+	fmt.Fprintln(w, "   Then reconnect the server in your agent (/mcp in Claude Code), or restart it.")
+	fmt.Fprintln(w)
 }
 
 func printCommands(w io.Writer, cmds []string) {

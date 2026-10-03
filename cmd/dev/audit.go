@@ -32,6 +32,7 @@ Usage: warden dev audit [options]
       $ warden dev audit -limit 10
       $ warden dev audit -user alice
       $ warden dev audit -decision deny -limit 1
+      $ warden dev audit -role-name atm
 
   With -o json, each entry also carries the raw audit record.
 `,
@@ -44,19 +45,27 @@ func init() {
 	AuditCmd.Flags().IntVar(&auditN, "limit", 20, "How many entries, newest first")
 	AuditCmd.Flags().StringVar(&auditPrincipal, "principal", "", "Only calls made by this agent")
 	AuditCmd.Flags().StringVar(&auditUser, "user", "", "Only calls made for this user")
-	AuditCmd.Flags().StringVar(&auditRole, "role", "", "Only calls made under this role")
+	// Not -role: that is the global flag choosing the role a command runs under,
+	// and a local one by the same name would shadow it and its -r shorthand.
+	AuditCmd.Flags().StringVar(&auditRole, "role-name", "", "Only calls made under this role")
 	AuditCmd.Flags().StringVar(&auditDecision, "decision", "", `Only "allow" or "deny"`)
 }
 
-func runAudit(cmd *cobra.Command, args []string) error {
-	query := map[string][]string{"n": {strconv.Itoa(auditN)}}
-	for key, value := range map[string]string{
-		"principal": auditPrincipal, "user": auditUser, "role": auditRole, "decision": auditDecision,
+// auditQuery is the read's query: the count, and each filter that is set.
+func auditQuery(n int, principal, user, role, decision string) map[string][]string {
+	query := map[string][]string{"n": {strconv.Itoa(n)}}
+	for _, f := range [...]struct{ key, value string }{
+		{"principal", principal}, {"user", user}, {"role", role}, {"decision", decision},
 	} {
-		if value != "" {
-			query[key] = []string{value}
+		if f.value != "" {
+			query[f.key] = []string{f.value}
 		}
 	}
+	return query
+}
+
+func runAudit(cmd *cobra.Command, args []string) error {
+	query := auditQuery(auditN, auditPrincipal, auditUser, auditRole, auditDecision)
 
 	c, err := helpers.Client()
 	if err != nil {

@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -52,7 +51,8 @@ Usage: warden dev jwt <agent|user> <sub> [options]
           "ttl": "1h"
         }'
 
-  With -o json, the token is printed with its decoded claims.
+  With -o json, the token is printed with its decoded claims. WARDEN_OUTPUT
+  does not change this command's output, so $(...) always captures the token.
 `,
 		Args: cobra.MaximumNArgs(2),
 		RunE: runJWT,
@@ -83,6 +83,10 @@ func runJWT(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("the server returned no token; is it running with -dev-playground?")
 	}
 	token, _ := resource.Data["token"].(string)
+	if token == "" {
+		// Printing an empty line would leave AGENT=$(...) silently empty.
+		return fmt.Errorf("the server returned an empty token")
+	}
 
 	// Bare by default, so $(...) works even though captured output is not a
 	// terminal. Structured output only when asked for explicitly.
@@ -136,13 +140,12 @@ func jwtPayload(cmd *cobra.Command, args []string) (map[string]any, error) {
 	return payload, nil
 }
 
-// structuredOutputRequested reports whether -o or WARDEN_OUTPUT explicitly asks
-// for json or ndjson.
+// structuredOutputRequested reports whether this command's -o flag asks for
+// json or ndjson. WARDEN_OUTPUT is deliberately not consulted: someone who sets
+// it to json for every command still needs AGENT=$(warden dev jwt ...) to
+// capture a bare token.
 func structuredOutputRequested() bool {
-	if *helpers.OutputFlagPtr() == "" && os.Getenv("WARDEN_OUTPUT") == "" {
-		return false
-	}
-	f := helpers.ResolveFormat()
+	f := helpers.Format(strings.ToLower(*helpers.OutputFlagPtr()))
 	return f == helpers.FormatJSON || f == helpers.FormatNDJSON
 }
 

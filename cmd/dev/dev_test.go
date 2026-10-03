@@ -90,8 +90,43 @@ func TestRenderTour(t *testing.T) {
 	assert.Contains(t, fourth, `--header "X-Warden-Agent-Token: $AGENT"`)
 	assert.Contains(t, fourth, "Then reconnect")
 	assert.Contains(t, fourth, "Optional: As bob")
+	// Each variant that swaps the bank asks to reconnect too: a running agent
+	// keeps the old headers, and would go on acting for alice.
+	assert.Equal(t, 3, strings.Count(fourth, "Then reconnect"), "the scenario and both variants")
+	bob := fourth[strings.Index(fourth, "Optional: As bob"):]
+	assert.Less(t, strings.Index(bob, "Then reconnect"), strings.Index(bob, "Ask:"), "before the variant's question")
 
 	seventh := renderTourFor(7)
 	assert.Contains(t, seventh, "claude mcp remove bank")
 	assert.NotContains(t, seventh, "claude mcp add", "the REST scenario attaches nothing new")
+}
+
+// Only this command's -o flag asks for structured output; WARDEN_OUTPUT does
+// not, so $(warden dev jwt ...) captures a bare token for everyone.
+func TestStructuredOutputRequested(t *testing.T) {
+	t.Cleanup(func() { helpers.SetOutputFormat("") })
+	for flag, want := range map[string]bool{
+		"": false, "table": false, "text": false, "json": true, "ndjson": true, "JSON": true,
+	} {
+		helpers.SetOutputFormat(flag)
+		assert.Equal(t, want, structuredOutputRequested(), "-o %q", flag)
+	}
+
+	helpers.SetOutputFormat("")
+	t.Setenv("WARDEN_OUTPUT", "json")
+	assert.False(t, structuredOutputRequested(), "WARDEN_OUTPUT=json still prints the bare token")
+}
+
+func TestAuditQuery(t *testing.T) {
+	assert.Equal(t, map[string][]string{"n": {"20"}}, auditQuery(20, "", "", "", ""), "unset filters are left out")
+	assert.Equal(t, map[string][]string{
+		"n": {"1"}, "principal": {"atm"}, "user": {"alice"}, "role": {"atm"}, "decision": {"deny"},
+	}, auditQuery(1, "atm", "alice", "atm", "deny"), "filters with the same value are each sent")
+}
+
+// The role filter must not shadow the global -role flag, whose -r shorthand
+// would then stop parsing.
+func TestAuditCmd_RoleFilterDoesNotShadowTheGlobalFlag(t *testing.T) {
+	assert.Nil(t, AuditCmd.Flags().Lookup("role"))
+	assert.NotNil(t, AuditCmd.Flags().Lookup("role-name"))
 }
