@@ -92,11 +92,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 	if only == 0 {
 		fmt.Fprintln(w, "Setup, once:")
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  export WARDEN_ADDR=%s\n", wardenAddr)
-		for _, line := range resp.Setup {
-			fmt.Fprintf(w, "  %s\n", line)
-		}
-		fmt.Fprintln(w)
+		printCommands(w, append([]string{"export WARDEN_ADDR=" + wardenAddr}, resp.Setup...))
 	}
 	for _, s := range resp.Scenarios {
 		if only != 0 && s.Number != only {
@@ -172,6 +168,9 @@ func printReconnectHint(w io.Writer) {
 	fmt.Fprintln(w)
 }
 
+// printCommands prints commands flush left, unlike the prose around them, so
+// they paste as they are: a shell ends a heredoc only on a line that is its
+// delimiter alone, and an indented EOF would leave it waiting for more.
 func printCommands(w io.Writer, cmds []string) {
 	if len(cmds) == 0 {
 		return
@@ -179,7 +178,7 @@ func printCommands(w io.Writer, cmds []string) {
 	for i, c := range cmds {
 		lines := strings.Split(c, "\n")
 		for _, line := range lines {
-			fmt.Fprintf(w, "   %s\n", line)
+			fmt.Fprintln(w, line)
 		}
 		// A command that spans lines is set apart from the next one.
 		if len(lines) > 1 && i < len(cmds)-1 {
