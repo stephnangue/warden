@@ -333,6 +333,37 @@ func TestRenderTour_FileClientsWriteValidConfig(t *testing.T) {
 	}
 }
 
+// Scenario 7 tells the agent where to look, in the file its client reads
+// instructions from, as an operator would; a client without one gets none.
+func TestRenderTour_Instructions(t *testing.T) {
+	for _, name := range clientNames() {
+		t.Run(name, func(t *testing.T) {
+			c := clients[name]
+			seventh := renderTourAs(name, 7)
+			if c.instructions == "" {
+				assert.NotContains(t, seventh, ".md\" <<'EOF'")
+				return
+			}
+			start := strings.Index(seventh, `mkdir -p "$HOME/warden-playground" && cat > "$HOME/warden-playground/`+c.instructions+`" <<'EOF'`)
+			require.NotEqual(t, -1, start)
+			end := strings.Index(seventh[start:], "\nEOF\n")
+			require.NotEqual(t, -1, end)
+			home := t.TempDir()
+			cmd := exec.Command("sh")
+			cmd.Env = append(os.Environ(), "HOME="+home)
+			cmd.Stdin = strings.NewReader(seventh[start : start+end+len("\nEOF\n")])
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			raw, err := os.ReadFile(filepath.Join(home, "warden-playground", c.instructions))
+			require.NoError(t, err)
+			assert.Equal(t, playground.Scenarios()[6].Instructions, string(raw))
+			assert.Contains(t, string(raw), "list_roles")
+
+			assert.NotContains(t, renderTourAs(name, 8), c.instructions, "written once, with discovery")
+		})
+	}
+}
+
 // The generic client prints what to enter, with the shell's values filled in.
 func TestRenderTour_Generic(t *testing.T) {
 	first := renderTourAs("generic", 1)

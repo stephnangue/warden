@@ -194,7 +194,11 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 			continue
 		}
 		fmt.Fprintf(w, "%d. %s\n\n", s.Number, s.Title)
-		printCommands(w, stepCommands(c, before, s.Detach, s.Attach, s.Commands, wardenAddr))
+		cmds := stepCommands(c, before, s.Detach, s.Attach, s.Commands, wardenAddr)
+		if s.Instructions != "" && c.instructions != "" {
+			cmds = append(cmds, writeInstructions(c.instructions, s.Instructions))
+		}
+		printCommands(w, cmds)
 		switch {
 		case s.Restart:
 			fmt.Fprintf(w, "   Then restart your agent, so it inherits the exports: %s.\n\n", c.restart)

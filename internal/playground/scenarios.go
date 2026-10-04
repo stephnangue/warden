@@ -46,8 +46,11 @@ type Scenario struct {
 	Commands []string `json:"commands,omitempty"`
 	// Restart says the agent must be restarted from the reader's shell:
 	// Commands export what it needs, and a running agent never sees them.
-	Restart bool     `json:"restart,omitempty"`
-	Ask     []string `json:"ask,omitempty"`
+	Restart bool `json:"restart,omitempty"`
+	// Instructions is markdown for the agent's instruction file (AGENTS.md,
+	// for a client that reads one), written with the scenario's attachment.
+	Instructions string   `json:"instructions,omitempty"`
+	Ask          []string `json:"ask,omitempty"`
 	// Then is the scenario's next step, done once its questions are answered:
 	// a change the reader makes, and the question that shows it took effect.
 	Then     *Variant  `json:"then,omitempty"`
@@ -223,7 +226,12 @@ func Scenarios() []Scenario {
 			Number: 7,
 			Title:  "The agent finds its roles by itself",
 			Attach: &Attachment{Server: "warden", Path: "/v1/sys/mcp", Headers: agentHeader("AGENT")},
-			Ask:    []string{"What can you do through Warden?"},
+			// What an operator tells their agents, so they look in Warden for a
+			// service rather than only when a question names it.
+			Instructions: "# Warden\n\n" +
+				"Reach services through Warden. Call list_roles on the warden MCP server, " +
+				"pick the role that fits the task, and read its skill before using it.\n",
+			Ask: []string{"What can you do through Warden?"},
 			Shows: []string{
 				"list_roles returns atm, assistant and teller, each with a description, a provider, a skill:// URI and a url.",
 				"It returns github too, which has no credential yet: scenario 9 gives it one.",
@@ -237,10 +245,10 @@ func Scenarios() []Scenario {
 			Detach:   []string{"bank"},
 			Commands: []string{"export AGENT WARDEN_ADDR"},
 			Restart:  true,
-			// The question names where to look and the interface. Without
-			// "through Warden", some models never consult discovery; without
-			// "HTTP API", some pick atm, whose MCP tools are not attached.
-			Ask: []string{"Use the bank's HTTP API through Warden: check my balance, deposit 30, then withdraw 500."},
+			// The question names the interface, or some models pick atm, whose
+			// MCP tools are not attached. Where to look comes from scenario 7's
+			// instructions.
+			Ask: []string{"Use the bank's HTTP API: check my balance, deposit 30, then withdraw 500."},
 			Shows: []string{
 				"The agent turns to discovery and picks teller, the role you call over HTTP: provider rest, with a url it can call itself.",
 				"It reads skill://teller/SKILL.md and calls the API with its own JWT. The bank still receives a token of its own.",

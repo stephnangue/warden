@@ -40,6 +40,9 @@ type client struct {
 	restart string
 	// rawResult, when set, says how to see a tool's raw result.
 	rawResult string
+	// instructions names the file, in the playground directory, the client
+	// reads the agent's instructions from. Empty: the tour writes none.
+	instructions string
 }
 
 // clients are the harnesses the tour knows, by the name -client takes.
@@ -61,16 +64,18 @@ var clients = map[string]client{
 			"Trust the folder when it asks: it reads the servers from .gemini/settings.json here.",
 		// /mcp refresh reconnects the servers Gemini CLI started with; it does
 		// not read the settings again.
-		reconnect: "restart Gemini CLI from this directory",
-		restart:   "exit Gemini CLI, then run gemini again from this shell",
+		reconnect:    "restart Gemini CLI from this directory",
+		restart:      "exit Gemini CLI, then run gemini again from this shell",
+		instructions: "GEMINI.md",
 	},
 	"codex": {
 		name: "codex",
 		file: codexConfig,
 		launch: "Once scenario 1 has written the bank, start Codex from this shell: cd " + playgroundDir + " && codex. " +
 			"Trust the directory when Codex asks: it reads the servers from .codex/config.toml there.",
-		reconnect: "restart Codex",
-		restart:   "exit Codex, then run codex again from this shell",
+		reconnect:    "restart Codex",
+		restart:      "exit Codex, then run codex again from this shell",
+		instructions: "AGENTS.md",
 	},
 	"cursor": {
 		name: "cursor",
@@ -79,23 +84,26 @@ var clients = map[string]client{
 			"An open Cursor never sees this shell's exports, and scenario 8 needs them. Approve the MCP servers when it asks.",
 		// Cursor can keep a server's old tools across a reconnect; a restart
 		// is the reliable way.
-		reconnect: "quit Cursor fully, then run cursor " + playgroundDir + " again",
-		restart:   "quit Cursor fully, then run cursor " + playgroundDir + " from this shell",
+		reconnect:    "quit Cursor fully, then run cursor " + playgroundDir + " again",
+		restart:      "quit Cursor fully, then run cursor " + playgroundDir + " from this shell",
+		instructions: "AGENTS.md",
 	},
 	"vscode": {
 		name: "vscode",
 		file: vscodeConfig,
 		launch: "Once scenario 1 has written the bank, quit VS Code fully and start it from this shell: code " + playgroundDir + ". " +
 			"An open VS Code never sees this shell's exports, and scenario 8 needs them. Trust the workspace when it asks.",
-		reconnect: "send your next message: VS Code restarts a server whose config changed. If it does not, MCP: List Servers > Restart",
-		restart:   "quit VS Code fully, then run code " + playgroundDir + " from this shell",
+		reconnect:    "send your next message: VS Code restarts a server whose config changed. If it does not, MCP: List Servers > Restart",
+		restart:      "quit VS Code fully, then run code " + playgroundDir + " from this shell",
+		instructions: "AGENTS.md",
 	},
 	"opencode": {
-		name:      "opencode",
-		file:      opencodeConfig,
-		launch:    "Once scenario 1 has written the bank, start opencode from this shell: cd " + playgroundDir + " && opencode. It reads the servers from opencode.json there.",
-		reconnect: "restart opencode",
-		restart:   "exit opencode, then run opencode again from this shell",
+		name:         "opencode",
+		file:         opencodeConfig,
+		launch:       "Once scenario 1 has written the bank, start opencode from this shell: cd " + playgroundDir + " && opencode. It reads the servers from opencode.json there.",
+		reconnect:    "restart opencode",
+		restart:      "exit opencode, then run opencode again from this shell",
+		instructions: "AGENTS.md",
 	},
 	"generic": {
 		name:      "generic",
@@ -158,11 +166,22 @@ func genericAdd(a *playground.Attachment, wardenAddr string) string {
 // the file holds the tokens themselves, and a client never has to inherit the
 // shell's environment to read them.
 func writeFile(path, body string) string {
+	return writeHeredoc(path, body, "EOF")
+}
+
+// writeInstructions renders the command that writes the agent's instructions
+// to path, under the playground directory, as they are: the delimiter is
+// quoted, so the shell expands nothing in them.
+func writeInstructions(path, body string) string {
+	return writeHeredoc(path, strings.TrimSuffix(body, "\n"), "'EOF'")
+}
+
+func writeHeredoc(path, body, delimiter string) string {
 	dir := playgroundDir
 	if i := strings.LastIndex(path, "/"); i >= 0 {
 		dir += "/" + path[:i]
 	}
-	return `mkdir -p "` + dir + `" && cat > "` + playgroundDir + "/" + path + `" <<EOF` + "\n" + body + "\nEOF"
+	return `mkdir -p "` + dir + `" && cat > "` + playgroundDir + "/" + path + `" <<` + delimiter + "\n" + body + "\nEOF"
 }
 
 func headerMap(a *playground.Attachment) map[string]string {
