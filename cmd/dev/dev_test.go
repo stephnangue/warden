@@ -77,7 +77,8 @@ func TestRenderTour(t *testing.T) {
 	all := renderTourFor(0)
 	assert.True(t, strings.HasPrefix(all, "Setup, once:"))
 	assert.Contains(t, all, "export WARDEN_ADDR=http://127.0.0.1:8400")
-	assert.Contains(t, all, "AGENT=$(warden dev jwt agent agent-1)")
+	assert.Contains(t, all, "AGENT=$(warden dev jwt agent agent-1 -ttl 8h)")
+	assert.Contains(t, all, `BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)`)
 
 	first := renderTourFor(1)
 	assert.Contains(t, first, `claude mcp add --transport http bank "http://127.0.0.1:8400/v1/bank/role/atm/gateway/"`)

@@ -81,6 +81,15 @@ func TestBootstrap_Roles(t *testing.T) {
 	assert.NotContains(t, steps[stepIndex(steps, "auth/agent/role/atm")].Data, "skill", "an MCP role uses the mcp skill by default")
 }
 
+// The assistant's policies read may_act and the tier from the person's token,
+// so the user role must surface both as metadata.
+func TestBootstrap_UserMetadata(t *testing.T) {
+	steps := Bootstrap(testSettings())
+	claims := steps[stepIndex(steps, "auth/user/role/user")].Data["metadata_claims"].(map[string]any)
+	assert.Equal(t, "may_act_sub", claims["/may_act/sub"])
+	assert.Equal(t, "tier", claims["/tier"])
+}
+
 func TestBootstrap_KeylessSource(t *testing.T) {
 	steps := Bootstrap(testSettings())
 	src := steps[stepIndex(steps, "sys/cred/sources/bank-as")].Data["config"].(map[string]any)
@@ -114,6 +123,10 @@ func TestBootstrap_Policies(t *testing.T) {
 	assert.NotContains(t, policyATMTools, "close_account")
 	assert.Contains(t, liveLimitPolicy, "call.args.amount <= 1000")
 	assert.Contains(t, policyAssistantOnBehalf, "user.metadata.may_act_sub == agent.principal")
+	assert.Contains(t, policyAssistantTools, "call.tool != 'withdraw' ||", "the person's limit judges withdraw only")
+	assert.Contains(t, policyAssistantTools, "has(call.args.amount)", "a withdrawal without a readable amount fails closed")
+	assert.Contains(t, policyAssistantTools, "has(user.metadata.tier)", "a person without a tier gets the lower limit")
+	assert.NotContains(t, policyAssistantTools, "orValue", "dotted access, so the audit records the tier it read")
 	assert.Contains(t, policyTellerAPI, "has(request.data.amount)", "the body condition fails closed")
 	assert.NotContains(t, policyTellerAPI, "orValue", "a default would let an unread body through")
 }
