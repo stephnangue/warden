@@ -145,29 +145,59 @@ func (as attachments) has(server string) bool {
 	return slices.ContainsFunc(as, func(a *playground.Attachment) bool { return a.Server == server })
 }
 
+// step is one change the tour asks the reader to make.
+type step struct {
+	detach   []string
+	attach   *playground.Attachment
+	export   []string
+	commands []string
+}
+
+// state is what the agent has after the steps so far: the servers attached
+// to its client, and the shell variables handed to it.
+type state struct {
+	attached attachments
+	exported []string
+}
+
+func (st state) after(s step) state {
+	exported := slices.Clone(st.exported)
+	for _, name := range s.export {
+		if !slices.Contains(exported, name) {
+			exported = append(exported, name)
+		}
+	}
+	return state{attached: st.attached.with(s.detach, s.attach), exported: exported}
+}
+
 // stepCommands are the commands of one step of the tour: detach, configure,
 // then attach. A client with a config file gets the whole file, rewritten
-// with what is attached after the step.
-func stepCommands(c client, before attachments, detach []string, a *playground.Attachment, commands []string, wardenAddr string) []string {
+// with what the agent has after the step.
+func stepCommands(c client, before state, s step, wardenAddr string) []string {
+	commands := s.commands
+	if len(s.export) > 0 {
+		commands = append([]string{"export " + strings.Join(s.export, " ")}, s.commands...)
+	}
 	if c.file != nil {
 		cmds := append([]string(nil), commands...)
-		if len(detach) > 0 || a != nil {
-			cmds = append(cmds, c.file(before.with(detach, a), wardenAddr))
+		if len(s.detach) > 0 || s.attach != nil || len(s.export) > 0 {
+			after := before.after(s)
+			cmds = append(cmds, c.file(after.attached, after.exported, wardenAddr))
 		}
 		return cmds
 	}
 	var cmds []string
-	for _, server := range detach {
+	for _, server := range s.detach {
 		cmds = append(cmds, c.remove(server))
 	}
 	// A server is replaced, never added beside another of its name.
-	if a != nil && before.has(a.Server) {
-		cmds = append(cmds, c.remove(a.Server))
+	if s.attach != nil && before.attached.has(s.attach.Server) {
+		cmds = append(cmds, c.remove(s.attach.Server))
 	}
 	// Configure first, then connect.
 	cmds = append(cmds, commands...)
-	if a != nil {
-		cmds = append(cmds, c.add(a, wardenAddr))
+	if s.attach != nil {
+		cmds = append(cmds, c.add(s.attach, wardenAddr))
 	}
 	return cmds
 }
@@ -184,25 +214,26 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 			fmt.Fprintf(w, "   %s\n\n", c.launch)
 		}
 	}
-	// Scenarios run in order, each keeping what the last one attached: one
-	// printed alone still knows what is attached when it starts.
-	var attached attachments
+	// Scenarios run in order, each keeping what the last one left: one printed
+	// alone still knows what the agent has when it starts.
+	var current state
 	for _, s := range resp.Scenarios {
-		before := attached
-		attached = before.with(s.Detach, s.Attach)
+		before := current
+		change := step{detach: s.Detach, attach: s.Attach, export: s.Export, commands: s.Commands}
+		current = before.after(change)
 		if only != 0 && s.Number != only {
 			continue
 		}
 		fmt.Fprintf(w, "%d. %s\n\n", s.Number, s.Title)
-		cmds := stepCommands(c, before, s.Detach, s.Attach, s.Commands, wardenAddr)
+		cmds := stepCommands(c, before, change, wardenAddr)
 		if s.Instructions != "" && c.instructions != "" {
 			cmds = append(cmds, writeInstructions(c.instructions, s.Instructions))
 		}
 		printCommands(w, cmds)
 		switch {
-		case s.Restart:
+		case len(s.Export) > 0:
 			fmt.Fprintf(w, "   Then restart your agent, so it inherits the exports: %s.\n\n", c.restart)
-		case s.Attach != nil && len(before) > 0 || len(s.Detach) > 0:
+		case s.Attach != nil && len(before.attached) > 0 || len(s.Detach) > 0:
 			printReconnectHint(w, c)
 		}
 		for _, ask := range s.Ask {
@@ -215,7 +246,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		// change what they show.
 		if s.Then != nil {
 			fmt.Fprintf(w, "   Then: %s\n\n", s.Then.Label)
-			printFollowUp(w, c, attached, *s.Then, wardenAddr)
+			printFollowUp(w, c, current, *s.Then, wardenAddr)
 		}
 		fmt.Fprintln(w, "   What it shows:")
 		for _, line := range s.Shows {
@@ -231,7 +262,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		// attaches its own bank again.
 		for _, v := range s.Variants {
 			fmt.Fprintf(w, "   Optional: %s\n\n", v.Label)
-			printFollowUp(w, c, attached, v, wardenAddr)
+			printFollowUp(w, c, current, v, wardenAddr)
 			for _, line := range v.Shows {
 				fmt.Fprintf(w, "   - %s\n", line)
 			}
@@ -242,8 +273,8 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 
 // printFollowUp prints what a follow-up asks the reader to do: swap the bank,
 // run its commands, then ask its question.
-func printFollowUp(w io.Writer, c client, attached attachments, v playground.Variant, wardenAddr string) {
-	printCommands(w, stepCommands(c, attached, nil, v.Attach, v.Commands, wardenAddr))
+func printFollowUp(w io.Writer, c client, current state, v playground.Variant, wardenAddr string) {
+	printCommands(w, stepCommands(c, current, step{attach: v.Attach, commands: v.Commands}, wardenAddr))
 	if v.Attach != nil {
 		// A running agent keeps the old headers until it reconnects, and
 		// would go on acting as the previous person.

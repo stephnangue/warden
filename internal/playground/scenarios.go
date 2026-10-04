@@ -44,9 +44,10 @@ type Scenario struct {
 	Attach *Attachment `json:"attach,omitempty"`
 	// Commands are shell commands to run, in order, besides attaching.
 	Commands []string `json:"commands,omitempty"`
-	// Restart says the agent must be restarted from the reader's shell:
-	// Commands export what it needs, and a running agent never sees them.
-	Restart bool `json:"restart,omitempty"`
+	// Export names the shell variables the scenario hands to the agent itself,
+	// to call an API with. They reach an agent started after the export, so
+	// the scenario has it restarted; until one exports, the agent holds none.
+	Export []string `json:"export,omitempty"`
 	// Instructions is markdown for the agent's instruction file (AGENTS.md,
 	// for a client that reads one), written with the scenario's attachment.
 	Instructions string   `json:"instructions,omitempty"`
@@ -240,11 +241,10 @@ func Scenarios() []Scenario {
 			},
 		},
 		{
-			Number:   8,
-			Title:    "The same bank, as a plain HTTP API",
-			Detach:   []string{"bank"},
-			Commands: []string{"export AGENT WARDEN_ADDR"},
-			Restart:  true,
+			Number: 8,
+			Title:  "The same bank, as a plain HTTP API",
+			Detach: []string{"bank"},
+			Export: []string{"AGENT", "WARDEN_ADDR"},
 			// The question names the interface, or some models pick atm, whose
 			// MCP tools are not attached. Where to look comes from scenario 7's
 			// instructions.

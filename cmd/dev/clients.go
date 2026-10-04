@@ -26,8 +26,9 @@ type client struct {
 	add    func(a *playground.Attachment, wardenAddr string) string
 	remove func(server string) string
 	// file prints the command that writes the whole config, with every
-	// attached server in it. Set instead of add and remove.
-	file func(attached []*playground.Attachment, wardenAddr string) string
+	// attached server in it and the variables exported to the agent so far.
+	// Set instead of add and remove.
+	file func(attached []*playground.Attachment, exported []string, wardenAddr string) string
 	// setup are commands run once, after the identities are minted.
 	setup []string
 	// launch is printed after the setup: where to start the agent, so it
@@ -203,7 +204,7 @@ func marshalConfig(v any) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
-func cursorConfig(attached []*playground.Attachment, wardenAddr string) string {
+func cursorConfig(attached []*playground.Attachment, _ []string, wardenAddr string) string {
 	type server struct {
 		URL     string            `json:"url"`
 		Headers map[string]string `json:"headers"`
@@ -215,7 +216,7 @@ func cursorConfig(attached []*playground.Attachment, wardenAddr string) string {
 	return writeFile(".cursor/mcp.json", marshalConfig(map[string]any{"mcpServers": servers}))
 }
 
-func vscodeConfig(attached []*playground.Attachment, wardenAddr string) string {
+func vscodeConfig(attached []*playground.Attachment, _ []string, wardenAddr string) string {
 	type server struct {
 		Type    string            `json:"type"`
 		URL     string            `json:"url"`
@@ -228,7 +229,7 @@ func vscodeConfig(attached []*playground.Attachment, wardenAddr string) string {
 	return writeFile(".vscode/mcp.json", marshalConfig(map[string]any{"servers": servers}))
 }
 
-func opencodeConfig(attached []*playground.Attachment, wardenAddr string) string {
+func opencodeConfig(attached []*playground.Attachment, _ []string, wardenAddr string) string {
 	type server struct {
 		Type    string            `json:"type"`
 		URL     string            `json:"url"`
@@ -245,30 +246,33 @@ func opencodeConfig(attached []*playground.Attachment, wardenAddr string) string
 	}))
 }
 
-// codexSandbox prepares the commands Codex runs in the playground directory
-// for scenario 8, whose agent calls the bank's HTTP API with curl. Codex runs
-// them with the network off by default; MCP calls are Codex's own, and work
-// without it. The variables the teller skill uses are set in the file, filled
-// in by the shell as it writes, as the headers are, so the commands have them
-// however Codex was started. sandbox_mode is top-level, so it comes before
-// any table.
-const codexSandbox = `sandbox_mode = "workspace-write"
-
-[sandbox_workspace_write]
-network_access = true
-
-[shell_environment_policy]
-set = { "WARDEN_ADDR" = "$WARDEN_ADDR", "AGENT" = "$AGENT" }
-`
+// codexAgentShell hands the exported variables to the commands Codex runs in
+// the playground directory, once a scenario hands them to the agent: scenario
+// 8, whose agent calls the bank's HTTP API with curl. Until then the agent
+// holds no token and calls nothing itself, so neither is set. Codex runs the
+// commands with the network off by default; MCP calls are Codex's own, and
+// work without it. The values are filled in by the shell as it writes the
+// file, as the headers are, so the commands have them however Codex was
+// started. sandbox_mode is top-level, so it comes before any table.
+func codexAgentShell(exported []string) string {
+	pairs := make([]string, len(exported))
+	for i, name := range exported {
+		pairs[i] = strconv.Quote(name) + " = " + strconv.Quote("$"+name)
+	}
+	return "sandbox_mode = \"workspace-write\"\n\n" +
+		"[sandbox_workspace_write]\nnetwork_access = true\n\n" +
+		"[shell_environment_policy]\nset = { " + strings.Join(pairs, ", ") + " }\n"
+}
 
 // codexConfig writes Codex's TOML by hand: the shape is two keys a server.
-func codexConfig(attached []*playground.Attachment, wardenAddr string) string {
+func codexConfig(attached []*playground.Attachment, exported []string, wardenAddr string) string {
 	sorted := append([]*playground.Attachment(nil), attached...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Server < sorted[j].Server })
-	var b strings.Builder
-	b.WriteString(codexSandbox)
+	var sections []string
+	if len(exported) > 0 {
+		sections = append(sections, codexAgentShell(exported))
+	}
 	for _, a := range sorted {
-		b.WriteString("\n")
 		headers := headerMap(a)
 		names := make([]string, 0, len(headers))
 		for name := range headers {
@@ -279,9 +283,11 @@ func codexConfig(attached []*playground.Attachment, wardenAddr string) string {
 		for j, name := range names {
 			pairs[j] = strconv.Quote(name) + " = " + strconv.Quote(headers[name])
 		}
+		var b strings.Builder
 		fmt.Fprintf(&b, "[mcp_servers.%s]\n", a.Server)
 		fmt.Fprintf(&b, "url = %s\n", strconv.Quote(wardenAddr+a.Path))
 		fmt.Fprintf(&b, "http_headers = { %s }\n", strings.Join(pairs, ", "))
+		sections = append(sections, b.String())
 	}
-	return writeFile(".codex/config.toml", strings.TrimSuffix(b.String(), "\n"))
+	return writeFile(".codex/config.toml", strings.TrimSuffix(strings.Join(sections, "\n"), "\n"))
 }

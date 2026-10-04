@@ -248,10 +248,9 @@ var (
 	tomlPair    = regexp.MustCompile(`"([^"]+)" = "([^"]*)"`)
 )
 
-// pasteConfig pastes the nth config write in out into a shell, as a reader
-// would, and returns the servers the file it wrote attaches, with their
-// headers.
-func pasteConfig(t *testing.T, name, out string, nth int) map[string]map[string]string {
+// pasteRaw pastes the nth config write in out into a shell, as a reader
+// would, and returns the file it wrote.
+func pasteRaw(t *testing.T, out string, nth int) string {
 	t.Helper()
 	blocks := configWrite.FindAllString(out, -1)
 	require.Greater(t, len(blocks), nth, "config write %d", nth)
@@ -266,15 +265,16 @@ func pasteConfig(t *testing.T, name, out string, nth int) map[string]map[string]
 	raw, err := os.ReadFile(filepath.Join(home, configPath.FindStringSubmatch(blocks[nth])[1]))
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "$", "the shell filled in every value")
+	return string(raw)
+}
 
+// pasteConfig pastes the nth config write in out, and returns the servers the
+// file it wrote attaches, with their headers.
+func pasteConfig(t *testing.T, name, out string, nth int) map[string]map[string]string {
+	t.Helper()
+	raw := []byte(pasteRaw(t, out, nth))
 	servers := map[string]map[string]string{}
 	if name == "codex" {
-		// Before the first table, or TOML reads it as a key of that table.
-		assert.True(t, strings.HasPrefix(string(raw), "sandbox_mode = \"workspace-write\"\n"), "%s", raw)
-		assert.Contains(t, string(raw), "[sandbox_workspace_write]\nnetwork_access = true\n",
-			"scenario 8's curl needs the network Codex turns off by default")
-		assert.Contains(t, string(raw), `set = { "WARDEN_ADDR" = "http://127.0.0.1:8400", "AGENT" = "jwt-agent-1" }`,
-			"scenario 8's curl gets the address and the JWT however Codex was started")
 		current := ""
 		for _, line := range strings.Split(string(raw), "\n") {
 			if m := tomlServer.FindStringSubmatch(line); m != nil {
@@ -331,6 +331,27 @@ func TestRenderTour_FileClientsWriteValidConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Codex's commands get the network and the agent's variables from scenario 8,
+// which hands them to the agent, and not before: until then the agent holds
+// no token and calls nothing itself.
+func TestRenderTour_CodexAgentShell(t *testing.T) {
+	for _, n := range []int{1, 4, 7} {
+		raw := pasteRaw(t, renderTourAs("codex", n), 0)
+		assert.NotContains(t, raw, "network_access", "scenario %d", n)
+		assert.NotContains(t, raw, "shell_environment_policy", "scenario %d", n)
+	}
+	for _, n := range []int{8, 9} {
+		raw := pasteRaw(t, renderTourAs("codex", n), 0)
+		// Before the first table, or TOML reads it as a key of that table.
+		assert.True(t, strings.HasPrefix(raw, "sandbox_mode = \"workspace-write\"\n"), "scenario %d: %s", n, raw)
+		assert.Contains(t, raw, "[sandbox_workspace_write]\nnetwork_access = true\n",
+			"scenario %d: the agent's curl needs the network Codex turns off by default", n)
+		assert.Contains(t, raw, `set = { "AGENT" = "jwt-agent-1", "WARDEN_ADDR" = "http://127.0.0.1:8400" }`,
+			"scenario %d: the exported variables, however Codex was started", n)
+	}
+	assert.Contains(t, renderTourAs("codex", 8), "\nexport AGENT WARDEN_ADDR\n", "the export is printed for every client")
 }
 
 // Scenario 7 tells the agent where to look, in the file its client reads
