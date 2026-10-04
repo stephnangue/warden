@@ -87,15 +87,15 @@ func TestRenderTour(t *testing.T) {
 	assert.NotContains(t, first, "Setup, once:")
 
 	// The live edit comes after the questions it would otherwise change: run
-	// first, it would let the 500 through before the reader saw it refused.
+	// first, it would let the 300 through before the reader saw it refused.
 	third := renderTourFor(3)
-	refused := strings.Index(third, `Ask: "Withdraw 500."`)
+	refused := strings.Index(third, `Ask: "Withdraw 300."`)
 	raise := strings.Index(third, "warden policy write -type mcp atm-tools")
 	require.NotEqual(t, -1, refused)
 	require.NotEqual(t, -1, raise)
-	assert.Less(t, refused, raise, "the limit is raised after the 500 is refused")
+	assert.Less(t, refused, raise, "the limit is raised after the 300 is refused")
 	assert.Less(t, strings.Index(third, "Then: Raise the limit"), raise)
-	again := strings.LastIndex(third, `Ask: "Withdraw 500."`)
+	again := strings.LastIndex(third, `Ask: "Withdraw 300."`)
 	assert.Less(t, raise, again, "and the same question is asked again")
 	assert.Less(t, again, strings.Index(third, "What it shows:"))
 
