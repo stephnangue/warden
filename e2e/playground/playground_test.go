@@ -419,7 +419,7 @@ func TestPlayground(t *testing.T) {
 
 		// Raise the limit live, with the command the scenario prints, run by a
 		// shell as the reader would.
-		e.sh(t, playground.Scenarios()[2].Commands[0])
+		e.sh(t, playground.Scenarios()[2].Then.Commands[0])
 		out, err = callTool(t, bank, "withdraw", map[string]any{"amount": 500})
 		require.NoError(t, err, "the next call, on the same session, follows the new limit")
 		assert.Equal(t, int64(500), out.Result.Withdrawn)

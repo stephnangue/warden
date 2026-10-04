@@ -45,7 +45,7 @@ func TestPoliciesParse(t *testing.T) {
 	}
 	assert.Equal(t, 7, parsed, "every policy the bootstrap writes")
 
-	cmd := playground.Scenarios()[2].Commands[0]
+	cmd := playground.Scenarios()[2].Then.Commands[0]
 	_, rest, ok := strings.Cut(cmd, "<<EOF\n")
 	require.True(t, ok, "scenario 3 writes its policy from a heredoc")
 	policy, ok := strings.CutSuffix(rest, "EOF")
