@@ -2,7 +2,11 @@ package types
 
 import (
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/stephnangue/warden/credential"
 )
@@ -84,14 +88,15 @@ func (t *GitHubTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Describe("Personal access token (required for pat auth, or for local source)").
 			Example("ghp_xxxxxxxxxxxxxxxxxxxx"),
 
-		// Optional fields
-		credential.StringField("repository").
-			Describe("Repository to scope the token to (format: owner/repo)").
-			Example("acme-corp/backend"),
+		// Optional fields: narrow an App installation token below what the
+		// installation grants
+		credential.StringField("repositories").
+			Describe("Comma-separated bare repository names to scope App installation tokens to (no owner: the installation already fixes it); at most 500").
+			Example("backend,frontend"),
 
 		credential.StringField("permissions").
-			Describe("Comma-separated list of permissions for App installation tokens").
-			Example("contents:read,issues:write"),
+			Describe("Comma-separated name:level pairs to scope App installation tokens to; level is read, write or admin").
+			Example("contents:read,pull_requests:write"),
 		credential.StringField(credential.ConfigSecretSpec).
 			Describe("Name of a credential spec that yields the secret (App private key or PAT) instead of storing it inline (credential chaining)").
 			Example("github-app-key"),
@@ -119,8 +124,20 @@ func (t *GitHubTokenCredType) ValidateConfig(config credential.Config, sourceTyp
 		return err
 	}
 
+	// The singular key was accepted but never applied, so a spec carrying it got a
+	// token for the whole installation. Reject it rather than keep that silent
+	// no-op; the driver refuses to mint from a stored spec that still has it.
+	if config.Get("repository") != "" {
+		return errors.New(GitHubLegacyRepositoryError)
+	}
+
 	// Step 3: Conditional validation based on source and mint_method
 	if sourceType == credential.SourceTypeLocal {
+		// A static token's scope is fixed where it was issued; nothing here can
+		// narrow it.
+		if config.Get("repositories") != "" || config.Get("permissions") != "" {
+			return fmt.Errorf("'repositories' and 'permissions' are not supported with a local source")
+		}
 		// Local source: must have static token, mint_method not needed. A local
 		// source has no keyless path, so credential chaining does not apply.
 		if config.Get(credential.ConfigSecretSpec) != "" {
@@ -176,7 +193,109 @@ func (t *GitHubTokenCredType) ValidateConfig(config credential.Config, sourceTyp
 		}
 	}
 
+	scope, err := ParseGitHubTokenScope(config)
+	if err != nil {
+		return err
+	}
+	if !scope.IsZero() && mintMethod != "app" {
+		return errors.New(GitHubScopeRequiresAppError)
+	}
+
 	return nil
+}
+
+// GitHubLegacyRepositoryError is returned, on write and at mint, for a spec that
+// still sets the singular 'repository' key.
+const GitHubLegacyRepositoryError = "'repository' is no longer supported; use 'repositories' (bare repository names, comma-separated)"
+
+// GitHubScopeRequiresAppError is returned, on write and at mint, for a scope set on
+// a spec that does not mint App installation tokens.
+const GitHubScopeRequiresAppError = "'repositories' and 'permissions' apply only to mint_method=app (a PAT's scope is fixed when it is created)"
+
+// githubMaxScopedRepositories is GitHub's limit on repositories named in one
+// installation token request.
+const githubMaxScopedRepositories = 500
+
+var (
+	githubRepoNameRE       = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+	githubPermissionNameRE = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+)
+
+// GitHubTokenScope narrows an App installation token below what the installation
+// grants. The zero value asks for everything the installation has.
+type GitHubTokenScope struct {
+	// Repositories are bare repository names, sorted and deduplicated.
+	Repositories []string
+	// Permissions maps a permission name to read, write or admin.
+	Permissions map[string]string
+}
+
+// IsZero reports whether the scope narrows nothing.
+func (s GitHubTokenScope) IsZero() bool {
+	return len(s.Repositories) == 0 && len(s.Permissions) == 0
+}
+
+// ParseGitHubTokenScope reads the 'repositories' and 'permissions' keys of a
+// github_token spec. It checks shape only: which permission names exist, and which
+// repositories the installation can reach, is GitHub's to say when the token is
+// requested.
+func ParseGitHubTokenScope(config credential.Config) (GitHubTokenScope, error) {
+	var scope GitHubTokenScope
+
+	seen := map[string]bool{}
+	for _, name := range splitGitHubList(config.Get("repositories")) {
+		if strings.Contains(name, "/") {
+			return GitHubTokenScope{}, fmt.Errorf("repositories: %q must be a bare repository name; the installation already fixes the owner", name)
+		}
+		if name == "." || name == ".." || !githubRepoNameRE.MatchString(name) {
+			return GitHubTokenScope{}, fmt.Errorf("repositories: %q is not a valid repository name", name)
+		}
+		if !seen[name] {
+			seen[name] = true
+			scope.Repositories = append(scope.Repositories, name)
+		}
+	}
+	if len(scope.Repositories) > githubMaxScopedRepositories {
+		return GitHubTokenScope{}, fmt.Errorf("repositories: at most %d may be named, got %d", githubMaxScopedRepositories, len(scope.Repositories))
+	}
+	sort.Strings(scope.Repositories)
+
+	for _, item := range splitGitHubList(config.Get("permissions")) {
+		name, level, ok := strings.Cut(item, ":")
+		name, level = strings.TrimSpace(name), strings.TrimSpace(level)
+		if !ok || name == "" {
+			return GitHubTokenScope{}, fmt.Errorf("permissions: %q must be name:level", item)
+		}
+		if !githubPermissionNameRE.MatchString(name) {
+			return GitHubTokenScope{}, fmt.Errorf("permissions: %q is not a valid permission name", name)
+		}
+		switch level {
+		case "read", "write", "admin":
+		default:
+			return GitHubTokenScope{}, fmt.Errorf("permissions: %q: level must be read, write or admin, got %q", name, level)
+		}
+		if prev, dup := scope.Permissions[name]; dup && prev != level {
+			return GitHubTokenScope{}, fmt.Errorf("permissions: %q is given twice, as %q and %q", name, prev, level)
+		}
+		if scope.Permissions == nil {
+			scope.Permissions = map[string]string{}
+		}
+		scope.Permissions[name] = level
+	}
+
+	return scope, nil
+}
+
+// splitGitHubList splits a comma-separated config value, trimming each item and
+// dropping empty ones.
+func splitGitHubList(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // RequiresSpecRotation returns false — GitHub tokens are minted per-session;

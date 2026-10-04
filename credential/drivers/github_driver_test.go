@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -916,15 +918,205 @@ func TestGitHubDriver_InlineKeyRejectionIsNotRetryable(t *testing.T) {
 }
 
 func TestGitHubAppTokenCacheKey(t *testing.T) {
-	assert.Equal(t, appTokenCacheKey("a", "i", "k"), appTokenCacheKey("a", "i", "k"))
-	assert.NotEqual(t, appTokenCacheKey("a", "i", "k"), appTokenCacheKey("a", "i", "k2"))
-	assert.NotEqual(t, appTokenCacheKey("a", "i", "k"), appTokenCacheKey("a", "i2", "k"))
-	assert.NotEqual(t, appTokenCacheKey("a", "i", "k"), appTokenCacheKey("a2", "i", "k"))
+	base := appTokenCacheKey("a", "i", "k", "", "")
+	assert.Equal(t, base, appTokenCacheKey("a", "i", "k", "", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i", "k2", "", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i2", "k", "", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a2", "i", "k", "", ""))
+	// A scope, either part of it, is a different token.
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i", "k", "backend", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i", "k", "", "contents:read"))
 	// Fields that would collide under plain concatenation must not.
-	assert.NotEqual(t, appTokenCacheKey("ab", "c", "d"), appTokenCacheKey("a", "bc", "d"))
+	assert.NotEqual(t, appTokenCacheKey("ab", "c", "d", "", ""), appTokenCacheKey("a", "bc", "d", "", ""))
+	assert.NotEqual(t, appTokenCacheKey("a", "i", "k", "backend", ""), appTokenCacheKey("a", "i", "k", "", "backend"))
+	assert.NotEqual(t, appTokenCacheKey("a", "i", "k", "ab", "c"), appTokenCacheKey("a", "i", "k", "a", "bc"))
 
-	assert.NotContains(t, appTokenCacheKey("app", "inst", "SECRETKEY"), "SECRETKEY",
+	assert.NotContains(t, appTokenCacheKey("app", "inst", "SECRETKEY", "", ""), "SECRETKEY",
 		"the private key must not sit in a map key")
+}
+
+// --- app installation token scoping ---
+
+func scopedAppSpec(name, keyPEM string, scope map[string]string) *credential.CredSpec {
+	spec := inlineAppSpec(name, "67890", keyPEM)
+	for k, v := range scope {
+		spec.Config = spec.Config.With(k, v)
+	}
+	return spec
+}
+
+func TestGitHubDriver_MintAppCredential_SendsScope(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var gotContentType string
+	var gotBody struct {
+		Repositories []string          `json:"repositories"`
+		Permissions  map[string]string `json:"permissions"`
+	}
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		writeInstallationToken(w, "ghs_scoped")
+	})
+
+	spec := scopedAppSpec("scoped", key, map[string]string{
+		"repositories": " frontend, backend ,frontend,",
+		"permissions":  "pull_requests:write, contents:read",
+	})
+	rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_scoped", rawData["token"])
+
+	assert.Equal(t, "application/json", gotContentType)
+	assert.Equal(t, []string{"backend", "frontend"}, gotBody.Repositories, "repositories are trimmed, deduplicated and sorted")
+	assert.Equal(t, map[string]string{"contents": "read", "pull_requests": "write"}, gotBody.Permissions)
+}
+
+// Only permissions set: the body must not carry an empty repositories list, which
+// GitHub could read as "no repositories".
+func TestGitHubDriver_MintAppCredential_PermissionsOnlyOmitsRepositories(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var gotBody map[string]json.RawMessage
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		writeInstallationToken(w, "ghs_perms_only")
+	})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(),
+		scopedAppSpec("perms-only", key, map[string]string{"permissions": "contents:read"}))
+	require.NoError(t, err)
+	assert.NotContains(t, gotBody, "repositories")
+	assert.Contains(t, gotBody, "permissions")
+}
+
+func TestGitHubDriver_MintAppCredential_UnscopedSendsNoBody(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var gotBody []byte
+	var gotContentType string
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		writeInstallationToken(w, "ghs_unscoped")
+	})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), inlineAppSpec("unscoped", "67890", key))
+	require.NoError(t, err)
+	assert.Empty(t, gotBody, "an unscoped spec must keep sending no body")
+	assert.Empty(t, gotContentType)
+}
+
+// The crux of keying the cache on scope: a narrow spec must never be served the
+// token minted for a broader one on the same installation, whichever mints first.
+func TestGitHubDriver_AppTokenCacheIsKeyedByScope(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var body struct {
+			Repositories []string `json:"repositories"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Repositories) == 0 {
+			writeInstallationToken(w, "ghs_whole_installation")
+			return
+		}
+		writeInstallationToken(w, "ghs_only_"+strings.Join(body.Repositories, "_"))
+	})
+
+	mint := func(spec *credential.CredSpec) interface{} {
+		rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+		require.NoError(t, err)
+		return rawData["token"]
+	}
+	broad := inlineAppSpec("broad", "67890", key)
+	backend := scopedAppSpec("backend", key, map[string]string{"repositories": "backend"})
+	frontend := scopedAppSpec("frontend", key, map[string]string{"repositories": "frontend"})
+
+	assert.Equal(t, "ghs_whole_installation", mint(broad))
+	assert.Equal(t, "ghs_only_backend", mint(backend), "a scoped spec must not inherit the broad token")
+	assert.Equal(t, "ghs_only_frontend", mint(frontend), "different scopes must not share a token")
+	assert.Equal(t, int32(3), calls.Load())
+
+	// Each is now cached under its own scope.
+	assert.Equal(t, "ghs_only_backend", mint(backend))
+	assert.Equal(t, "ghs_whole_installation", mint(broad))
+	assert.Equal(t, int32(3), calls.Load(), "a repeated scope must reuse its cached token")
+}
+
+func TestGitHubDriver_MintAppCredential_Scope422(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"The permissions requested are not granted to this installation."}`))
+	})
+	spec := scopedAppSpec("too-broad", key, map[string]string{"permissions": "administration:write"})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "if repositories/permissions ask for more than the App was granted")
+	assert.Contains(t, err.Error(), "The permissions requested are not granted")
+	var statusErr *httputil.StatusError
+	require.ErrorAs(t, err, &statusErr)
+	assert.Equal(t, http.StatusUnprocessableEntity, statusErr.Status)
+
+	// The chained path must not mark a 422 as a stale key worth re-fetching.
+	chainedSpec := githubAppSpec("too-broad-chained")
+	chainedSpec.Config = chainedSpec.Config.With("permissions", "administration:write")
+	_, _, _, _, err = driver.MintFromSecret(context.Background(), chainedSpec,
+		credential.SecretMaterial{Data: map[string]string{"private_key": key}, Field: "private_key"})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+
+	// Not cached: the next attempt asks GitHub again.
+	_, _, _, _, err = driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Equal(t, int32(3), calls.Load())
+}
+
+// Stored specs skip create-time validation, so the driver must refuse what
+// ValidateConfig would have, before any request leaves.
+func TestGitHubDriver_RefusesUnvalidatedScope(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeInstallationToken(w, "ghs_should_not_mint")
+	})
+	material := credential.SecretMaterial{Data: map[string]string{"private_key": key}, Field: "private_key"}
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{"legacy repository", map[string]string{"repository": "acme/backend"}, "'repository' is no longer supported"},
+		{"unparseable permissions", map[string]string{"permissions": "contents"}, "must be name:level"},
+		{"bad level", map[string]string{"permissions": "contents:owner"}, "level must be read, write or admin"},
+		{"owner in repository name", map[string]string{"repositories": "acme/backend"}, "must be a bare repository name"},
+		{"scope on a pat", map[string]string{"mint_method": "pat", "token": "ghp_x", "repositories": "backend"}, "apply only to mint_method=app"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"/direct", func(t *testing.T) {
+			spec := scopedAppSpec("stored", key, tt.config)
+			_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+		t.Run(tt.name+"/chained", func(t *testing.T) {
+			spec := githubAppSpec("stored-chained")
+			for k, v := range tt.config {
+				if k == "token" {
+					continue // a chained PAT is fetched, not stored inline
+				}
+				spec.Config = spec.Config.With(k, v)
+			}
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, material)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+	assert.Equal(t, int32(0), calls.Load(), "a refused scope must never reach GitHub")
 }
 
 // --- app installation token mint concurrency ---

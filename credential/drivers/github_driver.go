@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 	"golang.org/x/sync/singleflight"
@@ -62,15 +64,22 @@ type appTokenCache struct {
 // key never sits in a map key, and length-prefixed so no two input sets can collide
 // by concatenating differently.
 //
+// The requested scope (repositories, permissions) is part of the inputs: without
+// it, two specs on one installation that ask for different scopes would share
+// whichever token was minted first, and a narrowly scoped spec could be served a
+// token for the whole installation. The scope goes in as the raw config strings,
+// not their parsed form, so a cache hit never has to parse them; two spellings of
+// one scope merely mint a token each.
+//
 // SHA-256 rather than a password KDF, deliberately: this derives a cache key, not a
 // stored verifier. No digest is kept, nothing is ever compared against one, and the
 // result never leaves this process. The slowness a KDF buys is protection against
 // guessing a low-entropy human password from a stolen digest — here the input is an
 // RSA private key, and anything able to read this key can already read the key it
 // was derived from, so that slowness would cost every lookup and protect nothing.
-func appTokenCacheKey(appID, installationID, keyPEM string) string {
+func appTokenCacheKey(appID, installationID, keyPEM, repositories, permissions string) string {
 	h := sha256.New()
-	for _, field := range []string{appID, installationID, keyPEM} {
+	for _, field := range []string{appID, installationID, keyPEM, repositories, permissions} {
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(field)))
 		h.Write(length[:])
@@ -181,11 +190,23 @@ func (d *GitHubDriver) getGitHubURL() string {
 // auth_method key so a spec persisted before the rename (which skips create-time
 // validation on load) fails with a clear migration message rather than a confusing
 // downstream error (e.g. a PAT parsed as an App private key).
+//
+// It also refuses the scope keys a stored spec can carry without having been
+// checked: the singular 'repository', which never narrowed anything and must not
+// go on minting tokens for the whole installation, and a scope on a PAT, which
+// cannot be narrowed here.
 func githubMintMethod(spec *credential.CredSpec) (string, error) {
 	if spec.Config.Get("auth_method") != "" {
 		return "", fmt.Errorf("github: 'auth_method' is no longer supported; use 'mint_method' (app or pat)")
 	}
-	return credential.GetString(spec.Config, "mint_method", "app"), nil
+	if spec.Config.Get("repository") != "" {
+		return "", fmt.Errorf("github: %s", types.GitHubLegacyRepositoryError)
+	}
+	mintMethod := credential.GetString(spec.Config, "mint_method", "app")
+	if mintMethod != "app" && (spec.Config.Get("repositories") != "" || spec.Config.Get("permissions") != "") {
+		return "", fmt.Errorf("github: %s", types.GitHubScopeRequiresAppError)
+	}
+	return mintMethod, nil
 }
 
 // MintCredential returns a GitHub token for the given spec, minting directly from
@@ -274,7 +295,8 @@ func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.Cred
 func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *credential.CredSpec, keyPEM string, chained bool) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	appID := credential.GetString(spec.Config, "app_id", "")
 	installationID := credential.GetString(spec.Config, "installation_id", "")
-	cacheKey := appTokenCacheKey(appID, installationID, keyPEM)
+	cacheKey := appTokenCacheKey(appID, installationID, keyPEM,
+		spec.Config.Get("repositories"), spec.Config.Get("permissions"))
 
 	if cached, ok := d.cachedAppToken(cacheKey); ok {
 		return appTokenRawData(cached), nil, time.Until(cached.expiresAt), "", nil
@@ -294,12 +316,20 @@ func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *crede
 			return cached, nil
 		}
 
+		// Parsed here, on a miss, rather than on every request. A stored spec
+		// skips create-time validation, so a bad scope is caught here too; it
+		// never mints, so it never reaches the hit path above.
+		scope, err := types.ParseGitHubTokenScope(spec.Config)
+		if err != nil {
+			return nil, fmt.Errorf("github: %w", err)
+		}
+
 		key, err := parseRSAPrivateKey(keyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse private key: %w", err)
 		}
 
-		token, expiresAt, err := d.mintInstallationToken(context.WithoutCancel(ctx), key, appID, installationID, chained)
+		token, expiresAt, err := d.mintInstallationToken(context.WithoutCancel(ctx), key, appID, installationID, scope, chained)
 		if err != nil {
 			return nil, fmt.Errorf("failed to mint installation token: %w", err)
 		}
@@ -384,8 +414,10 @@ func (d *GitHubDriver) mintPATFromToken(token string) (map[string]interface{}, m
 	return rawData, nil, 0, "", nil
 }
 
-// mintInstallationToken creates a new installation access token via the GitHub API
-func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.PrivateKey, appID, installationID string, chained bool) (string, time.Time, error) {
+// mintInstallationToken creates a new installation access token via the GitHub API.
+// A non-zero scope narrows the token to those repositories and permissions; the
+// zero scope sends no body and gets everything the installation has.
+func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.PrivateKey, appID, installationID string, scope types.GitHubTokenScope, chained bool) (string, time.Time, error) {
 	// Generate JWT for GitHub App authentication
 	jwt, err := generateAppJWT(key, appID)
 	if err != nil {
@@ -395,14 +427,29 @@ func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.Priva
 	// POST /app/installations/{installation_id}/access_tokens
 	path := fmt.Sprintf("/app/installations/%s/access_tokens", url.PathEscape(installationID))
 
+	var body io.Reader
+	if !scope.IsZero() {
+		payload, err := json.Marshal(struct {
+			Repositories []string          `json:"repositories,omitempty"`
+			Permissions  map[string]string `json:"permissions,omitempty"`
+		}{scope.Repositories, scope.Permissions})
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("failed to encode token scope: %w", err)
+		}
+		body = bytes.NewReader(payload)
+	}
+
 	apiURL := d.getGitHubURL() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, body)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
@@ -427,6 +474,13 @@ func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.Priva
 			return "", time.Time{}, &httputil.StatusError{Status: resp.StatusCode,
 				Err: fmt.Errorf("github: installation token request rejected: %w (status %d: %s)",
 					credential.ErrChainedSecretRejected, resp.StatusCode, string(respBody))}
+		}
+		// GitHub answers 422 both for a scope beyond what the App was granted or
+		// installed on and for rate limiting, so point at the scope without
+		// claiming it was the cause.
+		if resp.StatusCode == http.StatusUnprocessableEntity && !scope.IsZero() {
+			return "", time.Time{}, &httputil.StatusError{Status: resp.StatusCode,
+				Err: fmt.Errorf("github: installation token request returned 422 — if repositories/permissions ask for more than the App was granted or installed on, narrow them: %s", string(respBody))}
 		}
 		return "", time.Time{}, &httputil.StatusError{Status: resp.StatusCode,
 			Err: fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, string(respBody))}

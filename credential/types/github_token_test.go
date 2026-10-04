@@ -5,6 +5,8 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,6 +242,78 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "require a github or local source",
 		},
+
+		// --- token scope ---
+		{
+			name: "github app - scoped",
+			config: map[string]string{
+				"mint_method":     "app",
+				"app_id":          "12345",
+				"private_key":     testPEM,
+				"installation_id": "67890",
+				"repositories":    "backend,frontend",
+				"permissions":     "contents:read,pull_requests:write",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    false,
+		},
+		{
+			name: "github app - legacy repository key",
+			config: map[string]string{
+				"mint_method":     "app",
+				"app_id":          "12345",
+				"private_key":     testPEM,
+				"installation_id": "67890",
+				"repository":      "acme-corp/backend",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    true,
+			errMsg:     "'repository' is no longer supported; use 'repositories'",
+		},
+		{
+			name: "github app - invalid scope",
+			config: map[string]string{
+				"mint_method":     "app",
+				"app_id":          "12345",
+				"private_key":     testPEM,
+				"installation_id": "67890",
+				"permissions":     "contents:owner",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    true,
+			errMsg:     "level must be read, write or admin",
+		},
+		{
+			name: "github pat - scope rejected",
+			config: map[string]string{
+				"mint_method":  "pat",
+				"token":        "ghp_test",
+				"repositories": "backend",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    true,
+			errMsg:     "apply only to mint_method=app",
+		},
+		{
+			name: "local - scope rejected",
+			config: map[string]string{
+				"token":       "ghp_test",
+				"permissions": "contents:read",
+			},
+			sourceType: credential.SourceTypeLocal,
+			wantErr:    true,
+			errMsg:     "not supported with a local source",
+		},
+		{
+			name: "local - legacy repository key",
+			config: map[string]string{
+				"token":      "ghp_test",
+				"repository": "acme-corp/backend",
+			},
+			sourceType: credential.SourceTypeLocal,
+			wantErr:    true,
+			errMsg:     "'repository' is no longer supported",
+		},
 	}
 
 	for _, tt := range tests {
@@ -255,6 +329,75 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseGitHubTokenScope(t *testing.T) {
+	tooMany := make([]string, githubMaxScopedRepositories+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("repo-%d", i)
+	}
+
+	tests := []struct {
+		name      string
+		config    map[string]string
+		wantRepos []string
+		wantPerms map[string]string
+		errMsg    string
+	}{
+		{name: "empty", config: map[string]string{}},
+		{
+			name:      "trimmed, deduplicated and sorted",
+			config:    map[string]string{"repositories": " frontend,backend , frontend,,", "permissions": " issues:write , contents:read"},
+			wantRepos: []string{"backend", "frontend"},
+			wantPerms: map[string]string{"contents": "read", "issues": "write"},
+		},
+		{
+			name:      "repository name characters",
+			config:    map[string]string{"repositories": "Hello-World,my.repo,under_score"},
+			wantRepos: []string{"Hello-World", "my.repo", "under_score"},
+		},
+		{
+			name:      "same permission twice at one level collapses",
+			config:    map[string]string{"permissions": "contents:read,contents:read"},
+			wantPerms: map[string]string{"contents": "read"},
+		},
+		{
+			name:      "admin level",
+			config:    map[string]string{"permissions": "repository_projects:admin"},
+			wantPerms: map[string]string{"repository_projects": "admin"},
+		},
+		{name: "owner in name", config: map[string]string{"repositories": "acme/backend"}, errMsg: "must be a bare repository name"},
+		{name: "dot", config: map[string]string{"repositories": "."}, errMsg: "not a valid repository name"},
+		{name: "dot dot", config: map[string]string{"repositories": ".."}, errMsg: "not a valid repository name"},
+		{name: "invalid character", config: map[string]string{"repositories": "back end"}, errMsg: "not a valid repository name"},
+		{name: "name too long", config: map[string]string{"repositories": strings.Repeat("a", 101)}, errMsg: "not a valid repository name"},
+		{name: "too many", config: map[string]string{"repositories": strings.Join(tooMany, ",")}, errMsg: "at most 500"},
+		{name: "missing level", config: map[string]string{"permissions": "contents"}, errMsg: "must be name:level"},
+		{name: "missing name", config: map[string]string{"permissions": ":read"}, errMsg: "must be name:level"},
+		{name: "bad level", config: map[string]string{"permissions": "contents:owner"}, errMsg: "level must be read, write or admin"},
+		{name: "bad name", config: map[string]string{"permissions": "Contents:read"}, errMsg: "not a valid permission name"},
+		{name: "conflicting levels", config: map[string]string{"permissions": "contents:read,contents:write"}, errMsg: "given twice"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scope, err := ParseGitHubTokenScope(credential.NewConfig(tt.config))
+			if tt.errMsg != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantRepos, scope.Repositories)
+			assert.Equal(t, tt.wantPerms, scope.Permissions)
+			assert.Equal(t, tt.wantRepos == nil && tt.wantPerms == nil, scope.IsZero())
+		})
+	}
+
+	// Exactly the limit is allowed.
+	scope, err := ParseGitHubTokenScope(credential.NewConfig(map[string]string{"repositories": strings.Join(tooMany[:githubMaxScopedRepositories], ",")}))
+	require.NoError(t, err)
+	assert.Len(t, scope.Repositories, githubMaxScopedRepositories)
 }
 
 func TestGitHubTokenCredType_Parse(t *testing.T) {
