@@ -100,6 +100,19 @@ func TestRenderTour(t *testing.T) {
 	eighth := renderTourFor(8)
 	assert.Contains(t, eighth, "claude mcp remove bank")
 	assert.NotContains(t, eighth, "claude mcp add", "the REST scenario attaches nothing new")
+
+	// The playground set GitHub up; the reader brings the PAT, then connects.
+	// GitHub is attached beside discovery, not in place of a bank.
+	ninth := renderTourFor(9)
+	add := strings.Index(ninth, `claude mcp add --transport http github "http://127.0.0.1:8400/v1/github-mcp/role/github/gateway/"`)
+	require.NotEqual(t, -1, add)
+	assert.Less(t, strings.Index(ninth, "warden cred spec create github-pat"), add)
+	for _, bootstrapped := range []string{"provider enable", "cred source create", "policy write", "role/github <<EOF"} {
+		assert.NotContains(t, ninth, bootstrapped, "the playground did this already")
+	}
+	assert.NotContains(t, ninth, "claude mcp remove")
+	assert.Contains(t, ninth, "Then reconnect")
+	assert.Contains(t, ninth, "read -rs GITHUB_PAT", "the PAT is read without echo")
 }
 
 // Only this command's -o flag asks for structured output; WARDEN_OUTPUT does

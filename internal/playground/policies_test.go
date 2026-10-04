@@ -43,7 +43,7 @@ func TestPoliciesParse(t *testing.T) {
 		assert.NoError(t, err, s.Path)
 		parsed++
 	}
-	assert.Equal(t, 5, parsed, "every policy the bootstrap writes")
+	assert.Equal(t, 7, parsed, "every policy the bootstrap writes")
 
 	cmd := playground.Scenarios()[2].Commands[0]
 	_, rest, ok := strings.Cut(cmd, "<<EOF\n")

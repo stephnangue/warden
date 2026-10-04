@@ -123,7 +123,7 @@ func checkPlaygroundTrust(certPEM, wardenAddr string) error {
 }
 
 // playgroundRoles are the roles the self-check expects discovery to list.
-var playgroundRoles = []string{playground.RoleATM, playground.RoleAssistant, playground.RoleTeller}
+var playgroundRoles = []string{playground.RoleATM, playground.RoleAssistant, playground.RoleTeller, playground.RoleGitHub}
 
 // bootstrapPlayground wires Warden to the playground as the root token, then
 // checks discovery shows what the scenarios tell a newcomer to expect. Either
@@ -146,10 +146,12 @@ func printPlaygroundBanner(w io.Writer, pg *playground.Playground, wardenAddr st
 	fmt.Fprintf(w, "==> Playground\n")
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "A bank protected by Warden, and the identity provider that signs your\n")
-	fmt.Fprintf(w, "agents and users, are running:\n")
+	fmt.Fprintf(w, "agents and users, are running. Warden also fronts GitHub's MCP server,\n")
+	fmt.Fprintf(w, "which waits for your PAT (warden dev scenarios 9):\n")
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "  Identity provider:  %s\n", pg.ASURL())
 	fmt.Fprintf(w, "  Bank (MCP + REST):  %s\n", pg.BankURL())
+	fmt.Fprintf(w, "  GitHub MCP:         %s (needs your PAT)\n", playground.GitHubMCPURL)
 	fmt.Fprintf(w, "  Audit log:          %s\n", pg.AuditPath())
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "Try it:\n")

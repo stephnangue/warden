@@ -38,7 +38,8 @@ const rootToken = "root"
 
 // env is a running playground.
 type env struct {
-	addr string // Warden, e.g. http://127.0.0.1:41234
+	addr string      // Warden, e.g. http://127.0.0.1:41234
+	out  *syncBuffer // the server's output, banner included
 }
 
 // freeAddr returns a loopback address with a port free at the time of asking.
@@ -61,8 +62,8 @@ func startPlayground(t *testing.T) *env {
 		"-dev-playground-as-addr="+freeAddr(t),
 		"-dev-playground-bank-addr="+freeAddr(t),
 	)
-	var out syncBuffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	out := &syncBuffer{}
+	cmd.Stdout, cmd.Stderr = out, out
 	require.NoError(t, cmd.Start())
 	// One Wait, started now, so a server that exits during startup is noticed
 	// at once rather than after the whole deadline.
@@ -81,7 +82,7 @@ func startPlayground(t *testing.T) *env {
 		}
 	})
 
-	e := &env{addr: "http://" + listen}
+	e := &env{addr: "http://" + listen, out: out}
 	deadline := time.After(60 * time.Second)
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
@@ -298,6 +299,13 @@ func TestPlayground(t *testing.T) {
 	atmHeaders := map[string]string{"Authorization": "Bearer " + agent}
 
 	asURL, bankURL := "", ""
+
+	t.Run("0 the banner names everything Warden fronts", func(t *testing.T) {
+		banner := e.out.String()
+		for _, line := range []string{"Identity provider:", "Bank (MCP + REST):", "GitHub MCP:         " + playground.GitHubMCPURL, "Audit log:"} {
+			assert.Contains(t, banner, line)
+		}
+	})
 
 	t.Run("0 the tour prints commands for this server", func(t *testing.T) {
 		// Captured output is not a terminal, so ask for the tour by name.
@@ -540,7 +548,8 @@ func TestPlayground(t *testing.T) {
 			"atm":       {"mcp", "skill://mcp/SKILL.md", "/v1/bank/role/atm/gateway/"},
 			"assistant": {"mcp", "skill://mcp/SKILL.md", "/v1/bank-me/role/assistant/gateway/"},
 			"teller":    {"rest", "skill://teller/SKILL.md", "/v1/bank-api/role/teller/gateway/"},
-		}, got)
+			"github":    {"mcp", "skill://mcp/SKILL.md", "/v1/github-mcp/role/github/gateway/"},
+		}, got, "github is listed before it has a credential")
 
 		for _, uri := range []string{"skill://teller/SKILL.md", "skill://rest/SKILL.md", "skill://mcp/SKILL.md"} {
 			res, err := discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "read_skill", Arguments: map[string]any{"uri": uri}})
@@ -596,5 +605,19 @@ func TestPlayground(t *testing.T) {
 		viaMCP, err := callTool(t, bank, "get_balance", nil)
 		require.NoError(t, err)
 		assert.Equal(t, out.Result.Balance, viaMCP.Result.Balance, "one account behind both faces")
+	})
+
+	t.Run("9 your own service next: GitHub", func(t *testing.T) {
+		// The playground set GitHub up; all the reader brings is the PAT. Every
+		// command needs it, so none runs here: GitHub verifies the PAT.
+		for _, line := range playground.Scenarios()[8].Commands {
+			assert.Contains(t, line, "GITHUB_PAT", "the reader only supplies the PAT")
+		}
+
+		// Until then the role is ready but has nothing to mint, and Warden says
+		// so before GitHub is reached.
+		_, err := e.attach(t, "/v1/github-mcp/role/github/gateway/", map[string]string{"Authorization": "Bearer " + agent})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), playground.SpecGitHub, "the missing spec is named")
 	})
 }
