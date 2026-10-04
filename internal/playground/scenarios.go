@@ -80,8 +80,10 @@ func gatewayPath(mount, role string) string {
 }
 
 // liveLimitPolicy is scenario 3's live edit: the same tool policy with a larger
-// withdrawal limit.
-var liveLimitPolicy = gatewayMCP(MountBank, atmToolRules(1000))
+// withdrawal limit. It stays apart from scenario 4's numbers (500 under a
+// premium customer's 1000), so the reader does not take that scenario's
+// success for this edit carried over to another role's policy.
+var liveLimitPolicy = gatewayMCP(MountBank, atmToolRules(400))
 
 // githubCommands give the bootstrapped github role the one thing the bootstrap
 // cannot: the reader's PAT. It is stored on the spec, the quickest start, which
@@ -139,16 +141,16 @@ func Scenarios() []Scenario {
 		{
 			Number: 3,
 			Title:  "Policy decides which arguments",
-			Ask:    []string{"Withdraw 50.", "Withdraw 500."},
+			Ask:    []string{"Withdraw 50.", "Withdraw 300."},
 			Then: &Variant{
-				Label:    "Raise the limit to 1000, live, and ask again",
+				Label:    "Raise the limit to 400, live, and ask again",
 				Commands: []string{"warden policy write -type mcp atm-tools - <<EOF\n" + liveLimitPolicy + "EOF"},
-				Ask:      "Withdraw 500.",
+				Ask:      "Withdraw 300.",
 			},
 			Shows: []string{
-				"50 goes through; 500 is refused by Warden before the bank sees it, by the condition " + atmWithdrawCondition(100) + ".",
+				"50 goes through; 300 is refused by Warden before the bank sees it, by the condition " + atmWithdrawCondition(100) + ".",
 				"The condition runs on every MCP call, so it only judges withdraw, and it fails closed: a withdrawal without a readable amount is refused.",
-				"Once the limit is raised, the same 500 goes through on the next call, with no change to the agent or the bank, and no reconnect.",
+				"Once the limit is raised, the same 300 goes through on the next call, with no change to the agent or the bank, and no reconnect.",
 			},
 		},
 		{

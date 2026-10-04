@@ -127,7 +127,7 @@ func TestBootstrap_Policies(t *testing.T) {
 	assert.Contains(t, policyATMTools, "has(call.args.amount)", "a withdrawal without a readable amount fails closed")
 	assert.NotContains(t, policyATMTools, "orValue", "a default would let an unreadable amount through")
 	assert.NotContains(t, policyATMTools, "close_account")
-	assert.Contains(t, liveLimitPolicy, "call.args.amount <= 1000")
+	assert.Contains(t, liveLimitPolicy, "call.args.amount <= 400")
 	assert.Contains(t, policyAssistantOnBehalf, "user.metadata.may_act_sub == agent.principal")
 	assert.Contains(t, policyAssistantTools, "call.tool != 'withdraw' ||", "the person's limit judges withdraw only")
 	assert.Contains(t, policyAssistantTools, "has(call.args.amount)", "a withdrawal without a readable amount fails closed")

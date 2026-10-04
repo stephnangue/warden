@@ -399,8 +399,8 @@ func TestPlayground(t *testing.T) {
 		out, err := callTool(t, bank, "withdraw", map[string]any{"amount": 50})
 		require.NoError(t, err)
 		assert.Equal(t, int64(50), out.Result.Withdrawn)
-		_, err = callTool(t, bank, "withdraw", map[string]any{"amount": 500})
-		requireRefused(t, err, "500 is over the limit")
+		_, err = callTool(t, bank, "withdraw", map[string]any{"amount": 300})
+		requireRefused(t, err, "300 is over the limit")
 
 		// The limit judges withdraw only, and never errors on a call without an amount.
 		_, err = callTool(t, bank, "get_balance", nil)
@@ -420,9 +420,11 @@ func TestPlayground(t *testing.T) {
 		// Raise the limit live, with the command the scenario prints, run by a
 		// shell as the reader would.
 		e.sh(t, playground.Scenarios()[2].Then.Commands[0])
-		out, err = callTool(t, bank, "withdraw", map[string]any{"amount": 500})
+		out, err = callTool(t, bank, "withdraw", map[string]any{"amount": 300})
 		require.NoError(t, err, "the next call, on the same session, follows the new limit")
-		assert.Equal(t, int64(500), out.Result.Withdrawn)
+		assert.Equal(t, int64(300), out.Result.Withdrawn)
+		_, err = callTool(t, bank, "withdraw", map[string]any{"amount": 500})
+		requireRefused(t, err, "the limit was raised to 400, not lifted")
 	})
 
 	t.Run("4 the agent acts for a person", func(t *testing.T) {
