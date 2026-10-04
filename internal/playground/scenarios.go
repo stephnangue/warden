@@ -23,13 +23,16 @@ type Attachment struct {
 	Headers []Header `json:"headers"`
 }
 
-// Variant is an optional follow-up within a scenario, done by replacing the
-// attachment.
+// Variant is a follow-up within a scenario: optional when listed in Variants,
+// usually done by replacing the attachment; part of the scenario when it is
+// its Then, done after the scenario's own questions.
 type Variant struct {
 	Label  string      `json:"label"`
 	Attach *Attachment `json:"attach,omitempty"`
-	Ask    string      `json:"ask"`
-	Shows  []string    `json:"shows"`
+	// Commands run before Ask, after any attachment.
+	Commands []string `json:"commands,omitempty"`
+	Ask      string   `json:"ask"`
+	Shows    []string `json:"shows,omitempty"`
 }
 
 // Scenario is one idea about how Warden works, with what to do and what to look
@@ -43,8 +46,11 @@ type Scenario struct {
 	// Attach replaces the server of the same name. Nil keeps what is attached.
 	Attach *Attachment `json:"attach,omitempty"`
 	// Commands are shell commands to run, in order, besides attaching.
-	Commands []string  `json:"commands,omitempty"`
-	Ask      []string  `json:"ask,omitempty"`
+	Commands []string `json:"commands,omitempty"`
+	Ask      []string `json:"ask,omitempty"`
+	// Then is the scenario's next step, done once its questions are answered:
+	// a change the reader makes, and the question that shows it took effect.
+	Then     *Variant  `json:"then,omitempty"`
 	Shows    []string  `json:"shows"`
 	Variants []Variant `json:"variants,omitempty"`
 }
@@ -134,12 +140,16 @@ func Scenarios() []Scenario {
 			Number: 3,
 			Title:  "Policy decides which arguments",
 			Ask:    []string{"Withdraw 50.", "Withdraw 500."},
+			Then: &Variant{
+				Label:    "Raise the limit to 1000, live, and ask again",
+				Commands: []string{"warden policy write -type mcp atm-tools - <<EOF\n" + liveLimitPolicy + "EOF"},
+				Ask:      "Withdraw 500.",
+			},
 			Shows: []string{
 				"50 goes through; 500 is refused by Warden before the bank sees it, by the condition " + atmWithdrawCondition(100) + ".",
 				"The condition runs on every MCP call, so it only judges withdraw, and it fails closed: a withdrawal without a readable amount is refused.",
-				"Raise the limit with the command below; the next call follows it, with no change to the agent or the bank.",
+				"Once the limit is raised, the same 500 goes through on the next call, with no change to the agent or the bank, and no reconnect.",
 			},
-			Commands: []string{"warden policy write -type mcp atm-tools - <<EOF\n" + liveLimitPolicy + "EOF"},
 		},
 		{
 			Number: 4,

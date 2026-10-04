@@ -126,6 +126,12 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		if len(s.Ask) > 0 {
 			fmt.Fprintln(w)
 		}
+		// The next step comes after the questions: run before them, it would
+		// change what they show.
+		if s.Then != nil {
+			fmt.Fprintf(w, "   Then: %s\n\n", s.Then.Label)
+			printFollowUp(w, *s.Then, wardenAddr)
+		}
 		fmt.Fprintln(w, "   What it shows:")
 		for _, line := range s.Shows {
 			fmt.Fprintf(w, "   - %s\n", line)
@@ -133,20 +139,31 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		fmt.Fprintln(w)
 		for _, v := range s.Variants {
 			fmt.Fprintf(w, "   Optional: %s\n\n", v.Label)
-			if v.Attach != nil {
-				printCommands(w, []string{"claude mcp remove bank", playground.ClaudeAddCommand(v.Attach, wardenAddr)})
-				// A running agent keeps the old headers until it reconnects, and
-				// would go on acting as the previous person.
-				printReconnectHint(w)
-			}
-			if v.Ask != "" {
-				fmt.Fprintf(w, "   Ask: %q\n\n", v.Ask)
-			}
+			printFollowUp(w, v, wardenAddr)
 			for _, line := range v.Shows {
 				fmt.Fprintf(w, "   - %s\n", line)
 			}
 			fmt.Fprintln(w)
 		}
+	}
+}
+
+// printFollowUp prints what a follow-up asks the reader to do: swap the bank,
+// run its commands, then ask its question.
+func printFollowUp(w io.Writer, v playground.Variant, wardenAddr string) {
+	var cmds []string
+	if v.Attach != nil {
+		cmds = append(cmds, "claude mcp remove bank", playground.ClaudeAddCommand(v.Attach, wardenAddr))
+	}
+	cmds = append(cmds, v.Commands...)
+	printCommands(w, cmds)
+	if v.Attach != nil {
+		// A running agent keeps the old headers until it reconnects, and
+		// would go on acting as the previous person.
+		printReconnectHint(w)
+	}
+	if v.Ask != "" {
+		fmt.Fprintf(w, "   Ask: %q\n\n", v.Ask)
 	}
 }
 
