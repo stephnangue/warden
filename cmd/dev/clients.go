@@ -226,15 +226,24 @@ func opencodeConfig(attached []*playground.Attachment, wardenAddr string) string
 	}))
 }
 
+// codexSandbox opens the network to the commands Codex runs in the playground
+// directory. Codex runs them with the network off by default, and scenario 8's
+// agent calls the bank's HTTP API with curl; MCP calls are Codex's own, and
+// work without it. sandbox_mode is top-level, so it comes before any table.
+const codexSandbox = `sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = true
+`
+
 // codexConfig writes Codex's TOML by hand: the shape is two keys a server.
 func codexConfig(attached []*playground.Attachment, wardenAddr string) string {
 	sorted := append([]*playground.Attachment(nil), attached...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Server < sorted[j].Server })
 	var b strings.Builder
-	for i, a := range sorted {
-		if i > 0 {
-			b.WriteString("\n")
-		}
+	b.WriteString(codexSandbox)
+	for _, a := range sorted {
+		b.WriteString("\n")
 		headers := headerMap(a)
 		names := make([]string, 0, len(headers))
 		for name := range headers {

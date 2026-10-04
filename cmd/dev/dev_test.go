@@ -267,6 +267,10 @@ func pasteConfig(t *testing.T, name, out string, nth int) map[string]map[string]
 
 	servers := map[string]map[string]string{}
 	if name == "codex" {
+		// Before the first table, or TOML reads it as a key of that table.
+		assert.True(t, strings.HasPrefix(string(raw), "sandbox_mode = \"workspace-write\"\n"), "%s", raw)
+		assert.Contains(t, string(raw), "[sandbox_workspace_write]\nnetwork_access = true\n",
+			"scenario 8's curl needs the network Codex turns off by default")
 		current := ""
 		for _, line := range strings.Split(string(raw), "\n") {
 			if m := tomlServer.FindStringSubmatch(line); m != nil {
