@@ -257,7 +257,9 @@ func pasteConfig(t *testing.T, name, out string, nth int) map[string]map[string]
 	require.Greater(t, len(blocks), nth, "config write %d", nth)
 	home := t.TempDir()
 	cmd := exec.Command("sh")
-	cmd.Env = append(os.Environ(), "HOME="+home, "AGENT=jwt-agent-1", "ALICE=jwt-alice", "BOB=jwt-bob")
+	// As the setup leaves the reader's shell.
+	cmd.Env = append(os.Environ(), "HOME="+home, "WARDEN_ADDR=http://127.0.0.1:8400",
+		"AGENT=jwt-agent-1", "ALICE=jwt-alice", "BOB=jwt-bob")
 	cmd.Stdin = strings.NewReader("warden() { echo jwt-agent-2; }\n" + blocks[nth] + "\n")
 	shOut, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", shOut)
@@ -271,6 +273,8 @@ func pasteConfig(t *testing.T, name, out string, nth int) map[string]map[string]
 		assert.True(t, strings.HasPrefix(string(raw), "sandbox_mode = \"workspace-write\"\n"), "%s", raw)
 		assert.Contains(t, string(raw), "[sandbox_workspace_write]\nnetwork_access = true\n",
 			"scenario 8's curl needs the network Codex turns off by default")
+		assert.Contains(t, string(raw), `set = { "WARDEN_ADDR" = "http://127.0.0.1:8400", "AGENT" = "jwt-agent-1" }`,
+			"scenario 8's curl gets the address and the JWT however Codex was started")
 		current := ""
 		for _, line := range strings.Split(string(raw), "\n") {
 			if m := tomlServer.FindStringSubmatch(line); m != nil {

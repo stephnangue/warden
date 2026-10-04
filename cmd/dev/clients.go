@@ -226,14 +226,20 @@ func opencodeConfig(attached []*playground.Attachment, wardenAddr string) string
 	}))
 }
 
-// codexSandbox opens the network to the commands Codex runs in the playground
-// directory. Codex runs them with the network off by default, and scenario 8's
-// agent calls the bank's HTTP API with curl; MCP calls are Codex's own, and
-// work without it. sandbox_mode is top-level, so it comes before any table.
+// codexSandbox prepares the commands Codex runs in the playground directory
+// for scenario 8, whose agent calls the bank's HTTP API with curl. Codex runs
+// them with the network off by default; MCP calls are Codex's own, and work
+// without it. The variables the teller skill uses are set in the file, filled
+// in by the shell as it writes, as the headers are, so the commands have them
+// however Codex was started. sandbox_mode is top-level, so it comes before
+// any table.
 const codexSandbox = `sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]
 network_access = true
+
+[shell_environment_policy]
+set = { "WARDEN_ADDR" = "$WARDEN_ADDR", "AGENT" = "$AGENT" }
 `
 
 // codexConfig writes Codex's TOML by hand: the shape is two keys a server.
