@@ -237,9 +237,12 @@ func Scenarios() []Scenario {
 			Detach:   []string{"bank"},
 			Commands: []string{"export AGENT WARDEN_ADDR"},
 			Restart:  true,
-			Ask:      []string{"Check my balance, deposit 30, then withdraw 500."},
+			// The question names the interface: teller is the role whose
+			// description says HTTP API. Left to infer it from which tools are
+			// missing, some models pick atm, whose MCP tools are not attached.
+			Ask: []string{"Use the bank's HTTP API: check my balance, deposit 30, then withdraw 500."},
 			Shows: []string{
-				"With no bank tool attached, the agent turns to discovery and picks teller: provider rest, with a url it can call itself.",
+				"The agent turns to discovery and picks teller, the role you call over HTTP: provider rest, with a url it can call itself.",
 				"It reads skill://teller/SKILL.md and calls the API with its own JWT. The bank still receives a token of its own.",
 				"The withdrawal of 500 is refused by a policy condition on the JSON body, written to fail closed: has(request.data.amount) && request.data.amount <= 100.",
 				"If the agent asks which bank, answer: the one you can reach through Warden.",
