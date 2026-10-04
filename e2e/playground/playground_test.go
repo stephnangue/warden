@@ -38,7 +38,8 @@ const rootToken = "root"
 
 // env is a running playground.
 type env struct {
-	addr string // Warden, e.g. http://127.0.0.1:41234
+	addr string      // Warden, e.g. http://127.0.0.1:41234
+	out  *syncBuffer // the server's output, banner included
 }
 
 // freeAddr returns a loopback address with a port free at the time of asking.
@@ -61,8 +62,8 @@ func startPlayground(t *testing.T) *env {
 		"-dev-playground-as-addr="+freeAddr(t),
 		"-dev-playground-bank-addr="+freeAddr(t),
 	)
-	var out syncBuffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	out := &syncBuffer{}
+	cmd.Stdout, cmd.Stderr = out, out
 	require.NoError(t, cmd.Start())
 	// One Wait, started now, so a server that exits during startup is noticed
 	// at once rather than after the whole deadline.
@@ -81,7 +82,7 @@ func startPlayground(t *testing.T) *env {
 		}
 	})
 
-	e := &env{addr: "http://" + listen}
+	e := &env{addr: "http://" + listen, out: out}
 	deadline := time.After(60 * time.Second)
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
@@ -298,6 +299,13 @@ func TestPlayground(t *testing.T) {
 	atmHeaders := map[string]string{"Authorization": "Bearer " + agent}
 
 	asURL, bankURL := "", ""
+
+	t.Run("0 the banner names everything Warden fronts", func(t *testing.T) {
+		banner := e.out.String()
+		for _, line := range []string{"Identity provider:", "Bank (MCP + REST):", "GitHub MCP:         " + playground.GitHubMCPURL, "Audit log:"} {
+			assert.Contains(t, banner, line)
+		}
+	})
 
 	t.Run("0 the tour prints commands for this server", func(t *testing.T) {
 		// Captured output is not a terminal, so ask for the tour by name.

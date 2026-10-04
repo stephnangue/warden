@@ -35,7 +35,7 @@ const (
 	MountGitHub  = "github-mcp"
 	RoleGitHub   = "github"
 
-	githubMCPURL = "https://api.githubcopilot.com/mcp"
+	GitHubMCPURL = "https://api.githubcopilot.com/mcp"
 
 	SkillTeller = "teller"
 	AuditDevice = "playground"
@@ -280,7 +280,7 @@ func Bootstrap(s Settings) []Step {
 			// Configuring the mount checks the URL's shape only: the playground
 			// still starts offline.
 			Path: MountGitHub + "/config", Operation: "update",
-			Data: map[string]any{"mcp_url": githubMCPURL, "auto_auth_path": "auth/" + AgentAuthMount + "/"},
+			Data: map[string]any{"mcp_url": GitHubMCPURL, "auto_auth_path": "auth/" + AgentAuthMount + "/"},
 		},
 
 		// Credentials: one keyless source, nothing stored.
