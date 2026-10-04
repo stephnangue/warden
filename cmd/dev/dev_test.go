@@ -97,9 +97,9 @@ func TestRenderTour(t *testing.T) {
 	bob := fourth[strings.Index(fourth, "Optional: As bob"):]
 	assert.Less(t, strings.Index(bob, "Then reconnect"), strings.Index(bob, "Ask:"), "before the variant's question")
 
-	seventh := renderTourFor(7)
-	assert.Contains(t, seventh, "claude mcp remove bank")
-	assert.NotContains(t, seventh, "claude mcp add", "the REST scenario attaches nothing new")
+	eighth := renderTourFor(8)
+	assert.Contains(t, eighth, "claude mcp remove bank")
+	assert.NotContains(t, eighth, "claude mcp add", "the REST scenario attaches nothing new")
 }
 
 // Only this command's -o flag asks for structured output; WARDEN_OUTPUT does

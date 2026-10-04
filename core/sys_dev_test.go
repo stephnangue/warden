@@ -210,7 +210,7 @@ func TestHandleDevScenarios(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.IsError())
 	assert.Equal(t, playground.SetupCommands, resp.Data["setup"])
-	assert.Len(t, resp.Data["scenarios"], 7)
+	assert.Len(t, resp.Data["scenarios"], len(playground.Scenarios()), "the whole catalogue")
 }
 
 // The playground is global: a namespace's own sys mount serves the dev paths
