@@ -111,14 +111,17 @@ func TestBootstrap_KeylessSource(t *testing.T) {
 }
 
 func TestBootstrap_Policies(t *testing.T) {
-	// Every policy covers both gateway shapes.
+	// Every policy covers the one gateway shape the tour uses: the role in the path.
 	for name, policy := range map[string]string{
 		"bank-access": policyBankAccess, "atm-tools": policyATMTools,
 		"assistant-on-behalf": policyAssistantOnBehalf, "assistant-tools": policyAssistantTools,
 		"github-access": policyGitHubAccess, "github-read": policyGitHubRead,
 	} {
-		assert.Equal(t, 2, strings.Count(policy, "path \""), name)
+		assert.Equal(t, 1, strings.Count(policy, "path \""), name)
 		assert.Contains(t, policy, "/role/+/gateway*", name)
+	}
+	for _, route := range []string{"accounts/me\"", "accounts/me/deposit\"", "accounts/me/withdraw\""} {
+		assert.Contains(t, policyTellerAPI, "bank-api/role/+/gateway/"+route, "one stanza per route")
 	}
 	assert.Contains(t, policyATMTools, "call.tool != 'withdraw' ||", "the limit judges withdraw only")
 	assert.Contains(t, policyATMTools, "has(call.args.amount)", "a withdrawal without a readable amount fails closed")

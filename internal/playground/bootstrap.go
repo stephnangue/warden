@@ -76,8 +76,9 @@ type Step struct {
 	Note string
 }
 
-// Policies the bootstrap writes. Every one covers both gateway shapes, since the
-// role-in-path one and the bare one are matched independently.
+// Policies the bootstrap writes. Every one covers only the role-in-path gateway
+// shape: every URL the tour gives carries the role. A client that named its role
+// in a header instead would reach the bare shape, which no policy here grants.
 var (
 	policyBankAccess = gatewayCBP(MountBank, "")
 
@@ -137,33 +138,28 @@ func atmToolRules(limit int) string {
 
 const gatewayCapabilities = `["read", "create", "update", "delete", "list"]`
 
+// gatewayPathPattern matches a mount's gateway reached through a role in the
+// path, /v1/<mount>/role/<role>/gateway/, the only shape the tour uses.
+func gatewayPathPattern(mount string) string { return mount + "/role/+/gateway" }
+
 func gatewayCBP(mount, extra string) string {
-	stanza := func(path string) string {
-		body := "  capabilities = " + gatewayCapabilities + "\n"
-		if extra != "" {
-			body += extra + "\n"
-		}
-		return "path \"" + path + "\" {\n" + body + "}\n"
+	body := "  capabilities = " + gatewayCapabilities + "\n"
+	if extra != "" {
+		body += extra + "\n"
 	}
-	return stanza(mount+"/gateway*") + stanza(mount+"/role/+/gateway*")
+	return "path \"" + gatewayPathPattern(mount) + "*\" {\n" + body + "}\n"
 }
 
 func gatewayMCP(mount, rules string) string {
-	stanza := func(path string) string {
-		return "path \"" + path + "\" {\n" + rules + "\n}\n"
-	}
-	return stanza(mount+"/gateway*") + stanza(mount+"/role/+/gateway*")
+	return "path \"" + gatewayPathPattern(mount) + "*\" {\n" + rules + "\n}\n"
 }
 
 func restRouteCBP(route, capabilities, condition string) string {
-	stanza := func(path string) string {
-		body := "  capabilities = " + capabilities + "\n"
-		if condition != "" {
-			body += "  condition    = \"" + condition + "\"\n"
-		}
-		return "path \"" + path + "\" {\n" + body + "}\n"
+	body := "  capabilities = " + capabilities + "\n"
+	if condition != "" {
+		body += "  condition    = \"" + condition + "\"\n"
 	}
-	return stanza(MountBankAPI+"/gateway/"+route) + stanza(MountBankAPI+"/role/+/gateway/"+route)
+	return "path \"" + gatewayPathPattern(MountBankAPI) + "/" + route + "\" {\n" + body + "}\n"
 }
 
 // Bootstrap returns the writes that build the playground, in order. Order matters:
