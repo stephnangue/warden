@@ -151,7 +151,7 @@ func TestTellerSkill_MatchesTheBank(t *testing.T) {
 
 func TestScenarios(t *testing.T) {
 	scenarios := Scenarios()
-	require.Len(t, scenarios, 8)
+	require.Len(t, scenarios, 9)
 	for i, s := range scenarios {
 		assert.Equal(t, i+1, s.Number)
 		assert.NotEmpty(t, s.Title)
@@ -160,7 +160,7 @@ func TestScenarios(t *testing.T) {
 		// second one beside it.
 		for _, a := range append([]*Attachment{s.Attach}, variantAttachments(s)...) {
 			if a != nil {
-				assert.Contains(t, []string{"bank", "warden"}, a.Server, s.Title)
+				assert.Contains(t, []string{"bank", "warden", "github"}, a.Server, s.Title)
 			}
 		}
 	}

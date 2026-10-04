@@ -107,14 +107,15 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		for _, server := range s.Detach {
 			cmds = append(cmds, "claude mcp remove "+server)
 		}
+		// The bank is replaced, never added beside another one.
+		if s.Attach != nil && s.Attach.Server == "bank" && s.Number > 1 {
+			cmds = append(cmds, "claude mcp remove bank")
+		}
+		// Configure first, then connect.
+		cmds = append(cmds, s.Commands...)
 		if s.Attach != nil {
-			// The bank is replaced, never added beside another one.
-			if s.Attach.Server == "bank" && s.Number > 1 {
-				cmds = append(cmds, "claude mcp remove bank")
-			}
 			cmds = append(cmds, playground.ClaudeAddCommand(s.Attach, wardenAddr))
 		}
-		cmds = append(cmds, s.Commands...)
 		printCommands(w, cmds)
 		if s.Attach != nil && s.Number > 1 || len(s.Detach) > 0 {
 			printReconnectHint(w)
@@ -158,9 +159,14 @@ func printCommands(w io.Writer, cmds []string) {
 	if len(cmds) == 0 {
 		return
 	}
-	for _, c := range cmds {
-		for _, line := range strings.Split(c, "\n") {
+	for i, c := range cmds {
+		lines := strings.Split(c, "\n")
+		for _, line := range lines {
 			fmt.Fprintf(w, "   %s\n", line)
+		}
+		// A command that spans lines is set apart from the next one.
+		if len(lines) > 1 && i < len(cmds)-1 {
+			fmt.Fprintln(w)
 		}
 	}
 	fmt.Fprintln(w)

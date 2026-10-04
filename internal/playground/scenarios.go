@@ -14,8 +14,9 @@ type Header struct {
 
 // Attachment is an MCP server to attach to the agent's client.
 type Attachment struct {
-	// Server is the name the client knows it by: "bank" or "warden". There is
-	// never more than one bank attached, so the agent cannot pick the wrong one.
+	// Server is the name the client knows it by: "bank", "warden" or "github".
+	// There is never more than one bank attached, so the agent cannot pick the
+	// wrong one.
 	Server string `json:"server"`
 	// Path is relative to the Warden address, for example "/v1/bank/role/atm/gateway/".
 	Path    string   `json:"path"`
@@ -75,6 +76,73 @@ func gatewayPath(mount, role string) string {
 // liveLimitPolicy is scenario 3's live edit: the same tool policy with a larger
 // withdrawal limit.
 var liveLimitPolicy = gatewayMCP(MountBank, atmToolRules(1000))
+
+// What the last scenario has the reader create: the same agent identity, in
+// front of GitHub's hosted MCP server, with the reader's own PAT.
+const (
+	SourceGitHub = "github"
+	SpecGitHub   = "github-pat"
+	MountGitHub  = "github-mcp"
+	RoleGitHub   = "github"
+
+	githubMCPURL = "https://api.githubcopilot.com/mcp"
+)
+
+// The last scenario's policies, exported so a test can parse them. The tools
+// are GitHub's read-only ones: its write tools never reach the agent.
+var (
+	GitHubAccessPolicy = gatewayCBP(MountGitHub, "")
+	GitHubReadPolicy   = gatewayMCP(MountGitHub,
+		`  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["get_me", "get_file_contents", "list_issues", "issue_read", "list_pull_requests", "pull_request_read", "search_code", "search_issues"] }`)
+)
+
+// githubCommands set GitHub up the way the bootstrap set the bank up, minus the
+// keyless source: the PAT is stored on the spec, the quickest start, which the
+// scenario then points at credential chaining for production. The PAT is read
+// without echo, so it stays out of the shell's history, and the heredoc
+// expands it.
+func githubCommands() []string {
+	return []string{
+		"printf 'GitHub PAT: '; read -rs GITHUB_PAT; echo",
+		`warden cred source create ` + SourceGitHub + ` -json '{
+  "type": "github",
+  "config": {
+    "github_url": "https://api.github.com"
+  }
+}'`,
+		`warden cred spec create ` + SpecGitHub + ` -json - <<EOF
+{
+  "source": "` + SourceGitHub + `",
+  "min_ttl": 3600,
+  "max_ttl": 86400,
+  "config": {
+    "mint_method": "pat",
+    "token": "$GITHUB_PAT"
+  }
+}
+EOF`,
+		`warden provider enable -path=` + MountGitHub + ` -description="GitHub, as an MCP server." mcp`,
+		`warden write ` + MountGitHub + `/config <<EOF
+{
+  "mcp_url": "` + githubMCPURL + `",
+  "auto_auth_path": "auth/` + AgentAuthMount + `/"
+}
+EOF`,
+		"warden policy write github-access - <<EOF\n" + GitHubAccessPolicy + "EOF",
+		"warden policy write -type mcp github-read - <<EOF\n" + GitHubReadPolicy + "EOF",
+		`warden write auth/` + AgentAuthMount + `/role/` + RoleGitHub + ` <<EOF
+{
+  "description": "Read GitHub repositories, issues and pull requests, with the operator's PAT.",
+  "bound_audiences": ["` + AudienceAgent + `"],
+  "user_claim": "sub",
+  "token_policies": ["github-access", "github-read"],
+  "cred_spec_name": "` + SpecGitHub + `",
+  "provider_path": "` + MountGitHub + `/"
+}
+EOF`,
+	}
+}
 
 // Scenarios is the playground's tour, one idea at a time.
 func Scenarios() []Scenario {
@@ -206,6 +274,20 @@ func Scenarios() []Scenario {
 				"It reads skill://teller/SKILL.md and calls the API with its own JWT. The bank still receives a token of its own.",
 				"The withdrawal of 500 is refused by a policy condition on the JSON body, written to fail closed: has(request.data.amount) && request.data.amount <= 100.",
 				"If the agent asks which bank, answer: the one you can reach through Warden.",
+			},
+		},
+		{
+			Number:   9,
+			Title:    "Your own service next: GitHub",
+			Commands: githubCommands(),
+			Attach:   &Attachment{Server: "github", Path: gatewayPath(MountGitHub, RoleGitHub), Headers: agentHeader("AGENT")},
+			Ask:      []string{"What can you do through Warden?", "List the open issues in <owner>/<repo>."},
+			Shows: []string{
+				"Same agent, same identity, same Warden: only the upstream changed. The PAT lives in Warden; the agent still holds only $AGENT.",
+				"list_roles now includes github. The tool policy lets through GitHub's read-only tools; its write tools never reach the agent.",
+				"Creating the spec warns that it stores a secret: a PAT is long-lived, which the bank's keyless token never was.",
+				"In production, store nothing: keep the PAT in your secret store and let Warden fetch it per request with credential chaining (secret_spec). https://wardengateway.com/federation/credential-chaining/",
+				"The dev server keeps everything in memory. Restarting it forgets the PAT.",
 			},
 		},
 	}

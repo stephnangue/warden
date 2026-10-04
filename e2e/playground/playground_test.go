@@ -597,4 +597,42 @@ func TestPlayground(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, out.Result.Balance, viaMCP.Result.Balance, "one account behind both faces")
 	})
+
+	t.Run("9 your own service next: GitHub", func(t *testing.T) {
+		// Every command the reader runs, as a shell runs it, but the two that
+		// need a real PAT: the prompt, and the spec create GitHub verifies.
+		ran := 0
+		for _, line := range playground.Scenarios()[8].Commands {
+			if strings.Contains(line, "GITHUB_PAT") {
+				continue
+			}
+			e.sh(t, line)
+			ran++
+		}
+		require.Equal(t, 6, ran, "the source, the mount and its config, both policies and the role")
+
+		discovery, err := e.attach(t, "/v1/sys/mcp", map[string]string{"Authorization": "Bearer " + agent})
+		require.NoError(t, err)
+		res, err := discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
+		require.NoError(t, err)
+		raw, _ := json.Marshal(res.StructuredContent)
+		var listed struct {
+			Roles []struct {
+				Name, Provider, Skill, URL string
+			} `json:"roles"`
+			Warnings []string `json:"warnings"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &listed))
+		assert.Empty(t, listed.Warnings, "the mount, its auth path and the role agree")
+		var github *struct{ Name, Provider, Skill, URL string }
+		for i, r := range listed.Roles {
+			if r.Name == playground.RoleGitHub {
+				github = &listed.Roles[i]
+			}
+		}
+		require.NotNil(t, github, "the agent finds the new role by itself: %+v", listed.Roles)
+		assert.Equal(t, "mcp", github.Provider)
+		assert.Equal(t, "skill://mcp/SKILL.md", github.Skill)
+		assert.Equal(t, "/v1/github-mcp/role/github/gateway/", github.URL)
+	})
 }

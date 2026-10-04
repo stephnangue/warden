@@ -52,4 +52,10 @@ func TestPoliciesParse(t *testing.T) {
 	require.True(t, ok, "the heredoc is terminated")
 	_, err := core.ParseMCPPolicy(namespace.RootNamespace, policy)
 	assert.NoError(t, err, "scenario 3's live limit")
+
+	// The policies the last scenario has the reader write for GitHub.
+	_, err = core.ParseCBPPolicy(namespace.RootNamespace, playground.GitHubAccessPolicy)
+	assert.NoError(t, err, "github-access")
+	_, err = core.ParseMCPPolicy(namespace.RootNamespace, playground.GitHubReadPolicy)
+	assert.NoError(t, err, "github-read")
 }
