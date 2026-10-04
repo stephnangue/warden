@@ -540,7 +540,8 @@ func TestPlayground(t *testing.T) {
 			"atm":       {"mcp", "skill://mcp/SKILL.md", "/v1/bank/role/atm/gateway/"},
 			"assistant": {"mcp", "skill://mcp/SKILL.md", "/v1/bank-me/role/assistant/gateway/"},
 			"teller":    {"rest", "skill://teller/SKILL.md", "/v1/bank-api/role/teller/gateway/"},
-		}, got)
+			"github":    {"mcp", "skill://mcp/SKILL.md", "/v1/github-mcp/role/github/gateway/"},
+		}, got, "github is listed before it has a credential")
 
 		for _, uri := range []string{"skill://teller/SKILL.md", "skill://rest/SKILL.md", "skill://mcp/SKILL.md"} {
 			res, err := discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "read_skill", Arguments: map[string]any{"uri": uri}})
@@ -599,40 +600,16 @@ func TestPlayground(t *testing.T) {
 	})
 
 	t.Run("9 your own service next: GitHub", func(t *testing.T) {
-		// Every command the reader runs, as a shell runs it, but the two that
-		// need a real PAT: the prompt, and the spec create GitHub verifies.
-		ran := 0
+		// The playground set GitHub up; all the reader brings is the PAT. Every
+		// command needs it, so none runs here: GitHub verifies the PAT.
 		for _, line := range playground.Scenarios()[8].Commands {
-			if strings.Contains(line, "GITHUB_PAT") {
-				continue
-			}
-			e.sh(t, line)
-			ran++
+			assert.Contains(t, line, "GITHUB_PAT", "the reader only supplies the PAT")
 		}
-		require.Equal(t, 6, ran, "the source, the mount and its config, both policies and the role")
 
-		discovery, err := e.attach(t, "/v1/sys/mcp", map[string]string{"Authorization": "Bearer " + agent})
-		require.NoError(t, err)
-		res, err := discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
-		require.NoError(t, err)
-		raw, _ := json.Marshal(res.StructuredContent)
-		var listed struct {
-			Roles []struct {
-				Name, Provider, Skill, URL string
-			} `json:"roles"`
-			Warnings []string `json:"warnings"`
-		}
-		require.NoError(t, json.Unmarshal(raw, &listed))
-		assert.Empty(t, listed.Warnings, "the mount, its auth path and the role agree")
-		var github *struct{ Name, Provider, Skill, URL string }
-		for i, r := range listed.Roles {
-			if r.Name == playground.RoleGitHub {
-				github = &listed.Roles[i]
-			}
-		}
-		require.NotNil(t, github, "the agent finds the new role by itself: %+v", listed.Roles)
-		assert.Equal(t, "mcp", github.Provider)
-		assert.Equal(t, "skill://mcp/SKILL.md", github.Skill)
-		assert.Equal(t, "/v1/github-mcp/role/github/gateway/", github.URL)
+		// Until then the role is ready but has nothing to mint, and Warden says
+		// so before GitHub is reached.
+		_, err := e.attach(t, "/v1/github-mcp/role/github/gateway/", map[string]string{"Authorization": "Bearer " + agent})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), playground.SpecGitHub, "the missing spec is named")
 	})
 }

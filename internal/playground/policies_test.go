@@ -43,7 +43,7 @@ func TestPoliciesParse(t *testing.T) {
 		assert.NoError(t, err, s.Path)
 		parsed++
 	}
-	assert.Equal(t, 5, parsed, "every policy the bootstrap writes")
+	assert.Equal(t, 7, parsed, "every policy the bootstrap writes")
 
 	cmd := playground.Scenarios()[2].Commands[0]
 	_, rest, ok := strings.Cut(cmd, "<<EOF\n")
@@ -52,10 +52,4 @@ func TestPoliciesParse(t *testing.T) {
 	require.True(t, ok, "the heredoc is terminated")
 	_, err := core.ParseMCPPolicy(namespace.RootNamespace, policy)
 	assert.NoError(t, err, "scenario 3's live limit")
-
-	// The policies the last scenario has the reader write for GitHub.
-	_, err = core.ParseCBPPolicy(namespace.RootNamespace, playground.GitHubAccessPolicy)
-	assert.NoError(t, err, "github-access")
-	_, err = core.ParseMCPPolicy(namespace.RootNamespace, playground.GitHubReadPolicy)
-	assert.NoError(t, err, "github-read")
 }

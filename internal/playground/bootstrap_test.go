@@ -52,6 +52,8 @@ func TestBootstrap_Order(t *testing.T) {
 	before("sys/cred/sources/bank-as", "sys/cred/specs/bank-agent")
 	before("sys/cred/specs/bank-agent", "auth/agent/role/atm")
 	before("sys/policies/mcp/atm-tools", "auth/agent/role/atm")
+	before("sys/providers/github-mcp", "github-mcp/config")
+	before("sys/policies/mcp/github-read", "auth/agent/role/github")
 	assert.Equal(t, "sys/audit/playground", steps[len(steps)-1].Path, "audit last, so the log holds the scenarios")
 
 	seen := map[string]bool{}
@@ -66,7 +68,7 @@ func TestBootstrap_Order(t *testing.T) {
 // stay prose.
 func TestBootstrap_Roles(t *testing.T) {
 	steps := Bootstrap(testSettings())
-	want := map[string]string{RoleATM: "bank/", RoleAssistant: "bank-me/", RoleTeller: "bank-api/"}
+	want := map[string]string{RoleATM: "bank/", RoleAssistant: "bank-me/", RoleTeller: "bank-api/", RoleGitHub: "github-mcp/"}
 	for role, mount := range want {
 		i := stepIndex(steps, "auth/agent/role/"+role)
 		require.NotEqual(t, -1, i, role)
@@ -113,6 +115,7 @@ func TestBootstrap_Policies(t *testing.T) {
 	for name, policy := range map[string]string{
 		"bank-access": policyBankAccess, "atm-tools": policyATMTools,
 		"assistant-on-behalf": policyAssistantOnBehalf, "assistant-tools": policyAssistantTools,
+		"github-access": policyGitHubAccess, "github-read": policyGitHubRead,
 	} {
 		assert.Equal(t, 2, strings.Count(policy, "path \""), name)
 		assert.Contains(t, policy, "/role/+/gateway*", name)

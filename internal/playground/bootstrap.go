@@ -27,6 +27,16 @@ const (
 	SpecBankOnBehalf = "bank-on-behalf"
 	SpecBankAPIAgent = "bank-api-agent"
 
+	// GitHub's hosted MCP server, set up like the bank's MCP face but for its
+	// credential: the spec holds the reader's PAT, so the reader creates it
+	// (scenario 9) and until then the role has nothing to mint.
+	SourceGitHub = "github"
+	SpecGitHub   = "github-pat"
+	MountGitHub  = "github-mcp"
+	RoleGitHub   = "github"
+
+	githubMCPURL = "https://api.githubcopilot.com/mcp"
+
 	SkillTeller = "teller"
 	AuditDevice = "playground"
 
@@ -96,6 +106,12 @@ var (
 		restRouteCBP("accounts/me/deposit", `["create", "update"]`, "") +
 		restRouteCBP("accounts/me/withdraw", `["create", "update"]`,
 			`has(request.data.amount) && request.data.amount <= 100`)
+
+	// GitHub's read-only tools: its write tools never reach the agent.
+	policyGitHubAccess = gatewayCBP(MountGitHub, "")
+	policyGitHubRead   = gatewayMCP(MountGitHub,
+		`  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["get_me", "get_file_contents", "list_issues", "issue_read", "list_pull_requests", "pull_request_read", "search_code", "search_issues"] }`)
 )
 
 // atmWithdrawCondition is the ATM's withdrawal limit, as a policy condition.
@@ -255,6 +271,17 @@ func Bootstrap(s Settings) []Step {
 			Path: MountBankAPI + "/config", Operation: "update",
 			Data: map[string]any{"base_url": s.bankAPIURL(), "ca_data": caData, "auto_auth_path": "auth/" + AgentAuthMount + "/"},
 		},
+		{
+			Path: "sys/providers/" + MountGitHub, Operation: "create",
+			Data: map[string]any{"type": "mcp", "description": "GitHub, as an MCP server."},
+			Note: "A real service for the last scenario, reached exactly like the bank's MCP face.",
+		},
+		{
+			// Configuring the mount checks the URL's shape only: the playground
+			// still starts offline.
+			Path: MountGitHub + "/config", Operation: "update",
+			Data: map[string]any{"mcp_url": githubMCPURL, "auto_auth_path": "auth/" + AgentAuthMount + "/"},
+		},
 
 		// Credentials: one keyless source, nothing stored.
 		{
@@ -271,6 +298,13 @@ func Bootstrap(s Settings) []Step {
 		{Path: "sys/cred/specs/" + SpecBankAgent, Operation: "create", Data: spec(s.bankMCPURL(), false), Note: "A bank token for the agent itself."},
 		{Path: "sys/cred/specs/" + SpecBankOnBehalf, Operation: "create", Data: spec(s.bankMCPURL(), true), Note: "A bank token for a person, with the agent in act."},
 		{Path: "sys/cred/specs/" + SpecBankAPIAgent, Operation: "create", Data: spec(s.bankAPIURL(), false), Note: "A bank token for the REST face."},
+		{
+			// The source holds no secret, so it is created offline; the spec that
+			// holds the reader's PAT is theirs to create, in scenario 9.
+			Path: "sys/cred/sources/" + SourceGitHub, Operation: "create",
+			Data: map[string]any{"type": "github", "config": map[string]any{"github_url": "https://api.github.com"}},
+			Note: "Where GitHub tokens come from; the reader adds the PAT.",
+		},
 
 		// Policies.
 		{Path: "sys/policies/cbp/bank-access", Operation: "create", Data: map[string]any{"policy": policyBankAccess}},
@@ -278,6 +312,8 @@ func Bootstrap(s Settings) []Step {
 		{Path: "sys/policies/cbp/assistant-on-behalf", Operation: "create", Data: map[string]any{"policy": policyAssistantOnBehalf}, Note: "Only the agent the person named in may_act."},
 		{Path: "sys/policies/mcp/assistant-tools", Operation: "create", Data: map[string]any{"policy": policyAssistantTools}, Note: "Which tools, and withdrawals of at most 100, or 1000 for a premium customer."},
 		{Path: "sys/policies/cbp/teller-api", Operation: "create", Data: map[string]any{"policy": policyTellerAPI}, Note: "Routes, and a withdrawal amount read from the body."},
+		{Path: "sys/policies/cbp/github-access", Operation: "create", Data: map[string]any{"policy": policyGitHubAccess}},
+		{Path: "sys/policies/mcp/github-read", Operation: "create", Data: map[string]any{"policy": policyGitHubRead}, Note: "GitHub's read-only tools."},
 
 		// A skill for the REST role: an HTTP API does not describe itself.
 		{
@@ -307,6 +343,13 @@ func Bootstrap(s Settings) []Step {
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleTeller, Operation: "create",
 			Data: agentRole("The bank's HTTP API for your own account: balance, deposit, and withdraw up to 100 at a time.",
 				MountBankAPI, SpecBankAPIAgent, []string{"teller-api"}, SkillTeller),
+		},
+		{
+			// Names a spec that does not exist until the reader creates it: a role
+			// is stored without checking it, and discovery lists it all the same.
+			Path: "auth/" + AgentAuthMount + "/role/" + RoleGitHub, Operation: "create",
+			Data: agentRole("Read GitHub repositories, issues and pull requests, with a GitHub token the operator provides.",
+				MountGitHub, SpecGitHub, []string{"github-access", "github-read"}, ""),
 		},
 
 		// Last, so the log holds the scenarios rather than the setup.

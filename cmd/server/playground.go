@@ -123,7 +123,7 @@ func checkPlaygroundTrust(certPEM, wardenAddr string) error {
 }
 
 // playgroundRoles are the roles the self-check expects discovery to list.
-var playgroundRoles = []string{playground.RoleATM, playground.RoleAssistant, playground.RoleTeller}
+var playgroundRoles = []string{playground.RoleATM, playground.RoleAssistant, playground.RoleTeller, playground.RoleGitHub}
 
 // bootstrapPlayground wires Warden to the playground as the root token, then
 // checks discovery shows what the scenarios tell a newcomer to expect. Either
