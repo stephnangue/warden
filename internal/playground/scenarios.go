@@ -45,11 +45,13 @@ type Scenario struct {
 	Variants []Variant `json:"variants,omitempty"`
 }
 
-// SetupCommands mint the identities the scenarios use.
+// SetupCommands mint the identities the scenarios use. They live a working day,
+// so a reader who pauses the tour does not come back to refusals on every
+// attached server. bob is a premium customer: his token says so.
 var SetupCommands = []string{
-	"AGENT=$(warden dev jwt agent agent-1)",
-	"ALICE=$(warden dev jwt user alice -may-act agent-1)",
-	"BOB=$(warden dev jwt user bob -may-act agent-1)",
+	"AGENT=$(warden dev jwt agent agent-1 -ttl 8h)",
+	"ALICE=$(warden dev jwt user alice -may-act agent-1 -ttl 8h)",
+	`BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)`,
 }
 
 func agentHeader(variable string) []Header {
@@ -126,8 +128,14 @@ func Scenarios() []Scenario {
 				{
 					Label:  "As bob",
 					Attach: bankAssistant("AGENT", "BOB"),
-					Ask:    "What's my balance?",
-					Shows:  []string{"bob's account: same agent, same role, one account per person."},
+					Ask:    "What's my balance? Withdraw 500.",
+					Shows: []string{
+						"bob's account: same agent, same role, one account per person.",
+						"500 goes through: bob's token carries tier: premium, and the assistant's limit reads it as user.metadata.tier, 1000 for a premium customer.",
+						"alice has no tier, so her limit is 100.",
+						"The tier comes from bob's token, signed by the IdP. Neither the agent nor anything said in the conversation can claim it.",
+						"`warden policy -type mcp read assistant-tools` shows the rule.",
+					},
 				},
 				{
 					Label: "As agent-2, holding alice's token",

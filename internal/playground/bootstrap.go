@@ -83,9 +83,12 @@ var (
 	policyAssistantOnBehalf = gatewayCBP(MountBankMe,
 		`  condition = "user.present && user.metadata.may_act_sub == agent.principal"`)
 
+	// The person's limit comes from their own verified token: a premium customer
+	// may withdraw more. Like the ATM's, it judges withdraw only and fails closed.
 	policyAssistantTools = gatewayMCP(MountBankMe,
 		`  methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_balance", "withdraw", "deposit"] }`)
+  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
+  condition = "`+assistantWithdrawCondition()+`"`)
 
 	// The REST face reads the withdrawal body. The condition fails closed: a body
 	// Warden did not read has no amount, so it is refused rather than let through.
@@ -98,6 +101,15 @@ var (
 // atmWithdrawCondition is the ATM's withdrawal limit, as a policy condition.
 func atmWithdrawCondition(limit int) string {
 	return fmt.Sprintf("call.tool != 'withdraw' || (has(call.args.amount) && call.args.amount <= %d)", limit)
+}
+
+// assistantWithdrawCondition is the withdrawal limit of a person an agent acts
+// for: 1000 for a premium customer, 100 otherwise. The tier is read with dotted
+// access, which the audit records among the condition's inputs; a person whose
+// token carries no tier has an empty metadata map, so has() is false.
+func assistantWithdrawCondition() string {
+	return "call.tool != 'withdraw' || (has(call.args.amount) && call.args.amount <= " +
+		"(has(user.metadata.tier) && user.metadata.tier == 'premium' ? 1000 : 100))"
 }
 
 // atmToolRules is the body of the ATM's tool policy, with the given limit.
@@ -205,10 +217,11 @@ func Bootstrap(s Settings) []Step {
 				"description":     "A person an agent acts for.",
 				"bound_audiences": []string{AudienceUser},
 				"user_claim":      "sub",
-				// Surface may_act so the assistant policy can check it.
-				"metadata_claims": map[string]any{"/may_act/sub": "may_act_sub"},
+				// Surface may_act so the assistant policy can check it, and the
+				// customer tier its withdrawal limit reads.
+				"metadata_claims": map[string]any{"/may_act/sub": "may_act_sub", "/tier": "tier"},
 			},
-			Note: "The person's token exposes which agent may act for them.",
+			Note: "The person's token exposes which agent may act for them, and their customer tier.",
 		},
 
 		// The bank's faces.
@@ -263,7 +276,7 @@ func Bootstrap(s Settings) []Step {
 		{Path: "sys/policies/cbp/bank-access", Operation: "create", Data: map[string]any{"policy": policyBankAccess}},
 		{Path: "sys/policies/mcp/atm-tools", Operation: "create", Data: map[string]any{"policy": policyATMTools}, Note: "Which tools, and withdrawals of at most 100."},
 		{Path: "sys/policies/cbp/assistant-on-behalf", Operation: "create", Data: map[string]any{"policy": policyAssistantOnBehalf}, Note: "Only the agent the person named in may_act."},
-		{Path: "sys/policies/mcp/assistant-tools", Operation: "create", Data: map[string]any{"policy": policyAssistantTools}},
+		{Path: "sys/policies/mcp/assistant-tools", Operation: "create", Data: map[string]any{"policy": policyAssistantTools}, Note: "Which tools, and withdrawals of at most 100, or 1000 for a premium customer."},
 		{Path: "sys/policies/cbp/teller-api", Operation: "create", Data: map[string]any{"policy": policyTellerAPI}, Note: "Routes, and a withdrawal amount read from the body."},
 
 		// A skill for the REST role: an HTTP API does not describe itself.
@@ -286,7 +299,8 @@ func Bootstrap(s Settings) []Step {
 		},
 		{
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleAssistant, Operation: "create",
-			Data: agentRole("Use a person's bank account on their behalf, when they have allowed this agent to act for them.",
+			Data: agentRole("Use a person's bank account on their behalf, when they have allowed this agent to act for them: "+
+				"check the balance, deposit, and withdraw up to 100 at a time, or 1000 for a premium customer.",
 				MountBankMe, SpecBankOnBehalf, []string{"assistant-on-behalf", "assistant-tools"}, ""),
 		},
 		{

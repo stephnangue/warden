@@ -11,6 +11,7 @@ package playground
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -237,6 +238,37 @@ func isAgent(sub any, principal string) bool {
 	return strings.HasPrefix(s, "wid:") && strings.HasSuffix(s, ":"+principal)
 }
 
+// setup runs the tour's setup lines, NAME=$(command), and returns each token by
+// name. It runs the command inside the substitution, since an assignment would
+// not outlive the shell it ran in.
+func (e *env) setup(t *testing.T) map[string]string {
+	t.Helper()
+	tokens := map[string]string{}
+	for _, line := range playground.SetupCommands {
+		name, rest, ok := strings.Cut(line, "=$(")
+		require.True(t, ok, "a setup line assigns a command's output: %s", line)
+		command, ok := strings.CutSuffix(rest, ")")
+		require.True(t, ok, "the substitution is closed: %s", line)
+		tokens[name] = e.sh(t, command)
+	}
+	return tokens
+}
+
+// lifetime is a JWT's exp minus its iat.
+func lifetime(t *testing.T, token string) time.Duration {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3, "a compact JWT")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims struct {
+		IAT int64 `json:"iat"`
+		EXP int64 `json:"exp"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return time.Duration(claims.EXP-claims.IAT) * time.Second
+}
+
 func (e *env) rest(t *testing.T, token, method, route, contentType, body string) (int, bankResult) {
 	t.Helper()
 	req, err := http.NewRequest(method, e.addr+"/v1/bank-api/role/teller/gateway/accounts/me"+route, strings.NewReader(body))
@@ -256,10 +288,13 @@ func (e *env) rest(t *testing.T, token, method, route, contentType, body string)
 func TestPlayground(t *testing.T) {
 	e := startPlayground(t)
 
-	agent := e.cli(t, "", "dev", "jwt", "agent", "agent-1")
-	alice := e.cli(t, "", "dev", "jwt", "user", "alice", "-may-act", "agent-1")
-	bob := e.cli(t, "", "dev", "jwt", "user", "bob", "-may-act", "agent-1")
+	// The identities the reader mints, minted the same way.
+	tokens := e.setup(t)
+	agent, alice, bob := tokens["AGENT"], tokens["ALICE"], tokens["BOB"]
 	require.Equal(t, 2, strings.Count(agent, "."), "warden dev jwt prints a bare JWT")
+	for name, token := range tokens {
+		assert.Equal(t, 8*time.Hour, lifetime(t, token), "%s lasts a working day", name)
+	}
 	atmHeaders := map[string]string{"Authorization": "Bearer " + agent}
 
 	asURL, bankURL := "", ""
@@ -395,6 +430,10 @@ func TestPlayground(t *testing.T) {
 		act, _ := out.AccessToken["act"].(map[string]any)
 		assert.True(t, isAgent(act["sub"], "agent-1"), "the agent in act: %v", act)
 
+		// alice has no tier: her limit is 100, though the bank would pay.
+		_, err = callTool(t, asAlice, "withdraw", map[string]any{"amount": 500})
+		requireRefused(t, err, "500 is over alice's limit")
+
 		asBob, err := e.attach(t, "/v1/bank-me/role/assistant/gateway/", map[string]string{
 			"X-Warden-Agent-Token": agent, "Authorization": "Bearer " + bob,
 		})
@@ -403,6 +442,14 @@ func TestPlayground(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "bob", out.Result.Account)
 		assert.Equal(t, int64(1000), out.Result.Balance)
+
+		// bob's token says premium: same agent, same role, a higher limit.
+		out, err = callTool(t, asBob, "withdraw", map[string]any{"amount": 500})
+		require.NoError(t, err, "500 is within a premium customer's limit")
+		assert.Equal(t, int64(500), out.Result.Balance)
+		// Refused by Warden over the limit, not by the bank for want of funds.
+		_, err = callTool(t, asBob, "withdraw", map[string]any{"amount": 1500})
+		requireRefused(t, err, "1500 is over even a premium customer's limit")
 
 		agent2 := e.cli(t, "", "dev", "jwt", "agent", "agent-2")
 		_, err = e.attach(t, "/v1/bank-me/role/assistant/gateway/", map[string]string{
