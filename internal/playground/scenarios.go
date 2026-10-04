@@ -1,9 +1,6 @@
 package playground
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // Header is one header an MCP client is attached with. Values refer to shell
 // variables (for example "Bearer $AGENT") that the setup commands define.
@@ -47,7 +44,14 @@ type Scenario struct {
 	Attach *Attachment `json:"attach,omitempty"`
 	// Commands are shell commands to run, in order, besides attaching.
 	Commands []string `json:"commands,omitempty"`
-	Ask      []string `json:"ask,omitempty"`
+	// Export names the shell variables the scenario hands to the agent itself,
+	// to call an API with. They reach an agent started after the export, so
+	// the scenario has it restarted; until one exports, the agent holds none.
+	Export []string `json:"export,omitempty"`
+	// Instructions is markdown for the agent's instruction file (AGENTS.md,
+	// for a client that reads one), written with the scenario's attachment.
+	Instructions string   `json:"instructions,omitempty"`
+	Ask          []string `json:"ask,omitempty"`
 	// Then is the scenario's next step, done once its questions are answered:
 	// a change the reader makes, and the question that shows it took effect.
 	Then     *Variant  `json:"then,omitempty"`
@@ -125,7 +129,7 @@ func Scenarios() []Scenario {
 				"The bank received a different token: access_token.iss is the bank's authorization server, aud is the bank, exp is five minutes away.",
 				"Warden got that token by proving the agent's identity with an assertion signed by its own OIDC issuer. No secret is stored anywhere: `warden cred source read " + SourceBankAS + "` shows none.",
 				"The agent never saw the bank token.",
-				"The agent is asked to show the token's claims with every answer. If it does not, expand the raw tool result (ctrl+o in Claude Code) and read access_token.",
+				"The agent is asked to show the token's claims with every answer. If it does not, expand the raw tool result in your client and read access_token.",
 			},
 		},
 		{
@@ -223,7 +227,12 @@ func Scenarios() []Scenario {
 			Number: 7,
 			Title:  "The agent finds its roles by itself",
 			Attach: &Attachment{Server: "warden", Path: "/v1/sys/mcp", Headers: agentHeader("AGENT")},
-			Ask:    []string{"What can you do through Warden?"},
+			// What an operator tells their agents, so they look in Warden for a
+			// service rather than only when a question names it.
+			Instructions: "# Warden\n\n" +
+				"Reach services through Warden. Call list_roles on the warden MCP server, " +
+				"pick the role that fits the task, and read its skill before using it.\n",
+			Ask: []string{"What can you do through Warden?"},
 			Shows: []string{
 				"list_roles returns atm, assistant and teller, each with a description, a provider, a skill:// URI and a url.",
 				"It returns github too, which has no credential yet: scenario 9 gives it one.",
@@ -232,16 +241,18 @@ func Scenarios() []Scenario {
 			},
 		},
 		{
-			Number:   8,
-			Title:    "The same bank, as a plain HTTP API",
-			Detach:   []string{"bank"},
-			Commands: []string{"export AGENT WARDEN_ADDR"},
-			Ask:      []string{"Check my balance, deposit 30, then withdraw 500."},
+			Number: 8,
+			Title:  "The same bank, as a plain HTTP API",
+			Detach: []string{"bank"},
+			Export: []string{"AGENT", "WARDEN_ADDR"},
+			// The question names the interface, or some models pick atm, whose
+			// MCP tools are not attached. Where to look comes from scenario 7's
+			// instructions.
+			Ask: []string{"Use the bank's HTTP API: check my balance, deposit 30, then withdraw 500."},
 			Shows: []string{
-				"With no bank tool attached, the agent turns to discovery and picks teller: provider rest, with a url it can call itself.",
+				"The agent turns to discovery and picks teller, the role you call over HTTP: provider rest, with a url it can call itself.",
 				"It reads skill://teller/SKILL.md and calls the API with its own JWT. The bank still receives a token of its own.",
 				"The withdrawal of 500 is refused by a policy condition on the JSON body, written to fail closed: has(request.data.amount) && request.data.amount <= 100.",
-				"If the agent asks which bank, answer: the one you can reach through Warden.",
 			},
 		},
 		{
@@ -260,14 +271,4 @@ func Scenarios() []Scenario {
 			},
 		},
 	}
-}
-
-// ClaudeAddCommand renders the claude mcp add line for an attachment.
-func ClaudeAddCommand(a *Attachment, wardenAddr string) string {
-	var b strings.Builder
-	b.WriteString("claude mcp add --transport http " + a.Server + ` "` + wardenAddr + a.Path + `"`)
-	for _, h := range a.Headers {
-		b.WriteString(` \` + "\n  --header \"" + h.Name + ": " + h.Value + `"`)
-	}
-	return b.String()
 }

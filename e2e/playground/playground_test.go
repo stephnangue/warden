@@ -315,6 +315,11 @@ func TestPlayground(t *testing.T) {
 		for _, s := range playground.Scenarios() {
 			assert.Contains(t, tour, fmt.Sprintf("%d. %s", s.Number, s.Title))
 		}
+
+		cursor := e.cli(t, "", "dev", "scenarios", "-client", "cursor", "-o", "table", "1")
+		assert.Contains(t, cursor, `cat > "$HOME/warden-playground/.cursor/mcp.json" <<EOF`)
+		assert.Contains(t, cursor, `"url": "`+e.addr+`/v1/bank/role/atm/gateway/"`)
+		assert.NotContains(t, cursor, "claude mcp")
 	})
 
 	t.Run("1 the agent shows only its identity; Warden brings the credential", func(t *testing.T) {

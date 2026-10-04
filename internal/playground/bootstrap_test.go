@@ -79,6 +79,14 @@ func TestBootstrap_Roles(t *testing.T) {
 		assert.NotContains(t, desc, "skill:", role)
 		assert.NotContains(t, desc, "url:", role)
 	}
+	// The description says how the role is used, so an agent without the
+	// bank's MCP tools can tell teller from atm without guessing.
+	for _, role := range []string{RoleATM, RoleAssistant, RoleGitHub} {
+		desc := steps[stepIndex(steps, "auth/agent/role/"+role)].Data["description"]
+		assert.Contains(t, desc, "MCP tools", role)
+		assert.Contains(t, desc, "attached to your client", role)
+	}
+	assert.Contains(t, steps[stepIndex(steps, "auth/agent/role/teller")].Data["description"], "call yourself over HTTP")
 	assert.Equal(t, SkillTeller, steps[stepIndex(steps, "auth/agent/role/teller")].Data["skill"])
 	assert.NotContains(t, steps[stepIndex(steps, "auth/agent/role/atm")].Data, "skill", "an MCP role uses the mcp skill by default")
 }
@@ -180,13 +188,4 @@ func variantAttachments(s Scenario) []*Attachment {
 		out = append(out, v.Attach)
 	}
 	return out
-}
-
-func TestClaudeAddCommand(t *testing.T) {
-	a := &Attachment{Server: "bank", Path: "/v1/bank-me/role/assistant/gateway/", Headers: onBehalfHeaders("AGENT", "ALICE")}
-	assert.Equal(t,
-		`claude mcp add --transport http bank "http://127.0.0.1:8400/v1/bank-me/role/assistant/gateway/" \`+"\n"+
-			`  --header "X-Warden-Agent-Token: $AGENT" \`+"\n"+
-			`  --header "Authorization: Bearer $ALICE"`,
-		ClaudeAddCommand(a, "http://127.0.0.1:8400"))
 }

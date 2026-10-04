@@ -160,4 +160,7 @@ func printPlaygroundBanner(w io.Writer, pg *playground.Playground, wardenAddr st
 	fmt.Fprintf(w, "  $ export WARDEN_TOKEN=<the root token above>\n")
 	fmt.Fprintf(w, "  $ warden dev scenarios\n")
 	fmt.Fprintf(w, "\n")
+	fmt.Fprintf(w, "The tour's commands are for Claude Code. For another agent, add\n")
+	fmt.Fprintf(w, "-client codex, cursor, gemini, opencode, vscode or generic.\n")
+	fmt.Fprintf(w, "\n")
 }

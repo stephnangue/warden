@@ -324,27 +324,34 @@ func Bootstrap(s Settings) []Step {
 		},
 
 		// Roles. Each names its provider mount, so discovery returns its url and skill.
+		// Each description says how the role is used, MCP tools attached to the
+		// client or an API the agent calls itself, so an agent that has one but
+		// not the other can tell which roles it can use now.
 		{
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleATM, Operation: "create",
-			Data: agentRole("Use your own bank account: check the balance and recent transactions, deposit, and withdraw up to 100 at a time.",
+			Data: agentRole("Use your own bank account through the bank's MCP tools, attached to your client: "+
+				"check the balance and recent transactions, deposit, and withdraw up to 100 at a time.",
 				MountBank, SpecBankAgent, []string{"bank-access", "atm-tools"}, ""),
 		},
 		{
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleAssistant, Operation: "create",
-			Data: agentRole("Use a person's bank account on their behalf, when they have allowed this agent to act for them: "+
+			Data: agentRole("Use a person's bank account on their behalf, through the bank's MCP tools attached to your client, "+
+				"when they have allowed this agent to act for them: "+
 				"check the balance and recent transactions, deposit, and withdraw up to 100 at a time, or 1000 for a premium customer.",
 				MountBankMe, SpecBankOnBehalf, []string{"assistant-on-behalf", "assistant-tools"}, ""),
 		},
 		{
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleTeller, Operation: "create",
-			Data: agentRole("The bank's HTTP API for your own account: balance, deposit, and withdraw up to 100 at a time.",
+			Data: agentRole("The bank's HTTP API for your own account, which you call yourself over HTTP (curl from a shell): "+
+				"balance, deposit, and withdraw up to 100 at a time.",
 				MountBankAPI, SpecBankAPIAgent, []string{"teller-api"}, SkillTeller),
 		},
 		{
 			// Names a spec that does not exist until the reader creates it: a role
 			// is stored without checking it, and discovery lists it all the same.
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleGitHub, Operation: "create",
-			Data: agentRole("Read GitHub repositories, issues and pull requests, with a GitHub token the operator provides.",
+			Data: agentRole("Read GitHub repositories, issues and pull requests through GitHub's MCP tools, attached to your client, "+
+				"with a GitHub token the operator provides.",
 				MountGitHub, SpecGitHub, []string{"github-access", "github-read"}, ""),
 		},
 
