@@ -181,12 +181,3 @@ func variantAttachments(s Scenario) []*Attachment {
 	}
 	return out
 }
-
-func TestClaudeAddCommand(t *testing.T) {
-	a := &Attachment{Server: "bank", Path: "/v1/bank-me/role/assistant/gateway/", Headers: onBehalfHeaders("AGENT", "ALICE")}
-	assert.Equal(t,
-		`claude mcp add --transport http bank "http://127.0.0.1:8400/v1/bank-me/role/assistant/gateway/" \`+"\n"+
-			`  --header "X-Warden-Agent-Token: $AGENT" \`+"\n"+
-			`  --header "Authorization: Bearer $ALICE"`,
-		ClaudeAddCommand(a, "http://127.0.0.1:8400"))
-}

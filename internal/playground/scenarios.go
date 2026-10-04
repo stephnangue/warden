@@ -1,9 +1,6 @@
 package playground
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // Header is one header an MCP client is attached with. Values refer to shell
 // variables (for example "Bearer $AGENT") that the setup commands define.
@@ -47,7 +44,10 @@ type Scenario struct {
 	Attach *Attachment `json:"attach,omitempty"`
 	// Commands are shell commands to run, in order, besides attaching.
 	Commands []string `json:"commands,omitempty"`
-	Ask      []string `json:"ask,omitempty"`
+	// Restart says the agent must be restarted from the reader's shell:
+	// Commands export what it needs, and a running agent never sees them.
+	Restart bool     `json:"restart,omitempty"`
+	Ask     []string `json:"ask,omitempty"`
 	// Then is the scenario's next step, done once its questions are answered:
 	// a change the reader makes, and the question that shows it took effect.
 	Then     *Variant  `json:"then,omitempty"`
@@ -125,7 +125,7 @@ func Scenarios() []Scenario {
 				"The bank received a different token: access_token.iss is the bank's authorization server, aud is the bank, exp is five minutes away.",
 				"Warden got that token by proving the agent's identity with an assertion signed by its own OIDC issuer. No secret is stored anywhere: `warden cred source read " + SourceBankAS + "` shows none.",
 				"The agent never saw the bank token.",
-				"The agent is asked to show the token's claims with every answer. If it does not, expand the raw tool result (ctrl+o in Claude Code) and read access_token.",
+				"The agent is asked to show the token's claims with every answer. If it does not, expand the raw tool result in your client and read access_token.",
 			},
 		},
 		{
@@ -236,6 +236,7 @@ func Scenarios() []Scenario {
 			Title:    "The same bank, as a plain HTTP API",
 			Detach:   []string{"bank"},
 			Commands: []string{"export AGENT WARDEN_ADDR"},
+			Restart:  true,
 			Ask:      []string{"Check my balance, deposit 30, then withdraw 500."},
 			Shows: []string{
 				"With no bank tool attached, the agent turns to discovery and picks teller: provider rest, with a url it can call itself.",
@@ -260,14 +261,4 @@ func Scenarios() []Scenario {
 			},
 		},
 	}
-}
-
-// ClaudeAddCommand renders the claude mcp add line for an attachment.
-func ClaudeAddCommand(a *Attachment, wardenAddr string) string {
-	var b strings.Builder
-	b.WriteString("claude mcp add --transport http " + a.Server + ` "` + wardenAddr + a.Path + `"`)
-	for _, h := range a.Headers {
-		b.WriteString(` \` + "\n  --header \"" + h.Name + ": " + h.Value + `"`)
-	}
-	return b.String()
 }

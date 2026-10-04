@@ -3,8 +3,12 @@ package dev
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -69,8 +73,12 @@ func TestDecodeClaims(t *testing.T) {
 }
 
 func renderTourFor(only int) string {
+	return renderTourAs("claude", only)
+}
+
+func renderTourAs(name string, only int) string {
 	var buf bytes.Buffer
-	renderTour(&buf, scenariosResponse{Setup: playground.SetupCommands, Scenarios: playground.Scenarios()}, only, "http://127.0.0.1:8400")
+	renderTour(&buf, scenariosResponse{Setup: playground.SetupCommands, Scenarios: playground.Scenarios()}, only, "http://127.0.0.1:8400", clients[name])
 	return buf.String()
 }
 
@@ -158,6 +166,181 @@ func TestRenderTour_CommandsPasteAsPrinted(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)
 	assert.Equal(t, "pasted\n", string(out), "the heredoc ended, and the next command ran")
+}
+
+func TestClaudeAdd(t *testing.T) {
+	a := &playground.Attachment{Server: "bank", Path: "/v1/bank-me/role/assistant/gateway/", Headers: []playground.Header{
+		{Name: "X-Warden-Agent-Token", Value: "$AGENT"},
+		{Name: "Authorization", Value: "Bearer $ALICE"},
+	}}
+	assert.Equal(t,
+		`claude mcp add --transport http bank "http://127.0.0.1:8400/v1/bank-me/role/assistant/gateway/" \`+"\n"+
+			`  --header "X-Warden-Agent-Token: $AGENT" \`+"\n"+
+			`  --header "Authorization: Bearer $ALICE"`,
+		claudeAdd(a, "http://127.0.0.1:8400"))
+}
+
+func TestResolveClient(t *testing.T) {
+	t.Cleanup(func() { scenariosClient = "" })
+
+	t.Setenv("WARDEN_DEV_CLIENT", "")
+	c, err := resolveClient()
+	require.NoError(t, err)
+	assert.Equal(t, "claude", c.name, "Claude Code by default")
+
+	t.Setenv("WARDEN_DEV_CLIENT", "cursor")
+	c, err = resolveClient()
+	require.NoError(t, err)
+	assert.Equal(t, "cursor", c.name)
+
+	scenariosClient = "Codex"
+	c, err = resolveClient()
+	require.NoError(t, err)
+	assert.Equal(t, "codex", c.name, "the flag wins over the environment, in any case")
+
+	scenariosClient = "bogus"
+	_, err = resolveClient()
+	assert.True(t, errors.Is(err, helpers.ErrUsage))
+	assert.ErrorContains(t, err, strings.Join(clientNames(), ", "))
+}
+
+// Every client gets its own commands and hints, and only Claude Code's name
+// appears in the tour printed for it.
+func TestRenderTour_Clients(t *testing.T) {
+	for _, name := range clientNames() {
+		t.Run(name, func(t *testing.T) {
+			c := clients[name]
+			all := renderTourAs(name, 0)
+			if name != "claude" {
+				assert.NotContains(t, all, "claude mcp")
+				assert.NotContains(t, all, "Claude Code")
+			}
+			assert.Contains(t, all, "Then "+c.reconnect+".")
+			assert.Contains(t, renderTourAs(name, 8), "Then restart your agent, so it inherits the exports: "+c.restart+".",
+				"scenario 8's exports reach only an agent started after them")
+			if c.launch != "" {
+				assert.Contains(t, all, c.launch)
+			}
+			for _, line := range strings.Split(all, "\n") {
+				if strings.TrimSpace(line) == "EOF" {
+					assert.Equal(t, "EOF", line, "an indented delimiter never ends the heredoc")
+				}
+			}
+		})
+	}
+
+	// A client that adds servers by command replaces the bank, as Claude Code does.
+	gemini := renderTourAs("gemini", 4)
+	assert.Less(t, strings.Index(gemini, "gemini mcp remove bank"), strings.Index(gemini, "gemini mcp add -t http bank"))
+	assert.Contains(t, gemini, `-H "X-Warden-Agent-Token: $AGENT"`)
+	assert.Contains(t, renderTourAs("gemini", 0), "mkdir -p $HOME/warden-playground && cd $HOME/warden-playground",
+		"gemini mcp add writes .gemini/settings.json where it runs")
+
+	// Only Claude Code's raw-result shortcut is known.
+	assert.Contains(t, renderTourFor(1), "read access_token. In Claude Code, press ctrl+o.")
+	assert.NotContains(t, renderTourAs("cursor", 1), "ctrl+o")
+}
+
+var (
+	configWrite = regexp.MustCompile(`(?ms)^mkdir -p "\$HOME/warden-playground.*?^EOF$`)
+	configPath  = regexp.MustCompile(`cat > "\$HOME/([^"]+)"`)
+	tomlServer  = regexp.MustCompile(`^\[mcp_servers\.([a-z-]+)\]$`)
+	tomlPair    = regexp.MustCompile(`"([^"]+)" = "([^"]*)"`)
+)
+
+// pasteConfig pastes the nth config write in out into a shell, as a reader
+// would, and returns the servers the file it wrote attaches, with their
+// headers.
+func pasteConfig(t *testing.T, name, out string, nth int) map[string]map[string]string {
+	t.Helper()
+	blocks := configWrite.FindAllString(out, -1)
+	require.Greater(t, len(blocks), nth, "config write %d", nth)
+	home := t.TempDir()
+	cmd := exec.Command("sh")
+	cmd.Env = append(os.Environ(), "HOME="+home, "AGENT=jwt-agent-1", "ALICE=jwt-alice", "BOB=jwt-bob")
+	cmd.Stdin = strings.NewReader("warden() { echo jwt-agent-2; }\n" + blocks[nth] + "\n")
+	shOut, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", shOut)
+	raw, err := os.ReadFile(filepath.Join(home, configPath.FindStringSubmatch(blocks[nth])[1]))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "$", "the shell filled in every value")
+
+	servers := map[string]map[string]string{}
+	if name == "codex" {
+		current := ""
+		for _, line := range strings.Split(string(raw), "\n") {
+			if m := tomlServer.FindStringSubmatch(line); m != nil {
+				current = m[1]
+				servers[current] = map[string]string{}
+			}
+			if strings.HasPrefix(line, "http_headers = ") {
+				for _, m := range tomlPair.FindAllStringSubmatch(line, -1) {
+					servers[current][m[1]] = m[2]
+				}
+			}
+		}
+		return servers
+	}
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &doc), "%s", raw)
+	key := map[string]string{"cursor": "mcpServers", "vscode": "servers", "opencode": "mcp"}[name]
+	var entries map[string]struct {
+		URL     string            `json:"url"`
+		Headers map[string]string `json:"headers"`
+	}
+	require.NoError(t, json.Unmarshal(doc[key], &entries))
+	for server, e := range entries {
+		assert.True(t, strings.HasPrefix(e.URL, "http://127.0.0.1:8400/v1/"), e.URL)
+		servers[server] = e.Headers
+	}
+	return servers
+}
+
+// A client with a config file gets the whole file at each change, and a
+// scenario printed alone knows what the ones before it attached.
+func TestRenderTour_FileClientsWriteValidConfig(t *testing.T) {
+	agentOnly := map[string]string{"Authorization": "Bearer jwt-agent-1"}
+	forAlice := map[string]string{"Authorization": "Bearer jwt-alice", "X-Warden-Agent-Token": "jwt-agent-1"}
+	for _, name := range []string{"codex", "cursor", "opencode", "vscode"} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, map[string]map[string]string{"bank": agentOnly}, pasteConfig(t, name, renderTourAs(name, 1), 0))
+
+			fourth := renderTourAs(name, 4)
+			assert.Equal(t, map[string]map[string]string{"bank": forAlice}, pasteConfig(t, name, fourth, 0))
+			assert.Equal(t, "Bearer jwt-bob", pasteConfig(t, name, fourth, 1)["bank"]["Authorization"], "as bob")
+			assert.Equal(t, "jwt-agent-2", pasteConfig(t, name, fourth, 2)["bank"]["X-Warden-Agent-Token"],
+				"the substitution runs as the file is written")
+
+			assert.Equal(t, map[string]map[string]string{"bank": forAlice, "warden": agentOnly}, pasteConfig(t, name, renderTourAs(name, 7), 0),
+				"discovery beside the bank scenario 5 attached")
+			assert.Equal(t, map[string]map[string]string{"warden": agentOnly}, pasteConfig(t, name, renderTourAs(name, 8), 0),
+				"the REST scenario detaches the bank")
+			assert.Equal(t, map[string]map[string]string{"warden": agentOnly, "github": agentOnly}, pasteConfig(t, name, renderTourAs(name, 9), 0))
+
+			// Scenarios that change nothing attached write nothing.
+			for _, n := range []int{2, 6} {
+				assert.Empty(t, configWrite.FindAllString(renderTourAs(name, n), -1), "scenario %d", n)
+			}
+		})
+	}
+}
+
+// The generic client prints what to enter, with the shell's values filled in.
+func TestRenderTour_Generic(t *testing.T) {
+	first := renderTourAs("generic", 1)
+	start := strings.Index(first, "cat <<EOF")
+	require.NotEqual(t, -1, start)
+	end := strings.Index(first[start:], "\nEOF\n")
+	require.NotEqual(t, -1, end)
+	cmd := exec.Command("sh")
+	cmd.Env = append(os.Environ(), "AGENT=jwt-agent-1")
+	cmd.Stdin = strings.NewReader(first[start : start+end+len("\nEOF\n")])
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	assert.Contains(t, string(out), "  URL:    http://127.0.0.1:8400/v1/bank/role/atm/gateway/\n")
+	assert.Contains(t, string(out), "  Header: Authorization: Bearer jwt-agent-1\n")
+
+	assert.Contains(t, renderTourAs("generic", 8), `# Remove the MCP server "bank" from your client.`)
 }
 
 // Only this command's -o flag asks for structured output; WARDEN_OUTPUT does
