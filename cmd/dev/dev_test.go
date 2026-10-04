@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -126,6 +127,37 @@ func TestRenderTour(t *testing.T) {
 	assert.NotContains(t, ninth, "claude mcp remove")
 	assert.Contains(t, ninth, "Then reconnect")
 	assert.Contains(t, ninth, "read -rs GITHUB_PAT", "the PAT is read without echo")
+}
+
+// Commands paste as printed: a heredoc's delimiter must stand alone on its line,
+// or the reader's shell waits for more input.
+func TestRenderTour_CommandsPasteAsPrinted(t *testing.T) {
+	all := renderTourFor(0)
+	assert.Contains(t, all, "\nexport WARDEN_ADDR=http://127.0.0.1:8400\n")
+	assert.Contains(t, all, "\nAGENT=$(warden dev jwt agent agent-1 -ttl 8h)\n")
+	heredocs := 0
+	for _, line := range strings.Split(all, "\n") {
+		if strings.TrimSpace(line) == "EOF" {
+			assert.Equal(t, "EOF", line, "an indented delimiter never ends the heredoc")
+			heredocs++
+		}
+	}
+	assert.Equal(t, 2, heredocs, "scenario 3's policy and scenario 9's spec")
+
+	// Paste the block as a reader would, then a line after it: that line runs
+	// only if the heredoc ended where the block does.
+	third := renderTourFor(3)
+	start := strings.Index(third, "warden policy write")
+	require.NotEqual(t, -1, start)
+	// The delimiter line, not the <<EOF that opens the heredoc.
+	end := strings.Index(third[start:], "\nEOF\n")
+	require.NotEqual(t, -1, end)
+	block := third[start : start+end+len("\nEOF\n")]
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader("warden() { cat >/dev/null; }\n" + block + "echo pasted\n")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	assert.Equal(t, "pasted\n", string(out), "the heredoc ended, and the next command ran")
 }
 
 // Only this command's -o flag asks for structured output; WARDEN_OUTPUT does
