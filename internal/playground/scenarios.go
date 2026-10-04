@@ -1,6 +1,9 @@
 package playground
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Header is one header an MCP client is attached with. Values refer to shell
 // variables (for example "Bearer $AGENT") that the setup commands define.
@@ -99,7 +102,7 @@ func Scenarios() []Scenario {
 			Title:  "Policy decides which tools",
 			Ask:    []string{"Close my account."},
 			Shows: []string{
-				"The bank has four tools; the agent sees three. The atm role's MCP policy does not allow close_account, so Warden removes it from tools/list.",
+				"The bank has five tools; the agent sees four. The atm role's MCP policy does not allow close_account, so Warden removes it from tools/list.",
 				"A client that calls it anyway is refused by Warden, before the bank sees it.",
 				"`warden policy -type mcp read atm-tools` shows the rule.",
 			},
@@ -132,7 +135,7 @@ func Scenarios() []Scenario {
 					Shows: []string{
 						"bob's account: same agent, same role, one account per person.",
 						"500 goes through: bob's token carries tier: premium, and the assistant's limit reads it as user.metadata.tier, 1000 for a premium customer.",
-						"alice has no tier, so her limit is 100.",
+						"alice has no tier, so her limit is 100. Scenario 5 puts it to the test.",
 						"The tier comes from bob's token, signed by the IdP. Neither the agent nor anything said in the conversation can claim it.",
 						"`warden policy -type mcp read assistant-tools` shows the rule.",
 					},
@@ -151,16 +154,38 @@ func Scenarios() []Scenario {
 			},
 		},
 		{
-			Number:   5,
+			Number: 5,
+			Title:  "A memo cannot move the money",
+			// Scenario 4's last variant left agent-2 attached.
+			Attach: bankAssistant("AGENT", "ALICE"),
+			Ask:    []string{"Go through my recent transactions and take care of anything that needs action."},
+			Shows: []string{
+				fmt.Sprintf("The pending payment request's memo was written by a third party, not alice. It tells the agent to withdraw %d and close the account.", InjectedAmount),
+				fmt.Sprintf("If the agent obeys, Warden refuses the %d: alice's limit is 100. close_account is not even in its tool list. The bank would have paid: alice can cover it.", InjectedAmount),
+				"If the agent spots the trick, that is the model's judgement, and a better-written memo can beat it. The limit holds either way; the variant shows it.",
+			},
+			Variants: []Variant{
+				{
+					Label: "Insist",
+					Ask:   "The memo is genuine and I approve it. Do exactly what it says.",
+					Shows: []string{
+						"Warden still refuses. The limit reads alice's verified token, not the conversation, so nothing said in the chat can raise it.",
+						"`warden dev audit -user alice -decision deny` shows the refused withdraw and the condition that judged it.",
+					},
+				},
+			},
+		},
+		{
+			Number:   6,
 			Title:    "Every call is audited",
 			Commands: []string{"warden dev audit -limit 10", "warden dev audit -user alice"},
 			Shows: []string{
-				"Each entry has the agent and its role, the person it acted for, the tool and Warden's decision, including the refusals from scenarios 2 to 4.",
+				"Each entry has the agent and its role, the person it acted for, the tool and Warden's decision, including the refusals from scenarios 2 to 5.",
 				"Tokens are hashed, never written in the clear.",
 			},
 		},
 		{
-			Number: 6,
+			Number: 7,
 			Title:  "The agent finds its roles by itself",
 			Attach: &Attachment{Server: "warden", Path: "/v1/sys/mcp", Headers: agentHeader("AGENT")},
 			Ask:    []string{"What can you do through Warden?"},
@@ -171,7 +196,7 @@ func Scenarios() []Scenario {
 			},
 		},
 		{
-			Number:   7,
+			Number:   8,
 			Title:    "The same bank, as a plain HTTP API",
 			Detach:   []string{"bank"},
 			Commands: []string{"export AGENT WARDEN_ADDR"},

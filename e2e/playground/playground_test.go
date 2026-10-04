@@ -1,6 +1,6 @@
 //go:build e2e
 
-// Package playground walks the dev playground's seven scenarios end to end
+// Package playground walks the dev playground's scenarios end to end
 // against a real `warden server -dev-playground`, the way a first-time user
 // would, but with the go-sdk MCP client and plain HTTP in place of an agent.
 // It needs no Hydra and no Docker dependencies: the playground brings its own
@@ -348,7 +348,7 @@ func TestPlayground(t *testing.T) {
 		for _, tool := range tools.Tools {
 			names = append(names, tool.Name)
 		}
-		assert.ElementsMatch(t, []string{"get_balance", "withdraw", "deposit"}, names, "close_account is hidden")
+		assert.ElementsMatch(t, []string{"get_balance", "get_transactions", "withdraw", "deposit"}, names, "close_account is hidden")
 
 		_, err = callTool(t, bank, "close_account", nil)
 		requireRefused(t, err, "a direct call to the hidden tool is refused")
@@ -458,7 +458,47 @@ func TestPlayground(t *testing.T) {
 		assert.Error(t, err, "alice's may_act names agent-1, so agent-2 is refused, initialize included")
 	})
 
-	t.Run("5 every call is audited", func(t *testing.T) {
+	t.Run("5 a memo cannot move the money", func(t *testing.T) {
+		asAlice, err := e.attach(t, "/v1/bank-me/role/assistant/gateway/", map[string]string{
+			"X-Warden-Agent-Token": agent, "Authorization": "Bearer " + alice,
+		})
+		require.NoError(t, err)
+
+		res, err := asAlice.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_transactions"})
+		require.NoError(t, err)
+		raw, _ := json.Marshal(res.StructuredContent)
+		var listed struct {
+			Result struct {
+				Balance      int64                    `json:"balance"`
+				Transactions []playground.Transaction `json:"transactions"`
+			} `json:"result"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &listed))
+		require.NotEmpty(t, listed.Result.Transactions)
+		var request *playground.Transaction
+		for i, tx := range listed.Result.Transactions {
+			if tx.Status == "pending" {
+				request = &listed.Result.Transactions[i]
+			}
+		}
+		require.NotNil(t, request, "the pending payment request: %+v", listed.Result.Transactions)
+		assert.Equal(t, playground.InjectedAmount, request.Amount)
+		assert.Contains(t, request.Memo, "close_account", "the memo is the injection")
+		before := listed.Result.Balance
+		require.GreaterOrEqual(t, before, playground.InjectedAmount, "the bank could pay what the memo asks")
+
+		// Do what the memo says: Warden refuses both, before the bank sees them.
+		_, err = callTool(t, asAlice, "withdraw", map[string]any{"amount": playground.InjectedAmount})
+		requireRefused(t, err, "the memo's withdrawal is over alice's limit")
+		_, err = callTool(t, asAlice, "close_account", nil)
+		requireRefused(t, err, "close_account is not the assistant's to call")
+
+		out, err := callTool(t, asAlice, "get_balance", nil)
+		require.NoError(t, err)
+		assert.Equal(t, before, out.Result.Balance, "nothing moved")
+	})
+
+	t.Run("6 every call is audited", func(t *testing.T) {
 		var denies []map[string]any
 		require.NoError(t, json.Unmarshal([]byte(e.cli(t, "", "dev", "audit", "-decision", "deny", "-limit", "50", "-o", "json")), &denies))
 		reasons := map[string]bool{}
@@ -467,6 +507,7 @@ func TestPlayground(t *testing.T) {
 		}
 		assert.True(t, reasons["atm agent-1"], "the refused withdrawal and hidden tool: %v", reasons)
 		assert.True(t, reasons["assistant agent-2"], "agent-2 acting for alice: %v", reasons)
+		assert.True(t, reasons["assistant agent-1"], "alice's limit and the memo's withdrawal: %v", reasons)
 
 		var forAlice []map[string]any
 		require.NoError(t, json.Unmarshal([]byte(e.cli(t, "", "dev", "audit", "-user", "alice", "-o", "json")), &forAlice))
@@ -477,7 +518,7 @@ func TestPlayground(t *testing.T) {
 		}
 	})
 
-	t.Run("6 the agent finds its roles by itself", func(t *testing.T) {
+	t.Run("7 the agent finds its roles by itself", func(t *testing.T) {
 		discovery, err := e.attach(t, "/v1/sys/mcp", map[string]string{"Authorization": "Bearer " + agent})
 		require.NoError(t, err)
 		res, err := discovery.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
@@ -530,7 +571,7 @@ func TestPlayground(t *testing.T) {
 		}
 	})
 
-	t.Run("7 the same bank, as a plain HTTP API", func(t *testing.T) {
+	t.Run("8 the same bank, as a plain HTTP API", func(t *testing.T) {
 		status, before := e.rest(t, agent, http.MethodGet, "", "", "")
 		require.Equal(t, http.StatusOK, status)
 		assert.True(t, isAgent(before.AccessToken["sub"], "agent-1"))

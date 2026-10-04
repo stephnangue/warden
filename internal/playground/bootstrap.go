@@ -87,7 +87,7 @@ var (
 	// may withdraw more. Like the ATM's, it judges withdraw only and fails closed.
 	policyAssistantTools = gatewayMCP(MountBankMe,
 		`  methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
+  tools   { allowed = ["get_balance", "get_transactions", "withdraw", "deposit"] }
   condition = "`+assistantWithdrawCondition()+`"`)
 
 	// The REST face reads the withdrawal body. The condition fails closed: a body
@@ -115,7 +115,7 @@ func assistantWithdrawCondition() string {
 // atmToolRules is the body of the ATM's tool policy, with the given limit.
 func atmToolRules(limit int) string {
 	return `  methods { allowed = ["tools/list", "tools/call"] }
-  tools   { allowed = ["get_balance", "withdraw", "deposit"] }
+  tools   { allowed = ["get_balance", "get_transactions", "withdraw", "deposit"] }
   condition = "` + atmWithdrawCondition(limit) + `"`
 }
 
@@ -294,13 +294,13 @@ func Bootstrap(s Settings) []Step {
 		// Roles. Each names its provider mount, so discovery returns its url and skill.
 		{
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleATM, Operation: "create",
-			Data: agentRole("Use your own bank account: check the balance, deposit, and withdraw up to 100 at a time.",
+			Data: agentRole("Use your own bank account: check the balance and recent transactions, deposit, and withdraw up to 100 at a time.",
 				MountBank, SpecBankAgent, []string{"bank-access", "atm-tools"}, ""),
 		},
 		{
 			Path: "auth/" + AgentAuthMount + "/role/" + RoleAssistant, Operation: "create",
 			Data: agentRole("Use a person's bank account on their behalf, when they have allowed this agent to act for them: "+
-				"check the balance, deposit, and withdraw up to 100 at a time, or 1000 for a premium customer.",
+				"check the balance and recent transactions, deposit, and withdraw up to 100 at a time, or 1000 for a premium customer.",
 				MountBankMe, SpecBankOnBehalf, []string{"assistant-on-behalf", "assistant-tools"}, ""),
 		},
 		{

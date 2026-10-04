@@ -151,7 +151,7 @@ func TestTellerSkill_MatchesTheBank(t *testing.T) {
 
 func TestScenarios(t *testing.T) {
 	scenarios := Scenarios()
-	require.Len(t, scenarios, 7)
+	require.Len(t, scenarios, 8)
 	for i, s := range scenarios {
 		assert.Equal(t, i+1, s.Number)
 		assert.NotEmpty(t, s.Title)
@@ -164,8 +164,8 @@ func TestScenarios(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, []string{"bank"}, scenarios[6].Detach, "the REST scenario removes the MCP bank")
-	assert.Nil(t, scenarios[6].Attach, "and keeps the same identity and discovery server")
+	assert.Equal(t, []string{"bank"}, scenarios[7].Detach, "the REST scenario removes the MCP bank")
+	assert.Nil(t, scenarios[7].Attach, "and keeps the same identity and discovery server")
 }
 
 func variantAttachments(s Scenario) []*Attachment {
