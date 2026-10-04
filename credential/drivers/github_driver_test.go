@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -923,4 +925,246 @@ func TestGitHubAppTokenCacheKey(t *testing.T) {
 
 	assert.NotContains(t, appTokenCacheKey("app", "inst", "SECRETKEY"), "SECRETKEY",
 		"the private key must not sit in a map key")
+}
+
+// --- app installation token mint concurrency ---
+
+// newGitHubDriverWithHandler builds a driver against a stand-in API served by h.
+// Unlike newCachingGitHubDriver it leaves call counting to the handler, so a test
+// driving concurrent mints can count safely.
+func newGitHubDriverWithHandler(t *testing.T, h http.HandlerFunc) *GitHubDriver {
+	t.Helper()
+	server := httptest.NewTLSServer(h)
+	t.Cleanup(server.Close)
+	return &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": server.URL})},
+		httpClient: server.Client(),
+		appTokens:  make(map[string]*appTokenCache),
+	}
+}
+
+func writeInstallationToken(w http.ResponseWriter, token string) {
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":      token,
+		"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+	})
+}
+
+func inlineAppSpec(name, installationID, keyPEM string) *credential.CredSpec {
+	return &credential.CredSpec{
+		Name: name,
+		Type: credential.TypeGitHubToken,
+		Config: credential.NewConfig(map[string]string{
+			"mint_method": "app", "app_id": "12345",
+			"installation_id": installationID, "private_key": keyPEM,
+		}),
+	}
+}
+
+// newGate returns a channel stand-in handlers block on and the func that opens it.
+// Opening is idempotent; register it with t.Cleanup after the driver is built so it
+// runs before the server's Close, which otherwise waits forever on a handler a
+// failed test never released.
+func newGate() (<-chan struct{}, func()) {
+	ch := make(chan struct{})
+	return ch, sync.OnceFunc(func() { close(ch) })
+}
+
+// waitFor fails the test if ch does not deliver within d.
+func waitFor[T any](t *testing.T, ch <-chan T, d time.Duration, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(d):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// The credential manager caches per caller, so N agents on one spec reach the
+// driver as N misses. They must cost one installation token, not N.
+func TestGitHubDriver_AppMint_CoalescesConcurrentMisses(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	arrived := make(chan struct{}, 1)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		<-release
+		writeInstallationToken(w, "ghs_shared")
+	})
+	t.Cleanup(openGate)
+
+	spec := inlineAppSpec("shared", "67890", key)
+	type result struct {
+		token interface{}
+		err   error
+	}
+	const n = 16
+	results := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			results <- result{rawData["token"], err}
+		}()
+	}
+
+	waitFor(t, arrived, 5*time.Second, "the first mint to reach the API")
+	openGate()
+	for i := 0; i < n; i++ {
+		res := waitFor(t, results, 5*time.Second, "a mint to return")
+		require.NoError(t, res.err)
+		assert.Equal(t, "ghs_shared", res.token)
+	}
+	assert.Equal(t, int32(1), calls.Load(), "concurrent misses for the same inputs must share one upstream call")
+}
+
+// Mints for unrelated inputs must not wait on each other. Each request here is
+// held until both have arrived, so a driver that serializes mints never sees the
+// second one and the test fails on the timeout.
+func TestGitHubDriver_AppMint_DistinctKeysRunInParallel(t *testing.T) {
+	key := generateTestRSAKey(t)
+	arrived := make(chan string, 2)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		installation := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
+		arrived <- installation
+		<-release
+		writeInstallationToken(w, "ghs_for_"+installation)
+	})
+	t.Cleanup(openGate)
+
+	errs := make(chan error, 2)
+	for _, installation := range []string{"111", "222"} {
+		spec := inlineAppSpec("spec-"+installation, installation, key)
+		go func() {
+			_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			errs <- err
+		}()
+	}
+
+	got := map[string]bool{}
+	timeout := time.After(5 * time.Second)
+	for len(got) < 2 {
+		select {
+		case installation := <-arrived:
+			got[installation] = true
+		case <-timeout:
+			t.Fatalf("mints for different installations were serialized: only %v reached the API", got)
+		}
+	}
+	openGate()
+	for i := 0; i < 2; i++ {
+		require.NoError(t, waitFor(t, errs, 5*time.Second, "a mint to return"))
+	}
+}
+
+// A caller that gives up returns at once, but the mint it started keeps going for
+// the others waiting on it: one caller's cancelled request must not fail theirs or
+// cost a second installation token.
+func TestGitHubDriver_AppMint_CallerCancelDoesNotAbortFlight(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	arrived := make(chan struct{}, 2)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		arrived <- struct{}{}
+		<-release
+		writeInstallationToken(w, "ghs_survivor")
+	})
+	t.Cleanup(openGate)
+	spec := inlineAppSpec("shared", "67890", key)
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	errA := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := driver.MintCredential(ctxA, spec)
+		errA <- err
+	}()
+	waitFor(t, arrived, 5*time.Second, "caller A's mint to reach the API")
+
+	type result struct {
+		token interface{}
+		err   error
+	}
+	resB := make(chan result, 1)
+	go func() {
+		rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+		resB <- result{rawData["token"], err}
+	}()
+
+	cancelA()
+	assert.ErrorIs(t, waitFor(t, errA, 5*time.Second, "caller A to return after cancel"), context.Canceled)
+
+	openGate()
+	b := waitFor(t, resB, 5*time.Second, "caller B to return")
+	require.NoError(t, b.err)
+	assert.Equal(t, "ghs_survivor", b.token)
+	assert.Equal(t, int32(1), calls.Load(), "caller A's cancel must not abort the shared mint")
+}
+
+// chained decides whether a refusal is marked retryable. A chained and an inline
+// caller presenting the same key must each get their own classification, so they
+// must not share a mint even though they share a cache key.
+func TestGitHubDriver_AppMint_ChainedAndInlineDoNotShareErrors(t *testing.T) {
+	key := generateTestRSAKey(t)
+	arrived := make(chan struct{}, 2)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		arrived <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	})
+	t.Cleanup(openGate)
+
+	chainedErr := make(chan error, 1)
+	inlineErr := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := driver.MintFromSecret(context.Background(), githubAppSpec("chained"),
+			credential.SecretMaterial{Data: map[string]string{"private_key": key}, Field: "private_key"})
+		chainedErr <- err
+	}()
+	go func() {
+		_, _, _, _, err := driver.MintCredential(context.Background(), inlineAppSpec("inline", "67890", key))
+		inlineErr <- err
+	}()
+
+	waitFor(t, arrived, 5*time.Second, "the first mint to reach the API")
+	waitFor(t, arrived, 5*time.Second, "the second mint to reach the API (chained and inline must not share a flight)")
+	openGate()
+
+	assert.ErrorIs(t, waitFor(t, chainedErr, 5*time.Second, "the chained mint"), credential.ErrChainedSecretRejected)
+	err := waitFor(t, inlineErr, 5*time.Second, "the inline mint")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+func TestGitHubDriver_AppMint_ErrorNotCached(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeInstallationToken(w, "ghs_second_try")
+	})
+	spec := inlineAppSpec("flaky", "67890", key)
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+
+	rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_second_try", rawData["token"])
+	assert.Equal(t, int32(2), calls.Load(), "a failed mint must not be cached")
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
+	"golang.org/x/sync/singleflight"
 )
 
 // githubMaxResponseBodySize limits response body reads to prevent OOM
@@ -95,9 +96,11 @@ type GitHubDriver struct {
 	httpClient *http.Client
 
 	// App installation token cache, keyed by appTokenCacheKey over the inputs each
-	// token was minted from
-	appTokens  map[string]*appTokenCache
-	appTokenMu sync.Mutex
+	// token was minted from. appTokenMu guards the map only and is never held across
+	// I/O; appTokenGroup coalesces concurrent misses for the same inputs.
+	appTokens     map[string]*appTokenCache
+	appTokenMu    sync.Mutex
+	appTokenGroup singleflight.Group
 }
 
 // GitHubDriverFactory creates GitHubDriver instances
@@ -260,64 +263,110 @@ func (d *GitHubDriver) MintFromSecret(ctx context.Context, spec *credential.Cred
 // given private-key PEM. chained says where that PEM came from: spec config for a
 // direct mint, or credential chaining — which decides whether a refusal from the
 // API is worth marking as retryable.
+//
+// Concurrent misses for the same inputs are coalesced into one request to GitHub.
+// The credential manager caches per caller, so without this every agent using a
+// spec would mint its own installation token. Misses for different inputs run in
+// parallel: the cache lock is never held across the key parse or the HTTP call.
+// The request runs detached from any one caller's context (bounded by the HTTP
+// client's timeout), so a caller that gives up does not fail the others waiting on
+// the same mint; each caller still returns as soon as its own context ends.
 func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *credential.CredSpec, keyPEM string, chained bool) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	appID := credential.GetString(spec.Config, "app_id", "")
 	installationID := credential.GetString(spec.Config, "installation_id", "")
 	cacheKey := appTokenCacheKey(appID, installationID, keyPEM)
 
+	if cached, ok := d.cachedAppToken(cacheKey); ok {
+		return appTokenRawData(cached), nil, time.Until(cached.expiresAt), "", nil
+	}
+
+	// The origin is part of the flight key but not the cache key: a token is the
+	// same whichever way its key arrived, but chained decides how a refusal is
+	// classified, and an inline caller must not receive a chained caller's error.
+	flightKey := cacheKey + "|inline"
+	if chained {
+		flightKey = cacheKey + "|chained"
+	}
+	ch := d.appTokenGroup.DoChan(flightKey, func() (interface{}, error) {
+		// A mint that finished just before this one started has already stored
+		// the token this caller missed.
+		if cached, ok := d.cachedAppToken(cacheKey); ok {
+			return cached, nil
+		}
+
+		key, err := parseRSAPrivateKey(keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse private key: %w", err)
+		}
+
+		token, expiresAt, err := d.mintInstallationToken(context.WithoutCancel(ctx), key, appID, installationID, chained)
+		if err != nil {
+			return nil, fmt.Errorf("failed to mint installation token: %w", err)
+		}
+
+		entry := &appTokenCache{token: token, expiresAt: expiresAt}
+		d.storeAppToken(cacheKey, entry)
+
+		if d.logger != nil {
+			d.logger.Debug("minted GitHub App installation token",
+				logger.String("spec", spec.Name),
+				logger.String("installation_id", installationID),
+				logger.String("ttl", time.Until(expiresAt).String()),
+			)
+		}
+		return entry, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, nil, 0, "", ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, nil, 0, "", res.Err
+		}
+		entry := res.Val.(*appTokenCache)
+		return appTokenRawData(entry), nil, time.Until(entry.expiresAt), "", nil
+	}
+}
+
+// appTokenRefreshBuffer is how long before expiry a cached installation token stops
+// being served, so a caller never receives one about to lapse mid-request.
+const appTokenRefreshBuffer = 5 * time.Minute
+
+// cachedAppToken returns the cached token for key if it outlives the refresh buffer.
+// Entries are never mutated once stored, so the returned pointer is safe to read
+// after the lock is released.
+func (d *GitHubDriver) cachedAppToken(key string) (*appTokenCache, bool) {
 	d.appTokenMu.Lock()
 	defer d.appTokenMu.Unlock()
-
-	// Return cached token if still valid (with 5min buffer)
-	if cached, ok := d.appTokens[cacheKey]; ok && time.Now().Add(5*time.Minute).Before(cached.expiresAt) {
-		rawData := map[string]interface{}{
-			"token":      cached.token,
-			"expires_at": cached.expiresAt.Format(time.RFC3339),
-		}
-		ttl := time.Until(cached.expiresAt)
-		return rawData, nil, ttl, "", nil
+	cached, ok := d.appTokens[key]
+	if !ok || !time.Now().Add(appTokenRefreshBuffer).Before(cached.expiresAt) {
+		return nil, false
 	}
+	return cached, true
+}
 
-	key, err := parseRSAPrivateKey(keyPEM)
-	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	// Mint a fresh installation token
-	token, expiresAt, err := d.mintInstallationToken(ctx, key, appID, installationID, chained)
-	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("failed to mint installation token: %w", err)
-	}
-
+// storeAppToken caches entry under key.
+func (d *GitHubDriver) storeAppToken(key string, entry *appTokenCache) {
+	d.appTokenMu.Lock()
+	defer d.appTokenMu.Unlock()
 	// Entries keyed by content are never read again once any input changes, so
 	// sweep what a read would already refuse rather than leaving one behind per
 	// rotation. This runs only on a cache miss, off the hit path.
-	for k, entry := range d.appTokens {
-		if time.Now().After(entry.expiresAt) {
+	now := time.Now()
+	for k, e := range d.appTokens {
+		if now.After(e.expiresAt) {
 			delete(d.appTokens, k)
 		}
 	}
+	d.appTokens[key] = entry
+}
 
-	d.appTokens[cacheKey] = &appTokenCache{
-		token:     token,
-		expiresAt: expiresAt,
+func appTokenRawData(entry *appTokenCache) map[string]interface{} {
+	return map[string]interface{}{
+		"token":      entry.token,
+		"expires_at": entry.expiresAt.Format(time.RFC3339),
 	}
-
-	ttl := time.Until(expiresAt)
-	rawData := map[string]interface{}{
-		"token":      token,
-		"expires_at": expiresAt.Format(time.RFC3339),
-	}
-
-	if d.logger != nil {
-		d.logger.Debug("minted GitHub App installation token",
-			logger.String("spec", spec.Name),
-			logger.String("installation_id", installationID),
-			logger.String("ttl", ttl.String()),
-		)
-	}
-
-	return rawData, nil, ttl, "", nil
 }
 
 // mintPATFromToken returns the given PAT as a credential (from spec config for a
