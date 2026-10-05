@@ -9,7 +9,13 @@ ALICE=$(warden dev jwt user alice -may-act agent-1 -ttl 8h) &&
 BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)
 ```
 
-Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, run there: cd $HOME/warden-playground &amp;&amp; codex. Trust the directory when Codex asks: it reads the servers from .codex/config.toml there.
+Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, start Codex there, from the playground directory:
+
+```bash
+cd $HOME/warden-playground && codex
+```
+
+Trust the directory when Codex asks: it reads the servers from .codex/config.toml there, and only there.
 
 **1 · The agent shows only its identity; Warden brings the credential**
 
@@ -238,7 +244,7 @@ http_headers = { "Authorization" = "Bearer $AGENT" }
 EOF
 ```
 
-Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then exit Codex, then run codex again.
+Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then exit Codex, then start it again: `cd $HOME/warden-playground && codex`.
 
 Ask your agent:
 

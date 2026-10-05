@@ -39,7 +39,7 @@ The tour keeps three tabs apart, on purpose:
 |---|---|
 | **Server** | Warden itself. |
 | **Warden tab** | Every command of the tour. It holds the root token. |
-| **Agent's tab** | Your agent, and nothing else. |
+| **Agent's tab** | Your agent, and nothing else, always started from `$HOME/warden-playground`. |
 
 The root token can do anything, including rewriting the policies the tour shows your
 agent cannot get past. An agent started in the Warden tab would inherit it, so the
@@ -222,6 +222,11 @@ Both are described under [`warden dev`](/cli/dev/).
 - **Every call is refused after a restart, or after eight hours.** The identities the
   setup minted are gone or expired. Run the setup again in the Warden tab, then the
   scenario you were on.
+- **The agent calls servers the tour did not attach, or every call fails with a
+  signature error.** The agent was started outside the playground directory and reads
+  that directory's servers instead, perhaps ones from an earlier run whose tokens a
+  restart voided. Exit it and start it again from the agent's tab, with the command
+  your agent's tour gives, such as `cd $HOME/warden-playground && claude`.
 - **Port 8400 is already in use.** Publish another one, as in step 1.
 - **In scenario 8 the agent has no `$AGENT`.** Load the variables in the agent's tab
   with `source $HOME/warden-playground/agent.env`, then restart the agent from there.

@@ -10,7 +10,13 @@ BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -tt
 mkdir -p $HOME/warden-playground && cd $HOME/warden-playground
 ```
 
-Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has added the bank, run there: cd $HOME/warden-playground &amp;&amp; gemini. Trust the folder when it asks: it reads the servers from .gemini/settings.json there.
+Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has added the bank, start Gemini CLI there, from the playground directory:
+
+```bash
+cd $HOME/warden-playground && gemini
+```
+
+Trust the folder when it asks: it reads the servers from .gemini/settings.json there, and only there.
 
 **1 · The agent shows only its identity; Warden brings the credential**
 
@@ -212,7 +218,7 @@ export WARDEN_ADDR='$WARDEN_ADDR'
 EOF
 ```
 
-Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then exit Gemini CLI, then run gemini again.
+Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then exit Gemini CLI, then start it again: `cd $HOME/warden-playground && gemini`.
 
 Ask your agent:
 

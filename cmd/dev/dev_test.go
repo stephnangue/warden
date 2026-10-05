@@ -243,6 +243,14 @@ func TestRenderTour_Clients(t *testing.T) {
 				"scenario 8's variables reach only an agent started after they are loaded")
 			assert.Contains(t, all, c.launch)
 			assert.True(t, strings.HasPrefix(c.launch, agentTab), "every launch sends the agent to its own tab")
+			// An agent started anywhere else reads that directory's servers, not
+			// the tour's: the start is a command of its own, never words in a
+			// sentence, and a restart repeats it.
+			if name != "generic" {
+				assert.Contains(t, c.start, playgroundDir, "the agent starts in the playground directory")
+				assert.Contains(t, all, "\n"+c.start+"\n", "the start is printed as a command")
+				assert.Contains(t, c.restart, "`"+c.start+"`", "a restart starts there again")
+			}
 			for _, line := range strings.Split(all, "\n") {
 				if strings.TrimSpace(line) == "EOF" {
 					assert.Equal(t, "EOF", line, "an indented delimiter never ends the heredoc")
@@ -259,7 +267,7 @@ func TestRenderTour_Clients(t *testing.T) {
 		"gemini mcp add writes .gemini/settings.json where it runs")
 	assert.Contains(t, renderTourFor(0), "mkdir -p $HOME/warden-playground && cd $HOME/warden-playground",
 		"claude mcp add attaches to the directory it runs in, which the agent's tab must share")
-	assert.Contains(t, clients["claude"].launch, "cd $HOME/warden-playground && claude")
+	assert.Equal(t, "cd $HOME/warden-playground && claude", clients["claude"].start)
 
 	// Only Claude Code's raw-result shortcut is known.
 	assert.Contains(t, renderTourFor(1), "read access_token. In Claude Code, press ctrl+o.")

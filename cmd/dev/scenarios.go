@@ -225,6 +225,14 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		if c.launch != "" {
 			fmt.Fprintf(w, "   %s\n\n", c.launch)
 		}
+		// A command of its own, not words in a sentence: an agent started
+		// outside the playground directory never sees what the tour attaches.
+		if c.start != "" {
+			printCommands(w, []string{c.start})
+		}
+		if c.startNote != "" {
+			fmt.Fprintf(w, "   %s\n\n", c.startNote)
+		}
 	}
 	// Scenarios run in order, each keeping what the last one left: one printed
 	// alone still knows what the agent has when it starts.

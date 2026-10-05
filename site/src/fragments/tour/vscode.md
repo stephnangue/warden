@@ -9,7 +9,13 @@ ALICE=$(warden dev jwt user alice -may-act agent-1 -ttl 8h) &&
 BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)
 ```
 
-Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, quit VS Code fully and run there: code $HOME/warden-playground. An open VS Code never sees that tab's variables, and scenario 8 needs them. Trust the workspace when it asks.
+Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, quit VS Code fully, then open the playground directory from that tab:
+
+```bash
+code $HOME/warden-playground
+```
+
+An open VS Code never sees that tab's variables, and scenario 8 needs them. Trust the workspace when it asks.
 
 **1 · The agent shows only its identity; Warden brings the credential**
 
@@ -294,7 +300,7 @@ mkdir -p "$HOME/warden-playground/.vscode" && cat > "$HOME/warden-playground/.vs
 EOF
 ```
 
-Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then quit VS Code fully, then run code $HOME/warden-playground again.
+Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then quit VS Code fully, then open it again: `code $HOME/warden-playground`.
 
 Ask your agent:
 

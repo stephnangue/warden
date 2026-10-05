@@ -9,7 +9,13 @@ ALICE=$(warden dev jwt user alice -may-act agent-1 -ttl 8h) &&
 BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)
 ```
 
-Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, run there: cd $HOME/warden-playground &amp;&amp; opencode. It reads the servers from opencode.json there.
+Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, start opencode there, from the playground directory:
+
+```bash
+cd $HOME/warden-playground && opencode
+```
+
+It reads the servers from opencode.json there, and only there.
 
 **1 · The agent shows only its identity; Warden brings the credential**
 
@@ -309,7 +315,7 @@ mkdir -p "$HOME/warden-playground" && cat > "$HOME/warden-playground/opencode.js
 EOF
 ```
 
-Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then exit opencode, then run opencode again.
+Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then exit opencode, then start it again: `cd $HOME/warden-playground && opencode`.
 
 Ask your agent:
 

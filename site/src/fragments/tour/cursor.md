@@ -9,7 +9,13 @@ ALICE=$(warden dev jwt user alice -may-act agent-1 -ttl 8h) &&
 BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)
 ```
 
-Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, quit Cursor fully and run there: cursor $HOME/warden-playground. An open Cursor never sees that tab's variables, and scenario 8 needs them. Approve the MCP servers when it asks.
+Start your agent in a new terminal tab, never in this one: this shell holds the root token, and an agent that inherited it could rewrite the policies the tour shows it cannot get past. Once scenario 1 has written the bank, quit Cursor fully, then open the playground directory from that tab:
+
+```bash
+cursor $HOME/warden-playground
+```
+
+An open Cursor never sees that tab's variables, and scenario 8 needs them. Approve the MCP servers when it asks.
 
 **1 · The agent shows only its identity; Warden brings the credential**
 
@@ -102,7 +108,7 @@ mkdir -p "$HOME/warden-playground/.cursor" && cat > "$HOME/warden-playground/.cu
 EOF
 ```
 
-Then quit Cursor fully, then run cursor $HOME/warden-playground again.
+Then quit Cursor fully, then open it again: `cursor $HOME/warden-playground`.
 
 Ask your agent:
 
@@ -131,7 +137,7 @@ mkdir -p "$HOME/warden-playground/.cursor" && cat > "$HOME/warden-playground/.cu
 EOF
 ```
 
-Then quit Cursor fully, then run cursor $HOME/warden-playground again.
+Then quit Cursor fully, then open it again: `cursor $HOME/warden-playground`.
 
 > What's my balance? Withdraw 500.
 
@@ -159,7 +165,7 @@ mkdir -p "$HOME/warden-playground/.cursor" && cat > "$HOME/warden-playground/.cu
 EOF
 ```
 
-Then quit Cursor fully, then run cursor $HOME/warden-playground again.
+Then quit Cursor fully, then open it again: `cursor $HOME/warden-playground`.
 
 - Warden refuses: alice's may_act names agent-1. The rule is the policy condition `user.metadata.may_act_sub == agent.principal`.
 - The refusal covers initialize too, so the client lists bank as failed. `warden dev audit -decision deny -limit 1` shows why.
@@ -184,7 +190,7 @@ mkdir -p "$HOME/warden-playground/.cursor" && cat > "$HOME/warden-playground/.cu
 EOF
 ```
 
-Then quit Cursor fully, then run cursor $HOME/warden-playground again.
+Then quit Cursor fully, then open it again: `cursor $HOME/warden-playground`.
 
 Ask your agent:
 
@@ -249,7 +255,7 @@ Reach services through Warden. Call list_roles on the warden MCP server, pick th
 EOF
 ```
 
-Then quit Cursor fully, then run cursor $HOME/warden-playground again.
+Then quit Cursor fully, then open it again: `cursor $HOME/warden-playground`.
 
 Ask your agent:
 
@@ -286,7 +292,7 @@ mkdir -p "$HOME/warden-playground/.cursor" && cat > "$HOME/warden-playground/.cu
 EOF
 ```
 
-Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then quit Cursor fully, then run cursor $HOME/warden-playground again.
+Then, in the agent's tab, load them and restart your agent: `source $HOME/warden-playground/agent.env`, then quit Cursor fully, then open it again: `cursor $HOME/warden-playground`.
 
 Ask your agent:
 
@@ -336,7 +342,7 @@ mkdir -p "$HOME/warden-playground/.cursor" && cat > "$HOME/warden-playground/.cu
 EOF
 ```
 
-Then quit Cursor fully, then run cursor $HOME/warden-playground again.
+Then quit Cursor fully, then open it again: `cursor $HOME/warden-playground`.
 
 Ask your agent:
 

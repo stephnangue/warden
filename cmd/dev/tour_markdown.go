@@ -34,6 +34,13 @@ func renderTourMarkdown(w io.Writer, setup []string, scenarios []playground.Scen
 	writeCodeBlock(w, []string{chainCommands(append(cmds, c.setup...))})
 	fmt.Fprintln(w, mdText(c.launch))
 	fmt.Fprintln(w)
+	if c.start != "" {
+		writeCodeBlock(w, []string{c.start})
+	}
+	if c.startNote != "" {
+		fmt.Fprintln(w, mdText(c.startNote))
+		fmt.Fprintln(w)
+	}
 
 	var current state
 	for _, s := range scenarios {
