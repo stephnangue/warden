@@ -36,6 +36,10 @@ skills=(provider/*/skill.md)
 # system bash on macOS) treats "${empty[@]}" as an unbound variable.
 blog=()
 [ -d "site/src/content/blog" ] && blog=("site/src/content/blog")
+# The getting started page's tour is generated from the playground's scenarios
+# and imported from site/src/fragments; readers copy its policies like any
+# other page's, so it rides with the blog in every check.
+[ -d "site/src/fragments" ] && blog+=("site/src/fragments")
 
 status=0
 

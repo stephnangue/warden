@@ -25,9 +25,9 @@ Prebuilt archives are published for **linux/amd64**, **linux/arm64**,
 :::note[How release assets are named]
 Archives are named `warden_<version>_<os>_<arch>.tar.gz` — the version in the
 filename has **no** leading `v`, while the release tag in the URL **does**. For
-`v0.20.0` on Apple Silicon that is
-`warden_0.20.0_darwin_arm64.tar.gz`, downloaded from
-`.../releases/download/v0.20.0/`. Windows archives are `.zip`, not `.tar.gz`.
+`v0.21.0` on Apple Silicon that is
+`warden_0.21.0_darwin_arm64.tar.gz`, downloaded from
+`.../releases/download/v0.21.0/`. Windows archives are `.zip`, not `.tar.gz`.
 
 The commands below resolve the version rather than hardcoding it, so they stay
 correct as releases land.
@@ -69,7 +69,7 @@ Apple Silicon (arm64):
 
 ```bash
 VERSION=$(curl -fsSL https://api.github.com/repos/stephnangue/warden/releases/latest \
-  | grep '"tag_name"' | cut -d'"' -f4)          # e.g. v0.20.0
+  | grep '"tag_name"' | cut -d'"' -f4)          # e.g. v0.21.0
 
 curl -fsSLO "https://github.com/stephnangue/warden/releases/download/${VERSION}/warden_${VERSION#v}_darwin_arm64.tar.gz"
 tar -xzf "warden_${VERSION#v}_darwin_arm64.tar.gz" warden
@@ -123,7 +123,7 @@ amd64:
 
 ```bash
 VERSION=$(curl -fsSL https://api.github.com/repos/stephnangue/warden/releases/latest \
-  | grep '"tag_name"' | cut -d'"' -f4)          # e.g. v0.20.0
+  | grep '"tag_name"' | cut -d'"' -f4)          # e.g. v0.21.0
 
 curl -fsSLO "https://github.com/stephnangue/warden/releases/download/${VERSION}/warden_${VERSION#v}_linux_amd64.tar.gz"
 tar -xzf "warden_${VERSION#v}_linux_amd64.tar.gz" warden
@@ -320,9 +320,9 @@ build you are running.
 clone and pass it yourself:
 
 ```bash
-git clone --depth 1 --branch v0.20.0 https://github.com/stephnangue/warden
+git clone --depth 1 --branch v0.21.0 https://github.com/stephnangue/warden
 cd warden
-go build -ldflags "-s -w -X main.version=0.20.0" -o warden .
+go build -ldflags "-s -w -X main.version=0.21.0" -o warden .
 ```
 :::
 

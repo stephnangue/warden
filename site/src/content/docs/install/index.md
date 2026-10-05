@@ -65,7 +65,9 @@ warden server -dev -dev-root-token=root
 Storage is in-memory, the cluster initializes and unseals itself, and the
 listener is plain HTTP on `127.0.0.1:8400`. Everything is lost when the process
 exits. That is the right tool for a tutorial, a demo, or a local agent
-experiment — see [Dev Server](/concepts/dev-server/).
+experiment — see [Dev Server](/concepts/dev-server/). To see Warden govern an agent
+before configuring anything, add `-dev-playground` and follow
+[Getting started](/getting-started/).
 
 **A real deployment** needs four things dev mode fakes:
 
@@ -79,6 +81,7 @@ and **8401** for inter-node forwarding between cluster members.
 
 ## Next steps
 
+- [Getting started](/getting-started/) — tour the playground from the agent you already use
 - [Quickstarts](/quickstarts/workstation/) — put an agent behind Warden on your own machine
 - [Concepts](/concepts/) — roles, policies, credentials, delegation
 - [CLI reference](/cli/)

@@ -169,6 +169,7 @@ a `{"error":{"code":…,"message":…,"hint":…}}` envelope on stderr.
 |---|---|
 | [`server`](/cli/server/) | Start a Warden server. |
 | [`status`](/cli/status/) | Show initialization, seal, and HA state. |
+| [`dev`](/cli/dev/) | Mint playground identities, read its audit log, and print its tour. |
 | [`operator`](/cli/operator/) | Administrative operations — initialize and generate a root token. |
 
 ### Auth, audit & policy

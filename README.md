@@ -33,6 +33,17 @@
 
 Agents discover what they're allowed to access. Warden brokers every connection. Operators get one control plane for identity, policy, and audit — across every MCP server, cloud, code-host, observability stack, database, and SaaS the agent reaches.
 
+## Try it in five minutes
+
+The playground is Warden with everything it protects already in place: its own identity provider, and a small bank to govern. Start it:
+
+```bash
+docker run --rm --name warden-playground -p 127.0.0.1:8400:8400 \
+  ghcr.io/stephnangue/warden:latest -dev-playground -dev-root-token=root
+```
+
+Then open **[Getting started](https://wardengateway.com/getting-started/)** and pick your agent — Claude Code, Codex, Cursor, Gemini CLI, opencode, VS Code, or any MCP client. The tour is written out for each. In nine short scenarios your agent holds no secret while Warden brings the bank's credential, policy decides its tools and then its arguments, it acts for a person, a prompt-injected memo fails to move the money, every call is audited, the agent finds its own roles — and the last scenario puts your own GitHub behind Warden. There's no identity provider to set up and no API key to find.
+
 ---
 
 ## The problem
@@ -65,7 +76,7 @@ Agents don't need that access wired in ahead of time. They can ask Warden which 
 
 ## Use cases
 
-- **Access brokering** — Warden brokers the upstream credential into each request while the agent presents only its own identity — a JWT, a TLS client certificate, or a SPIFFE SVID — and never holds a key. Warden itself need not hold the secret either — it can prove the caller's identity so the upstream mints the credential, or hold the secret and inject a scoped, short-lived credential. The same identity reaches every upstream the policy permits, so there's no per-system credential sprawl, nothing to rotate per integration, and nothing in the agent to leak.
+- **Access brokering** — Warden brokers the upstream credential into each request while the agent presents only its own identity — a JWT, a TLS client certificate, or a SPIFFE SVID — and never holds a key. Warden itself need not hold the secret either — it can prove the caller's identity so the upstream mints the credential, fetch the secret from your own store per request, or hold it and inject a scoped, short-lived credential. The same identity reaches every upstream the policy permits, so there's no per-system credential sprawl, nothing to rotate per integration, and nothing in the agent to leak.
 - **Breach containment** — a prompt-injected, jailbroken, or otherwise compromised agent has nothing to exfiltrate, because it never holds a credential — and in Warden's keyless modes there is no secret trove at the gateway to steal either. Every call it issues is still bounded by policy at request time and backed by short-lived access, so one bad step — or one hallucination — stays a contained, recoverable event instead of a broad compromise.
 - **Per-user access** — an agent can act on behalf of the verified person behind it, so the upstream authorizes the real human with their own scope — not a shared service identity — and every action is attributed to that person. It works even for upstreams with no built-in way to act on someone's behalf, and scales to a whole fleet of users without a separate role for each.
 - **Runtime authorization** — every call is authorized the moment it happens, down to the action and its arguments, evaluated against caller IP, time of day, day of week, and on whose behalf the agent is acting — the verified attributes its identity carries, so a shared agent still admits one principal and refuses another. For MCP traffic the policy reaches inside each tool call — which tools an agent may invoke and which arguments it may pass — so the agent gets the narrowest fit for each step, not a session-wide grant.
@@ -81,7 +92,7 @@ Warden fronts systems across MCP servers, LLMs, cloud, code-hosting, observabili
 | Category | Providers | Warden does |
 |---|---|---|
 | MCP servers | [Generic](https://wardengateway.com/provider-backends/mcp/) — GitHub, Google Cloud, Slack, Cloudflare, …; [AWS](https://wardengateway.com/provider-backends/mcp_aws/) (SigV4) | Proxies tool calls — injects credentials, enforces tool-level policy |
-| LLM APIs | [Anthropic](https://wardengateway.com/provider-backends/anthropic/), [OpenAI](https://wardengateway.com/provider-backends/openai/), [Mistral](https://wardengateway.com/provider-backends/mistral/), [Cohere](https://wardengateway.com/provider-backends/cohere/) | Injects API key |
+| LLM APIs | [Anthropic](https://wardengateway.com/provider-backends/anthropic/), [OpenAI](https://wardengateway.com/provider-backends/openai/), [Mistral](https://wardengateway.com/provider-backends/mistral/), [Cohere](https://wardengateway.com/provider-backends/cohere/) | Injects a short-lived token (keyless) or API key |
 | Cloud infrastructure | [AWS](https://wardengateway.com/provider-backends/aws/), [Azure](https://wardengateway.com/provider-backends/azure/), [GCP](https://wardengateway.com/provider-backends/gcp/), [Alicloud](https://wardengateway.com/provider-backends/alicloud/), [IBM Cloud](https://wardengateway.com/provider-backends/ibmcloud/), [OVH](https://wardengateway.com/provider-backends/ovh/), [Scaleway](https://wardengateway.com/provider-backends/scaleway/), [Cloudflare](https://wardengateway.com/provider-backends/cloudflare/) | Temporary credentials / Bearer tokens |
 | Code hosting & CI/CD | [GitHub](https://wardengateway.com/provider-backends/github/), [GitLab](https://wardengateway.com/provider-backends/gitlab/), [Atlassian](https://wardengateway.com/provider-backends/atlassian/), [Ansible Tower](https://wardengateway.com/provider-backends/ansible_tower/), [Terraform Enterprise](https://wardengateway.com/provider-backends/tfe/) | Injects App token, PAT, or Bearer token |
 | Observability | [Datadog](https://wardengateway.com/provider-backends/datadog/), [Dynatrace](https://wardengateway.com/provider-backends/dynatrace/), [Elastic](https://wardengateway.com/provider-backends/elastic/), [Grafana](https://wardengateway.com/provider-backends/grafana/), [Honeycomb](https://wardengateway.com/provider-backends/honeycomb/), [New Relic](https://wardengateway.com/provider-backends/newrelic/), [Prometheus](https://wardengateway.com/provider-backends/prometheus/), [Sentry](https://wardengateway.com/provider-backends/sentry/), [Splunk](https://wardengateway.com/provider-backends/splunk/) | Injects API key / proxies metrics |
@@ -103,6 +114,9 @@ Warden supports multiple methods for verifying caller identity.
 
 ## Tutorials
 
+Once the playground has shown you the ideas, put them to work on real
+systems.
+
 **Securing agents on the workstation — from one secret on disk to
 zero.** A three-part, hands-on series that takes a local coding
 agent (Claude Code) and removes every credential from the laptop,
@@ -112,7 +126,7 @@ one rung at a time, without changing how the agent works:
   Warden under an mTLS client-certificate identity; the LLM API key
   never touches the workstation.
 - **Certificate → LLM + MCP** — a hosted MCP server (GitHub) joins
-  the same identity, and its token lives only in Warden too.
+  the same identity, and its token never touches the workstation.
 - **SPIFFE → LLM + MCP** — the identity becomes a keyless,
   auto-rotating SPIFFE SVID, so even the private key leaves the
   disk. Zero long-lived credentials remain on the machine.
@@ -124,14 +138,15 @@ policy. See [the series](https://wardengateway.com/quickstarts/workstation/).
 
 ## Install
 
-Warden is a single static binary — the same one is both the command-line client and the server.
+Warden is a single static binary — the same one is both the command-line client and the server — and a container image built from it.
 
 ```bash
+docker pull ghcr.io/stephnangue/warden:latest
+# or, on macOS and Linux:
 curl -sL https://wardengateway.com/install.sh | bash
-warden --version
 ```
 
-That covers macOS and Linux. Windows archives, container images, and the Helm chart are all published on every release; see [the install guide](https://wardengateway.com/install/) for those, and for the difference between a one-command dev server and a real deployment.
+Windows archives and the Helm chart are published on every release too; see [the install guide](https://wardengateway.com/install/) for those, and for the difference between a one-command dev server and a real deployment.
 
 ## Architecture
 

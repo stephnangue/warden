@@ -59,6 +59,7 @@ export default defineConfig({
           label: 'Start here',
           items: [
             { label: 'Home', link: '/' },
+            { slug: 'getting-started' },
             { slug: 'agent-flow' },
             { slug: 'architecture' },
           ],

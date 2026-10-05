@@ -26,7 +26,7 @@ your dependencies, or as the starting point for a deployment you build yourself.
 | | |
 |---|---|
 | Repository | `ghcr.io/stephnangue/warden` (public — no `docker login` needed) |
-| Release tag | `v<version>` — **with a leading `v`**, e.g. `v0.20.0` |
+| Release tag | `v<version>` — **with a leading `v`**, e.g. `v0.21.0` |
 | Moving tags | `latest`, `debug` |
 | Debug variant | `v<version>-debug` |
 | Base | `gcr.io/distroless/static-debian12:nonroot` — no shell, no package manager, no DNS tools |
@@ -41,7 +41,7 @@ Anything you write after the image name replaces the image's *command*, not its
 entrypoint — so you pass **flags, not subcommands**:
 
 ```bash
-docker run ghcr.io/stephnangue/warden:v0.20.0 -dev     # runs: ./warden server -dev
+docker run ghcr.io/stephnangue/warden:latest -dev     # runs: ./warden server -dev
 ```
 
 Writing `... warden server -dev` would run `./warden server warden server -dev`
@@ -49,9 +49,9 @@ and fail. The same applies to `command:` in a Compose file.
 :::
 
 :::note[Image tags carry a `v`, chart versions do not]
-Four numbers travel together and only two of them match. For the v0.20.0
-release: the git tag is `v0.20.0`, the image tag is `v0.20.0`, the release
-archive is `warden_0.20.0_<os>_<arch>.tar.gz`, and the Helm chart version is an
+Four numbers travel together and only two of them match. For the v0.21.0
+release: the git tag is `v0.21.0`, the image tag is `v0.21.0`, the release
+archive is `warden_0.21.0_<os>_<arch>.tar.gz`, and the Helm chart version is an
 unrelated number entirely. See
 [Chart version vs Warden version](/install/helm/#chart-version-vs-warden-version).
 :::
@@ -61,7 +61,7 @@ unrelated number entirely. See
 ## Pull
 
 ```bash
-docker pull ghcr.io/stephnangue/warden:v0.20.0   # pin this for anything persistent
+docker pull ghcr.io/stephnangue/warden:v0.21.0   # pin this for anything persistent
 docker pull ghcr.io/stephnangue/warden:latest    # fine for a throwaway
 ```
 
@@ -69,22 +69,9 @@ docker pull ghcr.io/stephnangue/warden:latest    # fine for a throwaway
 
 ## Dev mode in a container
 
-Dev mode binds its listener to `127.0.0.1:8400` and there is no flag to change
-it. Inside a container that is the *container's* loopback, so the obvious command
-does not work — the published port has nothing to forward to:
-
 ```bash
-# DOES NOT WORK — the dev listener is on the container's loopback.
-docker run --rm -p 8400:8400 ghcr.io/stephnangue/warden:v0.20.0 -dev
-```
-
-Two ways around it.
-
-### Linux: host networking
-
-```bash
-docker run --rm --network host \
-  ghcr.io/stephnangue/warden:v0.20.0 -dev -dev-root-token=root
+docker run --rm --name warden-dev -p 127.0.0.1:8400:8400 \
+  ghcr.io/stephnangue/warden:latest -dev -dev-root-token=root
 ```
 
 ```bash
@@ -93,55 +80,37 @@ export WARDEN_TOKEN='root'
 warden status
 ```
 
-### macOS, Windows, or any host: a forwarder in the same namespace
-
-Publish a second port on the Warden container, then run a forwarder that shares
-its network namespace so it can reach `127.0.0.1:8400`. This is the same shape as
-the ghostunnel sidecar in the
-[cert + LLM quickstart](/quickstarts/workstation/01-cert-llm/).
-
-```bash
-docker run -d --name warden-dev -p 127.0.0.1:8400:8500 \
-  ghcr.io/stephnangue/warden:v0.20.0 -dev -dev-root-token=root
-
-docker run -d --name warden-dev-tunnel --network container:warden-dev \
-  alpine/socat TCP-LISTEN:8500,fork,reuseaddr TCP:127.0.0.1:8400
-```
-
-```bash
-docker logs warden-dev        # the dev banner, root token included
-
-export WARDEN_ADDR='http://127.0.0.1:8400'
-export WARDEN_TOKEN='root'
-warden status
-
-docker rm -f warden-dev warden-dev-tunnel
-```
+The image sets `WARDEN_DEV_LISTEN_ADDRESS=0.0.0.0:8400`, so dev mode listens on
+every interface of the *container* — the published port reaches it, and so can
+other containers on the same Docker network. To keep it on the container's
+loopback, pass `-dev-listen-address=127.0.0.1:8400`.
 
 :::caution
 Dev mode serves plain HTTP with an in-memory barrier and a known root token.
-Bind the published port to `127.0.0.1` as shown above — never to `0.0.0.0`.
+Publish it on `127.0.0.1` as shown — `-p 127.0.0.1:8400:8400`. A bare
+`-p 8400:8400` exposes the root-token listener to your whole network.
 :::
+
+To try Warden with an agent rather than a bare server, run the playground instead:
+`-dev-playground` in place of `-dev`, then follow
+[Getting started](/getting-started/).
 
 ### Dev mode with TLS
 
-Shown with host networking, so this is the Linux form — on macOS or Windows,
-keep the forwarder from the previous section and add the TLS flags to the Warden
-container.
-
 ```bash
-docker run --rm --network host \
-  -v "$PWD/certs:/certs:ro" \
-  ghcr.io/stephnangue/warden:v0.20.0 \
-  -dev -dev-root-token=root \
-  -dev-tls-cert-file=/certs/server.crt \
-  -dev-tls-key-file=/certs/server.key \
-  -dev-tls-ca-cert-file=/certs/ca.crt
+docker run --rm --name warden-dev -p 127.0.0.1:8400:8400 \
+  -v warden-certs:/certs \
+  ghcr.io/stephnangue/warden:latest \
+  -dev -dev-root-token=root -dev-tls \
+  -dev-tls-cert-dir=/certs -dev-tls-san=warden-dev
 ```
 
-Bare `-dev-tls` also works, but it generates a self-signed certificate into a
-temporary directory inside the container where you cannot read it — mount your
-own instead. See [Serving TLS](/concepts/dev-server/#serving-tls).
+`-dev-tls` generates a self-signed certificate; `-dev-tls-cert-dir` writes it to a
+directory you can read, and keeps it after shutdown. `/certs` ships in the image
+owned by the container's user, so a new named volume mounted there needs no
+`chown`. Add `-dev-tls-san` for each name clients reach the container by. To serve
+your own certificate instead, mount it and pass `-dev-tls-cert-file` and
+`-dev-tls-key-file`. See [Serving TLS](/concepts/dev-server/#serving-tls).
 
 ---
 
@@ -160,7 +129,7 @@ docker run -d --name warden \
   -v "$PWD/certs:/certs:ro" \
   -v "$PWD/seal:/seal:ro" \
   -v warden-audit:/var/log/warden \
-  ghcr.io/stephnangue/warden:v0.20.0
+  ghcr.io/stephnangue/warden:v0.21.0
 ```
 
 Every path the configuration names has to be mounted — `/certs` and `/seal`
@@ -221,26 +190,17 @@ keys it returns.
 
 ## Docker Compose
 
-A minimal dev stack. It carries the forwarder from
-[above](#macos-windows-or-any-host-a-forwarder-in-the-same-namespace), so it
-works identically on Linux, macOS, and Windows:
+A minimal dev stack:
 
 ```yaml
 name: warden-dev
 
 services:
   warden:
-    image: ghcr.io/stephnangue/warden:v0.20.0
+    image: ghcr.io/stephnangue/warden:latest
     command: ["-dev", "-dev-root-token=root"]
     ports:
-      # Served by the forwarder below, which shares this network namespace.
-      - "127.0.0.1:8400:8500"
-
-  tunnel:
-    image: alpine/socat
-    network_mode: "service:warden"
-    command: ["TCP-LISTEN:8500,fork,reuseaddr", "TCP:127.0.0.1:8400"]
-    depends_on: [warden]
+      - "127.0.0.1:8400:8400"
 ```
 
 ```bash
@@ -253,8 +213,7 @@ warden status
 docker compose down
 ```
 
-A configuration-file deployment needs no forwarder — bind `0.0.0.0` in the HCL
-and publish 8400 directly.
+Other services in the stack reach it as `http://warden:8400`.
 
 For a full stack with mTLS, a certificate-based agent identity, and an agent
 actually talking through Warden, see the
@@ -272,7 +231,7 @@ identical, so swapping the tag changes nothing else.
 
 ```bash
 docker run --rm --entrypoint sh \
-  ghcr.io/stephnangue/warden:v0.20.0-debug -c 'pwd; ls -l; id'
+  ghcr.io/stephnangue/warden:debug -c 'pwd; ls -l; id'
 ```
 
 ```
@@ -284,9 +243,8 @@ uid=65532(nonroot) gid=65532(nonroot) groups=65532(nonroot)
 `--entrypoint sh` is required — the default entrypoint is `./warden server`. Add
 `-it` for an interactive shell instead of `-c`.
 
-Note that `/config` does not exist in either image: it is a mount point, so it
-only appears once you mount something there. Inspecting a *running* container is
-the usual case:
+`/config`, `/certs` and `/var/log/warden` ship empty in both images, ready to be
+mounted over. Inspecting a *running* container is the usual case:
 
 ```bash
 docker exec warden ls -l /config
@@ -315,25 +273,11 @@ Docker Desktop on macOS and Windows remaps ownership inside its VM, so this only
 bites on Linux.
 
 **Writable paths.** The file audit device writes to the path in its `file_path`
-option, and that directory has to be writable by 65532. Neither a bind mount nor
-a named volume gives you that for free: `/var/log/warden` does not exist in the
-image, so a fresh named volume is created `root:root` and the audit device fails
-at startup. Chown it once, before the first run:
-
-```bash
-docker volume create warden-audit
-
-docker run --rm --user 0 -v warden-audit:/var/log/warden --entrypoint sh \
-  ghcr.io/stephnangue/warden:v0.20.0-debug -c 'chown 65532:65532 /var/log/warden'
-```
-
-A bind mount is the same story — `sudo chown 65532:65532 ./audit` on the host.
-
-:::note[Why Kubernetes needs no equivalent]
-The Helm chart mounts an `emptyDir` and sets `fsGroup: 65532`, which makes the
-kubelet fix up group ownership on the volume. Docker has no `fsGroup`, so the
-chown is manual.
-:::
+option, and that directory has to be writable by 65532. The image ships
+`/var/log/warden` and `/certs` owned by 65532, and a new **named volume** mounted
+there takes that ownership — so `-v warden-audit:/var/log/warden` works with no
+preparation. A **bind mount** keeps the host directory's ownership instead:
+`sudo chown 65532:65532 ./audit` on the host, once.
 
 **Read-only root filesystem.** Warden runs fine with `--read-only`, but the
 distroless base has no writable `/tmp`:
@@ -344,7 +288,7 @@ docker run --read-only --tmpfs /tmp:rw,size=64m \
   -p 8400:8400 \
   -v "$PWD/warden.hcl:/config/warden.hcl:ro" \
   -v warden-audit:/var/log/warden \
-  ghcr.io/stephnangue/warden:v0.20.0
+  ghcr.io/stephnangue/warden:v0.21.0
 ```
 
 `-dev-tls` without explicit certificate files needs a writable temporary

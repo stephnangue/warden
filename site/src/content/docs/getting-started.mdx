@@ -1,0 +1,239 @@
+---
+title: "Getting started"
+description: "Try Warden in a few minutes: a local playground with its own identity provider and a protected bank, toured from the agent you already use."
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import CopyPrompts from '../../components/CopyPrompts.astro';
+import { Content as TourClaude } from '../../fragments/tour/claude.md';
+import { Content as TourCodex } from '../../fragments/tour/codex.md';
+import { Content as TourCursor } from '../../fragments/tour/cursor.md';
+import { Content as TourGemini } from '../../fragments/tour/gemini.md';
+import { Content as TourOpencode } from '../../fragments/tour/opencode.md';
+import { Content as TourVSCode } from '../../fragments/tour/vscode.md';
+import { Content as TourGeneric } from '../../fragments/tour/generic.md';
+
+The playground is Warden with everything it protects already in place. One command
+starts it with its own identity provider and a small bank behind it — an MCP server
+and an HTTP API, with balances, withdrawals, and a payment request planted with a
+prompt injection. You then drive the bank from the agent you already use, and watch
+Warden at work:
+
+- the agent holds only its identity, and Warden brings the bank's credential;
+- policy decides which tools the agent sees, then which arguments it may pass;
+- the agent acts for a person, and the bank sees who;
+- a memo written by a stranger cannot move the money, however the agent reads it;
+- every call lands in the audit log;
+- the agent finds its own roles, and calls the same bank over plain HTTP;
+- and the last scenario puts your own GitHub behind Warden.
+
+**You need** Docker, or the `warden` binary, and an agent: Claude Code, Codex, Cursor,
+Gemini CLI, opencode, VS Code, or any client that speaks MCP. The last scenario also
+needs a GitHub personal access token; the first eight run entirely on your machine.
+
+## Three terminal tabs
+
+The tour keeps three tabs apart, on purpose:
+
+| Tab | What runs there |
+|---|---|
+| **Server** | Warden itself. |
+| **Warden tab** | Every command of the tour. It holds the root token. |
+| **Agent's tab** | Your agent, and nothing else. |
+
+The root token can do anything, including rewriting the policies the tour shows your
+agent cannot get past. An agent started in the Warden tab would inherit it, so the
+agent always starts in a tab of its own.
+
+## 1. Start the playground
+
+<Tabs syncKey="install">
+<TabItem label="Docker">
+
+In the **server** tab:
+
+```bash
+docker run --rm --name warden-playground -p 127.0.0.1:8400:8400 \
+  ghcr.io/stephnangue/warden:latest -dev-playground -dev-root-token=root
+```
+
+In the **Warden tab**, set the root token, and give the tab a `warden` command that
+runs the CLI inside the container:
+
+```bash
+export WARDEN_TOKEN=root
+warden() {
+  docker exec -i -e WARDEN_ADDR=http://127.0.0.1:8400 -e WARDEN_TOKEN -e WARDEN_OUTPUT=table \
+    warden-playground ./warden "$@"
+}
+```
+
+Nothing is installed on your machine. The function lives in this tab only, which is
+where the tour runs every `warden` command.
+
+</TabItem>
+<TabItem label="Binary">
+
+Install the binary — macOS and Linux; for Windows see [Binary](/install/binary/#windows):
+
+```bash
+curl -sL https://wardengateway.com/install.sh | bash
+```
+
+In the **server** tab:
+
+```bash
+warden server -dev-playground -dev-root-token=root
+```
+
+In the **Warden tab**, set the root token:
+
+```bash
+export WARDEN_TOKEN=root
+```
+
+</TabItem>
+</Tabs>
+
+After the usual dev-server banner, Warden says where the playground's pieces are:
+
+```
+==> Playground
+
+  Identity provider:  https://localhost:8410
+  Bank (MCP + REST):  https://localhost:8420
+  GitHub MCP:         https://api.githubcopilot.com/mcp (needs your PAT)
+```
+
+Your agent only ever talks to Warden, on `127.0.0.1:8400`; the identity provider and
+the bank sit behind it. If 8400 is taken, publish another port
+(`-p 127.0.0.1:9400:8400`, or `-dev-listen-address` for the binary) and change
+`WARDEN_ADDR` in the setup below to match. Everything lives in memory, so a restart
+starts over, setup included.
+
+## 2. Pick your agent and take the tour
+
+Choose your agent. Its tab holds the whole tour: the setup, then nine scenarios, each
+with the commands to run in the Warden tab, what to ask your agent, and what to look
+for.
+
+<Tabs syncKey="harness">
+<TabItem label="Claude Code">
+
+The tour adds Warden's servers to Claude Code with `claude mcp add`, in the playground
+directory both tabs work in. After a change, reconnect with `/mcp` in Claude Code.
+
+<div class="tour"><TourClaude /></div>
+
+</TabItem>
+<TabItem label="Codex">
+
+The tour writes Codex's whole `.codex/config.toml` in the playground directory at
+each change, so you never edit it by hand. Codex runs commands with the network off
+and reads environment variables only from its own process; from scenario 8, when the
+agent calls the bank itself, the config turns the network on and hands it its
+variables.
+
+<div class="tour"><TourCodex /></div>
+
+</TabItem>
+<TabItem label="Cursor">
+
+The tour writes Cursor's whole `.cursor/mcp.json` in the playground directory at each
+change. Start Cursor from the agent's tab with `cursor $HOME/warden-playground`, so
+it reads that file and the variables loaded there.
+
+<div class="tour"><TourCursor /></div>
+
+</TabItem>
+<TabItem label="Gemini CLI">
+
+The tour adds Warden's servers to Gemini CLI with `gemini mcp add`, which writes
+`.gemini/settings.json` in the playground directory both tabs work in. After a
+change, restart Gemini CLI: it does not read the settings again while running.
+
+<div class="tour"><TourGemini /></div>
+
+</TabItem>
+<TabItem label="opencode">
+
+The tour writes opencode's whole `opencode.json` in the playground directory at each
+change. Restart opencode to pick a change up.
+
+<div class="tour"><TourOpencode /></div>
+
+</TabItem>
+<TabItem label="VS Code">
+
+The tour writes VS Code's whole `.vscode/mcp.json` in the playground directory at
+each change. Start VS Code from the agent's tab with `code $HOME/warden-playground`,
+so it reads that file and the variables loaded there.
+
+<div class="tour"><TourVSCode /></div>
+
+</TabItem>
+<TabItem label="Any MCP client">
+
+For a client the tour has no commands for, each step prints the name, URL and headers
+to enter in it, with your tokens filled in. Use streamable HTTP.
+
+<div class="tour"><TourGeneric /></div>
+
+</TabItem>
+</Tabs>
+
+<CopyPrompts />
+
+## What each scenario teaches
+
+| Scenario | Read next |
+|---|---|
+| 1. The agent shows only its identity; Warden brings the credential | [Credentials](/concepts/credentials/) |
+| 2. Policy decides which tools | [MCP](/concepts/mcp/) |
+| 3. Policy decides which arguments | [CEL conditions](/concepts/cel-conditions/) |
+| 4. The agent acts for a person | [Delegation](/concepts/delegation/) |
+| 5. A memo cannot move the money | [Policies](/concepts/policies/) |
+| 6. Every call is audited | [Audit](/concepts/audit/) |
+| 7. The agent finds its roles by itself | [Discovery and skills](/concepts/discovery-and-skills/) |
+| 8. The same bank, as a plain HTTP API | [Agent end-to-end flow](/agent-flow/) |
+| 9. Your own service next: GitHub | [Providers](/provider-backends/) |
+
+## Look inside
+
+In the Warden tab, `warden dev audit` reads the playground's audit log, newest first:
+
+```bash
+warden dev audit -decision deny
+warden dev audit -user alice
+warden dev audit -role-name assistant -limit 5
+```
+
+`warden dev jwt` mints more agents and people to try the rules with:
+
+```bash
+warden dev jwt agent agent-3
+warden dev jwt user carol -may-act agent-3 -claims '{"tier": "premium"}'
+```
+
+Both are described under [`warden dev`](/cli/dev/).
+
+## Troubleshooting
+
+- **Every call is refused after a restart, or after eight hours.** The identities the
+  setup minted are gone or expired. Run the setup again in the Warden tab, then the
+  scenario you were on.
+- **Port 8400 is already in use.** Publish another one, as in step 1.
+- **In scenario 8 the agent has no `$AGENT`.** Load the variables in the agent's tab
+  with `source $HOME/warden-playground/agent.env`, then restart the agent from there.
+- **Codex cannot reach Warden in scenario 8.** Restart Codex once the scenario's
+  config is written; it reads the network setting at start.
+- **Your shell profile exports `WARDEN_TOKEN`.** Run `unset WARDEN_TOKEN` in the
+  agent's tab before starting the agent.
+
+## Where next
+
+- [Securing agents on the workstation](/quickstarts/workstation/) puts a real LLM and a
+  hosted MCP server behind Warden on your laptop, with no secret left on disk.
+- [Install](/install/) covers a real deployment: Docker, Helm and Kubernetes.
+- [Concepts](/concepts/) explains each idea the tour showed, in depth.
+- [Providers](/provider-backends/) lists the systems Warden fronts.
