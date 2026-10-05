@@ -176,7 +176,9 @@ func (st state) after(s step) state {
 func stepCommands(c client, before state, s step, wardenAddr string) []string {
 	commands := s.commands
 	if len(s.export) > 0 {
-		commands = append([]string{"export " + strings.Join(s.export, " ")}, s.commands...)
+		// The agent runs in a tab of its own, so the variables reach it through
+		// a file that tab sources, never through this shell's environment.
+		commands = append([]string{writeAgentEnv(before.after(s).exported)}, s.commands...)
 	}
 	if c.file != nil {
 		cmds := append([]string(nil), commands...)
@@ -232,7 +234,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		printCommands(w, cmds)
 		switch {
 		case len(s.Export) > 0:
-			fmt.Fprintf(w, "   Then restart your agent, so it inherits the exports: %s.\n\n", c.restart)
+			fmt.Fprintf(w, "   Then, in the agent's tab, load them and restart your agent: %s, then %s.\n\n", sourceAgentEnv, c.restart)
 		case s.Attach != nil && len(before.attached) > 0 || len(s.Detach) > 0:
 			printReconnectHint(w, c)
 		}

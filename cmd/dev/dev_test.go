@@ -150,7 +150,7 @@ func TestRenderTour_CommandsPasteAsPrinted(t *testing.T) {
 			heredocs++
 		}
 	}
-	assert.Equal(t, 2, heredocs, "scenario 3's policy and scenario 9's spec")
+	assert.Equal(t, 3, heredocs, "scenario 3's policy, scenario 8's agent.env and scenario 9's spec")
 
 	// Paste the block as a reader would, then a line after it: that line runs
 	// only if the heredoc ended where the block does.
@@ -216,11 +216,11 @@ func TestRenderTour_Clients(t *testing.T) {
 				assert.NotContains(t, all, "Claude Code")
 			}
 			assert.Contains(t, all, "Then "+c.reconnect+".")
-			assert.Contains(t, renderTourAs(name, 8), "Then restart your agent, so it inherits the exports: "+c.restart+".",
-				"scenario 8's exports reach only an agent started after them")
-			if c.launch != "" {
-				assert.Contains(t, all, c.launch)
-			}
+			assert.Contains(t, renderTourAs(name, 8),
+				"Then, in the agent's tab, load them and restart your agent: "+sourceAgentEnv+", then "+c.restart+".",
+				"scenario 8's variables reach only an agent started after they are loaded")
+			assert.Contains(t, all, c.launch)
+			assert.True(t, strings.HasPrefix(c.launch, agentTab), "every launch sends the agent to its own tab")
 			for _, line := range strings.Split(all, "\n") {
 				if strings.TrimSpace(line) == "EOF" {
 					assert.Equal(t, "EOF", line, "an indented delimiter never ends the heredoc")
@@ -235,6 +235,9 @@ func TestRenderTour_Clients(t *testing.T) {
 	assert.Contains(t, gemini, `-H "X-Warden-Agent-Token: $AGENT"`)
 	assert.Contains(t, renderTourAs("gemini", 0), "mkdir -p $HOME/warden-playground && cd $HOME/warden-playground",
 		"gemini mcp add writes .gemini/settings.json where it runs")
+	assert.Contains(t, renderTourFor(0), "mkdir -p $HOME/warden-playground && cd $HOME/warden-playground",
+		"claude mcp add attaches to the directory it runs in, which the agent's tab must share")
+	assert.Contains(t, clients["claude"].launch, "cd $HOME/warden-playground && claude")
 
 	// Only Claude Code's raw-result shortcut is known.
 	assert.Contains(t, renderTourFor(1), "read access_token. In Claude Code, press ctrl+o.")
@@ -242,7 +245,8 @@ func TestRenderTour_Clients(t *testing.T) {
 }
 
 var (
-	configWrite = regexp.MustCompile(`(?ms)^mkdir -p "\$HOME/warden-playground.*?^EOF$`)
+	// A client's config file, not agent.env or an instructions file.
+	configWrite = regexp.MustCompile(`(?ms)^mkdir -p "[^"]*" && cat > "\$HOME/warden-playground/(?:\.codex/|\.cursor/|\.vscode/|opencode\.json)[^"]*" <<EOF$.*?^EOF$`)
 	configPath  = regexp.MustCompile(`cat > "\$HOME/([^"]+)"`)
 	tomlServer  = regexp.MustCompile(`^\[mcp_servers\.([a-z-]+)\]$`)
 	tomlPair    = regexp.MustCompile(`"([^"]+)" = "([^"]*)"`)
@@ -351,7 +355,46 @@ func TestRenderTour_CodexAgentShell(t *testing.T) {
 		assert.Contains(t, raw, `set = { "AGENT" = "jwt-agent-1", "WARDEN_ADDR" = "http://127.0.0.1:8400" }`,
 			"scenario %d: the exported variables, however Codex was started", n)
 	}
-	assert.Contains(t, renderTourAs("codex", 8), "\nexport AGENT WARDEN_ADDR\n", "the export is printed for every client")
+}
+
+// Scenario 8 hands the agent its variables through a file its own tab
+// sources, for every client: the shell that has them is not the agent's.
+func TestRenderTour_AgentEnv(t *testing.T) {
+	envWrite := regexp.MustCompile(`(?ms)^mkdir -p "\$HOME/warden-playground" && cat > "\$HOME/warden-playground/agent\.env" <<EOF$.*?^EOF$`)
+	for _, name := range clientNames() {
+		t.Run(name, func(t *testing.T) {
+			eighth := renderTourAs(name, 8)
+			assert.NotContains(t, eighth, "\nexport AGENT WARDEN_ADDR\n", "an export would stay in this shell")
+			block := envWrite.FindString(eighth)
+			require.NotEmpty(t, block)
+
+			// Write it as the setup's shell would, then source it in a shell
+			// that has none of the setup's variables, as the agent's tab.
+			home := t.TempDir()
+			write := exec.Command("sh")
+			write.Env = append(os.Environ(), "HOME="+home, "WARDEN_ADDR=http://127.0.0.1:8400", "AGENT=jwt-agent-1")
+			write.Stdin = strings.NewReader(block + "\n")
+			out, err := write.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			tab := exec.Command("sh", "-c", `. "$HOME/warden-playground/agent.env" && echo "$AGENT $WARDEN_ADDR"`)
+			tab.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			out, err = tab.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			assert.Equal(t, "jwt-agent-1 http://127.0.0.1:8400\n", string(out))
+
+			for _, n := range []int{1, 4, 7, 9} {
+				assert.Empty(t, envWrite.FindString(renderTourAs(name, n)), "only scenario 8 hands the agent variables")
+			}
+		})
+	}
+}
+
+// The tour never hands the agent the root token: it is set only in the
+// setup's shell, and nothing the tour writes for the agent names it.
+func TestRenderTour_AgentNeverGetsTheRootToken(t *testing.T) {
+	for _, name := range clientNames() {
+		assert.NotContains(t, renderTourAs(name, 0), "WARDEN_TOKEN", name)
+	}
 }
 
 // Scenario 7 tells the agent where to look, in the file its client reads
