@@ -141,8 +141,8 @@ func TestRenderTour(t *testing.T) {
 // or the reader's shell waits for more input.
 func TestRenderTour_CommandsPasteAsPrinted(t *testing.T) {
 	all := renderTourFor(0)
-	assert.Contains(t, all, "\nexport WARDEN_ADDR=http://127.0.0.1:8400\n")
-	assert.Contains(t, all, "\nAGENT=$(warden dev jwt agent agent-1 -ttl 8h)\n")
+	assert.Contains(t, all, "\nexport WARDEN_ADDR=http://127.0.0.1:8400 &&\n")
+	assert.Contains(t, all, "\nAGENT=$(warden dev jwt agent agent-1 -ttl 8h) &&\n")
 	heredocs := 0
 	for _, line := range strings.Split(all, "\n") {
 		if strings.TrimSpace(line) == "EOF" {
@@ -166,6 +166,28 @@ func TestRenderTour_CommandsPasteAsPrinted(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)
 	assert.Equal(t, "pasted\n", string(out), "the heredoc ended, and the next command ran")
+}
+
+// The Docker install's warden is docker exec -i, which reads the terminal: in a
+// pasted setup it swallowed the lines after the first mint, and left ALICE and
+// BOB unset with no error. The setup is one chained command, which the shell
+// reads whole before it runs, so a warden that drains stdin finds nothing left.
+func TestRenderTour_SetupSurvivesAWardenThatReadsStdin(t *testing.T) {
+	for _, name := range []string{"claude", "codex"} {
+		t.Run(name, func(t *testing.T) {
+			all := renderTourAs(name, 0)
+			setup := strings.SplitN(all, "\n\n", 3)[1]
+			require.True(t, strings.HasPrefix(setup, "export WARDEN_ADDR="), "%s", setup)
+
+			cmd := exec.Command("sh")
+			cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+			cmd.Stdin = strings.NewReader(`warden() { cat >/dev/null; echo "token-$4"; }` + "\n" +
+				setup + ` && echo "$AGENT $ALICE $BOB"` + "\n")
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			assert.Equal(t, "token-agent-1 token-alice token-bob\n", string(out))
+		})
+	}
 }
 
 func TestClaudeAdd(t *testing.T) {

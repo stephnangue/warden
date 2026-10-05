@@ -217,7 +217,9 @@ func Scenarios() []Scenario {
 		{
 			Number:   6,
 			Title:    "Every call is audited",
-			Commands: []string{"warden dev audit -limit 10", "warden dev audit -user alice"},
+			// One chained command: pasted as two lines, the Docker install's
+			// warden (docker exec -i) would swallow the second.
+			Commands: []string{"warden dev audit -limit 10 &&\nwarden dev audit -user alice"},
 			Shows: []string{
 				"Each entry has the agent and its role, the person it acted for, the tool and Warden's decision, including the refusals from scenarios 2 to 5.",
 				"Tokens are hashed, never written in the clear.",

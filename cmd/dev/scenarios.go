@@ -204,6 +204,16 @@ func stepCommands(c client, before state, s step, wardenAddr string) []string {
 	return cmds
 }
 
+// chainCommands joins the setup into one command, line by line with &&. A
+// pasted block runs one line at a time otherwise, and a command that reads the
+// terminal swallows the lines pasted after it: the Docker install's warden is
+// docker exec -i, which left ALICE and BOB unset with no error. Chained, the
+// shell reads the whole block before it runs any of it, and a failed mint stops
+// the setup there instead of leaving its variable empty.
+func chainCommands(cmds []string) string {
+	return strings.Join(cmds, " &&\n")
+}
+
 // renderTour prints the scenarios as a walkthrough. only selects one scenario;
 // 0 prints them all, with the setup first.
 func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string, c client) {
@@ -211,7 +221,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		fmt.Fprintln(w, "Setup, once:")
 		fmt.Fprintln(w)
 		setup := append([]string{"export WARDEN_ADDR=" + wardenAddr}, resp.Setup...)
-		printCommands(w, append(setup, c.setup...))
+		printCommands(w, []string{chainCommands(append(setup, c.setup...))})
 		if c.launch != "" {
 			fmt.Fprintf(w, "   %s\n\n", c.launch)
 		}

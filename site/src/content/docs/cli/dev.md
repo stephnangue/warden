@@ -38,8 +38,8 @@ user's is presented alongside an agent's when the agent acts for them. The token
 printed bare, so it can be captured:
 
 ```bash
-AGENT=$(warden dev jwt agent agent-1)
-ALICE=$(warden dev jwt user alice -may-act agent-1)
+AGENT=$(warden dev jwt agent agent-1) &&
+ALICE=$(warden dev jwt user alice -may-act agent-1) &&
 BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)
 ```
 
