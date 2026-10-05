@@ -192,7 +192,7 @@ Reach services through Warden. Call list_roles on the warden MCP server, pick th
 EOF
 ```
 
-Then restart Gemini CLI.
+Then exit Gemini CLI, then start it again: `cd $HOME/warden-playground && gemini`.
 
 Ask your agent:
 
@@ -251,7 +251,7 @@ gemini mcp add -t http github "$WARDEN_ADDR/v1/github-mcp/role/github/gateway/" 
   -H "Authorization: Bearer $AGENT"
 ```
 
-Then restart Gemini CLI.
+Then exit Gemini CLI, then start it again: `cd $HOME/warden-playground && gemini`.
 
 Ask your agent:
 

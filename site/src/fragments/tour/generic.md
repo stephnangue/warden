@@ -204,7 +204,7 @@ Add this MCP server to your client (streamable HTTP):
 EOF
 ```
 
-Then reconnect the server in your agent, or restart it.
+Then restart your agent.
 
 Ask your agent:
 
@@ -267,7 +267,7 @@ Add this MCP server to your client (streamable HTTP):
 EOF
 ```
 
-Then reconnect the server in your agent, or restart it.
+Then restart your agent.
 
 Ask your agent:
 

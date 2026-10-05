@@ -262,7 +262,7 @@ Reach services through Warden. Call list_roles on the warden MCP server, pick th
 EOF
 ```
 
-Then send your next message: VS Code restarts a server whose config changed. If it does not, MCP: List Servers &gt; Restart.
+Then quit VS Code fully, then open it again: `code $HOME/warden-playground`.
 
 Ask your agent:
 
@@ -352,7 +352,7 @@ mkdir -p "$HOME/warden-playground/.vscode" && cat > "$HOME/warden-playground/.vs
 EOF
 ```
 
-Then send your next message: VS Code restarts a server whose config changed. If it does not, MCP: List Servers &gt; Restart.
+Then quit VS Code fully, then open it again: `code $HOME/warden-playground`.
 
 Ask your agent:
 

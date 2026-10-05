@@ -133,7 +133,13 @@ func TestRenderTour(t *testing.T) {
 		assert.NotContains(t, ninth, bootstrapped, "the playground did this already")
 	}
 	assert.NotContains(t, ninth, "claude mcp remove")
-	assert.Contains(t, ninth, "Then reconnect")
+	// A server added beside the bank is one the running agent never loaded:
+	// /mcp lists only the servers Claude Code started with, so it restarts.
+	assert.Contains(t, ninth, "Then "+clients["claude"].restart+".")
+	assert.NotContains(t, ninth, "Then reconnect")
+	seventh := renderTourFor(7)
+	assert.Contains(t, seventh, "Then "+clients["claude"].restart+".", "the warden server is new, so the agent restarts")
+	assert.NotContains(t, seventh, "Then reconnect")
 	assert.Contains(t, ninth, "read -rs GITHUB_PAT", "the PAT is read without echo")
 }
 

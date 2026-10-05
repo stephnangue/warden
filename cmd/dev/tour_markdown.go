@@ -62,7 +62,7 @@ func renderTourMarkdown(w io.Writer, setup []string, scenarios []playground.Scen
 		case len(s.Export) > 0:
 			fmt.Fprintf(w, "Then, in the agent's tab, load them and restart your agent: `%s`, then %s.\n\n", sourceAgentEnv, mdText(c.restart))
 		case s.Attach != nil && len(before.attached) > 0 || len(s.Detach) > 0:
-			writeReconnectMarkdown(w, c)
+			writePickUpMarkdown(w, pickUp(c, before, s.Attach))
 		}
 		if len(s.Ask) > 0 {
 			fmt.Fprintln(w, "Ask your agent:")
@@ -104,15 +104,15 @@ func writeFollowUpMarkdown(w io.Writer, c client, current state, v playground.Va
 		writeCodeBlock(w, cmds)
 	}
 	if v.Attach != nil {
-		writeReconnectMarkdown(w, c)
+		writePickUpMarkdown(w, pickUp(c, current, v.Attach))
 	}
 	if v.Ask != "" {
 		fmt.Fprintf(w, "> %s\n\n", mdText(v.Ask))
 	}
 }
 
-func writeReconnectMarkdown(w io.Writer, c client) {
-	fmt.Fprintf(w, "Then %s.\n\n", mdText(c.reconnect))
+func writePickUpMarkdown(w io.Writer, how string) {
+	fmt.Fprintf(w, "Then %s.\n\n", mdText(how))
 }
 
 // writeCodeBlock writes commands as one shell block, set apart as

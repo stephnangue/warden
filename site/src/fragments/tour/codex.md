@@ -206,7 +206,7 @@ Reach services through Warden. Call list_roles on the warden MCP server, pick th
 EOF
 ```
 
-Then restart Codex.
+Then exit Codex, then start it again: `cd $HOME/warden-playground && codex`.
 
 Ask your agent:
 
@@ -293,7 +293,7 @@ http_headers = { "Authorization" = "Bearer $AGENT" }
 EOF
 ```
 
-Then restart Codex.
+Then exit Codex, then start it again: `cd $HOME/warden-playground && codex`.
 
 Ask your agent:
 

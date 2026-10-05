@@ -273,7 +273,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		case len(s.Export) > 0:
 			fmt.Fprintf(w, "   Then, in the agent's tab, load them and restart your agent: %s, then %s.\n\n", sourceAgentEnv, c.restart)
 		case s.Attach != nil && len(before.attached) > 0 || len(s.Detach) > 0:
-			printReconnectHint(w, c)
+			printPickUp(w, pickUp(c, before, s.Attach))
 		}
 		for _, ask := range s.Ask {
 			fmt.Fprintf(w, "   Ask: %q\n", ask)
@@ -317,15 +317,27 @@ func printFollowUp(w io.Writer, c client, current state, v playground.Variant, w
 	if v.Attach != nil {
 		// A running agent keeps the old headers until it reconnects, and
 		// would go on acting as the previous person.
-		printReconnectHint(w, c)
+		printPickUp(w, pickUp(c, current, v.Attach))
 	}
 	if v.Ask != "" {
 		fmt.Fprintf(w, "   Ask: %q\n\n", v.Ask)
 	}
 }
 
-func printReconnectHint(w io.Writer, c client) {
-	fmt.Fprintf(w, "   Then %s.\n\n", c.reconnect)
+// pickUp says how the running agent picks up a step that attaches a server.
+// A reconnect reloads a server the agent already has, which is enough when the
+// step replaces one. A server added beside the others is one the running agent
+// never loaded: Claude Code's /mcp, for one, lists only the servers it started
+// with. That takes a restart.
+func pickUp(c client, before state, attach *playground.Attachment) string {
+	if attach != nil && !before.attached.has(attach.Server) {
+		return c.restart
+	}
+	return c.reconnect
+}
+
+func printPickUp(w io.Writer, how string) {
+	fmt.Fprintf(w, "   Then %s.\n\n", how)
 }
 
 // printCommands prints commands flush left, unlike the prose around them, so

@@ -275,7 +275,7 @@ Reach services through Warden. Call list_roles on the warden MCP server, pick th
 EOF
 ```
 
-Then restart opencode.
+Then exit opencode, then start it again: `cd $HOME/warden-playground && opencode`.
 
 Ask your agent:
 
@@ -370,7 +370,7 @@ mkdir -p "$HOME/warden-playground" && cat > "$HOME/warden-playground/opencode.js
 EOF
 ```
 
-Then restart opencode.
+Then exit opencode, then start it again: `cd $HOME/warden-playground && opencode`.
 
 Ask your agent:
 

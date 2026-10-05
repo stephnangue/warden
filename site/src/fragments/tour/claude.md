@@ -187,7 +187,7 @@ claude mcp add --transport http warden "$WARDEN_ADDR/v1/sys/mcp" \
   --header "Authorization: Bearer $AGENT"
 ```
 
-Then reconnect the server in your agent (/mcp in Claude Code), or restart it.
+Then exit Claude Code, then start it again: `cd $HOME/warden-playground && claude`.
 
 Ask your agent:
 
@@ -246,7 +246,7 @@ claude mcp add --transport http github "$WARDEN_ADDR/v1/github-mcp/role/github/g
   --header "Authorization: Bearer $AGENT"
 ```
 
-Then reconnect the server in your agent (/mcp in Claude Code), or restart it.
+Then exit Claude Code, then start it again: `cd $HOME/warden-playground && claude`.
 
 Ask your agent:
 
