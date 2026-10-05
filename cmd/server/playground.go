@@ -162,5 +162,8 @@ func printPlaygroundBanner(w io.Writer, pg *playground.Playground, wardenAddr st
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "The tour's commands are for Claude Code. For another agent, add\n")
 	fmt.Fprintf(w, "-client codex, cursor, gemini, opencode, vscode or generic.\n")
+	fmt.Fprintf(w, "Start your agent in another terminal tab: this one holds the root token.\n")
+	fmt.Fprintf(w, "\n")
+	fmt.Fprintf(w, "The same tour, written out for each agent: https://wardengateway.com/getting-started/\n")
 	fmt.Fprintf(w, "\n")
 }

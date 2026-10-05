@@ -32,12 +32,12 @@ type client struct {
 	// setup are commands run once, after the identities are minted.
 	setup []string
 	// launch is printed after the setup: where to start the agent, so it
-	// reads what the tour attaches.
+	// reads what the tour attaches. It always opens with agentTab.
 	launch string
 	// reconnect tells the reader how the running agent picks up a change.
 	reconnect string
-	// restart tells the reader how to restart the agent so it inherits the
-	// shell's exports.
+	// restart tells the reader how to restart the agent, in its own tab, so
+	// it inherits the variables loaded there.
 	restart string
 	// rawResult, when set, says how to see a tool's raw result.
 	rawResult string
@@ -46,14 +46,31 @@ type client struct {
 	instructions string
 }
 
+// agentTab opens every launch line. The agent runs in a shell of its own,
+// never in the one that ran the setup: that shell holds the root token, and an
+// agent that inherited it could rewrite the very policies the tour shows it
+// cannot get past.
+const agentTab = "Start your agent in a new terminal tab, never in this one: this shell holds the root token, " +
+	"and an agent that inherited it could rewrite the policies the tour shows it cannot get past."
+
+// agentEnv is the file, in the playground directory, that hands the agent's
+// own tab the variables a scenario exports: the setup's shell, which has
+// them, is not the one the agent runs in.
+const agentEnv = "agent.env"
+
 // clients are the harnesses the tour knows, by the name -client takes.
 var clients = map[string]client{
 	"claude": {
-		name:      "claude",
-		add:       claudeAdd,
-		remove:    func(server string) string { return "claude mcp remove " + server },
+		name:   "claude",
+		add:    claudeAdd,
+		remove: func(server string) string { return "claude mcp remove " + server },
+		// claude mcp add attaches a server to the directory it runs in, so the
+		// setup and the agent's tab share one.
+		setup: []string{"mkdir -p " + playgroundDir + " && cd " + playgroundDir},
+		launch: agentTab + " Once scenario 1 has added the bank, run there: cd " + playgroundDir + " && claude. " +
+			"Claude Code reads the servers added in that directory.",
 		reconnect: "reconnect the server in your agent (/mcp in Claude Code), or restart it",
-		restart:   "exit Claude Code, then run claude again from this shell",
+		restart:   "exit Claude Code, then run claude again",
 		rawResult: "In Claude Code, press ctrl+o.",
 	},
 	"gemini": {
@@ -61,57 +78,58 @@ var clients = map[string]client{
 		add:    geminiAdd,
 		remove: func(server string) string { return "gemini mcp remove " + server },
 		setup:  []string{"mkdir -p " + playgroundDir + " && cd " + playgroundDir},
-		launch: "Once scenario 1 has added the bank, start Gemini CLI from this directory and this shell: gemini. " +
-			"Trust the folder when it asks: it reads the servers from .gemini/settings.json here.",
+		launch: agentTab + " Once scenario 1 has added the bank, run there: cd " + playgroundDir + " && gemini. " +
+			"Trust the folder when it asks: it reads the servers from .gemini/settings.json there.",
 		// /mcp refresh reconnects the servers Gemini CLI started with; it does
 		// not read the settings again.
-		reconnect:    "restart Gemini CLI from this directory",
-		restart:      "exit Gemini CLI, then run gemini again from this shell",
+		reconnect:    "restart Gemini CLI",
+		restart:      "exit Gemini CLI, then run gemini again",
 		instructions: "GEMINI.md",
 	},
 	"codex": {
 		name: "codex",
 		file: codexConfig,
-		launch: "Once scenario 1 has written the bank, start Codex from this shell: cd " + playgroundDir + " && codex. " +
+		launch: agentTab + " Once scenario 1 has written the bank, run there: cd " + playgroundDir + " && codex. " +
 			"Trust the directory when Codex asks: it reads the servers from .codex/config.toml there.",
 		reconnect:    "restart Codex",
-		restart:      "exit Codex, then run codex again from this shell",
+		restart:      "exit Codex, then run codex again",
 		instructions: "AGENTS.md",
 	},
 	"cursor": {
 		name: "cursor",
 		file: cursorConfig,
-		launch: "Once scenario 1 has written the bank, quit Cursor fully and start it from this shell: cursor " + playgroundDir + ". " +
-			"An open Cursor never sees this shell's exports, and scenario 8 needs them. Approve the MCP servers when it asks.",
+		launch: agentTab + " Once scenario 1 has written the bank, quit Cursor fully and run there: cursor " + playgroundDir + ". " +
+			"An open Cursor never sees that tab's variables, and scenario 8 needs them. Approve the MCP servers when it asks.",
 		// Cursor can keep a server's old tools across a reconnect; a restart
 		// is the reliable way.
 		reconnect:    "quit Cursor fully, then run cursor " + playgroundDir + " again",
-		restart:      "quit Cursor fully, then run cursor " + playgroundDir + " from this shell",
+		restart:      "quit Cursor fully, then run cursor " + playgroundDir + " again",
 		instructions: "AGENTS.md",
 	},
 	"vscode": {
 		name: "vscode",
 		file: vscodeConfig,
-		launch: "Once scenario 1 has written the bank, quit VS Code fully and start it from this shell: code " + playgroundDir + ". " +
-			"An open VS Code never sees this shell's exports, and scenario 8 needs them. Trust the workspace when it asks.",
+		launch: agentTab + " Once scenario 1 has written the bank, quit VS Code fully and run there: code " + playgroundDir + ". " +
+			"An open VS Code never sees that tab's variables, and scenario 8 needs them. Trust the workspace when it asks.",
 		reconnect:    "send your next message: VS Code restarts a server whose config changed. If it does not, MCP: List Servers > Restart",
-		restart:      "quit VS Code fully, then run code " + playgroundDir + " from this shell",
+		restart:      "quit VS Code fully, then run code " + playgroundDir + " again",
 		instructions: "AGENTS.md",
 	},
 	"opencode": {
 		name:         "opencode",
 		file:         opencodeConfig,
-		launch:       "Once scenario 1 has written the bank, start opencode from this shell: cd " + playgroundDir + " && opencode. It reads the servers from opencode.json there.",
+		launch:       agentTab + " Once scenario 1 has written the bank, run there: cd " + playgroundDir + " && opencode. It reads the servers from opencode.json there.",
 		reconnect:    "restart opencode",
-		restart:      "exit opencode, then run opencode again from this shell",
+		restart:      "exit opencode, then run opencode again",
 		instructions: "AGENTS.md",
 	},
 	"generic": {
 		name:      "generic",
 		add:       genericAdd,
 		remove:    func(server string) string { return `# Remove the MCP server "` + server + `" from your client.` },
+		launch:    agentTab,
 		reconnect: "reconnect the server in your agent, or restart it",
-		restart:   "restart your agent from this shell",
+		restart:   "restart your agent",
 	},
 }
 
@@ -169,6 +187,21 @@ func genericAdd(a *playground.Attachment, wardenAddr string) string {
 func writeFile(path, body string) string {
 	return writeHeredoc(path, body, "EOF")
 }
+
+// writeAgentEnv renders the command that writes the variables handed to the
+// agent to agentEnv, for its own tab to source. The shell fills in the values
+// as it writes, as it does the headers; a token or a URL holds no single
+// quote, so each value is quoted with them.
+func writeAgentEnv(exported []string) string {
+	lines := make([]string, len(exported))
+	for i, name := range exported {
+		lines[i] = "export " + name + "='$" + name + "'"
+	}
+	return writeFile(agentEnv, strings.Join(lines, "\n"))
+}
+
+// sourceAgentEnv is the command the agent's tab runs to load agentEnv.
+const sourceAgentEnv = "source " + playgroundDir + "/" + agentEnv
 
 // writeInstructions renders the command that writes the agent's instructions
 // to path, under the playground directory, as they are: the delimiter is

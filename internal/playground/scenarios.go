@@ -152,7 +152,7 @@ func Scenarios() []Scenario {
 				Ask:      "Withdraw 300.",
 			},
 			Shows: []string{
-				"50 goes through; 300 is refused by Warden before the bank sees it, by the condition " + atmWithdrawCondition(100) + ".",
+				"50 goes through; 300 is refused by Warden before the bank sees it, by the condition `" + atmWithdrawCondition(100) + "`.",
 				"The condition runs on every MCP call, so it only judges withdraw, and it fails closed: a withdrawal without a readable amount is refused.",
 				"Once the limit is raised, the same 300 goes through on the next call, with no change to the agent or the bank, and no reconnect.",
 			},
@@ -186,7 +186,7 @@ func Scenarios() []Scenario {
 						{Name: "Authorization", Value: "Bearer $ALICE"},
 					}},
 					Shows: []string{
-						"Warden refuses: alice's may_act names agent-1. The rule is the policy condition user.metadata.may_act_sub == agent.principal.",
+						"Warden refuses: alice's may_act names agent-1. The rule is the policy condition `user.metadata.may_act_sub == agent.principal`.",
 						"The refusal covers initialize too, so the client lists bank as failed. `warden dev audit -decision deny -limit 1` shows why.",
 					},
 				},
@@ -252,7 +252,7 @@ func Scenarios() []Scenario {
 			Shows: []string{
 				"The agent turns to discovery and picks teller, the role you call over HTTP: provider rest, with a url it can call itself.",
 				"It reads skill://teller/SKILL.md and calls the API with its own JWT. The bank still receives a token of its own.",
-				"The withdrawal of 500 is refused by a policy condition on the JSON body, written to fail closed: has(request.data.amount) && request.data.amount <= 100.",
+				"The withdrawal of 500 is refused by a policy condition on the JSON body, written to fail closed: `has(request.data.amount) && request.data.amount <= 100`.",
 			},
 		},
 		{
