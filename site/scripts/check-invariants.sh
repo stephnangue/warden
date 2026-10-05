@@ -88,6 +88,13 @@ check "MCP policy: no nested \`mcp {\` block" \
   'mcp[[:space:]]*\{' \
   "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}"
 
+# get_skill was replaced by read_skill(uri), and the "(skill: …, url: …)"
+# description convention by the role fields skill and provider_path (v0.21.0).
+# The seeded skills ship inside the binary, so they are scanned too.
+check "Discovery: no \`get_skill\` or \`(skill: …)\` description convention" \
+  'get_skill|\(skill: [a-z0-9_-]+' \
+  "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}" core/seed/skills
+
 # --- Pending checks -----------------------------------------------------------
 #
 # A check may only be enabled by the PR that removes the LAST occurrence of its

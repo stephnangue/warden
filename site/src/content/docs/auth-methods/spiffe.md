@@ -79,6 +79,9 @@ Fields:
 - `token_ttl` — TTL for issued tokens (default `1h`). Always capped by the SVID's own expiry.
 - `cred_spec_name` — credential spec to use for implicit-auth flows.
 - `groups_claim` / `group_policy_prefix` — dynamic policy mapping from a JWT-SVID claim (JWT-SVID only). See [Group-Based Policies](#group-based-policies-jwt-svid).
+- `description` — human-readable purpose, surfaced via introspection so agents can pick the right role.
+- `provider_path` — mount path of the provider the role is used with, relative to the role's namespace (e.g. `vault/`). The [discovery server](/concepts/discovery-and-skills/#discovering-roles) derives the role's URL from it.
+- `skill` — the skill that teaches an agent to use the role. Defaults to the skill of the provider at `provider_path`; set it only to point the role at a skill you wrote.
 
 A role's token type is always pinned to `spiffe_role`; operators can't override it. A role with no `bound_audiences` is accepted, but the write returns a warning: it can authenticate X.509-SVIDs but will reject every JWT-SVID login.
 
@@ -232,6 +235,8 @@ curl -H "Authorization: Bearer $JWT_SVID" \
 
 The response lists `{auth_path, name, description}` for each role whose trust-domain and SPIFFE-ID constraints the presented SVID satisfies. Introspection is a discovery hint, not an authorization — the workload picks a role and uses it on subsequent gateway requests, where the transparent-auth layer does the real validation. A credential that doesn't match the mount produces no error and no warning, so the aggregator can tolerate non-matching mounts.
 
+Roles that set `skill` or `provider_path` carry them in the response too. An agent normally asks the MCP discovery server's `list_roles` instead, which resolves those two fields into the role's provider type, `skill://` URI and URL — see [Discovery and Skills](/concepts/discovery-and-skills/#discovering-roles).
+
 Per-mount introspection (`auth/<mount>/introspect/roles`) exists too — the aggregator calls it internally — but workloads should prefer the aggregator since it handles dispatch.
 
 ## Revocation and SVID Lifetime
@@ -272,6 +277,7 @@ A trust domain is either **static** (a `bundle_pem`/`bundle_json` with no `bundl
 | Field | Required | Description |
 |---|---|---|
 | `trust_domain` | **Yes** | SPIFFE trust domain the role accepts. |
+| `description` | No | Human-readable purpose, surfaced via introspection so agents can pick the right role. |
 | `allowed_spiffe_ids` | No | Segment-aware SPIFFE-ID patterns the verified SVID must match. Empty accepts any SVID in the domain. |
 | `bound_audiences` | For JWT-SVID logins | Accepted JWT-SVID audiences. Required for JWT-SVIDs; ignored for X.509-SVIDs. |
 | `token_policies` | No | Warden policies attached to the issued token. |
@@ -281,6 +287,8 @@ A trust domain is either **static** (a `bundle_pem`/`bundle_json` with no `bundl
 | `group_policy_prefix` | No (default `group-`) | Prefix prepended to each group name to form the policy name. |
 | `metadata_mappings` | No | Map of SPIFFE-ID component (`trust_domain`, `spiffe_id`, `path`) → token metadata key. Both SVID flows. |
 | `metadata_claims` | No | Map of JWT-SVID claim (literal or JSON Pointer) → token metadata key. JWT-SVID only; values must be strings. |
+| `skill` | No | Name of the skill that teaches an agent to use this role. Defaults to the skill of the provider at `provider_path`. |
+| `provider_path` | No | Mount path of the provider this role is used with, relative to the role's namespace (e.g. `vault/`). The discovery server derives the role's URL from it; without it, `list_roles` shows the role with no URL. |
 
 ## Troubleshooting
 

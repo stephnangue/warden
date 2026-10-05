@@ -168,12 +168,17 @@ warden cred spec create github-ops -source github-src \
   -config mint_method=pat -config token=ghp_your_token_here
 ```
 
-See [GitHub MCP](/provider-backends/mcp-github/) for App-based and OAuth credential options.
+Storing the PAT in Warden keeps the tutorial short. In production, keep the secret in your own
+secret store and let Warden fetch it per request with
+[credential chaining](/federation/credential-chaining/) (`secret_spec`), so Warden holds nothing
+at rest. [GitHub MCP](/provider-backends/mcp-github/) covers the other credential options.
 
 ### Step 5 — define the four roles
 
 Each role is a **policy** (what it may do, scoped to one repo) plus a **role binding** (who
-may assume it, which credential it mints). Run the blocks below one at a time.
+may assume it, which credential it mints). Each binding also names the mount the role is used
+with, `provider_path=github-mcp/`, so the discovery server can list the role with its gateway
+URL and the `mcp` provider's skill. Run the blocks below one at a time.
 
 **1. `repo-lifecycle` — create `warden-role-assertion` and write & delete its files.**
 GitHub's MCP server has no repo-*deletion* tool, so a repo's "lifecycle" here is creating it
@@ -208,7 +213,8 @@ warden write auth/jwt/role/repo-lifecycle \
   token_policies=pol-repo-lifecycle,pol-repo-lifecycle-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="create the warden-role-assertion repo and write & delete its files (skill: mcp)" \
+  description="create the warden-role-assertion repo and write & delete its files" \
+  provider_path=github-mcp/ \
   token_ttl=1h
 ```
 
@@ -239,7 +245,8 @@ warden write auth/jwt/role/issue-triage \
   token_policies=pol-issue-triage,pol-issue-triage-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="open & close issues on warden-role-assertion (skill: mcp)" \
+  description="open & close issues on warden-role-assertion" \
+  provider_path=github-mcp/ \
   token_ttl=1h
 ```
 
@@ -267,7 +274,8 @@ warden write auth/jwt/role/repo-reader \
   token_policies=pol-repo-reader,pol-repo-reader-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="read files in warden-role-assertion (skill: mcp)" \
+  description="read files in warden-role-assertion" \
+  provider_path=github-mcp/ \
   token_ttl=1h
 ```
 
@@ -298,7 +306,8 @@ warden write auth/jwt/role/forbidden-repo-lifecycle \
   token_policies=pol-forbidden,pol-forbidden-calls \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="create the warden-forbidden repo and write & delete its files (skill: mcp)" \
+  description="create the warden-forbidden repo and write & delete its files" \
+  provider_path=github-mcp/ \
   token_ttl=1h
 ```
 
@@ -384,7 +393,8 @@ Open a `claude` session and ask, in plain language:
 > **use the warden mcp server to list the roles I can assume**
 
 Claude calls Warden's `list_roles` tool and reports exactly three: `repo-lifecycle`,
-`issue-triage`, and `repo-reader`, each with the description you set. `forbidden-repo-lifecycle`
+`issue-triage`, and `repo-reader`, each with the description you set, provider `mcp`, the skill
+`skill://mcp/SKILL.md`, and the gateway `url` you attached in Step 6. `forbidden-repo-lifecycle`
 is **not on the list** — Warden only returns roles the presented identity is admitted to, so
 the forbidden role doesn't exist as far as this agent is concerned. The menu the agent plans
 against is already scoped to its identity.
@@ -437,7 +447,8 @@ It fails, and it fails at **two** independent walls — neither of which is the 
 2. The role the agent *does* hold for creating repos, `repo-lifecycle`, refuses:
    its policy's condition allows `create_repository` **only** when
    `name == "warden-role-assertion"`. A call with `name="warden-forbidden"` is denied at the
-   gateway before it reaches GitHub.
+   gateway before it reaches GitHub. Claude gets a JSON-RPC error for that one call — code
+   `-32090`, *"Warden: …"* — and its session to the gateway stays open.
 
 Claude has no path to `warden-forbidden` and tells you so. The agent could be confused,
 hallucinating, or actively manipulated — the answer is the same, because the boundary lives at
@@ -498,6 +509,9 @@ task. The injected GitHub token never appears in the clear — the audit layer s
   an invalid PAT — Warden verifies it on creation). Re-run that command with a valid token.
 - **`404` from GitHub on a tool call** — trailing-slash mismatch. The gateway URL must end
   `…/gateway/`; the suffix after `gateway` is forwarded verbatim to GitHub's `…/mcp/`.
+- **`list_roles` shows a role with no `url`** — its `warnings` line says why. Check the role's
+  `provider_path=github-mcp/` and that the mount's `auto_auth_path` is `auth/jwt/`, trailing
+  slash included.
 - **A task ran under the wrong role, or a role's tools look stale** — Claude fetches an MCP
   server's tool list once when a session starts and caches it for the session. After changing
   a policy or role, exit Claude (`/exit`) and start a fresh session so it re-fetches.

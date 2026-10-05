@@ -6,6 +6,12 @@ How an AI agent goes from "I have a task" to "I successfully called an
 upstream service through Warden" — every step, every call, every response
 shape, and where each piece of knowledge comes from.
 
+:::tip[See it live]
+The playground runs this loop on your laptop in a few minutes: scenario 7 has an
+agent discover its roles and read their skills, and scenario 8 has it call a plain
+HTTP API from what it discovered. See [Getting started](/getting-started/).
+:::
+
 This document is for two audiences:
 
 - **Operators** who deployed Warden and connected it to an identity issuer
@@ -16,8 +22,8 @@ This document is for two audiences:
   homegrown harness.
 
 Discovery happens entirely over MCP: Warden runs its own MCP server at
-`/v1/sys/mcp` with two tools, `list_roles` and `get_skill`. The provider
-recipes an agent follows live in the skill registry (`get_skill`); this doc
+`/v1/sys/mcp` with two tools, `list_roles` and `read_skill`. The provider
+recipes an agent follows live in the skill registry (`read_skill`); this doc
 is the system-side view of the same contract.
 
 ## 1. The runtime contract
@@ -45,8 +51,8 @@ That's the whole onboarding ceremony.
 There is no CLI loop to learn. The runtime attaches the discovery server; the
 agent's first move is to call **`list_roles`** on it. The two discovery tools
 are self-describing (each carries a `description`), so the agent needs no
-pre-loaded knowledge — it connects, lists its roles, and reads the skill each
-one names.
+pre-loaded knowledge — it connects, lists its roles, and reads the skill of the
+one it picks.
 
 ## 3. The discovery loop
 
@@ -57,21 +63,49 @@ chains them before touching any upstream.
 
 `list_roles` (no arguments) introspects the caller's identity vehicle (JWT or
 client cert) and returns the roles that identity can assume in the current
-namespace, each with `{name, description}`:
+namespace:
 
 ```json
-{"roles": [
-  {"name": "read-repo",    "description": "search & read any repo (skill: github)"},
-  {"name": "read-secret",  "description": "read app secrets (skill: vault, url: /v1/team-data/vault/role/read-secret/gateway/)"},
-  {"name": "post-update",  "description": "post to the team channel (skill: slack)"}
-], "warnings": []}
+{
+  "roles": [
+    {
+      "name": "read-repo",
+      "description": "search and read any repo",
+      "provider": "mcp",
+      "skill": "skill://mcp/SKILL.md",
+      "url": "/v1/team-data/github-mcp/role/read-repo/gateway/"
+    },
+    {
+      "name": "read-secret",
+      "description": "read app secrets",
+      "provider": "vault",
+      "skill": "skill://vault/SKILL.md",
+      "url": "/v1/team-data/vault/role/read-secret/gateway/"
+    },
+    {
+      "name": "post-update",
+      "description": "post to the team channel",
+      "provider": "slack",
+      "skill": "skill://slack/SKILL.md",
+      "url": "/v1/team-data/slack/role/post-update/gateway/"
+    }
+  ],
+  "warnings": []
+}
 ```
 
-Each `description` is **operator-set free text** — how operators communicate
-intent at runtime. By convention it carries the machine-readable hints the
-agent needs: the **skill name** for the role's provider, and — for a
-**non-MCP** provider — the role's **gateway URL** (relative). The agent reads
-descriptions and matches them to the task; it does not memorize role names.
+- **`description`** is operator-set prose: what the role is for. The agent
+  matches it to the task; it does not memorize role names.
+- **`provider`** is the type of the provider the role is used with.
+- **`skill`** is the `skill://` URI of the recipe for this role.
+- **`url`** is where to call the provider under this role, relative to
+  `$WARDEN_ADDR`.
+
+Warden derives `provider`, `skill` and `url` from the role's
+[`provider_path` and `skill` fields](/concepts/roles/#common-fields). A role the
+operator has not pointed at a provider is listed with its description only, and
+`warnings` says why a field is missing. The agent does not build a URL for such a
+role.
 
 ### Step 2 — Match task → role
 
@@ -79,15 +113,18 @@ Read the descriptions and pick the role that fits. Prefer the **most-scoped**
 option (a role described as "read-only X" over "admin"); when two roles look
 equivalent, surface to the user rather than guess.
 
-### Step 3 — Get the skill
+### Step 3 — Read the skill
 
-`get_skill{skill: "<name>"}` — the name read out of the chosen role's
-description — returns the agent-facing recipe in markdown: how to reach the
-provider, how to present identity, the role-selection mechanic, and quirks.
+`read_skill{uri: "skill://vault/SKILL.md"}` — the chosen role's `skill` —
+returns the agent-facing recipe: how to reach the provider, how to present
+identity, the role-selection mechanic, and quirks. The tool returns the SKILL.md
+as text, and as `markdown` in its structured output for clients that read only
+that. A skill whose frontmatter lists `requires` depends on those skills too; the
+agent reads each before acting.
 
-If `get_skill` reports *skill "aws" not found*, the cluster has no AWS
-provider (a provider skill is seeded the first time a provider of that type is
-mounted). The agent surfaces the gap; it does not fabricate an endpoint.
+The agent reads the skill of the role it is about to use, not every skill on the
+menu. A client that supports the MCP Skills extension can read the same URI with
+`resources/read` instead.
 
 ### Step 4 — Act under the chosen role
 
@@ -101,9 +138,9 @@ reaches them*:
 - **MCP providers** are already attached to the agent's MCP client, **one
   attachment per role** (the operator wired each at `claude mcp add` time) — the
   agent calls the attached server whose role fits the task.
-- **Non-MCP providers** are driven over HTTP: the agent takes the role's gateway
-  URL from its description, prepends `$WARDEN_ADDR`, presents its identity on
-  each call, and targets another role's URL to act under another role.
+- **Non-MCP providers** are driven over HTTP: the agent takes the role's `url`,
+  prepends `$WARDEN_ADDR`, presents its identity on each call, and targets
+  another role's `url` to act under another role.
 
 ## 4. Worked example — read an S3 bucket through AWS (non-MCP)
 
@@ -114,18 +151,19 @@ User asks: *"Show me the keys in the staging-events S3 bucket."*
 
 **Agent's actions:**
 
-1. **`list_roles`** — finds `data-reader` (*"read-only data-warehouse & S3
-   access (skill: aws, url: /v1/team-data/aws/gateway)"*).
+1. **`list_roles`** — finds `data-reader`: description *"read-only
+   data-warehouse and S3 access"*, provider `aws`, skill
+   `skill://aws/SKILL.md`, url `/v1/team-data/aws/gateway`.
 2. **Match** — `data-reader` fits. No ambiguity.
-3. **`get_skill{skill: "aws"}`** — gets the recipe: the role travels in
-   `AWS_ACCESS_KEY_ID`, the JWT in the SigV4 secret/session slots, the
-   endpoint pointed at the gateway URL:
+3. **`read_skill{uri: "skill://aws/SKILL.md"}`** — gets the recipe: the role
+   travels in `AWS_ACCESS_KEY_ID`, the JWT in the SigV4 secret/session slots,
+   the endpoint pointed at the role's `url`:
 
    ```bash
    export AWS_ACCESS_KEY_ID="data-reader"                 # role, not an AWS key
    export AWS_SECRET_ACCESS_KEY="<jwt>"
    export AWS_SESSION_TOKEN="<jwt>"                       # Warden detects "eyJ"
-   export AWS_ENDPOINT_URL="$WARDEN_ADDR/v1/team-data/aws/gateway"   # the url from the description
+   export AWS_ENDPOINT_URL="$WARDEN_ADDR/v1/team-data/aws/gateway"   # the role's url
    aws s3 ls s3://staging-events
    ```
 
@@ -136,45 +174,57 @@ spec bound to it, mints fresh AWS credentials, re-signs, and proxies to
 
 ## 5. What changes per provider type
 
-Steps 1–3 are universal. Step 4's recipe varies by type; `get_skill` surfaces
-the exact one:
+Steps 1–3 are universal. Step 4's recipe varies by type; the role's skill
+surfaces the exact one:
 
 | Provider type | Kind | Recipe shape | How the role is passed |
 |---|---|---|---|
 | `mcp`, `mcp_aws` | MCP | Pre-attached MCP server, one per role; the agent calls the attached server for its role. | Role in the attached URL's `role/<role>/` segment (fixed per attachment). |
-| `github`, `gitlab`, `openai`, `slack`, `vault`, `rest`, `atlassian`, `ansible_tower` | Non-MCP HTTP | Point the client/SDK at `$WARDEN_ADDR<gateway-url>` (from the description) with the JWT as the bearer (or the provider's native header). | Role in the URL path segment `…/role/<role>/gateway/…`; another role = another URL. |
-| `aws`, `scaleway` | Non-MCP HTTP (SigV4) | SDK env vars: role in `AWS_ACCESS_KEY_ID`, JWT in the secret/session slot, endpoint at the gateway URL. | Role in `AWS_ACCESS_KEY_ID` (extracted from the SigV4 header). |
+| `github`, `gitlab`, `openai`, `slack`, `vault`, `rest`, `atlassian`, `ansible_tower` | Non-MCP HTTP | Point the client/SDK at `$WARDEN_ADDR` plus the role's `url`, with the JWT as the bearer (or the provider's native header). | Role in the URL path segment `…/role/<role>/gateway/…`; another role = another URL. |
+| `aws`, `scaleway` | Non-MCP HTTP (SigV4) | SDK env vars: role in `AWS_ACCESS_KEY_ID`, JWT in the secret/session slot, endpoint at the role's `url` (one URL for every role). | Role in `AWS_ACCESS_KEY_ID` (extracted from the SigV4 header). |
 | `rds` | Non-MCP (access) | One-shot call mints a short-lived DB connection string with an embedded IAM token; the agent then connects to the DB directly (no proxy in the data path). | Query parameter `…/access/<grant>?role=<role>`. |
 
 The skill body for each type explains the exact substitution, the quirks
-(AWS wildcard DNS for S3 virtual-hosted buckets, JWT-expiry manifesting as
-SigV4 `SignatureDoesNotMatch`, …), and any service-specific caveats.
+(AWS wildcard DNS for S3 virtual-hosted buckets, an expired JWT answered with
+the AWS protocol's own authentication error, …), and any service-specific
+caveats.
 
 ## 6. Error handling
 
-The `troubleshooting` skill (`get_skill{skill: "troubleshooting"}`) maps the
-errors an agent sees to a cause and a retry policy. Two surfaces:
+The `troubleshooting` skill (`read_skill{uri: "skill://troubleshooting/SKILL.md"}`)
+maps the errors an agent sees to a cause and a retry policy. Every identity can
+read it. Two surfaces:
 
 - **Discovery** — `list_roles` erroring with *"requires a JWT bearer token or
   TLS client certificate"* means no identity reached the endpoint (the MCP
   client connection lost/omitted it); an empty role list means the identity is
-  bound to no role — ask the operator. `get_skill` *"not found"* means the
-  provider isn't enabled.
-- **Gateways** — branch on the HTTP status (or MCP tool error): **401** =
+  bound to no role — ask the operator. A role listed with no `url` or no
+  `skill` is not wired to a provider yet; `warnings` says why. `read_skill`
+  *"not found"* means the skill is gone, or is not one this identity's roles
+  can read — call `list_roles` again rather than guess.
+- **Gateways** — branch on the HTTP status (or MCP error): **401** =
   identity missing or JWT expired (typical TTL 5–60 min) → refresh; **403**
   with `WWW-Authenticate: Bearer` = the role's policy forbids the call → switch
   role or ask the operator; **404** = wrong gateway URL/mount/namespace →
-  re-read the URL from the role description; **5xx** = Warden or upstream →
-  read the body, bounded backoff. SigV4 providers surface an expired JWT as
-  `SignatureDoesNotMatch` rather than 401.
+  re-read the role's `url` from `list_roles`; **5xx** = Warden or upstream →
+  read the body, bounded backoff.
+- **MCP gateways** answer a refused call with a JSON-RPC error, code `-32090`,
+  for the call's `id`, so the session survives and the next call goes through.
+  The message starts `Warden:` and names what was refused; `error.data` carries
+  `error` (`insufficient_permissions` for a policy refusal) and
+  `error_description`.
+- **The AWS gateway** answers an expired JWT in the AWS protocol's own terms, a
+  `403` whose code depends on the service: `InvalidClientTokenId` (query and
+  REST-XML APIs such as STS and IAM), `AuthFailure` (EC2),
+  `InvalidAccessKeyId` (S3), `UnrecognizedClientException` (JSON APIs). The fix
+  is the same as a 401: refresh the JWT and retry.
 
 ## 7. Caching strategy
 
-Skills change rarely; agents can cache them. Every skill record carries a
-`version` integer bumped on every update. A long-running agent caches the
-skills it has fetched and re-fetches only when a version changes. Roles are
-also stable-ish — re-run `list_roles` every N minutes or on a `403`/`404`,
-whichever comes first.
+Skills change rarely; agents can cache them. A client that supports the MCP
+Skills extension gets each skill's `digest` (`sha256:…`) from `skills/list` and
+re-reads a skill only when its digest changes. Roles are also stable-ish —
+re-run `list_roles` every N minutes or on a `403`/`404`, whichever comes first.
 
 ## 8. The big picture
 
@@ -190,10 +240,11 @@ whichever comes first.
 ```
 
 The operator configures the trust relationship (JWKS endpoint or CA bundle),
-mounts providers, defines roles (embedding the skill name and, for non-MCP
-providers, the gateway URL in each role's description), writes policies, and
-attaches the agent runtime's MCP client to `/v1/sys/mcp` and the MCP-provider
-gateways. After this, the operator is not in the per-call loop.
+mounts providers, defines roles (each pointed at its provider with
+`provider_path`, and at a skill of its own with `skill` where the provider's
+default does not fit), writes policies, and attaches the agent runtime's MCP
+client to `/v1/sys/mcp` and the MCP-provider gateways. After this, the operator
+is not in the per-call loop.
 
 Each provider seeds a default skill on first mount, but the catalog is the
 operator's to shape: they can override a seeded skill or author their own and
@@ -219,11 +270,11 @@ provider's whole API. See [Discovery and Skills](/concepts/discovery-and-skills/
 │ Agent                                                               │
 │                                                                     │
 │  ③ Discovery — MCP calls on /v1/sys/mcp                             │
-│       list_roles → pick a role → get_skill                          │
+│       list_roles → pick a role → read_skill                         │
 │                                                                     │
 │  ④ Upstream call                                                    │
 │       MCP gateway: tools/call on the attached server                │
-│       non-MCP:     $WARDEN_ADDR<gateway-url> + identity             │
+│       non-MCP:     $WARDEN_ADDR + the role's url, identity attached │
 └─────────────────────────────────┬───────────────────────────────────┘
                                   │
                                   ▼
@@ -253,15 +304,15 @@ credential spec's TTL) and held only in memory for the proxied request.
   client cert).
 - **Hold long-lived upstream credentials.** Warden mints them per call.
 - **Memorize role names, provider paths, or endpoint URLs.** Every fact comes
-  from a live `list_roles`/`get_skill` call.
-- **Decide on its own that "the system is broken."** A structured MCP tool
+  from a live `list_roles`/`read_skill` call.
+- **Decide on its own that "the system is broken."** A structured MCP
   error or an HTTP status maps deterministically to an action (retry, switch
   role, surface to the user). Ambiguous failures get surfaced, not papered
   over.
 
 ## 10. Where to go next
 
-- The seeded and provider skills themselves — reachable via `get_skill` — are
+- The seeded and provider skills themselves — reachable via `read_skill` — are
   the authoritative agent-facing source. This doc is the system view of the
   same contract.
 - For the discovery interface and skill model, see

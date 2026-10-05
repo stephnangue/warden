@@ -219,11 +219,41 @@ condition = "call.method != 'tools/call' || call.args.amount <= 1500"
 
 ### What the agent sees on a denial
 
-A denied call gets **HTTP 403** with a `WWW-Authenticate: Bearer …` header and a
-short `error_description` naming the offending method, tool, or parameter
-(e.g. *"Tool 'delete_database' not allowed."*). The message is deliberately
-generic — it never reveals the shape of the policy or echoes raw body bytes — but
-it tells the agent enough to correct course rather than guess at an opaque 403.
+A denied call gets **HTTP 403** with a `WWW-Authenticate: Bearer …` header, and a
+body that is a **JSON-RPC error** for the call it refuses:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32090,
+    "message": "Warden: Tool 'delete_database' not allowed.",
+    "data": {
+      "error": "insufficient_permissions",
+      "error_description": "Tool 'delete_database' not allowed.",
+      "request_id": "…"
+    }
+  }
+}
+```
+
+The error echoes the call's `id`, so the MCP client fails that one call and keeps
+its session: the next call goes through. `-32090` is Warden's own code for a
+refusal, by policy or for want of a valid identity, and retrying the same call
+fails the same way. A batch or a notification has no single `id` to echo, so its
+refusal carries `"id": null`.
+
+The description names the offending method, tool, or parameter. It is
+deliberately generic — it never reveals the shape of the policy or echoes raw body
+bytes — but it tells the agent enough to correct course rather than guess at an
+opaque 403.
+
+Policy applies to **every `POST`** to an MCP mount, whatever its `Content-Type`:
+the body goes to the strict JSON-RPC parser regardless of label, so relabelling a
+`tools/call` as `text/plain`, or sending it with no `Content-Type`, does not
+slip it past the rules. `GET` and `DELETE`, which carry no JSON-RPC method, are
+left to the capability policy.
 
 ## Denial reasons
 
@@ -243,7 +273,7 @@ denial:
 | `missing_method_header` | A legacy sentinel for a transport that declared no method. Effectively unreachable on the body-authoritative path, where `header_mismatch` covers transport contradictions |
 | `batch_unsupported` | A batch arrived from a client negotiating a modern protocol revision, where batching left the spec |
 | `batch_list_unfilterable` | A batch contains a list method; a batched list response cannot be pruned per element, so Warden fails closed rather than return an unfiltered list |
-| `missing_body` | A `POST`/JSON-RPC body is absent or fails to parse on a path with MCP enforcement. Body-less verbs (`GET` SSE stream, `DELETE` session terminate) skip MCP evaluation entirely |
+| `missing_body` | A `POST` body is absent or fails to parse on a path with MCP enforcement. Every `POST` is evaluated, whatever its `Content-Type`; body-less verbs (`GET` SSE stream, `DELETE` session terminate) skip MCP evaluation entirely |
 | `malformed_jsonrpc` | Body is not a well-formed JSON-RPC 2.0 envelope (bad version, missing method, unknown top-level key, UTF-8 BOM, …) |
 | `duplicate_key` | Duplicate object key anywhere in the body — Warden rejects the ambiguity a last-wins parser would hide |
 | `oversized_body` | Body exceeds the mount's `max_body_size` |
@@ -279,28 +309,30 @@ a sub-namespace selects it with the usual `X-Warden-Namespace` header.
 
 It exposes two tools:
 
-- **`list_roles`** — the roles the caller's identity can assume, each with its
-  operator-written **description**. This is the agent's menu (see
-  [Roles → Discovery](/concepts/roles/#discovery-what-roles-can-i-assume)). By convention
-  the operator embeds the **skill name** in the description — e.g.
-  *"search & read any repo (skill: github)"* — and, for a **non-MCP** provider,
-  the role's **gateway URL** as well — e.g.
-  *"read app secrets (skill: vault, url: /v1/vault/role/read-secret/gateway/)"*.
-  The agent reads these verbatim.
-- **`get_skill`** — given a **skill name** (the one just read out of a role
-  description), returns that **skill**: the markdown recipe that teaches the agent
-  how to drive the provider.
+- **`list_roles`** — the roles the caller's identity can assume. This is the
+  agent's menu (see
+  [Roles → Discovery](/concepts/roles/#discovery-what-roles-can-i-assume)). Each
+  role comes with its operator-written **description**, the **provider** type it
+  is used with, its **skill** as a `skill://<name>/SKILL.md` URI, and the **url**
+  to call it at, relative to the Warden address. Warden derives the last three
+  from the role's `provider_path` and `skill` fields.
+- **`read_skill`** — given a role's `skill` URI, returns that **skill**: the
+  markdown recipe that teaches the agent how to drive the provider.
 
-The loop, then, is: connect to `/v1/sys/mcp` → `list_roles` to see the menu → read
-the chosen role's skill name (and, for a non-MCP provider, its gateway URL) from
-the description → `get_skill` to learn how to drive it → do the work. The role a
-request runs as is the `role/<role>/` segment of its gateway URL. For an MCP
-provider that gateway is already attached to the agent's MCP client — one
-attachment per role, so the agent picks the attached server whose role fits; a
-non-MCP provider is called over HTTP at the role's gateway URL from the
-description, and another role means another URL. The discovery interface only
-*tells* the agent what it can do — the work still flows through the gateways
-described above.
+The same skills are served through the MCP Skills extension (`skills/list`,
+`skills/get`, and `resources/read` on `skill://` URIs), and an identity can read
+only the skills its roles lead to. See
+[Discovery and Skills](/concepts/discovery-and-skills/#skill-reads-are-identity-bound).
+
+The loop, then, is: connect to `/v1/sys/mcp` → `list_roles` to see the menu → pick
+the role whose description fits → `read_skill` on its `skill` URI to learn how to
+drive it → do the work. The role a request runs as is the `role/<role>/` segment
+of its gateway URL. For an MCP provider that gateway is already attached to the
+agent's MCP client — one attachment per role, so the agent picks the attached
+server whose role fits; a non-MCP provider is called over HTTP at the role's
+`url`, and another role means another URL. The discovery interface only *tells*
+the agent what it can do — the work still flows through the gateways described
+above.
 
 ## Using an MCP Mount
 
@@ -336,4 +368,4 @@ skill that documents its quirks.
 - [Credentials](/concepts/credentials/) — the bearer token or AWS credential injected.
 - [Audit](/concepts/audit/) — where each MCP decision is recorded.
 - [Discovery and Skills](/concepts/discovery-and-skills/) — how an agent finds an MCP mount.
-- [Roles](/concepts/roles/) — the discovery loop `list_roles`/`get_skill` mirrors, one role per step.
+- [Roles](/concepts/roles/) — the discovery loop `list_roles`/`read_skill` mirrors, one role per step.

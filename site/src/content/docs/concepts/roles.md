@@ -108,10 +108,10 @@ out what it is allowed to do, then decompose the goal into steps that fit.
 The agent doesn't need to know the role names in advance. Warden runs its own MCP
 discovery server at `/v1/sys/mcp`: the agent calls **`list_roles`** to get every
 role its identity can assume, each with an operator-written **description**, and
-reads that description to choose the right one for a step. The description names
-the **skill** that drives the role's provider — and, for a non-MCP provider,
-carries the role's gateway URL — and **`get_skill`** returns that recipe. All of
-it happens over MCP, before the agent drives a gateway. See
+reads that description to choose the right one for a step. Each role also comes
+with the **skill** that drives its provider, as a `skill://` URI, and the **URL**
+to call it at; **`read_skill`** returns the recipe. All of it happens over MCP,
+before the agent drives a gateway. See
 [MCP → Warden as an MCP Server](/concepts/mcp/#warden-as-an-mcp-server-discovery-interface).
 
 <p align="center"><img alt="The agent lists its available roles and Warden returns each with its description" src="/images/warden-role-role-list.png" width="520"></p>
@@ -268,6 +268,7 @@ warden write auth/jwt/role/read-repo \
   token_policies=read-repo \
   cred_spec_name=github-src \
   description="search for repositories and read access to any repo" \
+  provider_path=github-mcp/ \
   token_ttl=5m
 
 # Read, list, and delete
@@ -280,7 +281,7 @@ Agents discover which roles their **own identity** can assume over MCP, via
 `list_roles` (above). To inspect the same introspection from a terminal, an
 operator can use the role list command, which fans out across every auth mount of
 the credential type in the current namespace and returns each role with its
-description:
+description, and its `provider_path` and `skill` when set:
 
 ```bash
 warden role list
@@ -292,7 +293,8 @@ warden role list -o ndjson | jq -r .name
 
 Every role, regardless of auth method, shares the same definition fields. Nothing
 here is conferred at write time; this is what the assertion resolves to when a
-request names the role:
+request names the role. A write to an existing role changes only the fields it
+names:
 
 | Field | Meaning |
 |-------|---------|
@@ -300,6 +302,8 @@ request names the role:
 | `token_ttl` | Lifetime of issued tokens. Stored as a duration string (e.g. `1h`, `8h`); defaults to **1h** when unset. |
 | `cred_spec_name` | Name of a [credential spec](/concepts/credentials/) the issued token is scoped to — what Warden mints for callers of this role. |
 | `description` | Human-readable purpose of the role. **Surfaced through introspection** so an agent listing its roles can pick the right one for a task — as in the worked example above. |
+| `provider_path` | Mount path of the provider the role is used with, relative to the role's namespace (e.g. `github-mcp/`). The discovery server derives the role's `provider`, `skill` and `url` from it; without it, `list_roles` shows the role with no URL. |
+| `skill` | Name of the skill that teaches an agent to use the role. Defaults to the skill of the provider at `provider_path`; set it to point the role at a skill you wrote. See [Discovery and Skills](/concepts/discovery-and-skills/#discovering-roles). |
 
 > **`token_type` is not something you set.** Each auth method fixes the type of
 > token its roles issue — `jwt_role`, `cert_role`, `kubernetes_role`, or
