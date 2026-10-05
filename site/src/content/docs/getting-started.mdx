@@ -37,12 +37,12 @@ The tour keeps three tabs apart, on purpose:
 
 | Tab | What runs there |
 |---|---|
-| **Server** | Warden itself. |
-| **Warden tab** | Every command of the tour. It holds the root token. |
-| **Agent's tab** | Your agent, and nothing else, always started from `$HOME/warden-playground`. |
+| `Server tab` | Warden itself. |
+| `Warden tab` | Every command of the tour. It holds the root token. |
+| `Agent's tab` | Your agent, and nothing else, always started from `$HOME/warden-playground`. |
 
 The root token can do anything, including rewriting the policies the tour shows your
-agent cannot get past. An agent started in the Warden tab would inherit it, so the
+agent cannot get past. An agent started in the `Warden tab` would inherit it, so the
 agent always starts in a tab of its own.
 
 ## 1. Start the playground
@@ -50,14 +50,14 @@ agent always starts in a tab of its own.
 <Tabs syncKey="install">
 <TabItem label="Docker">
 
-In the **server** tab:
+In the `server tab`:
 
 ```bash
 docker run --rm --name warden-playground -p 127.0.0.1:8400:8400 \
   ghcr.io/stephnangue/warden:latest -dev-playground -dev-root-token=root
 ```
 
-In the **Warden tab**, set the root token, and give the tab a `warden` command that
+In the `Warden tab`, set the root token, and give the tab a `warden` command that
 runs the CLI inside the container:
 
 ```bash
@@ -80,13 +80,13 @@ Install the binary — macOS and Linux; for Windows see [Binary](/install/binary
 curl -sL https://wardengateway.com/install.sh | bash
 ```
 
-In the **server** tab:
+In the `server tab`:
 
 ```bash
 warden server -dev-playground -dev-root-token=root
 ```
 
-In the **Warden tab**, set the root token:
+In the `Warden tab`, set the root token:
 
 ```bash
 export WARDEN_TOKEN=root
@@ -114,7 +114,7 @@ starts over, setup included.
 ## 2. Pick your agent and take the tour
 
 Choose your agent. Its tab holds the whole tour: the setup, then nine scenarios, each
-with the commands to run in the Warden tab, what to ask your agent, and what to look
+with the commands to run in the `Warden tab`, what to ask your agent, and what to look
 for.
 
 <Tabs syncKey="harness">
@@ -140,7 +140,7 @@ variables.
 <TabItem label="Cursor">
 
 The tour writes Cursor's whole `.cursor/mcp.json` in the playground directory at each
-change. Start Cursor from the agent's tab with `cursor $HOME/warden-playground`, so
+change. Start Cursor from the `agent's tab` with `cursor $HOME/warden-playground`, so
 it reads that file and the variables loaded there.
 
 <div class="tour"><TourCursor /></div>
@@ -166,7 +166,7 @@ change. Restart opencode to pick a change up.
 <TabItem label="VS Code">
 
 The tour writes VS Code's whole `.vscode/mcp.json` in the playground directory at
-each change. Start VS Code from the agent's tab with `code $HOME/warden-playground`,
+each change. Start VS Code from the `agent's tab` with `code $HOME/warden-playground`,
 so it reads that file and the variables loaded there.
 
 <div class="tour"><TourVSCode /></div>
@@ -200,7 +200,7 @@ to enter in it, with your tokens filled in. Use streamable HTTP.
 
 ## Look inside
 
-In the Warden tab, `warden dev audit` reads the playground's audit log, newest first:
+In the `Warden tab`, `warden dev audit` reads the playground's audit log, newest first:
 
 ```bash
 warden dev audit -decision deny
@@ -220,20 +220,20 @@ Both are described under [`warden dev`](/cli/dev/).
 ## Troubleshooting
 
 - **Every call is refused after a restart, or after eight hours.** The identities the
-  setup minted are gone or expired. Run the setup again in the Warden tab, then the
+  setup minted are gone or expired. Run the setup again in the `Warden tab`, then the
   scenario you were on.
 - **The agent calls servers the tour did not attach, or every call fails with a
   signature error.** The agent was started outside the playground directory and reads
   that directory's servers instead, perhaps ones from an earlier run whose tokens a
-  restart voided. Exit it and start it again from the agent's tab, with the command
+  restart voided. Exit it and start it again from the `agent's tab`, with the command
   your agent's tour gives, such as `cd $HOME/warden-playground && claude`.
 - **Port 8400 is already in use.** Publish another one, as in step 1.
-- **In scenario 8 the agent has no `$AGENT`.** Load the variables in the agent's tab
+- **In scenario 8 the agent has no `$AGENT`.** Load the variables in the `agent's tab`
   with `source $HOME/warden-playground/agent.env`, then restart the agent from there.
 - **Codex cannot reach Warden in scenario 8.** Restart Codex once the scenario's
   config is written; it reads the network setting at start.
 - **Your shell profile exports `WARDEN_TOKEN`.** Run `unset WARDEN_TOKEN` in the
-  agent's tab before starting the agent.
+  `agent's tab` before starting the agent.
 
 ## Where next
 

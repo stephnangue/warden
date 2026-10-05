@@ -247,6 +247,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		// A command of its own, not words in a sentence: an agent started
 		// outside the playground directory never sees what the tour attaches.
 		if c.start != "" {
+			fmt.Fprintf(w, "   %s\n\n", agentTabLabel)
 			printCommands(w, []string{c.start})
 		}
 		if c.startNote != "" {
@@ -271,9 +272,9 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		printCommands(w, cmds)
 		switch {
 		case len(s.Export) > 0:
-			fmt.Fprintf(w, "   Then, in the agent's tab, load them and restart your agent: %s, then %s.\n\n", sourceAgentEnv, c.restart)
+			printAgentTabStep(w, c, true, true)
 		case s.Attach != nil && len(before.attached) > 0 || len(s.Detach) > 0:
-			printPickUp(w, pickUp(c, before, s.Attach))
+			printAgentTabStep(w, c, addsServer(before, s.Attach), false)
 		}
 		for _, ask := range s.Ask {
 			fmt.Fprintf(w, "   Ask: %q\n", ask)
@@ -317,27 +318,58 @@ func printFollowUp(w io.Writer, c client, current state, v playground.Variant, w
 	if v.Attach != nil {
 		// A running agent keeps the old headers until it reconnects, and
 		// would go on acting as the previous person.
-		printPickUp(w, pickUp(c, current, v.Attach))
+		printAgentTabStep(w, c, addsServer(current, v.Attach), false)
 	}
 	if v.Ask != "" {
 		fmt.Fprintf(w, "   Ask: %q\n\n", v.Ask)
 	}
 }
 
-// pickUp says how the running agent picks up a step that attaches a server.
-// A reconnect reloads a server the agent already has, which is enough when the
-// step replaces one. A server added beside the others is one the running agent
-// never loaded: Claude Code's /mcp, for one, lists only the servers it started
-// with. That takes a restart.
-func pickUp(c client, before state, attach *playground.Attachment) string {
-	if attach != nil && !before.attached.has(attach.Server) {
-		return c.restart
-	}
-	return c.reconnect
+// agentTabLabel heads the commands typed in the agent's tab, set apart from
+// those of the Warden tab.
+const agentTabLabel = "In the agent's tab:"
+
+// addsServer reports whether a step attaches a server the agent does not have
+// yet. A reconnect reloads a server the agent already has, which is enough
+// when the step replaces one. A server added beside the others is one the
+// running agent never loaded: Claude Code's /mcp, for one, lists only the
+// servers it started with. That takes a restart.
+func addsServer(before state, attach *playground.Attachment) bool {
+	return attach != nil && !before.attached.has(attach.Server)
 }
 
-func printPickUp(w io.Writer, how string) {
-	fmt.Fprintf(w, "   Then %s.\n\n", how)
+// agentTabStep is what the reader does for the running agent to pick up a
+// change: a sentence, then the commands to type in the agent's tab, if any. A
+// reconnect is done inside the agent and has none. A restart stops the agent
+// and starts it again from the playground directory, after loading the
+// exported variables when loadEnv is set. A client with no reconnect always
+// restarts.
+func agentTabStep(c client, restart, loadEnv bool) (string, []string) {
+	if !restart && !loadEnv && c.reconnect != "" {
+		return "Then " + c.reconnect + ".", nil
+	}
+	var cmds []string
+	if loadEnv {
+		cmds = append(cmds, sourceAgentEnv)
+	}
+	// A client the tour cannot start: the reader restarts it their own way.
+	if c.start == "" {
+		if loadEnv {
+			return "Then, in the agent's tab, load the variables, then restart your agent from there:", cmds
+		}
+		return "Then restart your agent.", nil
+	}
+	again := " and start it again:"
+	if loadEnv {
+		again = ", load the variables and start it again:"
+	}
+	return "Then, in the agent's tab, " + c.stop + again, append(cmds, c.start)
+}
+
+func printAgentTabStep(w io.Writer, c client, restart, loadEnv bool) {
+	text, cmds := agentTabStep(c, restart, loadEnv)
+	fmt.Fprintf(w, "   %s\n\n", text)
+	printCommands(w, cmds)
 }
 
 // printCommands prints commands flush left, unlike the prose around them, so

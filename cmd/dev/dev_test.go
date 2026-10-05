@@ -135,10 +135,11 @@ func TestRenderTour(t *testing.T) {
 	assert.NotContains(t, ninth, "claude mcp remove")
 	// A server added beside the bank is one the running agent never loaded:
 	// /mcp lists only the servers Claude Code started with, so it restarts.
-	assert.Contains(t, ninth, "Then "+clients["claude"].restart+".")
+	restart := "   Then, in the agent's tab, exit Claude Code and start it again:\n\ncd $HOME/warden-playground && claude\n"
+	assert.Contains(t, ninth, restart)
 	assert.NotContains(t, ninth, "Then reconnect")
 	seventh := renderTourFor(7)
-	assert.Contains(t, seventh, "Then "+clients["claude"].restart+".", "the warden server is new, so the agent restarts")
+	assert.Contains(t, seventh, restart, "the warden server is new, so the agent restarts")
 	assert.NotContains(t, seventh, "Then reconnect")
 	assert.Contains(t, ninth, "read -rs GITHUB_PAT", "the PAT is read without echo")
 }
@@ -255,19 +256,29 @@ func TestRenderTour_Clients(t *testing.T) {
 				assert.NotContains(t, all, "claude mcp")
 				assert.NotContains(t, all, "Claude Code")
 			}
-			assert.Contains(t, all, "Then "+c.reconnect+".")
-			assert.Contains(t, renderTourAs(name, 8),
-				"Then, in the agent's tab, load them and restart your agent: "+sourceAgentEnv+", then "+c.restart+".",
-				"scenario 8's variables reach only an agent started after they are loaded")
 			assert.Contains(t, all, c.launch)
 			assert.True(t, strings.HasPrefix(c.launch, agentTab), "every launch sends the agent to its own tab")
 			// An agent started anywhere else reads that directory's servers, not
-			// the tour's: the start is a command of its own, never words in a
-			// sentence, and a restart repeats it.
-			if name != "generic" {
+			// the tour's: what the reader types in the agent's tab is a command of
+			// its own, under its own heading, never words in a sentence, and every
+			// restart repeats the start.
+			if name == "generic" {
+				assert.Contains(t, all, "Then "+c.reconnect+".")
+				assert.Contains(t, renderTourAs(name, 8),
+					"Then, in the agent's tab, load the variables, then restart your agent from there:\n\n"+sourceAgentEnv+"\n")
+			} else {
 				assert.Contains(t, c.start, playgroundDir, "the agent starts in the playground directory")
-				assert.Contains(t, all, "\n"+c.start+"\n", "the start is printed as a command")
-				assert.Contains(t, c.restart, "`"+c.start+"`", "a restart starts there again")
+				assert.Contains(t, all, agentTabLabel+"\n\n"+c.start+"\n", "the start is printed as a command")
+				restart := "Then, in the agent's tab, " + c.stop + " and start it again:\n\n" + c.start + "\n"
+				assert.Contains(t, renderTourAs(name, 7), restart, "a new server takes a restart")
+				if c.reconnect != "" {
+					assert.Contains(t, renderTourAs(name, 4), "Then "+c.reconnect+".", "a replaced server takes a reconnect")
+				} else {
+					assert.Contains(t, renderTourAs(name, 4), restart, "a client with no reconnect restarts")
+				}
+				assert.Contains(t, renderTourAs(name, 8),
+					"Then, in the agent's tab, "+c.stop+", load the variables and start it again:\n\n"+sourceAgentEnv+" &&\n"+c.start+"\n",
+					"scenario 8's variables reach only an agent started after they are loaded")
 			}
 			for _, line := range strings.Split(all, "\n") {
 				if strings.TrimSpace(line) == "EOF" {
