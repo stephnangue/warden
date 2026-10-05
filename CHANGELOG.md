@@ -4,6 +4,85 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.21.0] — 2026-10-05
+
+### Breaking Changes
+
+- **The `default` assertion profile is now an RFC 8693 delegation token.** With no user disclosed, the top level is the agent: the composite `sub` is byte-identical to before, so agent trusts keep matching, alongside `warden_role` and opt-in `warden_metadata`. When a spec discloses a user, the top level becomes the **user** — the IdP's raw `sub`, `warden_namespace`, `warden_role`, `warden_metadata` — and the agent moves into `act`. `warden_sub`, `warden_auth_mount`, `warden_user` and the agent-level `warden_namespace` are gone. Rewrite any verifier that reads them (a Vault JWT role's `claim_mappings`, a GCP attribute condition, a CEL rule) and bind `warden_namespace` beside the user `sub` on delegation specs. (#693)
+- **`get_skill` is removed; agents read skills with `read_skill(uri)`.** Roles on the jwt, cert, kubernetes and spiffe auth methods carry structured `skill` and `provider_path` fields, and `list_roles` returns each role's `provider`, a `skill://<name>/SKILL.md` URI and the `url` to call. The convention of writing `(skill: …, url: …)` into a role's description is retired: **backfill `provider_path` on existing roles**, or they are listed with no `url` and no `skill`. (#709)
+- **Skill reads on the discovery server are identity-bound.** An agent sees only the skills reachable from the roles it can assume. The `sys/skills` API and `warden skill` are unchanged. (#710)
+- **Skill names follow the Agent Skills rule** — lowercase letters, digits and single hyphens. Every stored skill whose name carries an underscore is renamed once at unseal, hyphens for underscores — the built-in `mcp_aws` and `ansible_tower` become `mcp-aws` and `ansible-tower` — and `requires` entries follow. A rename that would collide or still be invalid is left in place and logged. Provider type names are unchanged. Update anything that names a skill with `_`. (#708)
+- **MCP refusals are JSON-RPC errors.** Warden answers a refused MCP call with code `-32090`, echoing the call's id, so the client's session survives it. The former top-level `error` / `error_description` move under `error.data`; the `403` and the `WWW-Authenticate` challenge are unchanged. (#722)
+- **Azure `key_vault_secret` specs fail every mint.** Move them to `mint_method=secret_read`. `azure_db_iam_token`, `scopes` and non-UUID `client_id` / `tenant_id` are refused at write. (#675, #677)
+- **GitHub's singular `repository` key is refused**, on write and at mint; use `repositories`. A stored `permissions` value, which was silently ignored, is now enforced. (#735)
+- **New AWS federated specs default to `assertion_profile=aws`**, which carries the role and metadata as session tags and needs `sts:TagSession` in the role's trust policy; **new Azure federated specs default to `minimal`**. Existing specs keep `default`. Opt out with `assertion_profile=default`. (#657, #676)
+- **AWS and Alibaba Cloud config writes merge.** A key left out of a write keeps its value; to reset one, name it. (#674)
+
+### Security
+
+- **Azure Key Vault URL injection closed**, and rotation no longer deletes live secrets. (#675)
+- **MCP policy is enforced on every POST** to an MCP mount, whatever its `Content-Type`. A POST body that is not JSON-RPC is refused. (#721)
+
+### New Features
+
+**A playground to try Warden in minutes**
+
+- **`warden server -dev-playground`** starts a dev server with its own identity provider, a protected bank with MCP and REST faces, and GitHub's MCP server waiting for a PAT — no IdP to stand up and no upstream keys to hold. (#717, #718)
+- **`warden dev jwt`, `warden dev scenarios` and `warden dev audit`** mint identities, print the nine-scenario tour, and read the audit log. (#719, #725, #726, #727)
+- **The tour is written out for Claude Code, Codex, Cursor, Gemini CLI, opencode, VS Code** or any MCP client, with `warden dev scenarios -client` or `WARDEN_DEV_CLIENT`, and on the new Getting started page. The agent runs in a terminal tab of its own, away from the root token. (#733)
+
+**Discovery and skills**
+
+- **Structured role fields** `skill` and `provider_path`, and `list_roles` with a resolved `provider`, `skill` URI and `url`. (#709)
+- **The MCP Skills extension** on the discovery server: `skills/list`, `skills/get`, and `skill://` resources. (#710)
+- **`read_skill` carries the SKILL.md as `markdown`** in its structured output, for clients that read only structured results. (#723)
+
+**Keyless credentials**
+
+- **Anthropic and OpenAI federate.** Keyless `anthropic` and `openai` sources exchange a Warden assertion for a short-lived token through workload identity federation; the providers accept the bearer. (#652, #695, #696)
+- **A keyless `cloudflare` source** for `cloudflare_keys`, chained from your secret store through `secret_spec`. (#691)
+- **Azure Key Vault is a chaining producer** (`mint_method=secret_read`). A chained consumer now expires with the secret it was minted from. (#677)
+- **`assertion_profile`** selects the claim shape of the minted assertion per spec — `default`, `minimal` or `aws` — and **`assertion_ttl`** requests a shorter lifetime, capped by the issuer. (#656, #657, #676)
+- **`keyless_enforcement_level`** (`off`, `warn`, `enforce`; default `warn`) gates writes that would leave a secret stored in Warden. Sources and specs report what they store as `stored_secrets`, and **`warden cred source|spec keyless-plan`** describes the keyless replacement for one. (#686, #687, #690)
+- **`token_exchange` sources can be public clients** (`client_auth=none`). (#714)
+- **GitHub App tokens can be scoped** with `repositories` and `permissions`. (#735)
+
+**The gateway answers in the upstream's own shape**
+
+- **Warden's own failures are rendered as the upstream would render them**: each AWS service's protocol, and OpenAI's and Anthropic's error bodies, with a `Warden:` message prefix — and, on OpenAI, `warden_`-prefixed codes. (#659, #660, #661, #699, #706, #707)
+- **A mount timeout answers `504`**, not an empty `200`. (#662)
+
+**Providers and policy**
+
+- **Anthropic**: the workspace a credential acts in, `anthropic-version` and `anthropic-beta` governed from mount config, and attribution to the user's upstream profile. (#648, #649, #650)
+- **Policy can read request bodies on `rest` mounts** (`parse_request_body`), and body parsing follows the mount's `max_body_size` and recognises every JSON media type. (#715, #716)
+- **The audit log records the user's namespace, role and act chain**, and every actor's issuer. (#694)
+
+**Docker**
+
+- **`-dev-listen-address`, `-dev-tls-cert-dir` and `-dev-tls-san`**, and an image whose volumes need no `chown`. Dev mode in the image listens on every container interface. (#705)
+
+### Fixed
+
+- **A credential mint the upstream refuses answers `403`**, not `500`; an unreachable upstream answers `503`. (#667)
+- **A config write takes effect only once it is saved**, across providers and auth methods; a refused write changes nothing. Vault, Azure and GCP config must carry `auto_auth_path` in the same write. (#668, #669, #670, #671)
+- **Forwarding headers are trusted only from `trusted_proxies`** — `X-Forwarded-For`, `X-Real-IP` and `X-Request-Id`, not only the forwarded client certificate. (#666)
+- **Rotation activations no longer revert operator edits or orphan keys**; a concurrent update answers `409`. (#688)
+- **Source drivers are rebuilt after a node steps down.** (#689)
+- **A forwarded request keeps its request id** on the active node. (#665)
+- **Federated Anthropic and GCP tokens record who they were minted for.** (#698)
+- **Each credential client gets its own pooled transport.** Deleting one source no longer drops another's connections. (#684)
+- **`mcp_aws` closes the idle connections of a replaced transport**, and a SPIFFE login is judged against one snapshot of the config. (#672, #673)
+- **App installation-token mints no longer wait on one another.** (#735)
+
+### Upgrade notes
+
+- **Behind a load balancer, list it in `trusted_proxies`**, or client IPs resolve to the balancer — which IP-bound tokens and `request.client_ip` conditions see. (#666)
+- **Sources with `ca_data` or `tls_skip_verify`, and Kubernetes auth with a CA certificate, now honour `HTTPS_PROXY` / `NO_PROXY`** and may negotiate HTTP/2. Add internal hosts to `NO_PROXY`. (#684)
+- **Every write that leaves a secret stored in Warden now warns**, since `keyless_enforcement_level` defaults to `warn`. (#687)
+- **Dev mode in the Docker image listens on `0.0.0.0:8400`**, so other containers on its network can reach it. Publish it as `-p 127.0.0.1:8400:8400`, or opt out with `-dev-listen-address=127.0.0.1:8400`. (#705)
+- **`application/jsonl` bodies are no longer parsed** for policy. (#716)
+
 ## [v0.20.0] — 2026-09-13
 
 ### Breaking Changes
