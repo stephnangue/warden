@@ -317,7 +317,7 @@ What it shows:
 In the Warden tab:
 
 ```bash
-printf 'GitHub PAT: '; read -rs GITHUB_PAT; echo
+printf 'GitHub PAT: '; read -rs GITHUB_PAT; echo &&
 warden cred spec create github-pat -json - <<EOF
 {
   "source": "github",

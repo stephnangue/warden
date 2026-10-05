@@ -31,7 +31,7 @@ func renderTourMarkdown(w io.Writer, setup []string, scenarios []playground.Scen
 	fmt.Fprintln(w, "**Setup, once.** In the Warden tab, where you set the root token above:")
 	fmt.Fprintln(w)
 	cmds := append([]string{"export WARDEN_ADDR=" + docsSetupAddr}, setup...)
-	writeCodeBlock(w, []string{chainCommands(append(cmds, c.setup...))})
+	writeCodeBlock(w, append(cmds, c.setup...))
 	fmt.Fprintln(w, mdText(c.launch))
 	fmt.Fprintln(w)
 	if c.start != "" {
@@ -116,9 +116,11 @@ func writeReconnectMarkdown(w io.Writer, c client) {
 }
 
 // writeCodeBlock writes commands as one shell block, set apart as
-// printCommands sets them apart, flush left so a heredoc's EOF ends it.
+// printCommands sets them apart, flush left so a heredoc's EOF ends it, and
+// chained as printCommands chains them.
 func writeCodeBlock(w io.Writer, cmds []string) {
 	fmt.Fprintln(w, "```bash")
+	cmds = chainCommands(cmds)
 	for i, c := range cmds {
 		fmt.Fprintln(w, c)
 		if strings.Contains(c, "\n") && i < len(cmds)-1 {

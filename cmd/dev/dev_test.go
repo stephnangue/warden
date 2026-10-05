@@ -168,6 +168,18 @@ func TestRenderTour_CommandsPasteAsPrinted(t *testing.T) {
 	assert.Equal(t, "pasted\n", string(out), "the heredoc ended, and the next command ran")
 }
 
+// Every block pastes as one command: a replaced bank is added only once the old
+// one is removed. A heredoc ends the chain, since && after its delimiter would
+// stop the delimiter ending it, and a comment never joins one.
+func TestChainCommands(t *testing.T) {
+	assert.Contains(t, renderTourFor(4), "claude mcp remove bank &&\nclaude mcp add --transport http bank")
+	assert.Equal(t, []string{"a &&\nb"}, chainCommands([]string{"a", "b"}))
+	assert.Equal(t, []string{"a &&\ncat > f <<EOF\nx\nEOF", "b"},
+		chainCommands([]string{"a", "cat > f <<EOF\nx\nEOF", "b"}), "a heredoc can close a chain, never continue one")
+	assert.Equal(t, []string{"# remove it", "b"}, chainCommands([]string{"# remove it", "b"}))
+	assert.Equal(t, []string{"a", "# then this"}, chainCommands([]string{"a", "# then this"}))
+}
+
 // The Docker install's warden is docker exec -i, which reads the terminal: in a
 // pasted setup it swallowed the lines after the first mint, and left ALICE and
 // BOB unset with no error. The setup is one chained command, which the shell

@@ -84,7 +84,7 @@ What it shows:
 In the Warden tab:
 
 ```bash
-claude mcp remove bank
+claude mcp remove bank &&
 claude mcp add --transport http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   --header "X-Warden-Agent-Token: $AGENT" \
   --header "Authorization: Bearer $ALICE"
@@ -104,7 +104,7 @@ What it shows:
 Optional: As bob.
 
 ```bash
-claude mcp remove bank
+claude mcp remove bank &&
 claude mcp add --transport http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   --header "X-Warden-Agent-Token: $AGENT" \
   --header "Authorization: Bearer $BOB"
@@ -123,7 +123,7 @@ Then reconnect the server in your agent (/mcp in Claude Code), or restart it.
 Optional: As agent-2, holding alice's token.
 
 ```bash
-claude mcp remove bank
+claude mcp remove bank &&
 claude mcp add --transport http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   --header "X-Warden-Agent-Token: $(warden dev jwt agent agent-2)" \
   --header "Authorization: Bearer $ALICE"
@@ -139,7 +139,7 @@ Then reconnect the server in your agent (/mcp in Claude Code), or restart it.
 In the Warden tab:
 
 ```bash
-claude mcp remove bank
+claude mcp remove bank &&
 claude mcp add --transport http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   --header "X-Warden-Agent-Token: $AGENT" \
   --header "Authorization: Bearer $ALICE"
@@ -205,7 +205,7 @@ What it shows:
 In the Warden tab:
 
 ```bash
-claude mcp remove bank
+claude mcp remove bank &&
 mkdir -p "$HOME/warden-playground" && cat > "$HOME/warden-playground/agent.env" <<EOF
 export AGENT='$AGENT'
 export WARDEN_ADDR='$WARDEN_ADDR'
@@ -229,7 +229,7 @@ What it shows:
 In the Warden tab:
 
 ```bash
-printf 'GitHub PAT: '; read -rs GITHUB_PAT; echo
+printf 'GitHub PAT: '; read -rs GITHUB_PAT; echo &&
 warden cred spec create github-pat -json - <<EOF
 {
   "source": "github",

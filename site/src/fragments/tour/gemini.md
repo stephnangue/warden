@@ -84,7 +84,7 @@ What it shows:
 In the Warden tab:
 
 ```bash
-gemini mcp remove bank
+gemini mcp remove bank &&
 gemini mcp add -t http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   -H "X-Warden-Agent-Token: $AGENT" \
   -H "Authorization: Bearer $ALICE"
@@ -104,7 +104,7 @@ What it shows:
 Optional: As bob.
 
 ```bash
-gemini mcp remove bank
+gemini mcp remove bank &&
 gemini mcp add -t http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   -H "X-Warden-Agent-Token: $AGENT" \
   -H "Authorization: Bearer $BOB"
@@ -123,7 +123,7 @@ Then restart Gemini CLI.
 Optional: As agent-2, holding alice's token.
 
 ```bash
-gemini mcp remove bank
+gemini mcp remove bank &&
 gemini mcp add -t http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   -H "X-Warden-Agent-Token: $(warden dev jwt agent agent-2)" \
   -H "Authorization: Bearer $ALICE"
@@ -139,7 +139,7 @@ Then restart Gemini CLI.
 In the Warden tab:
 
 ```bash
-gemini mcp remove bank
+gemini mcp remove bank &&
 gemini mcp add -t http bank "$WARDEN_ADDR/v1/bank-me/role/assistant/gateway/" \
   -H "X-Warden-Agent-Token: $AGENT" \
   -H "Authorization: Bearer $ALICE"
@@ -184,8 +184,7 @@ In the Warden tab:
 
 ```bash
 gemini mcp add -t http warden "$WARDEN_ADDR/v1/sys/mcp" \
-  -H "Authorization: Bearer $AGENT"
-
+  -H "Authorization: Bearer $AGENT" &&
 mkdir -p "$HOME/warden-playground" && cat > "$HOME/warden-playground/GEMINI.md" <<'EOF'
 # Warden
 
@@ -211,7 +210,7 @@ What it shows:
 In the Warden tab:
 
 ```bash
-gemini mcp remove bank
+gemini mcp remove bank &&
 mkdir -p "$HOME/warden-playground" && cat > "$HOME/warden-playground/agent.env" <<EOF
 export AGENT='$AGENT'
 export WARDEN_ADDR='$WARDEN_ADDR'
@@ -235,7 +234,7 @@ What it shows:
 In the Warden tab:
 
 ```bash
-printf 'GitHub PAT: '; read -rs GITHUB_PAT; echo
+printf 'GitHub PAT: '; read -rs GITHUB_PAT; echo &&
 warden cred spec create github-pat -json - <<EOF
 {
   "source": "github",

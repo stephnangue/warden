@@ -204,14 +204,33 @@ func stepCommands(c client, before state, s step, wardenAddr string) []string {
 	return cmds
 }
 
-// chainCommands joins the setup into one command, line by line with &&. A
-// pasted block runs one line at a time otherwise, and a command that reads the
-// terminal swallows the lines pasted after it: the Docker install's warden is
-// docker exec -i, which left ALICE and BOB unset with no error. Chained, the
-// shell reads the whole block before it runs any of it, and a failed mint stops
-// the setup there instead of leaving its variable empty.
-func chainCommands(cmds []string) string {
-	return strings.Join(cmds, " &&\n")
+// chainCommands joins a block's commands with &&, so the block pastes as one
+// command. Pasted as separate lines it runs one line at a time, and a command
+// that reads the terminal swallows the lines pasted after it: the Docker
+// install's warden is docker exec -i, which left ALICE and BOB unset with no
+// error. Chained, the shell reads the whole block before it runs any of it,
+// and a failure stops the block there: an add never runs after a failed
+// remove, nor a step after a failed mint.
+//
+// A heredoc ends the chain: && after its delimiter would stop the delimiter
+// ending it. A comment never joins one, since && after it would be commented
+// out.
+func chainCommands(cmds []string) []string {
+	var out []string
+	for _, c := range cmds {
+		if n := len(out); n > 0 && chainable(out[n-1]) && !strings.HasPrefix(c, "#") {
+			out[n-1] += " &&\n" + c
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// chainable reports whether a command can be joined to the next with &&: not
+// a comment, and not one ending in a heredoc's delimiter.
+func chainable(c string) bool {
+	return !strings.HasPrefix(c, "#") && !strings.HasSuffix(c, "\nEOF")
 }
 
 // renderTour prints the scenarios as a walkthrough. only selects one scenario;
@@ -221,7 +240,7 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		fmt.Fprintln(w, "Setup, once:")
 		fmt.Fprintln(w)
 		setup := append([]string{"export WARDEN_ADDR=" + wardenAddr}, resp.Setup...)
-		printCommands(w, []string{chainCommands(append(setup, c.setup...))})
+		printCommands(w, append(setup, c.setup...))
 		if c.launch != "" {
 			fmt.Fprintf(w, "   %s\n\n", c.launch)
 		}
@@ -311,11 +330,13 @@ func printReconnectHint(w io.Writer, c client) {
 
 // printCommands prints commands flush left, unlike the prose around them, so
 // they paste as they are: a shell ends a heredoc only on a line that is its
-// delimiter alone, and an indented EOF would leave it waiting for more.
+// delimiter alone, and an indented EOF would leave it waiting for more. The
+// commands are chained first, so the block pastes as one command.
 func printCommands(w io.Writer, cmds []string) {
 	if len(cmds) == 0 {
 		return
 	}
+	cmds = chainCommands(cmds)
 	for i, c := range cmds {
 		lines := strings.Split(c, "\n")
 		for _, line := range lines {
