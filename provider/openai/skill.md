@@ -12,10 +12,12 @@ upstream: OpenAI REST API (api.openai.com)
 ## What it does
 
 Warden proxies OpenAI REST API requests. The agent calls a Warden
-URL; Warden authenticates the caller (JWT/cert), looks up the OpenAI
-API key bound to the chosen role, injects `Authorization: Bearer <key>`
-plus optional `OpenAI-Organization` and `OpenAI-Project` headers,
-and forwards. The agent **never holds an API key**.
+URL; Warden authenticates the caller (JWT/cert), resolves the chosen
+role's OpenAI credential — a short-lived token minted by federation,
+or a key fetched from a secret store or held by Warden — injects
+`Authorization: Bearer <token>` plus optional `OpenAI-Organization` and
+`OpenAI-Project` headers, and forwards. The agent **never holds an API
+key**.
 
 ## Configure the CLI/SDK
 

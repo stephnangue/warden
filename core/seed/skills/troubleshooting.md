@@ -42,9 +42,11 @@ role's policy decides. Branch on the status:
 role allows. Fewer tools than you expected is not an error — it *is* the
 role's grant. If the tool you need isn't listed, that role can't call it.
 
-**SigV4 providers (AWS, Scaleway S3):** a stale JWT surfaces upstream as
-`SignatureDoesNotMatch`, not 401, because the SDK signed with a
-now-rejected token. Same fix: refresh and retry.
+**SigV4 providers:** a stale JWT does not surface as 401. On AWS, Warden
+answers 403 in the service's own error shape — `InvalidClientTokenId`,
+`AuthFailure` (EC2), `InvalidAccessKeyId` (S3) or
+`UnrecognizedClientException` (JSON APIs). On Scaleway S3 it surfaces as
+`SignatureDoesNotMatch`. Same fix: refresh and retry.
 
 ## Sensitive-field handling
 

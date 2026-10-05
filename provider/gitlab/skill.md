@@ -12,8 +12,9 @@ upstream: GitLab REST API (gitlab.com/api/v4 or self-hosted /api/v4) and Git sma
 ## What it does
 
 Warden proxies GitLab REST API requests. The agent calls a Warden
-URL; Warden authenticates the caller (JWT/cert), looks up the GitLab
-access token bound to the chosen role, injects it as
+URL; Warden authenticates the caller (JWT/cert), resolves the chosen
+role's GitLab credential — an access token it mints, or one fetched
+from a secret store or held by Warden — injects it as
 `Authorization: Bearer <token>`, and forwards to GitLab. The agent
 **never holds an access token**.
 
