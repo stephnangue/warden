@@ -3,9 +3,9 @@
 **Setup, once.** In the Warden tab, where you set the root token above:
 
 ```bash
-export WARDEN_ADDR=http://127.0.0.1:8400
-AGENT=$(warden dev jwt agent agent-1 -ttl 8h)
-ALICE=$(warden dev jwt user alice -may-act agent-1 -ttl 8h)
+export WARDEN_ADDR=http://127.0.0.1:8400 &&
+AGENT=$(warden dev jwt agent agent-1 -ttl 8h) &&
+ALICE=$(warden dev jwt user alice -may-act agent-1 -ttl 8h) &&
 BOB=$(warden dev jwt user bob -may-act agent-1 -claims '{"tier": "premium"}' -ttl 8h)
 ```
 
@@ -182,7 +182,7 @@ Optional: Insist.
 In the Warden tab:
 
 ```bash
-warden dev audit -limit 10
+warden dev audit -limit 10 &&
 warden dev audit -user alice
 ```
 
