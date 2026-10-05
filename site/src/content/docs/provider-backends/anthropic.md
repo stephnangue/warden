@@ -6,29 +6,44 @@ The Anthropic provider enables proxied access to the Anthropic API through Warde
 
 ## How a request flows
 
-The recommended setup holds **no Anthropic key anywhere**. Warden mints a short-lived
-identity assertion for the agent and exchanges it at Anthropic for a token that acts as one
-Anthropic **service account**:
+This mount can carry **two principals** — the agent, and the user it is acting for — and
+both can be described to Anthropic in the same assertion.
 
-1. The agent calls Warden with its own identity, asserting a role.
-2. The asserted role selects the credential spec — an `oauth_bearer_token` spec on an
-   `anthropic` source.
-3. Warden builds the assertion the spec calls for and has the issuer sign it — in an external
-   KMS, where one is configured.
-4. Warden exchanges it at Anthropic's token endpoint (no client secret) under the spec's
-   federation rule, for a token bound to the spec's service account.
-5. Warden injects it as `Authorization: Bearer <token>`, with the mount's
-   `anthropic-version`, and forwards.
+The recommended setup holds **no Anthropic key anywhere**. Warden mints a short-lived
+identity assertion and exchanges it at Anthropic for a token that acts as one Anthropic
+**service account**.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, exchanges it at Anthropic's token endpoint for an access token, and injects that token to the Claude API" src="/images/warden-prov-anthropic-oidc-federation.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting **both** credentials and asserting a role. Warden
+   authenticates each against its own auth mount.
+3. The asserted role selects the credential spec — an `oauth_bearer_token` spec on an
+   `anthropic` source. Warden builds the assertion that spec calls for — the agent's claims
+   or, when the spec discloses the user, a delegation token with the user as `sub` and the
+   agent in `act` — and sends it to an **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden presents it at **Anthropic's token endpoint** as an RFC 7523 JWT bearer grant,
+   with no client secret, under the spec's federation rule.
+6. Anthropic verifies it and returns an access token bound to the spec's service account.
+7. Warden injects that token as `Authorization: Bearer <token>`, with the mount's
+   `anthropic-version`, and forwards to the Claude API.
 
 A federated token is issued for one workspace and already binds it, so the mount sends no
 `anthropic-workspace-id` with it. See the
 [Anthropic credential driver](/credential-drivers/anthropic/).
 
-:::note[Steps 3–4 run only on a cache miss]
+:::note[Steps 3–6 run only on a cache miss]
 Warden caches the token until shortly before it expires, so most requests skip from step 2
-to step 5. The entry is keyed by namespace, the agent's token id and the spec name — plus
-the user's token id when the mount carries a user.
+to step 7. The entry is keyed by namespace, the agent's token id and the spec name — plus
+the user's token id when the mount carries a user, so one user's token is never served to
+another.
 :::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all.
+Omit the stanza and the issuer signs with a locally held key instead. The exchange is
+identical either way.
 
 ### Chained: an API key from your store
 

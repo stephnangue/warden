@@ -6,29 +6,51 @@ The OpenAI provider enables proxied access to the OpenAI API through Warden. It 
 
 ## How a request flows
 
-The recommended setup holds **no OpenAI key anywhere**. Warden mints a short-lived identity
-assertion for the agent and exchanges it at OpenAI's auth host for an access token that acts
-as one OpenAI **service account**:
+This mount can carry **two principals** — the agent, and the user it is acting for — and
+both can be described to OpenAI in the same assertion.
 
-1. The agent calls Warden with its own identity, asserting a role.
-2. The asserted role selects the credential spec — an `oauth_bearer_token` spec on an
-   `openai` source.
-3. Warden builds the assertion the spec calls for and has the issuer sign it — in an external
-   KMS, where one is configured.
-4. Warden exchanges it at `auth.openai.com` (RFC 8693, no client secret) for a token bound to
-   the spec's `service_account_id`.
-5. Warden injects it as `Authorization: Bearer <token>` and forwards.
+The recommended setup holds **no OpenAI key anywhere**. Warden mints a short-lived identity
+assertion and exchanges it at OpenAI's auth host for an access token that acts as one
+OpenAI **service account**.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, exchanges it at OpenAI's token endpoint for an access token, and injects that token to the OpenAI API" src="/images/warden-prov-openai-oidc-federation.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting **both** credentials and asserting a role. Warden
+   authenticates each against its own auth mount.
+3. The asserted role selects the credential spec — an `oauth_bearer_token` spec on an
+   `openai` source. Warden builds the assertion that spec calls for — the agent's claims
+   or, when the spec discloses the user, a delegation token with the user as `sub` and the
+   agent in `act` — and sends it to an **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden exchanges it at `auth.openai.com` as an RFC 8693 token exchange, with no client
+   secret.
+6. OpenAI verifies it and returns an access token bound to the spec's
+   `service_account_id`.
+7. Warden injects that token as `Authorization: Bearer <token>` and forwards to the
+   OpenAI API.
+
+Because the user's claims reach OpenAI inside the assertion, the identity provider's
+mapping can be written against them. A disclosed user's `sub` is their raw id, so bind
+`warden_namespace` beside it — see
+[Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user).
 
 A federated token is issued for one service account, which already belongs to one
 organization and one project, so the mount sends **no** `OpenAI-Organization` or
 `OpenAI-Project` header with it — and strips any the client sent. See the
 [OpenAI credential driver](/credential-drivers/openai/).
 
-:::note[Steps 3–4 run only on a cache miss]
+:::note[Steps 3–6 run only on a cache miss]
 Warden caches the token until shortly before it expires (an hour at most), so most requests
-skip from step 2 to step 5. The entry is keyed by namespace, the agent's token id and the
-spec name — plus the user's token id when the mount carries a user.
+skip from step 2 to step 7. The entry is keyed by namespace, the agent's token id and the
+spec name — plus the user's token id when the mount carries a user, so one user's token is
+never served to another.
 :::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all.
+Omit the stanza and the issuer signs with a locally held key instead. The exchange is
+identical either way.
 
 ### Chained: an API key from your store
 
