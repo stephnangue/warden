@@ -373,6 +373,60 @@ func TestGitHub_AppModeInjectsMintedToken(t *testing.T) {
 	})
 }
 
+// TestGitHub_AppModeSendsTokenScope pins that a scoped spec's repositories and
+// permissions travel the whole chain into the installation-token request, in the
+// shape GitHub expects: bare names, sorted, and a name-to-level object.
+func TestGitHub_AppModeSendsTokenScope(t *testing.T) {
+	ensureEnv(t)
+	keyPEM, key := githubAppKeyPEM(t)
+	serveGitHubInstallToken(t, key)
+
+	env := buildGitHubAppEnv(upstream.URL, keyPEM)
+	env.CredConfig["repositories"] = "frontend,backend"
+	env.CredConfig["permissions"] = "contents:read,pull_requests:write"
+	h.SetupFullChainProvider(t, leaderPort, upstream.URL, env)
+	t.Cleanup(func() { h.TeardownFullChainProviderBestEffort(leaderPort, env) })
+	upstream.Reset()
+
+	status, body, _ := h.ChainRequest(t, leaderPort, env, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         env.CertRole(),
+	})
+	h.AssertChain(t, upstream, status, body, h.ChainWant{
+		Status:        200,
+		Injected:      map[string]string{"Authorization": "token " + githubMintedToken},
+		UpstreamCalls: 2,
+	})
+
+	var mint *h.UpstreamRequest
+	for _, req := range upstream.Requests() {
+		if req.Method == http.MethodPost && req.Path == githubInstallPath {
+			mint = &req
+			break
+		}
+	}
+	if mint == nil {
+		t.Fatal("no installation-token request reached the upstream")
+	}
+	if got := mint.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("installation-token request Content-Type = %q, want application/json", got)
+	}
+	var scope struct {
+		Repositories []string          `json:"repositories"`
+		Permissions  map[string]string `json:"permissions"`
+	}
+	if err := json.Unmarshal(mint.Body, &scope); err != nil {
+		t.Fatalf("installation-token request body is not the scope JSON: %v (%s)", err, mint.Body)
+	}
+	if strings.Join(scope.Repositories, ",") != "backend,frontend" {
+		t.Errorf("repositories = %v, want [backend frontend]", scope.Repositories)
+	}
+	if len(scope.Permissions) != 2 || scope.Permissions["contents"] != "read" || scope.Permissions["pull_requests"] != "write" {
+		t.Errorf("permissions = %v, want contents:read and pull_requests:write", scope.Permissions)
+	}
+}
+
 // TestGitHub_ChainedAppKeyMintsWithStoreHeldKey is the row this section exists
 // for: a spec holding no key still mints, because the key travelled from the
 // store through federation and MintFromSecret to sign the assertion.
