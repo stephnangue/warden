@@ -2,7 +2,7 @@
 title: "Datadog"
 ---
 
-The Datadog provider enables proxied access to the Datadog REST API through Warden. It forwards requests to Datadog endpoints (Metrics, Monitors, Dashboards, Logs, Events, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `DD-API-KEY` and `DD-APPLICATION-KEY` headers. One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Datadog provider enables proxied access to the Datadog REST API through Warden. It forwards requests to Datadog endpoints (Metrics, Monitors, Dashboards, Logs, Events, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `DD-API-KEY` and `DD-APPLICATION-KEY` headers. Chain the keys from your secret store (recommended), or store them in Warden (`apikey` source type).
 
 ## How a request flows
 

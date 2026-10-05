@@ -36,6 +36,10 @@ skills=(provider/*/skill.md)
 # system bash on macOS) treats "${empty[@]}" as an unbound variable.
 blog=()
 [ -d "site/src/content/blog" ] && blog=("site/src/content/blog")
+# The getting started page's tour is generated from the playground's scenarios
+# and imported from site/src/fragments; readers copy its policies like any
+# other page's, so it rides with the blog in every check.
+[ -d "site/src/fragments" ] && blog+=("site/src/fragments")
 
 status=0
 
@@ -83,6 +87,19 @@ check "CEL namespace: no \`token.<field>\`" \
 check "MCP policy: no nested \`mcp {\` block" \
   'mcp[[:space:]]*\{' \
   "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}"
+
+# get_skill was replaced by read_skill(uri), and the "(skill: …, url: …)"
+# description convention by the role fields skill and provider_path (v0.21.0).
+# The seeded skills ship inside the binary, so they are scanned too.
+check "Discovery: no \`get_skill\` or \`(skill: …)\` description convention" \
+  'get_skill|\(skill: [a-z0-9_-]+' \
+  "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}" core/seed/skills
+
+# Provider intros said only a stored static key works, contradicting each page's
+# own chaining advice. Lead with keyless or chaining instead (v0.21.0).
+check "Provider intros: no \"One credential mode is supported: static\"" \
+  'One credential mode is supported: static' \
+  "$docs"
 
 # --- Pending checks -----------------------------------------------------------
 #

@@ -29,7 +29,7 @@ services:
     networks: [spiffe]
 
   warden:
-    image: ghcr.io/stephnangue/warden:v0.20.0      # published multi-arch image
+    image: ghcr.io/stephnangue/warden:v0.21.0      # published multi-arch image
     command: ["--dev", "--dev-root-token=root", "--dev-tls-spiffe"]  # fixed dev root token = "root"
     environment:
       SPIFFE_ENDPOINT_SOCKET: "unix:///run/spire/sockets/agent.sock"
@@ -39,12 +39,13 @@ services:
       - spire-sockets:/run/spire/sockets:ro
       - ./audit:/audit                            # the file audit device writes JSON entries here
     ports:
-      - "8200:8200"                               # ghostunnel (shares this netns) is published here
+      - "8200:8200"                               # ghostunnel's port (it shares this network namespace)
     networks: [spiffe]
 
   ghostunnel:
     image: ghostunnel/ghostunnel:v1.10.0-distroless  # official multi-arch image (incl. linux/arm64)
-    network_mode: "service:warden"                # share Warden's loopback to reach 127.0.0.1:8400
+    network_mode: "service:warden"                # Warden's network namespace: :8200 is published on warden,
+                                                  # and 127.0.0.1:8400 is Warden
     command:
       - client
       - --listen=0.0.0.0:8200

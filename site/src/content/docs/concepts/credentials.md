@@ -17,8 +17,10 @@ How Warden obtains that credential is a spectrum, best to worst by *what Warden 
   vault per request. **Recommended** wherever the driver supports it — the
   [capability matrix](/credential-drivers/#capability-matrix) says which do.
 - **Inline secret** — Warden holds a stored secret and either mints a short-lived
-  credential with it (*dynamic*) or injects it directly (*static*). A stored secret is
-  attack surface, so this is a fallback.
+  credential with it (*dynamic*) or injects it directly (*static*). It is the quick start,
+  not the production setup: a stored secret is attack surface, and a server can be set to
+  warn about or refuse it with
+  [`keyless_enforcement_level`](/federation/keyless-credentials/#keyless-enforcement).
 
 Whether the upstream sees a service identity or the *caller's* identity (on-behalf-of) is
 a separate, orthogonal choice — see [Delegation](/concepts/delegation/). The full picture
@@ -94,7 +96,16 @@ Sources live at `sys/cred/sources/<name>`, scoped to the current
 a stored secret in place — an AppRole-backed OpenBao/Vault source, and specs whose credential
 type embeds a rotatable secret — and is **not needed for a keyless or chained source** (no
 stored secret to rotate), nor for a per-request exchange spec (where it is rejected). Config
-fields that hold secrets are masked on read.
+fields that hold secrets are masked on read; a secret field an update cleared to `""`
+reads back as `""`, not masked, so an empty field is never mistaken for a secret still
+held.
+
+Every source and spec read and list also reports **`stored_secrets`** — the names of the
+secret fields it holds, never their values — and omits it when it holds none. A write
+that would leave a secret stored warns by default, and is refused when the server runs
+with `keyless_enforcement_level=enforce`; `warden cred source keyless-plan` and
+`warden cred spec keyless-plan` print the keyless replacement. See
+[Keyless enforcement](/federation/keyless-credentials/#keyless-enforcement).
 
 ### Specs
 
@@ -197,6 +208,9 @@ Warden ships drivers for:
 | `oauth2` | Generic OAuth2 providers |
 | `token_exchange` | RFC 8693 / RFC 7523 exchange at any OAuth2 STS |
 | `kubernetes` | Kubernetes API |
+| `anthropic` | Anthropic API tokens, through workload identity federation |
+| `openai` | OpenAI access tokens, through workload identity federation |
+| `cloudflare` | Cloudflare API tokens and R2 keys, chained from your secret store |
 | `local` | Static secrets stored in the spec itself |
 | `apikey` | Generic static API keys |
 | `ibm`, `elastic`, `grafana`, `alicloud`, `scaleway`, `ovh` | The respective SaaS / cloud APIs |
@@ -232,6 +246,14 @@ failing is persisted and retried daily for up to a week before being abandoned w
 error. Source rotation rotates the privileged secret Warden authenticates *with*; spec
 rotation rotates a secret a source manages *on behalf of* a workload.
 
+An operator edit always wins over a rotation in flight. An update or delete that changes
+a source's or spec's config **discards** any rotation staged for it, and the rotation
+starts again from the new config. Updates are compared against the config they were read
+from, so two writes that race are not merged: the second gets **`409`** (*changed while
+this update was in progress*) and should read the object again and retry. A source
+update that lands while a rotation holds the source gets `503` and can simply be
+retried.
+
 ## Delivering a Credential
 
 Credentials are delivered by **injection**. The workload sends its request to a Warden
@@ -239,9 +261,11 @@ Credentials are delivered by **injection**. The workload sends its request to a 
 credential and injects it into the proxied request — signing it with AWS SigV4, setting
 the upstream token header, and so on — then streams the upstream response back.
 
-The workload never receives the credential. It only ever lives inside the proxied hop, and
-any privileged secret that mints it never leaves Warden. That is the whole point: a
-compromised workload has no upstream secret to leak, because it never held one.
+The workload never receives the credential. It only ever lives inside the proxied hop. Behind
+it, a keyless source holds no privileged secret at all, a chained one fetches it from your
+store for that request and keeps nothing, and a stored one never leaves Warden. That is the
+whole point: a compromised workload has no upstream secret to leak, because it never held
+one.
 
 ## OAuth2 Consent
 
@@ -268,6 +292,7 @@ warden cred source read   <name>
 warden cred source list
 warden cred source update <name> -config=k=v ...
 warden cred source delete <name>
+warden cred source keyless-plan <name>   # print the keyless replacement; writes nothing
 
 # Specs
 warden cred spec create <name> -source=<source> -config=k=v ...
@@ -276,6 +301,7 @@ warden cred spec list
 warden cred spec update <name> -config=k=v ...
 warden cred spec delete <name>
 warden cred spec connect <name>   # OAuth2 authorization-code consent
+warden cred spec keyless-plan <name>
 ```
 
 Both commands also accept a full payload via `-json` (`-json @file.json`, `-json '<json>'`,

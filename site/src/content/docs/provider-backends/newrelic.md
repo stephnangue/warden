@@ -2,7 +2,7 @@
 title: "New Relic"
 ---
 
-The New Relic provider enables proxied access to the New Relic REST API v2 and NerdGraph (GraphQL) API through Warden. It forwards requests to New Relic endpoints (Applications, Alerts, Dashboards, NRQL queries, Synthetics, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Api-Key` header using a New Relic User API key (`NRAK-...`). One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The New Relic provider enables proxied access to the New Relic REST API v2 and NerdGraph (GraphQL) API through Warden. It forwards requests to New Relic endpoints (Applications, Alerts, Dashboards, NRQL queries, Synthetics, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Api-Key` header using a New Relic User API key (`NRAK-...`). Chain the key from your secret store (recommended), or store it in Warden (`apikey` source type).
 
 ## How a request flows
 

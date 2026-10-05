@@ -10,7 +10,7 @@ This driver supports a **keyless mode** — use it instead of storing a secret i
 
 The Grafana driver mints **Grafana service-account tokens** by talking to the Grafana HTTP API. For every mint it creates a **temporary service account**, generates a bounded-TTL token on it, and hands the token to the workload; on **revoke** it deletes that service account (and with it every token), so minted credentials are fully revocable.
 
-The privileged secret lives in the **source**: an `admin_token` (an admin service-account token with permission to create and delete service accounts) plus the `grafana_url` to reach. Each **spec** decides the shape of what gets minted — the role granted, the naming prefix, an optional org, and the token TTL. An operator reaches for this driver to grant workloads short-lived, least-privilege Grafana access without ever sharing the standing admin token.
+The **source** names the `grafana_url` to reach and authenticates with an `admin_token` (an admin service-account token with permission to create and delete service accounts) — chained from your secret store per request, or, with a stored token, held in the source. Each **spec** decides the shape of what gets minted — the role granted, the naming prefix, an optional org, and the token TTL. An operator reaches for this driver to grant workloads short-lived, least-privilege Grafana access without ever sharing the standing admin token.
 
 ## Keyless (via chaining)
 

@@ -3,8 +3,13 @@ title: "skill"
 ---
 
 Browse and manage the global agent **skill registry** — the agent-facing recipes
-that describe how to use Warden's capabilities (a foundation flow plus one record
-per provider type). See [Discovery & Skills](/concepts/discovery-and-skills/).
+that describe how to use Warden's capabilities (a shared troubleshooting guide, one
+record per provider type mounted, and any skills you write). See
+[Discovery & Skills](/concepts/discovery-and-skills/).
+
+This is the operator's view of the whole catalog. Agents read skills through the
+discovery server instead, which serves each identity only the skills its roles
+lead to.
 
 > **Reads are open** to any namespace token; **writes (`create`, `update`,
 > `delete`) require a root-namespace token.** Running a mutation from a
@@ -75,7 +80,7 @@ cat skill.json | warden skill create my-runbook --json -
 
 | Flag | Default | Description |
 |---|---|---|
-| `--name` | *(from arg/payload)* | Skill name (unique slug, `[a-z0-9_-]{2,64}`). |
+| `--name` | *(from arg/payload)* | Skill name, unique: lowercase letters, digits and single hyphens, no leading or trailing hyphen, at most 64 characters. See [Skill names](#skill-names). |
 | `--description` | *(none)* | One-line summary (required). |
 | `--category` | *(none)* | One of `agent-flow`, `shared`, `provider-guide`, `troubleshooting`, `custom`. |
 | `--requires` | *(none)* | Names of skills this one depends on; repeatable or comma-separated. |
@@ -83,6 +88,30 @@ cat skill.json | warden skill create my-runbook --json -
 | `--provider` | *(none)* | Provider type (required when `--category=provider-guide`). |
 | `--body-file` | *(none)* | Path to the markdown body file. |
 | `-j`, `--json` | *(none)* | Full JSON payload. Mutually exclusive with all typed flags above. |
+
+### Skill names
+
+A skill name follows the Agent Skills rule: lowercase letters, digits and single
+hyphens only, with no leading or trailing hyphen, at most 64 characters. An
+underscore is refused. The name is the last segment of the skill's
+`skill://<name>/SKILL.md` URI.
+
+Name the skills you write `<provider>-<purpose>`, such as `aws-s3-read-only` or
+`gh-repo-reader`, so a name says which provider it drives and what for.
+
+A provider's own skill is named after its type with any underscore turned into a
+hyphen: the `mcp_aws` provider ships `mcp-aws`, and `ansible_tower` ships
+`ansible-tower`. Provider type names keep their underscores.
+
+Skills stored under an older name with an underscore are renamed once, the first
+time the active node unseals on v0.21.0: `mcp_aws` becomes `mcp-aws`,
+`ansible_tower` becomes `ansible-tower`, and so does any skill you created with an
+underscore. A `requires` entry naming a renamed skill is rewritten with it. If the
+new name is already taken by a different skill, or is still invalid (two
+underscores in a row, say), the old skill is left in place and the server logs a
+warning. Rename it by hand — read it, create it under a valid name, then delete
+the old one — since a name that is not a valid skill URI cannot be served to
+agents.
 
 ### `skill update`
 

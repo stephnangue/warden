@@ -12,7 +12,7 @@ define four roles the agent can assume plus one it cannot, and let Claude run th
 `gh api`.
 
 The agent still speaks MCP for **discovery** — that's Warden's own always-on interface at
-`/v1/sys/mcp`, how it lists roles and fetches skills. What's gone is any GitHub-specific MCP
+`/v1/sys/mcp`, how it lists roles and reads skills. What's gone is any GitHub-specific MCP
 server: the upstream is the ordinary REST API. An MCP server is pleasant for an agent for two
 reasons — it exposes a **small, task-shaped set of tools** (not a 900-endpoint spec), and each tool
 is **already scoped** to what you're allowed to do. A raw REST API gives you neither: one broad
@@ -53,7 +53,7 @@ the call, never on the connection; the recipe is a few endpoints, never the whol
 full picture.
 
 This is the discovery loop from the [MCP role-assertion tutorial](/tutorials/access/mcp-role-assertion/) —
-the same `list_roles` → `get_skill` → act sequence — but the upstream is a plain REST API, and
+the same `list_roles` → `read_skill` → act sequence — but the upstream is a plain REST API, and
 the agent acts with `gh api` instead of MCP tool calls.
 
 ### The four roles
@@ -187,6 +187,11 @@ warden cred spec create github-ops -source github-src \
   -config mint_method=pat -config token=ghp_your_token_here
 ```
 
+Storing the PAT in Warden keeps the tutorial short. In production, keep the secret in your own
+secret store and let Warden fetch it per request with
+[credential chaining](/federation/credential-chaining/) (`secret_spec`), so Warden holds nothing at
+rest.
+
 ### Step 5 — define the roles
 
 Each role is a **policy** (which endpoints it may call, by HTTP method) plus a **role binding**
@@ -195,7 +200,12 @@ Each role is a **policy** (which endpoints it may call, by HTTP method) plus a *
 `PATCH` needs `patch`, `PUT` needs `update`, `DELETE` needs `delete`. The path Warden authorizes
 is the internal gateway path, `github/role/<role>/gateway/<api-path>`, so a policy scopes GitHub
 endpoints by writing patterns against it. Everything is default-deny; only what a rule grants gets
-through. Run the blocks below one at a time.
+through.
+
+Each binding also names the mount the role is used with, `provider_path=github/`, and the skill
+that teaches it, `skill=gh-…`. The discovery server turns those into the role's gateway URL and
+skill URI. The skills don't exist yet; you write them in Step 6. Run the blocks below one at a
+time.
 
 **1. `repo-creator` — create exactly one repo, name pinned in the body.** `POST /user/repos`
 carries no repo in its path, so the name is pinned with a CEL `condition` on the request body
@@ -214,7 +224,9 @@ warden write auth/jwt/role/repo-creator \
   token_policies=pol-repo-creator \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="create the warden-gh-api repository (skill: gh-repo-creator, url: /v1/github/role/repo-creator/gateway/)" \
+  description="create the warden-gh-api repository" \
+  provider_path=github/ \
+  skill=gh-repo-creator \
   token_ttl=1h
 ```
 
@@ -234,7 +246,9 @@ warden write auth/jwt/role/repo-reader \
   token_policies=pol-repo-reader \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="read the warden-gh-api repo, its README, files and languages (skill: gh-repo-reader, url: /v1/github/role/repo-reader/gateway/)" \
+  description="read the warden-gh-api repo, its README, files and languages" \
+  provider_path=github/ \
+  skill=gh-repo-reader \
   token_ttl=1h
 ```
 
@@ -253,7 +267,9 @@ warden write auth/jwt/role/issue-manager \
   token_policies=pol-issue-manager \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="list, open, edit and comment on issues in warden-gh-api (skill: gh-issue-manager, url: /v1/github/role/issue-manager/gateway/)" \
+  description="list, open, edit and comment on issues in warden-gh-api" \
+  provider_path=github/ \
+  skill=gh-issue-manager \
   token_ttl=1h
 ```
 
@@ -270,13 +286,15 @@ warden write auth/jwt/role/label-curator \
   token_policies=pol-label-curator \
   user_claim=sub \
   cred_spec_name=github-ops \
-  description="list, create, rename and delete labels on warden-gh-api (skill: gh-label-curator, url: /v1/github/role/label-curator/gateway/)" \
+  description="list, create, rename and delete labels on warden-gh-api" \
+  provider_path=github/ \
+  skill=gh-label-curator \
   token_ttl=1h
 ```
 
 **5. `collaborator-admin` — add collaborators, bound to a different identity.** The policy is
 fully functional; the only difference that matters is `bound_subject=admin-agent`, an identity the
-agent does **not** hold. It carries no skill, because the agent will never see it:
+agent does **not** hold. It names no mount or skill, because the agent will never see it:
 
 ```bash
 warden policy write pol-collaborator-admin - <<'EOF'
@@ -305,10 +323,10 @@ warden audit enable file -file-path=/tmp/warden-audit.log
 This is the "as efficient as MCP" half — and it factors cleanly. The `gh api` mechanics are the
 same for every role, so put them in **one base skill** that each role skill **`requires`**. A role
 skill then shrinks to a few lines: the endpoints it exposes. It does **not** hardcode a gateway URL —
-the agent already has that from the role's `list_roles` description (the `url:` field), so the skill
-lists only REST path suffixes. When the agent fetches a role skill it sees `requires: [gh-via-warden]`
-and pulls the base once for the mechanics — the way an MCP client shares one transport across many
-tools. Skills are authored from a file, so each block writes the body then registers it.
+the agent already has that from the role's `url` in `list_roles`, so the skill lists only REST path
+suffixes. When the agent reads a role skill it sees that it requires
+`skill://gh-via-warden/SKILL.md` and reads the base once for the mechanics — the way an MCP client
+shares one transport across many tools. Skills are authored from a file, so each block writes the body then registers it.
 
 **1. The base skill — `gh-via-warden`** (the shared `gh api` recipe, no endpoints of its own):
 
@@ -322,9 +340,9 @@ endpoint. GraphQL (`gh api graphql`) is not proxied.
 
 ## Recipe
 
-- **Base URL comes from the role's description.** `list_roles` gives each role a `url:` field (its
-  gateway, e.g. `/v1/github/role/<role>/gateway/`). Don't guess it — read it there. Set it once and
-  reuse it: `GW="$WARDEN_ADDR<url-from-description>"` (drop the trailing slash). Every call is then
+- **Base URL comes from the role.** `list_roles` gives each role a `url` (its gateway, e.g.
+  `/v1/github/role/<role>/gateway/`). Don't guess it — read it there. Set it once and reuse it:
+  `GW="$WARDEN_ADDR<the-role's-url>"` (drop the trailing slash). Every call is then
   `gh api "$GW/<rest-path>"`, where `<rest-path>` is one of the paths the role skill lists.
 - **Auth**: pass `-H "Authorization: Bearer <jwt>"`. Warden reads the bearer value as your
   identity and injects the real GitHub token upstream — you never hold it.
@@ -334,7 +352,7 @@ endpoint. GraphQL (`gh api graphql`) is not proxied.
   work through the proxy.
 - **Writes**: add `--method POST` / `PATCH` / `PUT` / `DELETE`; fields via `-f key=val` (string)
   or `-F key=val` (typed), or a whole JSON body with `--input file.json`.
-- **Switch role**: reset `$GW` to the other role's `url:` (or add `-H "X-Warden-Role: <role>"`).
+- **Switch role**: reset `$GW` to the other role's `url` (or add `-H "X-Warden-Role: <role>"`).
 
 The role skill that required this one lists the exact `<rest-path>`s you may call; anything outside
 that list is denied at the gateway.
@@ -349,13 +367,13 @@ warden skill create -name=gh-via-warden -category=shared \
 rest-paths the role may call, nothing else. That list is the one thing the skill uniquely adds: the
 model already knows GitHub's REST API and (from `gh-via-warden`) how to call it, so the skill's job
 is to state the *authorized surface*, not re-teach the API. `$GW` is the role's gateway, set from its
-`list_roles` description per the base skill. Author them one at a time.
+`url` in `list_roles` per the base skill. Author them one at a time.
 
 `gh-repo-creator`:
 
 ```bash
 cat > gh-repo-creator.md <<'EOF'
-# repo-creator — see gh-via-warden for gh api mechanics; $GW from this role's description
+# repo-creator — see gh-via-warden for gh api mechanics; $GW from this role's url
 - POST  user/repos   (body name must be "warden-gh-api", policy-enforced; -F auto_init=true seeds a README)
 EOF
 
@@ -367,7 +385,7 @@ warden skill create -name=gh-repo-creator -category=custom -requires=gh-via-ward
 
 ```bash
 cat > gh-repo-reader.md <<'EOF'
-# repo-reader (read-only) — see gh-via-warden for mechanics; $GW from this role's description
+# repo-reader (read-only) — see gh-via-warden for mechanics; $GW from this role's url
 # {owner} = the full_name returned when the repo was created
 - GET  repos/{owner}/warden-gh-api
 - GET  repos/{owner}/warden-gh-api/readme
@@ -383,7 +401,7 @@ warden skill create -name=gh-repo-reader -category=custom -requires=gh-via-warde
 
 ```bash
 cat > gh-issue-manager.md <<'EOF'
-# issue-manager — see gh-via-warden for mechanics; $GW from this role's description
+# issue-manager — see gh-via-warden for mechanics; $GW from this role's url
 - GET, POST   repos/{owner}/warden-gh-api/issues            (open: -f title= -f body=)
 - GET, PATCH  repos/{owner}/warden-gh-api/issues/{n}        (close: -f state=closed)
 - POST        repos/{owner}/warden-gh-api/issues/{n}/comments
@@ -397,7 +415,7 @@ warden skill create -name=gh-issue-manager -category=custom -requires=gh-via-war
 
 ```bash
 cat > gh-label-curator.md <<'EOF'
-# label-curator — see gh-via-warden for mechanics; $GW from this role's description
+# label-curator — see gh-via-warden for mechanics; $GW from this role's url
 - GET, POST      repos/{owner}/warden-gh-api/labels         (create: -f name= -f color=<6-hex>)
 - PATCH, DELETE  repos/{owner}/warden-gh-api/labels/{name}  (rename: -f new_name=)
 EOF
@@ -440,7 +458,7 @@ export GH_TOKEN="unused-real-credential-is-the-authorization-header"
 ```
 
 **3. Attach Warden's discovery MCP server** — this is how the agent finds out which roles it can
-assume and fetches their skills:
+assume and reads their skills:
 
 ```bash
 claude mcp add --transport http warden \
@@ -461,16 +479,18 @@ Open a `claude` session and ask, in plain language:
 > **use the warden mcp server to list the roles I can assume**
 
 Claude calls Warden's `list_roles` tool and reports exactly four: `repo-creator`, `repo-reader`,
-`issue-manager`, and `label-curator` — each with the
-description you set. `collaborator-admin` is **not on the list**: Warden only returns roles the
-presented identity is admitted to. The menu the agent plans against is already scoped to its
-identity — just like an MCP `tools/list`.
+`issue-manager`, and `label-curator` — each with the description you set, provider `github`, a
+`skill://gh-…/SKILL.md` URI, and its gateway `url`. `collaborator-admin` is **not on the list**:
+Warden only returns roles the presented identity is admitted to. The menu the agent plans against
+is already scoped to its identity — just like an MCP `tools/list`. So are the skills: the agent can
+read the four role skills and the shared ones, such as `gh-via-warden` and `troubleshooting`, and
+nothing else.
 
 ### Step 9 — one role per task
 
-Ask for these in turn. For each, Claude reads the matching role's description — taking the gateway
-URL from its `url:` field — calls `get_skill` for the role's recipe (and the `gh-via-warden` base
-skill it requires), builds the `gh api` command against that gateway, and runs it. Each task maps to
+Ask for these in turn. For each, Claude picks the role whose description matches, calls
+`read_skill` on its skill URI (and on the `gh-via-warden` base skill it requires), builds the
+`gh api` command against the role's `url`, and runs it. Each task maps to
 exactly one role.
 
 **Create the repo** — `repo-creator`:
@@ -574,9 +594,12 @@ injected GitHub token never appears in the clear — the audit layer salts it to
   was created (your GitHub login), not a placeholder.
 - **`credential spec "github-ops" not found`** — Step 4's `cred spec create` failed (usually an
   invalid PAT — Warden verifies it on creation). Re-run that command with a valid token.
-- **A task ran under the wrong role, or a skill looks stale** — Claude caches an MCP server's tool
-  list (including `list_roles`/`get_skill`) once per session. After changing a role, policy, or
-  skill, exit Claude (`/exit`) and start a fresh session so it re-fetches.
+- **A role has no `url`, or no `skill`** — `list_roles` returns a `warnings` line saying why. Check
+  the role's `provider_path=github/` and `skill=…`, that the skill exists (`warden skill list`), and
+  that the mount's `auto_auth_path` is `auth/jwt/`, trailing slash included.
+- **A task ran under the wrong role, or a skill looks stale** — Claude keeps what it read earlier in
+  the session. After changing a role, policy, or skill, exit Claude (`/exit`) and start a fresh
+  session so it reads them again.
 - **The forbidden collaborator call "just works"** — check `collaborator-admin` was written with
   `bound_subject=admin-agent`, not `my-agent`. That one field is the wall.
 

@@ -16,15 +16,36 @@ certificate — and, for a sub-namespace, the `X-Warden-Namespace` header.
 It needs no role: it authorizes on the identity you present. It exposes
 two tools:
 
-- **`list_roles`** — the roles your identity can assume, each with an
-  operator-written `description`. This is your menu.
-- **`get_skill`** — given a skill name, returns that skill: the markdown
-  recipe for driving the role's provider.
+- **`list_roles`** — the roles your identity can assume. This is your menu.
+  Each role carries:
+  - `description` — operator-written prose: what the role is for;
+  - `provider` — the type of provider it is used with (`vault`, `aws`, `mcp`, …);
+  - `skill` — the `skill://<name>/SKILL.md` URI of the recipe for it;
+  - `url` — where to call it, relative to Warden's address (prepend
+    `$WARDEN_ADDR`).
+- **`read_skill`** — given a role's `skill` URI, returns that SKILL.md: the
+  markdown recipe for driving the role's provider. The structured output
+  carries it whole as `markdown`.
 
-The `description` on each role carries what you need: the **skill name**,
-and — for a **non-MCP** provider — the role's **gateway URL** (relative;
-prepend `$WARDEN_ADDR`). For example:
-*"read app secrets (skill: vault, url: /v1/vault/role/read-secret/gateway/)"*.
+A client that supports the MCP Skills extension can use `skills/list`,
+`skills/get`, and `resources/read` on the same `skill://` URIs instead of
+`read_skill`.
+
+For example:
+
+```json
+{
+  "name": "read-secret",
+  "description": "read app secrets",
+  "provider": "vault",
+  "skill": "skill://vault/SKILL.md",
+  "url": "/v1/vault/role/read-secret/gateway/"
+}
+```
+
+A role listed without a `url` or a `skill` is not wired to a provider yet;
+the `warnings` in the same response say why. Don't build a URL for it — pick
+another role or ask the operator.
 
 ## The agent loop
 
@@ -38,11 +59,15 @@ prepend `$WARDEN_ADDR`). For example:
 [ match task → pick a role ]            ← read descriptions; choose the fit
        │
        ▼
-[ get_skill <name-from-description> ]   ← the per-provider recipe
+[ read_skill <the role's skill URI> ]   ← the recipe, plus what it requires
        │
        ▼
-[ act under the chosen role ]
+[ act under the chosen role ]           ← its url, or its attached MCP server
 ```
+
+Read the skill of the role you are about to use, not every skill on the
+menu. A skill whose frontmatter lists `requires` depends on those skills:
+read each one before acting.
 
 How you act depends on the provider kind. Your role is the `role/<role>/`
 segment of the gateway URL, so you pick a role by **targeting that role's URL** —
@@ -53,33 +78,40 @@ headers are fixed and which carries no role.)
 - **MCP providers** are already attached to your MCP client, **one attachment
   per role** (the operator wired each at `claude mcp add` time) — call the
   attached server whose role fits the task.
-- **Non-MCP providers** are driven over HTTP: read the role's gateway URL from
-  its description, prepend `$WARDEN_ADDR`, present your identity on each call,
-  and use another role's URL to act under another role.
+- **Non-MCP providers** are driven over HTTP: take the role's `url`, prepend
+  `$WARDEN_ADDR`, present your identity on each call, and use another role's
+  `url` to act under another role.
 
 ## Provider skills
 
-Each provider type ships a skill (`provider/<type>/skill.md`) that is seeded
-into the cluster's registry the **first time a provider of that type is
-mounted**. Fetch one by name with `get_skill` — the name is the provider
-type embedded in a role's description (`aws`, `vault`, `github`, `openai`,
-`slack`, `mcp`, …). If `get_skill` reports *skill "<name>" not found*, no
-provider of that type is enabled — the honest signal that the capability
-does not exist, not an endpoint to fabricate.
+Each provider type that ships a skill (`provider/<type>/skill.md`) has it
+seeded into the cluster's registry the **first time a provider of that type is
+mounted**. A role uses its provider's skill unless the operator points it at
+one of their own. The discovery server serves you only the skills your roles
+lead to, plus the shared ones such as `troubleshooting`. If `read_skill`
+reports *not found*, the skill is gone or none of your roles leads to it —
+the honest signal that the capability does not exist for you, not an
+endpoint to fabricate.
 
 ## Adding a skill for a new provider
 
-When a new provider lands under `provider/<name>/`, ship a matching
-`provider/<name>/skill.md` with the same shape as the existing ones, and add
-`<name>.Skill()` to the `providerSkills` map in `cmd/server/server.go`. The
-skill is seeded into the registry on the first mount of that provider type.
+When a new provider lands under `provider/<type>/`, ship a matching
+`provider/<type>/skill.md` with the same shape as the existing ones, and add
+`"<type>": <package>.Skill()` to the `providerSkills` map in
+`cmd/server/server.go`. The skill is seeded into the registry on the first
+mount of that provider type.
+
+The skill's `name` is the provider type with every underscore turned into a
+hyphen — skill names allow only lowercase letters, digits and single hyphens
+— while `provider` keeps the type as it is. Seeding refuses a name that does
+not match. For the `mcp_aws` type:
 
 ```yaml
 ---
-name: <name>
+name: mcp-aws
 description: "<one line: what does this provider expose>"
 category: provider-guide
-provider: <name>
+provider: mcp_aws
 requires: []
 upstream: "<service name>"
 ---
@@ -88,10 +120,10 @@ upstream: "<service name>"
 Body sections, in order:
 1. **What it does** — one paragraph.
 2. **Configure the CLI/SDK** — for a non-MCP provider, how to build the
-   request from the gateway URL in the role description (`$WARDEN_ADDR` +
-   `<gateway-url>`), how to present identity, and that the role is the URL's
-   `role/<role>/` segment (use another role's URL to switch); for an MCP
-   provider, that the server is pre-attached, one per role. The actionable part.
+   request from the role's `url` in `list_roles` (`$WARDEN_ADDR` + `url`), how
+   to present identity, and that the role is the URL's `role/<role>/` segment
+   (use another role's `url` to switch); for an MCP provider, that the server
+   is pre-attached, one per role. The actionable part.
 3. **Examples** — three to five copy-paste commands or SDK snippets.
 4. **Quirks** — provider-specific gotchas, unsupported operations,
    DNS requirements.

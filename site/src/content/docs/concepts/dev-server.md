@@ -90,6 +90,32 @@ warden status
 > `WARDEN_TOKEN` (or passing `-token`). The same is true in production — a token,
 > mTLS client certificate, or Bearer JWT must be supplied on every request.
 
+## The Playground
+
+`-dev-playground` starts the dev server with everything the
+[Getting started](/getting-started/) tour needs already in place:
+
+- an **identity provider** that signs the agents' and users' JWTs, minted with
+  [`warden dev jwt`](/cli/dev/#jwt), and doubles as the bank's authorization server;
+- a **bank**, served as an MCP server and as an HTTP API, behind Warden mounts, roles
+  and policies — including a keyless credential the bank's authorization server mints
+  from Warden's own identity assertion;
+- a **file audit device**, read with [`warden dev audit`](/cli/dev/#audit);
+- a mount in front of **GitHub's MCP server**, waiting for the reader's PAT.
+
+```bash
+warden server -dev-playground
+```
+
+The identity provider and the bank bind loopback only, even in a container: Warden
+reaches them in-process, and agents reach only Warden. Like everything in dev mode,
+the playground lives in memory.
+
+`-dev-playground` cannot be combined with `-dev-tls-spiffe`, or with
+`-dev-tls-require-client-cert` and a client CA: the playground's authorization server
+fetches Warden's signing keys from the dev listener, so that listener must be one it
+can reach without a SPIFFE identity or a client certificate.
+
 ## Dev Server Options
 
 The dev server accepts a handful of flags that tailor its behavior. All of them
@@ -208,6 +234,12 @@ is mutually exclusive with the file-based `-dev-tls-*` certificate flags.
 | `-dev-tls-require-client-cert` | `false` | Require a client certificate signed by `-dev-tls-ca-cert-file`. |
 | `-dev-tls-spiffe` | `false` | Serve TLS using an auto-rotating SPIFFE Workload API X.509-SVID. |
 | `-dev-tls-spiffe-socket` | `$SPIFFE_ENDPOINT_SOCKET` | Workload API socket for `-dev-tls-spiffe`. |
+| `-dev-tls-cert-dir` | _(a temp dir)_ | Write the auto-generated certificate and key here, and keep them after shutdown. |
+| `-dev-tls-san` | _(none)_ | Extra DNS name or IP for the auto-generated certificate. Repeatable. |
+| `-dev-listen-address` | `127.0.0.1:8400` | Address the dev listener binds. Falls back to `WARDEN_DEV_LISTEN_ADDRESS`. |
+| `-dev-playground` | `false` | Start the [playground](#the-playground) beside the dev server. Implies `-dev`. |
+| `-dev-playground-as-addr` | `127.0.0.1:8410` | Address the playground's identity provider listens on. |
+| `-dev-playground-bank-addr` | `127.0.0.1:8420` | Address the playground's bank listens on. |
 
 ## Environment Variables
 
@@ -220,6 +252,11 @@ environment variables. The ones you need for the dev server are:
 | `WARDEN_TOKEN` | Token used to authenticate requests — the dev root token. |
 | `WARDEN_CACERT` | Path to a CA certificate to trust, used with `-dev-tls`. |
 
+The server itself reads one: `WARDEN_DEV_LISTEN_ADDRESS` sets the dev listener's
+address when `-dev-listen-address` is not given. The container image sets it to
+`0.0.0.0:8400`, since a published port cannot reach a listener bound to the
+container's loopback; outside dev mode it is ignored.
+
 ## What the Dev Server Does Not Do
 
 The dev server is deliberately minimal. Knowing what it leaves out helps explain
@@ -229,9 +266,10 @@ behavior you might otherwise find surprising:
   write, and secret you create is gone the moment the process exits.
 - **No audit devices.** The dev server ships with zero audit devices enabled. If
   your workflow depends on audit log output, enable an audit device explicitly
-  after startup.
+  after startup. (The [playground](#the-playground) enables one.)
 - **No automatic mounts.** Warden does not pre-mount any providers or auth
-  methods in dev mode. Enable the ones you need yourself.
+  methods in dev mode. Enable the ones you need yourself. (The
+  [playground](#the-playground) mounts what its tour uses.)
 - **No real seal.** The barrier is auto-unsealed from an in-memory key; there is
   no Shamir ceremony, KMS, or recovery process to exercise.
 

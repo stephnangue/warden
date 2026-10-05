@@ -522,7 +522,7 @@ Bump `image.tag` (or upgrade the chart whose `appVersion` advances):
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
   -n warden --reuse-values \
-  --set image.tag=v0.20.0     # the leading "v" is part of the image tag
+  --set image.tag=v0.21.0     # the leading "v" is part of the image tag
 ```
 
 Same rolling-restart mechanics. Check the

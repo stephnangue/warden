@@ -2,7 +2,7 @@
 title: "Ansible Tower"
 ---
 
-The Ansible Tower provider enables proxied access to the Ansible Tower (AWX / Red Hat Ansible Automation Platform) REST API through Warden. It forwards requests to Ansible Tower API endpoints (Job Templates, Jobs, Inventories, Projects, Hosts, Workflow Templates, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header using Personal Access Tokens (PATs) or OAuth2 application tokens. One credential mode is supported: static bearer tokens (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Ansible Tower provider enables proxied access to the Ansible Tower (AWX / Red Hat Ansible Automation Platform) REST API through Warden. It forwards requests to Ansible Tower API endpoints (Job Templates, Jobs, Inventories, Projects, Hosts, Workflow Templates, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header using Personal Access Tokens (PATs) or OAuth2 application tokens. Chain the token from your secret store (recommended), or store it in Warden (`apikey` source type).
 
 ## How a request flows
 

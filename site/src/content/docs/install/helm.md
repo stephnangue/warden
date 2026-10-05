@@ -53,9 +53,9 @@ Release page:
 
 ```bash
 VERSION=$(curl -fsSL https://api.github.com/repos/stephnangue/warden/releases/latest \
-  | grep '"tag_name"' | cut -d'"' -f4)                # e.g. v0.20.0
+  | grep '"tag_name"' | cut -d'"' -f4)                # e.g. v0.21.0
 CHART_VERSION=$(helm show chart oci://ghcr.io/stephnangue/charts/warden \
-  | awk '/^version:/{print $2}')                      # e.g. 0.3.6
+  | awk '/^version:/{print $2}')                      # e.g. 0.3.7
 
 curl -L -o warden-chart.tgz \
   "https://github.com/stephnangue/warden/releases/download/${VERSION}/warden-${CHART_VERSION}.tgz"
@@ -101,10 +101,10 @@ of them.
 | `image.tag` | The **Warden binary** version | Defaults to `"v" + .Chart.AppVersion`. The release pipeline sets `appVersion` to the git tag with its `v` stripped. |
 
 :::note[`image.tag` needs the `v`; `--version` must not have it]
-The StatefulSet template prepends `v` to `appVersion`, so `appVersion: "0.20.0"`
-resolves to `ghcr.io/stephnangue/warden:v0.20.0`. If you set `image.tag`
-yourself, carry the `v` — `--set image.tag=v0.20.0`. Chart versions never take
-one: `--version 0.3.6`.
+The StatefulSet template prepends `v` to `appVersion`, so `appVersion: "0.21.0"`
+resolves to `ghcr.io/stephnangue/warden:v0.21.0`. If you set `image.tag`
+yourself, carry the `v` — `--set image.tag=v0.21.0`. Chart versions never take
+one: `--version 0.3.7`.
 :::
 
 The install commands on this page leave both numbers unpinned so they stay
@@ -124,8 +124,8 @@ automated:
 
 ```bash
 helm install warden oci://ghcr.io/stephnangue/charts/warden \
-  --version 0.3.6 \
-  --set image.tag=v0.20.0 \
+  --version 0.3.7 \
+  --set image.tag=v0.21.0 \
   -n warden --create-namespace -f your-values.yaml
 ```
 
@@ -213,7 +213,7 @@ To move the Warden binary without changing the chart:
 ```bash
 helm upgrade warden oci://ghcr.io/stephnangue/charts/warden \
   -n warden --reuse-values \
-  --set image.tag=v0.20.0
+  --set image.tag=v0.21.0
 ```
 
 Both trigger the same rolling restart. For what that restart does to a live

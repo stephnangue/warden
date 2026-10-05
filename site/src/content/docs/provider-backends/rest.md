@@ -198,6 +198,46 @@ more than one header, or when a value contains a comma:
 
 > **Header validation.** `token_header` and `headers` names/values are validated when you write the config — an invalid HTTP header name or value is rejected immediately rather than failing on every proxied request. Header names are treated case-insensitively, so a static header that differs from `token_header` only in case never shadows the injected token.
 
+### Request bodies and policy
+
+With **`parse_request_body`** on, Warden reads a JSON or form body before policy runs, so
+a [condition](/concepts/cel-conditions/) can gate on its fields as `request.data.<field>`:
+
+- **JSON** is `application/json`, `text/json` or any `+json` type (such as
+  `application/vnd.api+json`), matched case-insensitively. A body with **no
+  `Content-Type`** is read as JSON too. **Form** is `application/x-www-form-urlencoded`.
+- A body that does not parse as its label says — invalid JSON, or an unlabelled body that
+  is not JSON — is refused with `400`, so it never reaches the upstream unseen by policy.
+- Every other type (multipart, octet-stream, plain text, XML, `application/jsonl`) is
+  streamed untouched and contributes **no fields**.
+- Warden reads at most the mount's `max_body_size`; a larger body is refused with `413`.
+
+A mount created **at v0.21.0 or later** has it on. A mount that existed before keeps it off
+until you set it — upgrading never changes what an existing mount accepts:
+
+```bash
+warden write billing-api/config parse_request_body=true
+```
+
+Turn it off on a mount that fronts an upload or binary API, where an unlabelled body is not
+JSON.
+
+:::caution[Write body conditions to fail closed]
+A body Warden did not read contributes no fields, so a condition that **defaults** a
+missing field lets it through. A caller who labels the body `text/plain` sends a
+`withdraw` of any amount past `request.data.?amount.orValue(0) <= 100`. Require the field
+instead:
+
+```hcl
+path "billing-api/role/+/gateway/v1/withdrawals" {
+  capabilities = ["create"]
+  condition    = "has(request.data.amount) && request.data.amount <= 100"
+}
+```
+
+Now a body Warden could not read is refused, as is one that leaves `amount` out.
+:::
+
 ## Step 3: Create a Credential Source and Spec
 
 The REST provider injects an `api_key` or `oauth_bearer_token` credential, and rejects any other type. Any source minting one works: `apikey` (static), `oauth2` (client-credentials / refresh), `grafana`, `elastic`, `token_exchange`.

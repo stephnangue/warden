@@ -38,10 +38,13 @@ rules whether the agent is calling a cloud API, a Git host, or an MCP server. On
 hosts, observability stacks, SaaS, and MCP servers alike, so adding a system means
 mounting a provider, not standing up another access model.
 
-The secrets stay in one place too. Warden holds the privileged upstream credentials
-and [rotates](/concepts/credentials/#rotation) them on a schedule it manages,
-staging the change for upstreams that need time to propagate a new key — so the
-broker's own secrets stay fresh without per-integration coordination. For MCP, one
+Upstream credentials are governed in one place too. Warden
+[federates](/federation/keyless-credentials/) with upstreams that trust its identity, so
+there is no secret to keep; [chains](/federation/credential-chaining/) the ones that only
+issue secrets from the store that already manages them; and, for secrets it holds itself,
+[rotates](/concepts/credentials/#rotation) them on a schedule it manages, staging the
+change for upstreams that need time to propagate a new key — so upstream credentials stay
+fresh without per-integration coordination. For MCP, one
 gateway fronts every tool a server exposes, replacing the per-tool-credential-in-env
 model with a single policy surface.
 
@@ -57,8 +60,8 @@ their access models bleeding together.
   place and one language, instead of across a dozen consoles.
 - **Hard tenant isolation** — namespaces give each team or environment a sealed
   boundary on shared infrastructure.
-- **Secrets stay fresh on their own** — Warden holds and rotates the upstream
-  credentials centrally, so rotation is not N schedules to chase.
+- **Secrets stay fresh on their own** — Warden federates, chains, or holds and
+  rotates the upstream credentials centrally, so rotation is not N schedules to chase.
 
 ## In practice
 
@@ -66,8 +69,9 @@ A platform team runs one Warden for the whole company. Agents across several tea
 reach AWS, GitHub, Datadog, a production database, and a set of MCP servers — all
 through Warden, all under policies the platform team writes in one place. Each team
 works inside its own namespace, so `team-a`'s mounts and secrets are invisible to
-`team-b`, and the upstream credentials Warden holds rotate on schedule without any
-team touching a key. Onboarding a new upstream is one provider mount; offboarding an
+`team-b`. AWS and the database are reached by federation, Datadog's key is chained from
+the company's secret store, and the few secrets Warden holds itself rotate on schedule —
+without any team touching a key. Onboarding a new upstream is one provider mount; offboarding an
 agent is one identity removed — not a sweep across fifteen systems.
 
 ## See Also
@@ -76,6 +80,9 @@ agent is one identity removed — not a sweep across fifteen systems.
   behind one gateway.
 - [Namespaces](/concepts/namespaces/) — the hard isolation boundary for mounts,
   policies, and tokens.
+- [Keyless credentials](/federation/keyless-credentials/) and
+  [credential chaining](/federation/credential-chaining/) — reaching upstreams without
+  storing their secrets in Warden.
 - [Credentials](/concepts/credentials/#rotation) — how Warden rotates the
   secrets it holds, centrally.
 - [Runtime authorization](/use-cases/runtime-authorization/) — the per-call decisions this

@@ -110,6 +110,14 @@ When `audience` is set, Warden passes it through to TokenReview's `spec.audience
 
 For freshness-sensitive flows, `max_age` rejects tokens whose `iat` (issued-at) claim is older than the configured duration — useful when you want to force re-mint cycles to be no longer than, say, 5 minutes.
 
+For agents that discover their roles, give the role a `description` saying what it is for and a `provider_path` naming the provider mount it is used with (e.g. `vault/`); the [discovery server](/concepts/discovery-and-skills/#discovering-roles) derives the role's URL from it. `skill` defaults to that provider's skill — set it only to point the role at a skill you wrote. A write to an existing role changes only the fields it names:
+
+```bash
+warden write auth/k8s-prod/role/inventory-agent \
+  description="read and update the inventory" \
+  provider_path=vault/
+```
+
 ## Step 4: Wire Up Transparent Auth
 
 The kubernetes auth method is **transparent-only**. There is no "log in once, get a Warden bearer token" handshake the workload performs explicitly — `POST /auth/<mount>/login` for a `kubernetes_role` token is rejected at the request handler with `explicit login is not supported for roles with token_type=transparent`. The workload's ServiceAccount JWT flows through every call, and Warden's transparent middleware does the auth in-line.
@@ -206,6 +214,8 @@ curl -H "Authorization: Bearer $JWT" \
 
 The response is `{roles: [{auth_path, name, description}, ...], warnings: [...]}`. Each role in the list has passed the SA name + namespace + audience checks against the presented token, and `auth_path` tells the agent which mount the role lives on. Introspection is a discovery hint, not an authorization — the agent picks a role and uses it on subsequent gateway requests (via the `X-Warden-Role` header or the URL-path form), where Warden's transparent-auth layer does the actual TokenReview + cache write.
 
+Roles that set `skill` or `provider_path` carry them in the response too. An agent normally asks the MCP discovery server's `list_roles` instead, which resolves those two fields into the role's provider type, `skill://` URI and URL — see [Discovery and Skills](/concepts/discovery-and-skills/#discovering-roles).
+
 A Kubernetes SA token (recognized by its `sub: system:serviceaccount:*` claim) only fans out to kubernetes mounts — generic JWTs from other identity providers don't trigger wasted TokenReview round-trips against your kube-apiserver. Within the kubernetes mounts that get visited, each one does at most one TokenReview call per introspect request (regardless of how many roles the mount has), and a mount whose pinned `issuer` doesn't match the token's `iss` claim short-circuits before that call too.
 
 ## Configuration Reference
@@ -227,6 +237,7 @@ A Kubernetes SA token (recognized by its `sub: system:serviceaccount:*` claim) o
 
 | Field | Required | Description |
 |---|---|---|
+| `description` | No | Human-readable purpose, surfaced via introspection so agents can pick the right role. |
 | `bound_service_account_names` | At least one of names/namespaces must be a concrete value | List of ServiceAccount names accepted by this role. `"*"` matches any. |
 | `bound_service_account_namespaces` | At least one of names/namespaces must be a concrete value | List of namespaces accepted by this role. `"*"` matches any. |
 | `audience` | No | Required token audience. When set, passed through to TokenReview's `spec.audiences`. |
@@ -235,6 +246,8 @@ A Kubernetes SA token (recognized by its `sub: system:serviceaccount:*` claim) o
 | `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
 | `max_age` | No | Maximum elapsed time since the JWT's `iat` claim. Example: `30m`. Empty disables the check. |
 | `metadata_mappings` | No | Map of TokenReview attribute (`service_account_namespace`, `service_account_name`, `service_account_uid`, `username`, `groups`) → token metadata key. `groups` is comma-joined. |
+| `skill` | No | Name of the skill that teaches an agent to use this role. Defaults to the skill of the provider at `provider_path`. |
+| `provider_path` | No | Mount path of the provider this role is used with, relative to the role's namespace (e.g. `vault/`). The discovery server derives the role's URL from it; without it, `list_roles` shows the role with no URL. |
 
 A `*`/`*` binding (both names and namespaces only contain `"*"`) is refused at role-create time — at least one of the two must contain a concrete value.
 

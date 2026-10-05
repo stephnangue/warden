@@ -198,6 +198,13 @@ Nothing is projected unless it is listed: `{{user.*}}` claims need `assertion_us
 and agent claims other than `sub` need `assertion_metadata_claims`. Disclosure to the
 cluster is opt-in and operator-chosen, never the whole metadata map.
 
+Setting `assertion_user_claims` makes the assertion an RFC 8693 **delegation token**: `sub`
+is the user's own id, `warden_namespace` qualifies it, and the agent's composite subject
+moves into `act`. A user id is not unique across Warden namespaces, so the cluster's
+authenticator must bind `warden_namespace` beside `sub` — map the username from both, or
+add a claim validation rule on `warden_namespace`. See
+[Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user).
+
 :::note[The minted token outlives the assertion, by design]
 The ServiceAccount token's lifetime is fixed by the API server when it is issued and does
 not depend on the short-lived assertion that asked for it. That is expected: the assertion

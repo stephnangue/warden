@@ -8,9 +8,9 @@ title: "HashiCorp Vault"
 This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
 :::
 
-The `hvault` driver brokers credentials out of **HashiCorp Vault** (or **OpenBao**). The **source** holds how Warden authenticates to the Vault server — typically an **AppRole** identity (`role_id` + `secret_id`) — plus the server address and optional namespace. That one source can back many **specs**, each of which selects a **mint method** naming which Vault engine to draw from and what shape of credential to hand back to the workload.
+The `hvault` driver brokers credentials out of **HashiCorp Vault** (or **OpenBao**). The **source** holds the server address, optional namespace, and how Warden authenticates to the Vault server — keylessly, by logging in per request with a Warden identity assertion, or with a stored **AppRole** identity (`role_id` + `secret_id`). That one source can back many **specs**, each of which selects a **mint method** naming which Vault engine to draw from and what shape of credential to hand back to the workload.
 
-Reach for it when your secrets already live in Vault: static KV entries, dynamic cloud credentials from the AWS/GCP/IBM engines, OAuth2 bearer tokens from the oauthapp engine, or freshly minted Vault tokens. Warden authenticates once with the source's privileged AppRole, then mints per request against whatever engine the spec points at.
+Reach for it when your secrets already live in Vault: static KV entries, dynamic cloud credentials from the AWS/GCP/IBM engines, OAuth2 bearer tokens from the oauthapp engine, or freshly minted Vault tokens. Warden authenticates as the source — per request when keyless, once with a stored AppRole — then mints per request against whatever engine the spec points at.
 
 ## Keyless (OIDC federation)
 
@@ -23,6 +23,16 @@ Warden logs in **per request** against Vault's own JWT auth method
 `bound_audiences`). A keyless source needs no `rotation_period`, and a keyless
 `vault_token` spec needs no `token_role`. See
 [Keyless credential sources](/federation/keyless-credentials/).
+
+The JWT role decides which assertions may log in. An agent's assertion carries its
+composite subject, `wid:<namespaceID>:<mountAccessor>:<principalID>`, so a role with
+`bound_claims_type=glob` and `bound_claims` `{"sub": "wid:<namespaceID>:*"}` admits the
+agents of one namespace. A spec that sets `assertion_user_claims` mints a
+[delegation token](/federation/assertion-claims/#an-agent-acting-for-a-user) instead —
+`sub` is the user's own id, the agent is in `act` — so give it a JWT role of its own
+(`jwt_role` on the spec) that binds `warden_namespace` beside `sub`. The
+[OAuth 3LO credential store](/federation/oauth-3lo-store/#step-4-the-second-gate--a-templated-policy)
+shows such a role.
 
 ## Credential issued
 

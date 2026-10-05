@@ -31,7 +31,9 @@ identical either way.
 
 Because the assertion carries the caller's claims, a **templated Vault policy** can scope
 what the token may do per user or per team — one role serving everyone without a per-user
-role explosion. That is the same mechanism the
+role explosion. When a spec discloses the user, the assertion is an RFC 8693 delegation
+token: `sub` is the user, qualified by `warden_namespace`, and the agent is in `act` — see
+[Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user). That is the same mechanism the
 [credential-chaining](/federation/credential-chaining/) flows rely on, here applied to the
 proxied API itself.
 
@@ -64,7 +66,7 @@ See the [Vault credential driver](/credential-drivers/vault/) for every source a
 ## Prerequisites
 
 - HashiCorp Vault running and unsealed
-- Vault CLI (for initial AppRole setup)
+- Vault CLI (to set up the JWT auth role, or the AppRole on the stored path)
 - OpenSSL (for generating certificates)
 
 :::note[New to Warden?]
@@ -72,6 +74,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 :::
 
 ## Step 1: Create an AppRole in Vault
+
+This step is for the stored path only ([Option B](#option-b-approle-stored-in-warden)). On
+the keyless path Warden needs no AppRole — skip to Step 2 and set up the JWT role in
+[Option A](#option-a-keyless-federation-recommended). The policy below still shows what the
+JWT role's token needs.
 
 Create a dedicated AppRole for Warden with policies that grant access to the secrets engines it needs.
 
@@ -218,7 +225,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with the Vault server address and the cert auth mount from Step 2:
+Configure the provider with the Vault server address and the cert auth mount from Step 2. `auto_auth_path` must be in the same write as the settings it goes with: a write that leaves the mount without one is refused, and a refused write changes nothing.
 
 ```bash
 warden write vault/config <<EOF
@@ -251,6 +258,34 @@ rotate.
 On the Vault side, enable JWT auth, point it at Warden's issuer, and create a role whose
 policy may be templated on the assertion's claims. See
 [Keyless credentials](/federation/keyless-credentials/).
+
+```bash
+vault auth enable jwt
+vault write auth/jwt/config \
+  jwks_url="https://warden.example.com/oidc/jwks" \
+  bound_issuer="https://warden.example.com"
+
+vault write auth/jwt/role/warden-agents - <<'EOF'
+{
+  "role_type": "jwt",
+  "user_claim": "sub",
+  "bound_audiences": ["https://vault.example.com"],
+  "bound_claims_type": "glob",
+  "bound_claims": {
+    "sub": "wid:<namespaceID>:*"
+  },
+  "token_policies": ["warden-source"]
+}
+EOF
+```
+
+The `sub` glob admits every agent of one Warden namespace, whose subject is
+`wid:<namespaceID>:<mountAccessor>:<principalID>`. A spec that sets
+`assertion_user_claims` mints a delegation token instead, whose `sub` is the user's own id:
+give it a JWT role of its own with `user_claim` `sub` and
+`bound_claims` `{"warden_namespace": "root"}` (or the namespace path), since its `sub` no
+longer matches the agents' pattern. `warden cred source keyless-plan` prints these
+commands, filled in, for an existing AppRole source.
 
 ```bash
 warden cred source create vault-prod -json '{

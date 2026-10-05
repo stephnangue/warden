@@ -139,7 +139,10 @@ warden cred spec create github-ops -source github-src \
   -config mint_method=pat -config token=ghp_your_token_here
 ```
 
-See [GitHub MCP](/provider-backends/mcp-github/) for App-based and OAuth credential options.
+Storing the PAT in Warden keeps the tutorial short. In production, keep the secret in your own secret
+store and let Warden fetch it per request with [credential chaining](/federation/credential-chaining/)
+(`secret_spec`), so Warden holds nothing at rest. [GitHub MCP](/provider-backends/mcp-github/) covers
+the other credential options.
 
 ### Step 5 — start with NO filter (the "before")
 
@@ -267,8 +270,10 @@ can't attempt the delete at all, and tells you it has no way to do it. The dange
 never offered to the model in the first place, so there's nothing to hallucinate or inject.
 
 That pruning is trustworthy because it comes from the *same policy* the gateway enforces on every
-request: even a forged call that skipped the tool list would be refused with `insufficient_permissions`
-("Tool 'delete_repository' not allowed.") before anything reached GitHub.
+request: even a forged call that skipped the tool list would be refused before anything reached
+GitHub, with a JSON-RPC error for that one call — code `-32090`, message
+*"Warden: Tool 'delete_repository' not allowed."*, and `insufficient_permissions` in its `data`. The
+session survives the refusal, so the agent's next call goes through.
 
 ### Step 9 — see it in the audit log
 

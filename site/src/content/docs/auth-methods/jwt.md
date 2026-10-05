@@ -122,6 +122,9 @@ Per-role-only fields:
 
 - `max_age` — a freshness check: tokens whose `iat` (issued-at) claim is older than this duration are rejected. Useful when you want to force re-mint cycles to be no longer than, say, 5 minutes.
 - `cred_spec_name` — the credential spec to use for implicit-auth flows.
+- `description` — human-readable purpose, surfaced via introspection so agents can pick the right role.
+- `provider_path` — mount path of the provider the role is used with, relative to the role's namespace (e.g. `vault/`). The [discovery server](/concepts/discovery-and-skills/#discovering-roles) derives the role's URL from it.
+- `skill` — the skill that teaches an agent to use the role. Defaults to the skill of the provider at `provider_path`; set it only to point the role at a skill you wrote.
 
 A role's `TokenType` is always pinned to `jwt_role`; operators can't override it.
 
@@ -218,6 +221,8 @@ curl -H "Authorization: Bearer $JWT" \
 
 The response is `{roles: [{auth_path, name, description}, ...], warnings: [...]}`. Each role in the list has passed the issuer + audience + subject + bound-claims checks against the presented token, and `auth_path` tells the agent which mount the role lives on. Introspection is a discovery hint, not an authorization — the agent picks a role and uses it on subsequent gateway requests, where Warden's transparent-auth layer does the actual validation + cache write.
 
+Roles that set `skill` or `provider_path` carry them in the response too. An agent normally asks the MCP discovery server's `list_roles` instead, which resolves those two fields into the role's provider type, `skill://` URI and URL — see [Discovery and Skills](/concepts/discovery-and-skills/#discovering-roles).
+
 Per-mount introspection (`auth/<mount>/introspect/roles`) exists too — the aggregator calls it internally — but workloads should prefer the aggregator since it handles dispatch.
 
 ## Configuration Reference
@@ -247,6 +252,7 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 
 | Field | Required | Description |
 |---|---|---|
+| `description` | No | Human-readable purpose, surfaced via introspection so agents can pick the right role. |
 | `bound_audiences` | No | Per-role audience binding; overrides the mount's `bound_audiences` when set. |
 | `bound_subject` | No | Per-role subject binding; overrides the mount's `bound_subject` when set. |
 | `bound_claims` | No | Per-role claim requirements; merged with the mount's `bound_claims` (both must pass). |
@@ -258,6 +264,8 @@ Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` mus
 | `metadata_claims` | No | Map of source claim (literal or JSON Pointer) → token metadata key. Copies verified claims into the token's metadata for CEL `condition` matching via `agent.metadata`. Values must be strings. |
 | `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
 | `max_age` | No | Maximum elapsed time since the JWT's `iat` claim. Example: `30m`. Empty disables the check. |
+| `skill` | No | Name of the skill that teaches an agent to use this role. Defaults to the skill of the provider at `provider_path`. |
+| `provider_path` | No | Mount path of the provider this role is used with, relative to the role's namespace (e.g. `vault/`). The discovery server derives the role's URL from it; without it, `list_roles` shows the role with no URL. |
 
 ## Troubleshooting
 

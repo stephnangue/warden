@@ -26,8 +26,8 @@ For the Warden-side keys, see the [Vault credential driver](/credential-drivers/
 ## How a request resolves
 
 1. The agent calls Warden carrying the user's identity as well as its own.
-2. Warden mints an identity assertion. Its `sub` is the **agent**; the user travels in a
-   nested `warden_user` claim.
+2. Warden mints an identity assertion naming both: its `sub` is the **user**, and the
+   **agent** travels in the `act` claim — an RFC 8693 delegation token.
 3. Warden logs in to OpenBao/Vault with that assertion at the JWT auth mount.
 4. Warden reads `<oauth2_mount>/creds/<credential_name>`, where `credential_name` is
    resolved from the caller's claims.
@@ -147,10 +147,10 @@ username or email at the provider — these are frequently different, and the st
 to tell you so.
 :::
 
-`assertion_user_claims` is what makes `{{user.*}}` resolvable at all; listing **only `sub`**
-is the minimal form and yields an identity-only `warden_user`. A spec that sets it and
-receives no user principal fails closed with a 401 challenge rather than falling back to some
-other credential.
+`assertion_user_claims` is what makes `{{user.*}}` resolvable at all, and what puts the
+user in the assertion's `sub`; listing **only `sub`** is the minimal form and discloses no
+other user claim. A spec that sets it and receives no user principal fails closed with a 401
+challenge rather than falling back to some other credential.
 
 To key on something other than the principal — a provider-side user id carried in the user's
 login metadata, say — list that claim instead:
@@ -180,17 +180,21 @@ breaks the gate. Identify it as the *user*:
 bao write auth/jwt/role/warden-oauth \
     role_type=jwt \
     bound_audiences=https://vault.example.com \
-    user_claim=/warden_user/sub \
-    user_claim_json_pointer=true \
-    bound_claims='{"warden_role":"slack-agent"}' \
-    claim_mappings='{"warden_sub":"warden_agent","warden_role":"warden_agent_role","warden_namespace":"warden_namespace"}' \
+    user_claim=sub \
+    bound_claims='{"warden_namespace":"root","/act/warden_role":"slack-agent"}' \
+    claim_mappings='{"/act/sub":"warden_agent","/act/warden_role":"warden_agent_role","warden_namespace":"warden_namespace"}' \
     token_policies=warden-oauth-user
 ```
 
 `user_claim` names the claim that "will be used as the name for the Identity entity alias
-created due to a successful login", and `user_claim_json_pointer=true` lets it reach the
-nested `warden_user` claim. So each user gets their **own** entity alias, named by their
-principal id — the same value `{{user.sub}}` resolves to.
+created due to a successful login". On a delegation token `sub` is the user, so each user
+gets their **own** entity alias, named by their principal id — the same value
+`{{user.sub}}` resolves to.
+
+`bound_claims` does two jobs. **`warden_namespace`** qualifies that id: a raw user id is
+not unique across Warden namespaces, so a verifier must bind the namespace beside `sub` —
+the path, such as `team-payments/`, or `root` for the root namespace. **`/act/warden_role`**,
+a JSON pointer into the `act` claim, pins which agents may log in at all.
 
 The `claim_mappings` line is not part of the gate — it puts the **agent** into the store's
 audit log. See [Keeping the agent in the store's audit log](#keeping-the-agent-in-the-stores-audit-log).
@@ -210,8 +214,9 @@ authenticated as. A spec whose `credential_name` resolves to anything else gets 
 denied from the store rather than another user's token.
 
 :::caution[Do not key the alias on the agent]
-Setting `user_claim=warden_sub` (or anything else agent-scoped) looks reasonable — the
-assertion's subject *is* the agent — but it collapses every user behind a given agent into
+Setting `user_claim=/act/sub` with `user_claim_json_pointer=true` (or anything else
+agent-scoped) looks reasonable — the agent is the one calling — but it collapses every user
+behind a given agent into
 **one shared entity alias**. Scoping the path then requires `claim_mappings` to write the
 user into that alias's metadata on each login, and alias metadata is last-write-wins: two
 concurrent requests through the same agent for different users can interleave, so one
@@ -230,11 +235,14 @@ this agent, acting for this user, may use the spec at all. The store decides —
 trusting Warden's templating — which row this login may read.
 
 Both principals still gate, in different places: `bound_claims` pins **which agents** may log
-in at all (the assertion carries `warden_sub`, `warden_role`, `warden_namespace` and
-`warden_auth_mount` at the top level for exactly this), while the alias name scopes the
-**path** to the user. That separation is possible because the assertion keeps `sub` as the
-agent and carries the user nested in `warden_user`, so a verifier can bind each independently
-rather than having to pick one.
+in at all (the assertion carries the agent's composite `sub` and `warden_role` under `act`
+for exactly this), while the alias name scopes the **path** to the user. That separation is
+possible because the delegation token keeps the user at the top level and the agent in
+`act`, so a verifier can bind each independently rather than having to pick one.
+
+Neither gate decides that *this* agent may act for *this* user — that pairing is a
+[CEL condition](/concepts/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
+the agent's Warden policy, evaluated before any assertion is minted.
 
 One map serves the assertion claim and the template, so `{{user.sub}}` resolves to exactly
 the value the policy binds. They cannot drift.
@@ -264,7 +272,7 @@ entry for a request made with that token carries it:
     "metadata": {
       "warden_agent": "agent-7",
       "warden_agent_role": "slack-agent",
-      "warden_namespace": "root/"
+      "warden_namespace": "root"
     }
   },
   "request": { "path": "oauth2/creds/U012ABCDEF" }
@@ -275,12 +283,11 @@ So the store records both principals after all: the **user** in the path and the
 **agent** in `auth.metadata`. The gate still keys only on the alias name, which nothing
 outside this login can move.
 
-:::caution[Map only claims the assertion always carries]
-A claim named in `claim_mappings` that is absent from the JWT **fails the login**. Only
-`warden_sub`, `warden_role`, `warden_namespace` and `warden_auth_mount` are emitted
-unconditionally; `warden_metadata`, `warden_user` and `warden_resource` appear only when the
-spec asks for them. Mapping a conditional claim makes every login fail for specs that do not
-project it.
+:::note[A mapped claim the assertion lacks is skipped]
+A claim named in `claim_mappings` that is absent from the JWT is left out of the metadata;
+the login still succeeds. `warden_metadata` and `warden_resource` appear only when the spec
+asks for them, so a mapping that names one records nothing for specs that do not project
+it. Gate on `bound_claims`, which refuses a missing claim, never on a mapping.
 :::
 
 Warden's own audit log remains the complete record of agent activity: because the credential
@@ -288,10 +295,10 @@ is cached per user until it expires, the store sees only the reads that miss tha
 one entry per agent request.
 
 One further property is worth leaning on: **the login fails before the policy is evaluated.**
-A role whose `user_claim` is absent from the JWT cannot authenticate, so a spec that forgot
-`assertion_user_claims` — and therefore minted an assertion with no `warden_user` — is
-rejected at login rather than logging in with an empty value and templating into an
-unintended path. An empty substitution never reaches the policy.
+A bound claim that is absent from the JWT refuses the login, so a spec that forgot
+`assertion_user_claims` — and therefore minted an agent-only assertion, with no `act` and no
+`warden_namespace` — is rejected at login rather than logging in as the agent and templating
+into an unintended path.
 
 ## Putting it together
 
@@ -363,17 +370,18 @@ resolves to someone else's credential — which is the gate working.
 
 If it happens for the *right* name, check in this order: the mount accessor in the policy
 template matches the JWT mount (`bao auth list -detailed`); the role's `user_claim` is
-`/warden_user/sub` with `user_claim_json_pointer=true`, so the alias is named for the user;
+`sub`, so the alias is named for the user;
 and — if the denial is intermittent under load rather than consistent — that the alias is not
 keyed on something agent-scoped, which makes concurrent logins overwrite each other. See
 [Do not key the alias on the agent](#step-4-the-second-gate--a-templated-policy).
 
 **Authentication fails at the JWT mount**
 
-The claim named by `user_claim` is absent from the assertion. Most often the spec omits
-`assertion_user_claims`, so no `warden_user` claim is minted at all. Also check
-`bound_audiences` against the source's `audience`, and any `bound_claims` against what the
-assertion actually carries.
+A bound claim is absent from the assertion, or does not match. Most often the spec omits
+`assertion_user_claims`, so the assertion names only the agent — no `act`, no
+`warden_namespace`. Also check `bound_audiences` against the source's `audience`, the
+`warden_namespace` value against the namespace path (`root` for the root namespace), and any
+other `bound_claims` against what the assertion actually carries.
 
 **`credential_name references {{user.sub}} but that claim is absent ...`**
 

@@ -35,10 +35,12 @@ wid:<namespaceID>:<mountAccessor>:<principalID>
 ```
 
 so a federated identity is globally unique across namespaces and auth mounts. Along
-with the standard `iss`, `aud`, `iat`, and `exp` claims, the assertion carries a small
-set of Warden claims — the agent's role, namespace, and auth mount, and (when a user
-principal is present) the user. How those claims are shaped and scoped is covered on
-the assertion-claims page in this section.
+with the standard `iss`, `aud`, `iat`, and `exp` claims, the assertion carries what the
+spec's **assertion profile** says its verifier can bind — the agent's role and opted-in
+metadata, AWS session tags, or nothing more. When a spec discloses a user, the default
+profile mints an RFC 8693 delegation token: the user is the subject and the agent sits in
+`act`. How those claims are shaped and scoped is covered on
+[Assertion claims](/federation/assertion-claims/).
 
 Assertions are **short-lived** — five minutes by default — minted on demand (on a
 credential-cache miss) and consumed immediately by the upstream exchange.

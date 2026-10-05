@@ -116,6 +116,8 @@ Per-role overrides:
 - `token_ttl` — overrides the mount-level default.
 - `cred_spec_name` — name of the credential spec to bind to this role. Downstream provider gateways use it to resolve and mint the upstream credential the workload's request will carry.
 - `description` — human-readable purpose, surfaced via introspection so agents can pick the right role.
+- `provider_path` — mount path of the provider the role is used with, relative to the role's namespace (e.g. `vault/`). The [discovery server](/concepts/discovery-and-skills/#discovering-roles) derives the role's URL from it.
+- `skill` — the skill that teaches an agent to use the role. Defaults to the skill of the provider at `provider_path`; set it only to point the role at a skill you wrote.
 
 A role's `TokenType` is always pinned to `cert_role`; operators can't override it.
 
@@ -241,6 +243,8 @@ curl --cert /path/to/client.crt --key /path/to/client.key \
 
 The response is `{roles: [{auth_path, name, description}, ...], warnings: [...]}`. Each role in the list has passed the chain check and the constraint check against the presented certificate, and `auth_path` tells the agent which mount the role lives on. Revocation is **not** checked at introspect time — it's advisory only, and the full revocation check runs at the actual call. Introspection is a discovery hint, not an authorization — the agent picks a role and uses it on subsequent gateway requests, where Warden's transparent-auth layer does the actual validation + cache write.
 
+Roles that set `skill` or `provider_path` carry them in the response too. An agent normally asks the MCP discovery server's `list_roles` instead, which resolves those two fields into the role's provider type, `skill://` URI and URL — see [Discovery and Skills](/concepts/discovery-and-skills/#discovering-roles).
+
 Per-mount introspection (`auth/<mount>/introspect/roles`) exists too — the aggregator calls it internally — but workloads should prefer the aggregator since it handles dispatch.
 
 ## Configuration Reference
@@ -276,6 +280,8 @@ At least one of the `allowed_*` constraint fields must be set — wide-open role
 | `token_policies` | No | Warden policies attached to the issued token. |
 | `token_ttl` | No (default `1h`) | TTL for issued tokens; overrides the mount-level `token_ttl`; further capped by the certificate's `NotAfter`. |
 | `cred_spec_name` | No | Credential spec name to bind to this role; downstream provider gateways use it to mint the upstream credential. |
+| `skill` | No | Name of the skill that teaches an agent to use this role. Defaults to the skill of the provider at `provider_path`. |
+| `provider_path` | No | Mount path of the provider this role is used with, relative to the role's namespace (e.g. `vault/`). The discovery server derives the role's URL from it; without it, `list_roles` shows the role with no URL. |
 
 ## Troubleshooting
 

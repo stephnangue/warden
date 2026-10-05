@@ -1,9 +1,13 @@
-# Cloudflare Pages redirects.
+# Cloudflare redirects (static assets read this file the same way Pages does).
 # The docs live at root paths (/concepts/, /provider-backends/, …), but "/docs"
 # is the obvious guess — and the nav labels it "Docs" — so send it to the
 # concepts guide rather than 404.
 /docs      /concepts/  301
 /docs/*    /concepts/  301
+
+# The playground is what the getting started page tours, and the name people
+# hear for it.
+/playground  /getting-started/  301
 
 # No rule for /install. It is the install docs overview (/install/index.html),
 # which is what someone typing that URL into a browser expects — and a static

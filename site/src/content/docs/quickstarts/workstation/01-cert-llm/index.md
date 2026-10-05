@@ -12,7 +12,7 @@ originates the mTLS leg.
 
 | Credential | Before this rung | After this rung |
 |------------|------------------|-----------------|
-| Anthropic API key | in your shell / `~/.claude/settings.json` | **only inside Warden** ✅ |
+| Anthropic API key | in your shell / `~/.claude/settings.json` | **never on the workstation** ✅ |
 | Client private key | — | on disk (`./certs/client.key`) — removed in [03](/quickstarts/workstation/03-spiffe-llm-mcp/) |
 
 ---
@@ -58,7 +58,7 @@ Download the **Warden CLI** onto your `PATH` (Apple Silicon shown — swap `darw
 `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.20.0
+VER=0.21.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -169,7 +169,7 @@ export ANTHROPIC_API_KEY="placeholder"
 claude
 ```
 
-Every prompt is now routed through Warden: the Console key lives only in Warden, and you can cap
+Every prompt is now routed through Warden: the Console key never reaches the workstation, and you can cap
 `model`/`max_tokens` centrally in the `anthropic-access` policy (proven in Step 7). (To persist
 it, put `ANTHROPIC_BASE_URL` under `env` in `~/.claude/settings.json`.)
 
@@ -228,8 +228,12 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 curl -sS http://127.0.0.1:9000/v1/anthropic/role/anthropic-user/gateway/v1/messages \
   -H 'content-type: application/json' \
   -d '{"model":"some-other-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
-# {"errors":["permission denied"]}   (HTTP 403)
+# {"type":"error","error":{"type":"permission_error","message":"Warden: permission denied"},"request_id":"…"}   (HTTP 403)
 ```
+
+The refusal comes back in Anthropic's own error shape, so Claude Code and the Anthropic SDKs
+show it as a normal API error; the `Warden:` prefix tells you it came from the gateway, not
+from Anthropic.
 
 In the audit tail the two calls sit side by side — same `id` and `role`, but `allowed: true` on
 the first and `allowed: false` on the second. That's the whole point made real: the limit lives
@@ -251,16 +255,28 @@ against the caller's identity.
    `auth.role_name = "anthropic-user"` and `response.credential.type = "api_key"` (the key value
    salted to `hmac-sha256:…`).
 6. **Policy bites:** the pinned-model curl returns `200`, the other-model curl returns `403`
-   `permission denied`, and both show in the audit log — `allowed:true` and `allowed:false`
+   `permission_error` (`Warden: permission denied`), and both show in the audit log — `allowed:true` and `allowed:false`
    under the same identity.
 
 ## Scorecard
 
-The **Anthropic API key is gone from the laptop** ✅ — it lives only in Warden, with central
-revocation and body-level policy. What's still on disk is the mTLS **client private key**
+The **Anthropic API key is gone from the laptop** ✅ — it never reaches the workstation, with
+central revocation and body-level policy. What's still on disk is the mTLS **client private key**
 (`./certs/client.key`): cert auth traded an API key for a private key. That's exactly what
 [**03 — SPIFFE → LLM + MCP**](/quickstarts/workstation/03-spiffe-llm-mcp/) removes. First, [**02**](/quickstarts/workstation/02-cert-llm-mcp/) adds an
 MCP server so we also stop storing MCP tokens.
+
+## In production
+
+This rung stores the Console key in Warden, which is why `cred spec create` warns that the
+spec stores a secret. In production, Warden need not hold one:
+
+- **Go keyless.** Anthropic's [keyless source](/credential-drivers/anthropic/) exchanges a
+  short-lived assertion from Warden for an Anthropic token through workload identity
+  federation, so there is no Console key anywhere.
+- **Or chain the key.** Keep the Console key in the secret store you already run and let
+  Warden fetch it per request with [credential chaining](/federation/credential-chaining/);
+  the spec names a `secret_spec` instead of carrying `api_key`.
 
 ## Troubleshooting
 

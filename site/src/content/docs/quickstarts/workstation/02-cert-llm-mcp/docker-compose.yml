@@ -24,7 +24,7 @@ services:
       - ./certs:/certs
 
   warden:
-    image: ghcr.io/stephnangue/warden:v0.20.0
+    image: ghcr.io/stephnangue/warden:v0.21.0
     command:
       - --dev
       - --dev-root-token=root
@@ -35,7 +35,7 @@ services:
       - ./certs:/certs:ro
       - ./audit:/audit                 # the file audit device writes JSON entries here
     ports:
-      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9000:9000"          # ghostunnel's port (it shares this network namespace)
     depends_on:
       cert-init:
         condition: service_completed_successfully
@@ -43,7 +43,8 @@ services:
 
   ghostunnel:
     image: ghostunnel/ghostunnel:v1.10.0-distroless
-    network_mode: "service:warden"
+    network_mode: "service:warden"     # Warden's network namespace: :9000 is published on warden, and
+                                       # 127.0.0.1:8400 is Warden, matching the server cert's IP SAN
     command:
       - client
       - --listen=0.0.0.0:9000

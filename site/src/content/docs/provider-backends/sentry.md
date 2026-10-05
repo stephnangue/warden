@@ -2,7 +2,7 @@
 title: "Sentry"
 ---
 
-The Sentry provider enables proxied access to the Sentry REST API through Warden. It forwards requests to Sentry endpoints (organizations, projects, issues, events, etc.) with automatic credential injection and policy evaluation. Credentials are static Internal Integration tokens created in the Sentry UI (`apikey` source type).
+The Sentry provider enables proxied access to the Sentry REST API through Warden. It forwards requests to Sentry endpoints (organizations, projects, issues, events, etc.) with automatic credential injection and policy evaluation. Credentials are Internal Integration tokens created in the Sentry UI: chain the token from your secret store (recommended), or store it in Warden (`apikey` source type).
 
 ## How a request flows
 

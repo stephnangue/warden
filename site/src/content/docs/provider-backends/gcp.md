@@ -2,7 +2,7 @@
 title: "GCP"
 ---
 
-The GCP provider enables proxied access to Google Cloud Platform APIs through Warden. It authenticates using service account keys, supports OAuth2 token minting and service account impersonation, and handles automated key rotation.
+The GCP provider enables proxied access to Google Cloud Platform APIs through Warden. It authenticates to Google keylessly, by exchanging a Warden identity assertion through Workload Identity Federation — or, where federation is not possible, with a stored service account key that Warden rotates. It mints OAuth2 access tokens, impersonates service accounts, and injects the token per request.
 
 ## How a request flows
 
@@ -17,8 +17,9 @@ The recommended setup stores **no GCP credentials at all**.
 2. The agent calls Warden presenting **both** credentials and asserting a role. Warden
    authenticates each against its own auth mount.
 3. The asserted role selects the credential spec. Warden builds the assertion that spec
-   calls for — agent claims, plus the user's under a nested `warden_user` claim when the
-   spec opts in — and sends it to an **external KMS** unsigned.
+   calls for — the agent's claims or, when the spec discloses the user, a delegation token
+   with the user as `sub` and the agent in `act` — and sends it to an **external KMS**
+   unsigned.
 4. The KMS returns it signed. No signing key lives in Warden.
 5. Warden exchanges it at **GCP STS** through Workload Identity Federation.
 6. STS verifies it against the trusted provider and returns an access token, optionally
@@ -26,7 +27,9 @@ The recommended setup stores **no GCP credentials at all**.
 7. Warden injects that token as `Authorization: Bearer <token>` and forwards.
 
 Because the user's claims reach Google inside the assertion, a WIF attribute condition or
-an IAM binding can be written against them.
+an IAM binding can be written against them. A disclosed user's `sub` is their raw id, so
+map `warden_namespace` too and bind it beside `sub` — see
+[Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user).
 
 :::note[Steps 3–6 run only on a cache miss]
 Warden caches the minted credential, so most requests skip from step 2 to step 7. The
@@ -71,13 +74,19 @@ See the [GCP credential driver](/credential-drivers/gcp/) for every source and s
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- A GCP **service account key** (JSON format) with appropriate IAM permissions
+- Keyless: a GCP **Workload Identity Federation** pool and OIDC provider trusting Warden's
+  issuer, and a target service account with appropriate IAM permissions
+- With a stored key instead: a GCP **service account key** (JSON format) with appropriate
+  IAM permissions
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
 ### Creating a Service Account Key
+
+Only for the stored-key path ([3b](#3b-stored-service-account-key)); skip it when you
+federate.
 
 1. Go to the [GCP Console](https://console.cloud.google.com/) > **IAM & Admin > Service Accounts**.
 2. Select or create a service account.
@@ -131,7 +140,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with `auto_auth_path`. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
+Configure the provider with `auto_auth_path`. This allows clients to authenticate with their JWT directly — no explicit Warden login required. `auto_auth_path` must be in the same write as the settings it goes with: a write that leaves the mount without one is refused, and a refused write changes nothing.
 
 ```bash
 warden write gcp/config <<EOF
@@ -173,7 +182,22 @@ warden cred source create gcp-src -json '{
 ```
 
 Configure that provider to trust Warden's issuer — see
-[Keyless credentials](/federation/keyless-credentials/).
+[Keyless credentials](/federation/keyless-credentials/). Its audience is the provider's own
+resource name, which is what Warden derives, so no `--allowed-audiences` is needed:
+
+```bash
+gcloud iam workload-identity-pools providers create-oidc warden-oidc \
+  --location=global \
+  --workload-identity-pool=warden-pool \
+  --issuer-uri="https://warden.example.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.warden_role=assertion.warden_role,attribute.warden_namespace=assertion.warden_namespace" \
+  --attribute-condition="assertion.sub.startsWith('wid:<namespaceID>:') || assertion.warden_namespace == 'root'"
+```
+
+`google.subject` may not exceed 127 bytes. The condition admits agent assertions from one
+namespace (whose `sub` is the composite `wid:<namespaceID>:…`) and delegation tokens for
+users of the root namespace; narrow either side to what you trust.
+`warden cred source keyless-plan` prints this command for an existing keyed source.
 
 A spec on a keyless source **must** set `subject_token_source`, and
 `assertion_user_claims` is what carries the user into the assertion:
@@ -193,12 +217,15 @@ warden cred spec create gcp-cloud-platform -json '{
 ```
 
 Three mint methods work over federation — `impersonated_access_token`, `access_token` and
-`secret_read`. Impersonation is the usual choice: the federated identity is granted only
-`roles/iam.serviceAccountTokenCreator` on the target, and the target carries the actual
+`secret_read`. Impersonation is the usual choice: the pool's principals are granted only
+`roles/iam.workloadIdentityUser` on the target, and the target carries the actual
 permissions.
 
 `assertion_user_claims` is opt-in and **fails closed** on a claim the user's login does not
-carry; omit it and the assertion describes the agent only.
+carry; omit it and the assertion describes the agent only. Set it, and the assertion
+becomes a delegation token: `sub` is the user's raw id, qualified by `warden_namespace`,
+and the agent is in `act` (`assertion.act.sub` in a GCP condition). Who may act for whom
+is decided by the agent's policy, not by the assertion.
 
 ### 3b. Stored service account key
 

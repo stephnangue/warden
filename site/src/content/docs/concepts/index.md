@@ -34,9 +34,10 @@ How a caller proves who it is and what that lets it do.
 
 ## Brokering access
 
-What Warden actually does: hold the privileged secret and inject a scoped credential
-into each proxied request, so the workload reaches the upstream without ever holding
-a credential of its own.
+What Warden actually does: mint or fetch the upstream credential and inject a scoped one
+into each proxied request, so the workload reaches the upstream without ever holding a
+credential of its own. Warden need not hold a secret to do it — it can federate with the
+upstream, or chain the secret from your own store per request.
 
 - [Credentials](/concepts/credentials/) — sources, specs, drivers, lifetime, and
   rotation.

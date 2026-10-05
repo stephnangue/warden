@@ -216,6 +216,41 @@ quietly substituting a different key.
 `mint_method=app` requires both `app_id` and `installation_id` — omitting either is rejected
 naming it.
 
+#### Scoping the installation token
+
+By default an installation token reaches every repository the App is installed on, with
+every permission it was granted. Narrow it per spec with **`repositories`** (bare names,
+comma-separated, at most 500) and **`permissions`** (`name:level` pairs, level `read`,
+`write` or `admin`), and GitHub enforces the result on the token itself:
+
+```bash
+warden cred spec create github-ci-reader -json '{
+  "source": "github-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "app",
+    "app_id": "<your-app-id>",
+    "installation_id": "<your-installation-id>",
+    "secret_spec": "github-app-key",
+    "repositories": "api,web",
+    "permissions": "contents:read,pull_requests:read"
+  }
+}'
+```
+
+Bind one Warden role to a narrow spec and another to a broad one, and the role the agent
+asserts decides what its token can reach. Asking for more than the App was granted fails
+at mint with GitHub's `422`. The singular `repository` key is refused — see the
+[GitHub credential driver](/credential-drivers/github/#scoping-app-tokens).
+
+:::note[GraphQL has one endpoint]
+A Warden policy scopes REST calls by path — `repos/<owner>/<repo>/…` — but every GraphQL
+call is a `POST` to `/graphql`, so a path rule cannot tell one repository from another.
+For GraphQL, the token's own scope is the only per-repository boundary: give roles that
+use it a spec with `repositories` and `permissions` set.
+:::
+
 ### Option B: App credential stored in Warden
 
 ```bash

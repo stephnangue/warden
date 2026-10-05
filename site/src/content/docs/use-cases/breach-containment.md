@@ -74,7 +74,8 @@ of an incident to clean up.
 An incident-response agent reaching a `grafana` mount is prompt-injected by a
 malicious annotation in a dashboard it reads: the embedded text tells it to delete
 every dashboard and copy an API key to an external host. Neither lands. There is no
-Grafana API key in the agent's environment to copy — Warden holds it — and the
+Grafana API key in the agent's environment to copy — Warden fetches it from the team's
+secret store per request and injects it upstream — and the
 agent's role grants only `read` on the mount, so the `DELETE` calls are refused
 before they reach Grafana, each recorded as a denied attempt with no state change.
 The injection becomes a logged non-event the on-call engineer reviews later, not an

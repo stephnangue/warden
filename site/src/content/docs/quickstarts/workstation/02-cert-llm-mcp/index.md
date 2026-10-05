@@ -12,8 +12,8 @@ never holds the token.
 
 | Credential | Before this rung | After this rung |
 |------------|------------------|-----------------|
-| GitHub MCP token | in `~/.claude.json` | **only inside Warden** ✅ |
-| Anthropic API key | (removed in 01) | only inside Warden ✅ |
+| GitHub MCP token | in `~/.claude.json` | **never on the workstation** ✅ |
+| Anthropic API key | (removed in 01) | never on the workstation ✅ |
 | Client private key | — | on disk (`./certs/client.key`) — removed in [03](/quickstarts/workstation/03-spiffe-llm-mcp/) |
 
 > This rung builds on **01** and reuses the identical cert stack. Finish 01 first (its Steps
@@ -60,7 +60,7 @@ inject. Download the **Warden CLI** onto your `PATH` (swap `darwin_arm64` for `d
 `linux_*`):
 
 ```bash
-VER=0.20.0
+VER=0.21.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -101,7 +101,7 @@ warden write github-mcp/config <<'EOF'
 { "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/cert/", "max_body_size": 10485760 }
 EOF
 
-# Credential — GitHub PAT, injected upstream as a bearer token (stays inside Warden)
+# Credential — GitHub PAT, injected upstream as a bearer token (never on the workstation)
 warden cred source create github-src -type=github -rotation-period=0 \
   -config=github_url=https://api.github.com
 
@@ -136,12 +136,9 @@ warden write auth/cert/role/github-user \
   cred_spec_name="github-ops"
 ```
 
-> **Want the interactive OAuth consent flow instead of a PAT?** Warden supports GitHub-App
-> user-to-server OAuth (`auth_method=authorization_code` + `warden cred spec connect`, which runs
-> a loopback listener and opens your browser for one-time consent — the host CLI handles this
-> fine). It's the better fit for real use (per-user consent, refresh tokens), but needs a GitHub
-> App and a callback URL; a PAT keeps this tutorial's setup short and demonstrates the same point
-> — the token lives only in Warden.
+> **Why a stored PAT?** It keeps this tutorial short and makes the same point — the token never
+> reaches the workstation. Beyond a tutorial, keep the token in your secret store and chain it
+> instead; see [In production](#in-production) below.
 
 ### Step 3 — smoke-test through the tunnel
 
@@ -202,12 +199,15 @@ curl -sS http://127.0.0.1:9000/v1/github-mcp/role/github-user/gateway/ \
   -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
        "params":{"name":"delete_repository","arguments":{"owner":"me","repo":"demo"}}}'
-# {"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed."}  (403)
+# {"jsonrpc":"2.0","id":2,"error":{"code":-32090,"message":"Warden: Tool 'delete_repository' not allowed.",
+#   "data":{"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed.",…}}}  (403)
 ```
 
-The audit entry for that call shows `allowed: false` with the offending `tool`. Ask Claude to do
-the same ("delete the demo repo") and it gets the identical refusal — the model can *propose* a
-dangerous tool, but Warden won't run it. **A hallucinated or injected write is contained at the
+The refusal is a JSON-RPC error for that one call (code `-32090`, echoing its `id`), so an MCP
+client fails the call and keeps its session. The audit entry for that call shows
+`allowed: false` with the offending `tool`. Ask Claude to do the same ("delete the demo repo")
+and it gets the identical refusal, then carries on with the next call — the model can
+*propose* a dangerous tool, but Warden won't run it. **A hallucinated or injected write is contained at the
 gateway, recorded, and never executed.**
 
 ---
@@ -223,15 +223,24 @@ gateway, recorded, and never executed.**
    holds only the gateway URL.
 5. **Audit is real:** the `tools/list` call has an entry with `auth.role_name = "github-user"`,
    `allowed:true`; the injected token is salted to `hmac-sha256:…`.
-6. **Policy bites:** the `delete_*` `tools/call` returns `403 insufficient_permissions`, shows
+6. **Policy bites:** the `delete_*` `tools/call` returns `403` with JSON-RPC error `-32090`
+   (`insufficient_permissions` under `error.data`), shows
    `allowed:false` with the tool name in the audit log, and no repository was changed.
 
 ## Scorecard
 
-The **GitHub token is gone from the laptop** ✅ — injected per request inside Warden, with
+The **GitHub token is gone from the laptop** ✅ — injected per request by Warden, with
 central revocation (delete the role) and one audit trail. Combined with 01, **no API key and no
 MCP token** remain. What's *still* on disk is the mTLS **client private key**
 (`./certs/client.key`). Removing that is the whole point of [**03 — SPIFFE → LLM + MCP**](/quickstarts/workstation/03-spiffe-llm-mcp/).
+
+## In production
+
+This rung stores the PAT in Warden, which is why `cred spec create` warns that the spec
+stores a secret. In production, keep the token in the secret store you already run and let
+Warden fetch it per request with [credential chaining](/federation/credential-chaining/) —
+the `github-ops` spec names a `secret_spec` instead of carrying `token`, and rotating the
+token is a change in the store, not in Warden. The same goes for 01's Anthropic key.
 
 ## Troubleshooting
 

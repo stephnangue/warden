@@ -34,7 +34,42 @@ only appropriate behind a trusted terminating proxy or on a loopback address.
 | `tls_client_ca_file` | *(none)* | CA bundle used to verify client certificates for mTLS. |
 | `tls_disable` | `false` | Serve plaintext HTTP instead of TLS. Mutually exclusive with the TLS keys. |
 | `tls_require_client_cert` | *(true when `tls_client_ca_file` is set)* | Require and verify a client certificate. |
-| `trusted_proxies` | *(none)* | CIDR ranges of load balancers permitted to forward the client certificate (for LB cert forwarding). |
+| `trusted_proxies` | *(none)* | CIDR ranges of load balancers whose forwarding headers Warden believes — the client certificate, client IP and request id. See [Trusted proxies](#trusted-proxies). |
+
+## Trusted proxies
+
+A load balancer in front of Warden speaks for the client through forwarding headers.
+Warden believes those headers **only from a connection whose address is in
+`trusted_proxies`**; from anyone else it ignores them, so a caller cannot choose the IP it
+is matched against or the identity it is logged as.
+
+```hcl
+listener "tcp" {
+  address         = ":8400"
+  tls_cert_file   = "/certs/warden-cert.pem"
+  tls_key_file    = "/certs/warden-key.pem"
+  trusted_proxies = ["10.0.0.0/24"]
+}
+```
+
+| From a trusted proxy | Warden takes |
+|---|---|
+| `X-Forwarded-For` | The client IP: the rightmost entry that is not itself a trusted proxy, or the leftmost when every entry is. Entries further left are whatever the client sent. |
+| `X-Real-IP` | The client IP, when there is no `X-Forwarded-For`. |
+| `X-Request-Id` | The request id recorded in the audit log, when it is a plausible id. |
+| `X-Forwarded-Client-Cert`, `X-SSL-Client-Cert` | The client certificate, for [cert auth](/auth-methods/cert/). |
+
+From any other connection, the client IP is the connection's own address, the request id
+is a new one, and the certificate headers are stripped; a certificate from the TLS
+handshake itself — a direct mTLS client, or a balancer in TLS passthrough — still counts.
+
+:::caution[Behind a load balancer, list it]
+Without the entry, every request's client IP is the **balancer's** address. That is the
+IP a token's IP binding checks and the `request.client_ip` a
+[policy condition](/concepts/cel-conditions/#19-source-ip-allowlist) sees. Before v0.21.0,
+`trusted_proxies` governed only the forwarded client certificate. See
+[Upgrading from v0.20.0](/upgrade/from-v0-20/).
+:::
 
 ## SPIFFE serving identity
 

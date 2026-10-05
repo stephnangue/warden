@@ -1,6 +1,6 @@
 ---
 title: "AWS MCP"
-description: "Front an AWS-hosted MCP server with Warden: both the agent and the user it acts for are authenticated, federated into short-lived STS credentials, and the tool call is signed with SigV4."
+description: "Front an AWS-hosted MCP server with Warden: the agent and the user it acts for are both authenticated, the agent is federated into short-lived STS credentials, and the tool call is signed with SigV4."
 ---
 
 The `mcp_aws` provider enables proxied access to AWS-hosted MCP (Model Context Protocol) servers through Warden. MCP clients (Claude Code, Cursor, Continue, Cline, Goose, ...) point at Warden instead of the AWS MCP endpoint; Warden authenticates the caller, mints short-lived STS credentials bound to the chosen role, signs the upstream request with AWS SigV4, and streams JSON or SSE responses back unchanged. Agents never hold an IAM access key.
@@ -11,28 +11,32 @@ The same provider fronts both **AWS's hosted MCP Server** (the GA product reache
 
 Unlike the [`aws` provider](/provider-backends/aws/), this mount can carry **two
 principals**: the agent making the call, and the user it is acting for. Both are
-authenticated by Warden, and both can be described to AWS in the same assertion — so the
-role a tool call assumes can depend on who the human behind it is.
+authenticated by Warden. Only the **agent** is described to AWS: an IAM trust policy for a
+custom issuer can bind only `sub`, `aud` and session tags, so the user stays in Warden,
+where policy can require them, bind them to the agent, and decide what they reach.
 
 The recommended setup stores **no AWS credentials at all**.
 
-<p align="center"><img alt="An agent presents both the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, trades it at AWS STS for temporary credentials, and signs the MCP JSON-RPC call to the AWS MCP server with SigV4" src="/images/warden-prov-mcp-aws-oidc-fed.png" width="860"></p>
+<p align="center"><img alt="An agent presents both the user's ID token and its own identity to Warden, which authenticates both, builds an assertion for the agent, has an external KMS sign it, trades it at AWS STS for temporary credentials, and signs the MCP JSON-RPC call to the AWS MCP server with SigV4" src="/images/warden-prov-mcp-aws-oidc-fed.png" width="860"></p>
 
 1. The user authenticates and the agent holds their ID token.
 2. The agent calls Warden presenting **both** credentials — the user's token and its own
    identity — and asserts a role. Warden authenticates each against its own auth mount.
 3. The asserted role selects the credential spec. Warden builds the assertion that spec
-   calls for, carrying the agent's claims and, when the spec opts in, the user's under a
-   nested `warden_user` claim. It goes to an **external KMS** unsigned.
+   calls for: the agent's subject, with its role and any projected metadata as **session
+   tags**. It goes to an **external KMS** unsigned.
 4. The KMS returns it signed. No signing key lives in Warden.
 5. Warden presents it to **STS** as `AssumeRoleWithWebIdentity` against the spec's
    `role_arn`.
 6. STS verifies it against the trusted issuer and returns temporary credentials.
 7. Warden signs the MCP JSON-RPC call with SigV4 and forwards it upstream.
 
-Because the user's claims reach STS inside the assertion, an IAM trust policy can condition
-on them — the same tool call made for two different people can land on two different roles,
-enforced by AWS rather than by Warden alone.
+An IAM trust policy conditions on the agent's `sub` and its session tags — say,
+`aws:RequestTag/warden_role` — and the role's permission policies can read the tags as
+`aws:PrincipalTag/<key>`. The user never reaches STS: a raw user id in `sub` would carry no
+namespace beside it, so any Warden namespace could mint it. To vary what a tool call reaches
+by the human behind it, give each population its own Warden role and spec, and bind the
+user to the agent with a [CEL condition](/concepts/cel-conditions/#agent-acting-for-a-user).
 
 :::note[Steps 3–6 run only on a cache miss]
 Warden caches the minted credential, so most tool calls skip straight from step 2 to step
@@ -63,9 +67,8 @@ storage and rotates them.
 
 Steps 3 and 4 become a storage read instead of a signing call, and step 5 is a plain
 `AssumeRole`. The user is still authenticated at step 2 — the mount is still a protected
-resource, and policy can still require a user — but **the user no longer reaches AWS**.
-There is no assertion to carry them, so an IAM trust policy cannot see who the call was
-made for. That distinction is the main reason to prefer federation here.
+resource, and policy can still require a user. What changes is what Warden holds: a
+long-lived IAM key, which federation removes entirely.
 
 Caching behaves the same way: steps 3–6 run only on a miss, and the entry is still keyed
 per user, so two people sharing an agent still get separate STS sessions.
@@ -74,7 +77,7 @@ per user, so two people sharing an agent still get separate STS sessions.
 
 | Mode | Supported | How |
 |---|---|---|
-| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`; the only mode that carries the user through to AWS |
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`. **Nothing stored.** |
 | **Stored root → short-lived mint** | Yes | `auth_method=static`; IAM keys in Warden storage, rotated automatically |
 | **Static inline** | No | Every mode mints through STS |
 | **Chaining** | No | An `aws` source takes no `secret_spec`, so nothing can feed it |
@@ -103,8 +106,8 @@ For a single developer with a laptop and personal AWS creds, `mcp-proxy-for-aws`
   permissions for the AWS operations the agent will make
 - An MCP client that supports remote MCP servers over HTTP (Claude Code, Cursor, Continue, Cline, Goose, ...)
 
-On the keyless path that role's trust policy accepts `sts:AssumeRoleWithWebIdentity` from
-an **IAM OIDC identity provider** pointed at Warden's issuer — see
+On the keyless path that role's trust policy allows `sts:AssumeRoleWithWebIdentity` **and
+`sts:TagSession`** from an **IAM OIDC identity provider** pointed at Warden's issuer — see
 [Keyless credentials](/federation/keyless-credentials/). There is **no IAM user and no
 access key** to create.
 
@@ -268,9 +271,11 @@ warden cred source create aws-src -json '{
 }'
 ```
 
-The spec is where the two principals are decided. `subject_token_source=warden_identity`
-makes Warden mint the assertion, and **`assertion_user_claims` is what puts the user in
-it**:
+`subject_token_source=warden_identity` makes Warden mint the assertion. A new spec on an
+AWS source is stored with
+[`assertion_profile=aws`](/federation/assertion-claims/#the-aws-profile): the agent's role
+travels as the `warden_role` session tag, and each key named in
+`assertion_metadata_claims` as a tag of its own:
 
 ```bash
 warden cred spec create aws-s3-reader -json '{
@@ -282,28 +287,21 @@ warden cred spec create aws-s3-reader -json '{
     "subject_token_source": "warden_identity",
     "role_arn": "arn:aws:iam::<ACCOUNT_ID>:role/s3-reader-role",
     "ttl": "1h",
-    "assertion_user_claims": "sub,email,groups"
+    "assertion_metadata_claims": "team"
   }
 }'
 ```
 
-`assertion_user_claims` is **opt-in and fails closed**, which is the opposite of how the
-agent's own `assertion_metadata_claims` behaves:
+The role's trust policy must allow **`sts:TagSession`** beside
+`sts:AssumeRoleWithWebIdentity`, or STS refuses the tagged token; it can then condition on
+`aws:RequestTag/warden_role` and `aws:RequestTag/team`. To mint without tags, set
+`assertion_profile=default` on the spec. Tag keys must be valid AWS tag keys, at most 49 of
+them besides the role.
 
-- Omit it and the assertion carries **no `warden_user` claim at all** — a spec that does
-  not ask never discloses the user. The mount still authenticates them; AWS just never
-  hears about it.
-- Set it and `warden_user` always carries the user's `sub`, plus whichever login-derived
-  metadata keys you name. List `sub` alone for an identity-only disclosure.
-- Name a claim the user's login does not provide and the **mint fails** rather than
-  silently omitting it — because these values scope a security decision at AWS.
-- It is valid only when the subject (or actor) is `warden_identity`. Pairing it with
-  `agent_identity` is rejected at write: *"field 'assertion_user_claims': is valid only
-  when the subject or actor is 'warden_identity'"*.
-
-An IAM trust policy can then condition on those claims, so the same tool call made by two
-different people can be granted different reach — decided by AWS, not by Warden alone. See
-[Assertion claims](/federation/assertion-claims/) for the claim shapes.
+`assertion_user_claims` is accepted here, and fails closed on a claim the user's login
+does not carry, but on an AWS source it **never puts the user in the assertion** — it only
+feeds `{{user.<claim>}}` request templating. See
+[Assertion claims](/federation/assertion-claims/#when-a-user-is-disclosed).
 
 ### 3b. Stored IAM keys
 
@@ -334,9 +332,6 @@ warden cred spec create aws-s3-reader -json '{
   }
 }'
 ```
-
-Note the absence of `assertion_user_claims`: there is no assertion on this path, so the
-user cannot be carried to AWS however the mount is configured.
 
 `rotation_period` is how often Warden rotates the source's IAM access keys — integer
 seconds in JSON. Longer periods are acceptable when the IAM user only holds

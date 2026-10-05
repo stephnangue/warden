@@ -2,15 +2,61 @@
 title: "OpenAI"
 ---
 
-The OpenAI provider enables proxied access to the OpenAI API through Warden. It streams requests to OpenAI endpoints (chat completions, responses, embeddings, images, models) with automatic API key injection and policy evaluation on AI request fields. Credentials are injected via the `Authorization: Bearer` header, plus `OpenAI-Organization` and `OpenAI-Project` when the credential carries them. One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The OpenAI provider enables proxied access to the OpenAI API through Warden. It streams requests to OpenAI endpoints (chat completions, responses, embeddings, images, models) with credential injection and policy evaluation on AI request fields. Credentials are injected via the `Authorization: Bearer` header. The recommended credential needs no API key at all: an `openai` source exchanges a Warden identity assertion for a short-lived OpenAI token through workload identity federation. Where an API key is needed, chain it from your secret store, or store it in Warden as the quick start.
 
 ## How a request flows
 
-This mount injects an **`api_key`** credential into the `Authorization` header as a bearer
-token, plus `OpenAI-Organization` and `OpenAI-Project` when that credential carries an
-`organization_id` or a `project_id`. The question is where that API key lives.
+This mount can carry **two principals** — the agent, and the user it is acting for — and
+both can be described to OpenAI in the same assertion.
 
-The recommended setup keeps it in the vault that manages it, read per request.
+The recommended setup holds **no OpenAI key anywhere**. Warden mints a short-lived identity
+assertion and exchanges it at OpenAI's auth host for an access token that acts as one
+OpenAI **service account**.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, exchanges it at OpenAI's token endpoint for an access token, and injects that token to the OpenAI API" src="/images/warden-prov-openai-oidc-federation.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting **both** credentials and asserting a role. Warden
+   authenticates each against its own auth mount.
+3. The asserted role selects the credential spec — an `oauth_bearer_token` spec on an
+   `openai` source. Warden builds the assertion that spec calls for — the agent's claims
+   or, when the spec discloses the user, a delegation token with the user as `sub` and the
+   agent in `act` — and sends it to an **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden exchanges it at `auth.openai.com` as an RFC 8693 token exchange, with no client
+   secret.
+6. OpenAI verifies it and returns an access token bound to the spec's
+   `service_account_id`.
+7. Warden injects that token as `Authorization: Bearer <token>` and forwards to the
+   OpenAI API.
+
+Because the user's claims reach OpenAI inside the assertion, the identity provider's
+mapping can be written against them. A disclosed user's `sub` is their raw id, so bind
+`warden_namespace` beside it — see
+[Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user).
+
+A federated token is issued for one service account, which already belongs to one
+organization and one project, so the mount sends **no** `OpenAI-Organization` or
+`OpenAI-Project` header with it — and strips any the client sent. See the
+[OpenAI credential driver](/credential-drivers/openai/).
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the token until shortly before it expires (an hour at most), so most requests
+skip from step 2 to step 7. The entry is keyed by namespace, the agent's token id and the
+spec name — plus the user's token id when the mount carries a user, so one user's token is
+never served to another.
+:::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all.
+Omit the stanza and the issuer signs with a locally held key instead. The exchange is
+identical either way.
+
+### Chained: an API key from your store
+
+Where an API key is required, keep it in the vault that manages it and read it per request.
+The mount injects an **`api_key`** credential as a bearer token, plus `OpenAI-Organization`
+and `OpenAI-Project` when that credential carries an `organization_id` or a `project_id`.
 
 <p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the OpenAI API key from an external vault at a path templated by the user's team and the agent's environment, and injects it to the OpenAI API" src="/images/warden-prov-openai-vault-apikey.png" width="860"></p>
 
@@ -27,28 +73,23 @@ The recommended setup keeps it in the vault that manages it, read per request.
 The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
 it stays in the store that manages it, and the read path decides who reaches which one.
 
-:::note[Steps 3–6 run only on a cache miss]
-Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
-keyed by namespace, the agent's token id and the spec name — plus the user's token id when
-the mount carries a user.
-:::
-
 ### The simpler variant
 
 <p align="center"><img alt="Warden reads a static OpenAI API key from its encrypted storage and injects it to the OpenAI API for every caller" src="/images/warden-prov-openai-inline-apikey.png" width="860"></p>
 
-**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
-one long-lived credential for every caller.
+**Inline.** The API key sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller — the quick start, not the production setup.
 
 ## Credential modes
 
 | Mode | What OpenAI sees | Where the credential lives |
 |---|---|---|
-| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
-| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+| **Keyless federation** ✅ *recommended* | A short-lived token for one service account | Nowhere — minted per cache miss |
+| **Chained** | One long-lived API key, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived API key, shared | Warden's storage |
 
-OpenAI exposes no workload-identity federation and mints nothing per request, so the
-credential is long-lived in both rows; what changes is whether Warden holds it.
+Federation removes the API key entirely. Where you still need one — a feature the federated
+token does not cover, or no OpenAI identity provider yet — chaining keeps it out of Warden.
 
 :::note[An organization or project id changes the chained shape]
 `OpenAI-Organization` and `OpenAI-Project` are sent **only when the credential carries an
@@ -59,13 +100,16 @@ vault with `mint_method=static_apikey`. It needs a producer spec instead; see
 [Carrying an organization or project id](#carrying-an-organization-or-project-id).
 :::
 
-See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
-key.
+See the [OpenAI credential driver](/credential-drivers/openai/) for the keyless source, and
+the [apikey credential driver](/credential-drivers/apikey/) for every API-key source and
+spec key.
 
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- An **OpenAI API key** from [platform.openai.com](https://platform.openai.com)
+- Keyless: an OpenAI **workload identity provider** that trusts Warden's issuer, and a
+  **service account** it may act as. With an API key instead: an **OpenAI API key** from
+  [platform.openai.com](https://platform.openai.com)
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
@@ -135,7 +179,36 @@ warden read openai/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Chained (recommended)
+### Option A: Keyless federation (recommended)
+
+The source names the identity provider that trusts Warden's issuer, and stores nothing —
+no `rotation_period`, no key. Each spec names the service account its token acts as.
+
+```bash
+warden cred source create openai-wif -json '{
+  "type": "openai",
+  "config": {
+    "auth_method": "oidc_federation",
+    "identity_provider_id": "<identity-provider-id>",
+    "audience": "https://warden.example.com/openai"
+  }
+}'
+
+warden cred spec create openai-ops -json '{
+  "source": "openai-wif",
+  "config": {
+    "subject_token_source": "warden_identity",
+    "service_account_id": "<service-account-id>"
+  }
+}'
+```
+
+`audience` is what the identity provider expects; leave it unset and every spec must set
+`assertion_audience` instead. The spec refuses `organization_id` and `project_id` — the
+service account already fixes both — and sets no `mint_method`: the type,
+`oauth_bearer_token`, is inferred.
+
+### Option B: Chained
 
 The flow in the first diagram. The vault holds the API key; Warden reads it per request and
 injects it.
@@ -245,7 +318,7 @@ warden cred spec create openai-ops -json '{
 
 A field that appears in neither place is simply omitted, and the provider sends no header for it.
 
-### Option B: Inline
+### Option C: Inline
 
 The second diagram. The key sits in Warden's encrypted storage rather than a vault — no
 assertion, no outbound hop to fetch it. Quickest to a working mount, and the reason it
@@ -446,6 +519,39 @@ This allows operators to enforce policies such as:
 - Enforce maximum token limits
 - Require streaming mode for cost visibility
 
+## Errors from Warden
+
+When Warden itself fails a request — authentication, policy, credential issuance, the
+upstream not answering — it answers in **OpenAI's error shape**, so an OpenAI SDK surfaces
+Warden's reason instead of failing to parse a foreign body. The status is unchanged, and it
+is what the SDKs retry on:
+
+```json
+{
+  "error": {
+    "message": "Warden: permission denied",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "warden_permission_denied"
+  }
+}
+```
+
+The message always starts with `Warden: `, and the `code` with `warden_`, so a caller can
+tell Warden refusing a request from OpenAI refusing it — they call for different fixes. The
+request id is in the `x-request-id` header.
+
+| `code` | `type` | Status | When |
+|---|---|---|---|
+| `warden_unauthenticated` | `invalid_request_error` | `401` | The caller's identity was missing or invalid. |
+| `warden_permission_denied` | `invalid_request_error` | `403` | A Warden policy refused the request. |
+| `warden_invalid_request` | `invalid_request_error` | `400` or another `4xx` | The request was malformed for Warden. |
+| `warden_credential_refused` | `invalid_request_error` | `403` | OpenAI refused the credential Warden presented — fix the configuration. |
+| `warden_credential_unavailable` | `service_unavailable_error` | `503` | The credential could not be obtained right now; retry. |
+| `warden_upstream_timeout` | `service_unavailable_error` | `504` | OpenAI did not answer within the mount's `timeout`. |
+| `warden_upstream_unreachable` | `service_unavailable_error` | `502` | OpenAI could not be reached. |
+| `warden_internal_error` | `server_error` | `500` | Anything else on Warden's side. |
+
 ## TLS Certificate Authentication
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
@@ -514,6 +620,9 @@ curl --cert client.pem --key client-key.pem \
 ```
 
 ## Key Management
+
+Keyless, there is no key to manage: the token is minted per cache miss and expires within
+the hour. The rest of this section applies to an API key stored in Warden.
 
 | Aspect | Details |
 |--------|---------|

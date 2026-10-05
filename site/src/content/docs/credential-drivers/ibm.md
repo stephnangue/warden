@@ -8,7 +8,7 @@ title: "IBM Cloud"
 This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
 :::
 
-The IBM Cloud driver brokers access to **IBM Cloud** by exchanging a long-lived **IBM Cloud API key** for short-lived **IAM bearer tokens**. The privileged API key lives in the **source** config; each **spec** decides whether a workload receives a bare bearer token or that token paired with static **Cloud Object Storage (COS)** HMAC keys. IAM tokens expire on their own, so nothing is left behind after use.
+The IBM Cloud driver brokers access to **IBM Cloud** by exchanging a long-lived **IBM Cloud API key** for short-lived **IAM bearer tokens**. Chained, the API key stays in your secret store and is fetched per request; with a stored key, the **source** holds it. Each **spec** decides whether a workload receives a bare bearer token or that token paired with static **Cloud Object Storage (COS)** HMAC keys. IAM tokens expire on their own, so nothing is left behind after use.
 
 An operator reaches for this driver when workloads need to call IBM Cloud APIs (or COS S3-compatible endpoints) without holding the account API key themselves. Warden can also rotate the source API key on a schedule, minting a fresh key for the same IAM identity and retiring the old one.
 

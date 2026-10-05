@@ -12,7 +12,7 @@ on them at once.
 | Use case | The problem | What Warden does |
 |----------|-------------|------------------|
 | [Per-user access](/use-cases/per-user-access/) | One agent acts for many users but reaches upstreams as a single shared identity. | Carries a verified user through per request — scoped, attributed, and at scale, even where the upstream has no on-behalf-of flow. |
-| [Access brokering](/use-cases/access-brokering/) | Every integration puts another secret in the agent, where it leaks. | Holds the upstream secret and injects a scoped credential per request; the agent carries only its identity. |
+| [Access brokering](/use-cases/access-brokering/) | Every integration puts another secret in the agent, where it leaks. | Mints or fetches the upstream credential and injects a scoped one per request; the agent carries only its identity. |
 | [Breach containment](/use-cases/breach-containment/) | A prompt-injected or hijacked agent can do anything its broad credential allows. | Leaves no secret to steal, bounds every call by policy, and expires the access it grants. |
 | [Runtime authorization](/use-cases/runtime-authorization/) | Reaching a system means doing anything in it — every tool, every argument, for anyone the agent fronts. | Authorizes each call at runtime, down to the tool and parameter and on whose behalf it acts, default-deny. |
 | [Centralized governance](/use-cases/centralized-governance/) | Dozens of systems, each with its own identity, policy, secrets, and audit. | One control plane — one identity, one policy surface, one audit log, central rotation. |

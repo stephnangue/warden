@@ -117,6 +117,13 @@ warden cred spec create jira-bot \
 (`organization_id,project_id`) works the same way — each named field is taken from the
 chained payload, or from the spec when the payload omits it.
 
+The Anthropic provider reads one adjunct of its own: **`workspace_id`**, sent as
+`anthropic-workspace-id`. A key used across several Anthropic workspaces is refused
+upstream unless a request names one, so declare `credential_fields=workspace_id` on the
+source and set it per spec. For Anthropic and OpenAI, prefer the keyless
+[`anthropic`](/credential-drivers/anthropic/) and [`openai`](/credential-drivers/openai/)
+sources, which need no API key at all.
+
 A spec that sets a credential field its source does not carry is **rejected at write**:
 
 ```

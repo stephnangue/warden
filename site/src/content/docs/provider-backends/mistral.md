@@ -2,7 +2,7 @@
 title: "Mistral AI"
 ---
 
-The Mistral provider enables proxied access to the Mistral AI API through Warden. It streams requests to Mistral endpoints (chat completions, embeddings, models) with automatic API key injection and policy evaluation on AI request fields. Credentials are injected via the `Authorization: Bearer` header. One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Mistral provider enables proxied access to the Mistral AI API through Warden. It streams requests to Mistral endpoints (chat completions, embeddings, models) with automatic API key injection and policy evaluation on AI request fields. Credentials are injected via the `Authorization: Bearer` header. Chain the key from your secret store (recommended), or store it in Warden (`apikey` source type).
 
 ## How a request flows
 

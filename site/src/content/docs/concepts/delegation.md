@@ -132,11 +132,12 @@ per-user role explosion.
 
 ## What pairing the user principal with federation unlocks
 
-- **Per-user cloud credentials** — a `warden_identity` spec with
-  [`assertion_user_claims`](/federation/assertion-claims/#the-user--warden_user) mints an
-  assertion where the agent is `sub`/`warden_sub` but a nested `warden_user` claim names
-  the user, so an upstream trust policy scopes access to that user while still binding the
-  agent.
+- **Per-user federated credentials** — a `warden_identity` spec with
+  [`assertion_user_claims`](/federation/assertion-claims/#an-agent-acting-for-a-user) mints
+  an RFC 8693 delegation token: the user is `sub` (bound together with `warden_namespace`)
+  and the agent is `act`, so an upstream trust policy scopes access to that user while still
+  binding the agent. Verifiers that bind only `iss`/`sub`/`aud` — AWS STS, Entra ID,
+  Alibaba Cloud RAM — are never given the user; there the assertion names the agent alone.
 - **Per-user secrets** — a `kv2_read` `secret_path` and the `oauth2` mint method's
   `credential_name` may template `{{user.<claim>}}`, so a per-user secret or token is
   selected by a verified user claim.
@@ -150,8 +151,10 @@ per-user role explosion.
 Independently of what is minted, Warden records who a request was *for* in the audit
 trail. The chain has a **single source — the cryptographically-verified RFC 8693 `act`
 claim** on the caller's token — and appears as the `actors` array on the request's audit
-entry. Each actor is `{subject}`; because every actor is verified, there is no `verified`
-field.
+entry. Each actor is `{subject}`, plus `issuer` when that layer of the chain carried one;
+because every actor is verified, there is no `verified` field. The user's own token keeps
+its chain separately, under `auth.user.actors`, beside the user's `namespace_path` and
+`role_name`.
 
 A signed JWT can carry a nested `act` claim, so the chain expresses "gateway → broker →
 agent"; Warden walks the nesting and persists the extracted actors on the
@@ -175,8 +178,14 @@ persisted `user_token_header` loads with a warning and is ignored. See
 [Upgrading from v0.19.0](/upgrade/from-v0-19/#2-dual-token-extraction-user_token_header-retired).
 :::
 
-On a `warden_identity` spec, `assertion_user_claims` (comma-separated) discloses the user
-under the `warden_user` claim.
+On a `warden_identity` spec, `assertion_user_claims` (comma-separated) discloses the user:
+the assertion's `sub` becomes the user and the agent moves into `act`. See
+[When a user is disclosed](/federation/assertion-claims/#when-a-user-is-disclosed).
+
+The assertion records the pair the agent's policy admitted; it does not decide that this
+agent may act for this user. That binding is a
+[CEL condition](/concepts/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
+the agent's policy, such as the one [above](#the-dual-principal-model).
 
 **Fail-closed matrix** — the request is denied when: the user credential equals the
 agent's; the user token is from another namespace; the user mount is not bearer-format; a
@@ -187,6 +196,6 @@ either token has expired.
 
 - [Token Exchange](/credential-drivers/token-exchange/) — the exchange mechanics.
 - [Credential chaining](/federation/credential-chaining/) — per-user secrets from a keyless vault.
-- [Assertion claims](/federation/assertion-claims/) — the `warden_user` claim.
+- [Assertion claims](/federation/assertion-claims/) — the delegation token's `sub`, `warden_namespace` and `act`.
 - [Audit](/concepts/audit/) — where the actor chain and `Auth.User` are recorded.
 - [Tokens](/concepts/tokens/) — where a verified `act` chain is persisted.
