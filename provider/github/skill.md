@@ -12,10 +12,11 @@ upstream: GitHub REST API (api.github.com or GHE) and Git smart-HTTP (github.com
 ## What it does
 
 Warden proxies GitHub REST API requests. The agent calls a Warden
-URL; Warden authenticates the caller (JWT/cert), looks up the GitHub
-PAT bound to the chosen role, injects it as `Authorization: token <pat>`
-plus a default `X-GitHub-Api-Version` header, and forwards to GitHub.
-The agent **never holds a PAT**.
+URL; Warden authenticates the caller (JWT/cert), resolves the chosen
+role's GitHub credential — an App installation token it mints, or a
+PAT fetched from a secret store or held by Warden — injects it as
+`Authorization: token <token>` plus a default `X-GitHub-Api-Version`
+header, and forwards to GitHub. The agent **never holds a token**.
 
 ## Configure the CLI/SDK
 

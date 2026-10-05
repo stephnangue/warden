@@ -27,9 +27,9 @@ Two values are per-task:
   shares it, because the role is not in the URL. Prepend `$WARDEN_ADDR`.
 
 Present your identity as the JWT placed in the SigV4 secret slots
-(below); Warden verifies the signature against it. A stale JWT surfaces
-as `SignatureDoesNotMatch` (typical JWT TTL 5–60 min) — refresh the JWT
-and retry.
+(below); Warden verifies the signature against it. An expired JWT
+(typical TTL 5–60 min) answers `403` with the service's
+invalid-credentials code — refresh the JWT and retry (see Quirks).
 
 ```bash
 export AWS_ACCESS_KEY_ID="<role>"               # Warden role name, not an AWS key
@@ -67,9 +67,13 @@ extracts the service and region from the SigV4 Authorization header.
 
 ## Quirks
 
-- **JWT expiry → `SignatureDoesNotMatch`.** The SDK signed with a
-  token Warden later rejects. Refresh the JWT and retry — the
-  symptom is signature, the cause is auth.
+- **JWT expiry → `403`, code by protocol.** `InvalidClientTokenId`
+  (STS, IAM and other query/REST-XML services), `AuthFailure` (EC2),
+  `InvalidAccessKeyId` (S3), `UnrecognizedClientException` (JSON
+  services: DynamoDB, Lambda, …). The message starts `Warden:`.
+  Refresh the JWT and retry. `SignatureDoesNotMatch` is different:
+  the signature did not verify — put the same JWT in
+  `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, and check the clock.
 - **Wildcard DNS for S3 control-plane and S3 Access Points.** The
   SDK constructs URLs like `<account-id>.s3-control.<region>.<warden-host>`
   for S3 Control APIs; the host needs to resolve to Warden. See
