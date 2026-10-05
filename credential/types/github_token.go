@@ -128,14 +128,14 @@ func (t *GitHubTokenCredType) ValidateConfig(config credential.Config, sourceTyp
 	// token for the whole installation. Reject it rather than keep that silent
 	// no-op; the driver refuses to mint from a stored spec that still has it.
 	if config.Get("repository") != "" {
-		return errors.New(GitHubLegacyRepositoryError)
+		return ErrGitHubLegacyRepository
 	}
 
 	// Step 3: Conditional validation based on source and mint_method
 	if sourceType == credential.SourceTypeLocal {
 		// A static token's scope is fixed where it was issued; nothing here can
 		// narrow it.
-		if config.Get("repositories") != "" || config.Get("permissions") != "" {
+		if HasGitHubScopeKeys(config) {
 			return fmt.Errorf("'repositories' and 'permissions' are not supported with a local source")
 		}
 		// Local source: must have static token, mint_method not needed. A local
@@ -193,24 +193,33 @@ func (t *GitHubTokenCredType) ValidateConfig(config credential.Config, sourceTyp
 		}
 	}
 
-	scope, err := ParseGitHubTokenScope(config)
-	if err != nil {
-		return err
+	// Checked on the raw keys, as the driver checks a stored spec: a value that
+	// parses to nothing (" ", ",") is still refused here rather than accepted now
+	// and refused on every mint.
+	if mintMethod != "app" && HasGitHubScopeKeys(config) {
+		return ErrGitHubScopeRequiresApp
 	}
-	if !scope.IsZero() && mintMethod != "app" {
-		return errors.New(GitHubScopeRequiresAppError)
+	if _, err := ParseGitHubTokenScope(config); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// GitHubLegacyRepositoryError is returned, on write and at mint, for a spec that
+// ErrGitHubLegacyRepository is returned, on write and at mint, for a spec that
 // still sets the singular 'repository' key.
-const GitHubLegacyRepositoryError = "'repository' is no longer supported; use 'repositories' (bare repository names, comma-separated)"
+var ErrGitHubLegacyRepository = errors.New("'repository' is no longer supported; use 'repositories' (bare repository names, comma-separated)")
 
-// GitHubScopeRequiresAppError is returned, on write and at mint, for a scope set on
-// a spec that does not mint App installation tokens.
-const GitHubScopeRequiresAppError = "'repositories' and 'permissions' apply only to mint_method=app (a PAT's scope is fixed when it is created)"
+// ErrGitHubScopeRequiresApp is returned, on write and at mint, for a scope set on a
+// spec that does not mint App installation tokens.
+var ErrGitHubScopeRequiresApp = errors.New("'repositories' and 'permissions' apply only to mint_method=app (a PAT's scope is fixed when it is created)")
+
+// HasGitHubScopeKeys reports whether a github_token spec sets either scope key,
+// whatever its value parses to. It is the test for "this spec asks to be scoped"
+// wherever a scope is not allowed, so write time and mint time agree.
+func HasGitHubScopeKeys(config credential.Config) bool {
+	return config.Get("repositories") != "" || config.Get("permissions") != ""
+}
 
 // githubMaxScopedRepositories is GitHub's limit on repositories named in one
 // installation token request.
@@ -224,7 +233,8 @@ var (
 // GitHubTokenScope narrows an App installation token below what the installation
 // grants. The zero value asks for everything the installation has.
 type GitHubTokenScope struct {
-	// Repositories are bare repository names, sorted and deduplicated.
+	// Repositories are bare repository names, sorted and deduplicated without
+	// regard to case, as GitHub matches them.
 	Repositories []string
 	// Permissions maps a permission name to read, write or admin.
 	Permissions map[string]string
@@ -250,8 +260,9 @@ func ParseGitHubTokenScope(config credential.Config) (GitHubTokenScope, error) {
 		if name == "." || name == ".." || !githubRepoNameRE.MatchString(name) {
 			return GitHubTokenScope{}, fmt.Errorf("repositories: %q is not a valid repository name", name)
 		}
-		if !seen[name] {
-			seen[name] = true
+		// The first spelling wins: "Backend,backend" names one repository.
+		if folded := strings.ToLower(name); !seen[folded] {
+			seen[folded] = true
 			scope.Repositories = append(scope.Repositories, name)
 		}
 	}

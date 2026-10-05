@@ -954,7 +954,7 @@ func TestGitHubDriver_MintAppCredential_SendsScope(t *testing.T) {
 	}
 	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		gotContentType = r.Header.Get("Content-Type")
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
 		writeInstallationToken(w, "ghs_scoped")
 	})
 
@@ -977,7 +977,7 @@ func TestGitHubDriver_MintAppCredential_PermissionsOnlyOmitsRepositories(t *test
 	key := generateTestRSAKey(t)
 	var gotBody map[string]json.RawMessage
 	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
 		writeInstallationToken(w, "ghs_perms_only")
 	})
 
@@ -1008,38 +1008,53 @@ func TestGitHubDriver_MintAppCredential_UnscopedSendsNoBody(t *testing.T) {
 // token minted for a broader one on the same installation, whichever mints first.
 func TestGitHubDriver_AppTokenCacheIsKeyedByScope(t *testing.T) {
 	key := generateTestRSAKey(t)
-	var calls atomic.Int32
-	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		var body struct {
-			Repositories []string `json:"repositories"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if len(body.Repositories) == 0 {
-			writeInstallationToken(w, "ghs_whole_installation")
-			return
-		}
-		writeInstallationToken(w, "ghs_only_"+strings.Join(body.Repositories, "_"))
-	})
-
-	mint := func(spec *credential.CredSpec) interface{} {
-		rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
-		require.NoError(t, err)
-		return rawData["token"]
-	}
 	broad := inlineAppSpec("broad", "67890", key)
 	backend := scopedAppSpec("backend", key, map[string]string{"repositories": "backend"})
 	frontend := scopedAppSpec("frontend", key, map[string]string{"repositories": "frontend"})
 
-	assert.Equal(t, "ghs_whole_installation", mint(broad))
-	assert.Equal(t, "ghs_only_backend", mint(backend), "a scoped spec must not inherit the broad token")
-	assert.Equal(t, "ghs_only_frontend", mint(frontend), "different scopes must not share a token")
-	assert.Equal(t, int32(3), calls.Load())
+	// newDriver answers each request with a token named after the scope it asked
+	// for, so a test can tell which scope a returned token was minted for.
+	newDriver := func(t *testing.T) (func(*credential.CredSpec) interface{}, *atomic.Int32) {
+		var calls atomic.Int32
+		driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			var body struct {
+				Repositories []string `json:"repositories"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Repositories) == 0 {
+				writeInstallationToken(w, "ghs_whole_installation")
+				return
+			}
+			writeInstallationToken(w, "ghs_only_"+strings.Join(body.Repositories, "_"))
+		})
+		return func(spec *credential.CredSpec) interface{} {
+			rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			require.NoError(t, err)
+			return rawData["token"]
+		}, &calls
+	}
 
-	// Each is now cached under its own scope.
-	assert.Equal(t, "ghs_only_backend", mint(backend))
-	assert.Equal(t, "ghs_whole_installation", mint(broad))
-	assert.Equal(t, int32(3), calls.Load(), "a repeated scope must reuse its cached token")
+	t.Run("broad first", func(t *testing.T) {
+		mint, calls := newDriver(t)
+		assert.Equal(t, "ghs_whole_installation", mint(broad))
+		assert.Equal(t, "ghs_only_backend", mint(backend), "a scoped spec must not inherit the broad token")
+		assert.Equal(t, "ghs_only_frontend", mint(frontend), "different scopes must not share a token")
+		assert.Equal(t, int32(3), calls.Load())
+
+		// Each is now cached under its own scope.
+		assert.Equal(t, "ghs_only_backend", mint(backend))
+		assert.Equal(t, "ghs_whole_installation", mint(broad))
+		assert.Equal(t, int32(3), calls.Load(), "a repeated scope must reuse its cached token")
+	})
+
+	t.Run("narrow first", func(t *testing.T) {
+		mint, calls := newDriver(t)
+		assert.Equal(t, "ghs_only_backend", mint(backend))
+		assert.Equal(t, "ghs_whole_installation", mint(broad), "an unscoped spec must not inherit a narrow token")
+		assert.Equal(t, "ghs_only_backend", mint(backend), "and the narrow spec must keep its own")
+		assert.Equal(t, int32(2), calls.Load())
+	})
 }
 
 func TestGitHubDriver_MintAppCredential_Scope422(t *testing.T) {
@@ -1177,7 +1192,9 @@ func waitFor[T any](t *testing.T, ch <-chan T, d time.Duration, what string) T {
 }
 
 // The credential manager caches per caller, so N agents on one spec reach the
-// driver as N misses. They must cost one installation token, not N.
+// driver as N misses. They must cost one installation token, not N. This guards
+// the outcome, not the mechanism: a driver that serializes every mint behind one
+// lock passes too. DistinctKeysRunInParallel is what rules that driver out.
 func TestGitHubDriver_AppMint_CoalescesConcurrentMisses(t *testing.T) {
 	key := generateTestRSAKey(t)
 	var calls atomic.Int32

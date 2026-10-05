@@ -200,11 +200,11 @@ func githubMintMethod(spec *credential.CredSpec) (string, error) {
 		return "", fmt.Errorf("github: 'auth_method' is no longer supported; use 'mint_method' (app or pat)")
 	}
 	if spec.Config.Get("repository") != "" {
-		return "", fmt.Errorf("github: %s", types.GitHubLegacyRepositoryError)
+		return "", fmt.Errorf("github: %w", types.ErrGitHubLegacyRepository)
 	}
 	mintMethod := credential.GetString(spec.Config, "mint_method", "app")
-	if mintMethod != "app" && (spec.Config.Get("repositories") != "" || spec.Config.Get("permissions") != "") {
-		return "", fmt.Errorf("github: %s", types.GitHubScopeRequiresAppError)
+	if mintMethod != "app" && types.HasGitHubScopeKeys(spec.Config) {
+		return "", fmt.Errorf("github: %w", types.ErrGitHubScopeRequiresApp)
 	}
 	return mintMethod, nil
 }
@@ -392,6 +392,7 @@ func (d *GitHubDriver) storeAppToken(key string, entry *appTokenCache) {
 	d.appTokens[key] = entry
 }
 
+// appTokenRawData is the credential data handed back for an installation token.
 func appTokenRawData(entry *appTokenCache) map[string]interface{} {
 	return map[string]interface{}{
 		"token":      entry.token,
@@ -480,7 +481,7 @@ func (d *GitHubDriver) mintInstallationToken(ctx context.Context, key *rsa.Priva
 		// claiming it was the cause.
 		if resp.StatusCode == http.StatusUnprocessableEntity && !scope.IsZero() {
 			return "", time.Time{}, &httputil.StatusError{Status: resp.StatusCode,
-				Err: fmt.Errorf("github: installation token request returned 422 — if repositories/permissions ask for more than the App was granted or installed on, narrow them: %s", string(respBody))}
+				Err: fmt.Errorf("github: installation token request returned 422; if repositories/permissions ask for more than the App was granted or installed on, narrow them: %s", string(respBody))}
 		}
 		return "", time.Time{}, &httputil.StatusError{Status: resp.StatusCode,
 			Err: fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, string(respBody))}

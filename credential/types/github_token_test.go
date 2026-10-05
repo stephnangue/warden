@@ -295,6 +295,19 @@ func TestGitHubTokenCredType_ValidateConfig(t *testing.T) {
 			errMsg:     "apply only to mint_method=app",
 		},
 		{
+			// Parses to no scope, but the driver refuses the raw key at mint, so
+			// accepting it here would store a spec that can never mint.
+			name: "github pat - scope key that parses to nothing still rejected",
+			config: map[string]string{
+				"mint_method":  "pat",
+				"token":        "ghp_test",
+				"repositories": " , ",
+			},
+			sourceType: credential.SourceTypeGitHub,
+			wantErr:    true,
+			errMsg:     "apply only to mint_method=app",
+		},
+		{
 			name: "local - scope rejected",
 			config: map[string]string{
 				"token":       "ghp_test",
@@ -350,6 +363,11 @@ func TestParseGitHubTokenScope(t *testing.T) {
 			config:    map[string]string{"repositories": " frontend,backend , frontend,,", "permissions": " issues:write , contents:read"},
 			wantRepos: []string{"backend", "frontend"},
 			wantPerms: map[string]string{"contents": "read", "issues": "write"},
+		},
+		{
+			name:      "deduplicated without regard to case, first spelling kept",
+			config:    map[string]string{"repositories": "Backend,frontend,backend,BACKEND"},
+			wantRepos: []string{"Backend", "frontend"},
 		},
 		{
 			name:      "repository name characters",
