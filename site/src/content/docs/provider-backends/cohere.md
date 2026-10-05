@@ -2,7 +2,7 @@
 title: "Cohere"
 ---
 
-The Cohere provider enables proxied access to the Cohere API through Warden. It forwards requests to Cohere endpoints (Chat, Embed, Rerank, Generate, Models, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer` header. One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Cohere provider enables proxied access to the Cohere API through Warden. It forwards requests to Cohere endpoints (Chat, Embed, Rerank, Generate, Models, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer` header. Chain the key from your secret store (recommended), or store it in Warden (`apikey` source type).
 
 ## How a request flows
 

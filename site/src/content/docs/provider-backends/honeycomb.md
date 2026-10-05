@@ -8,7 +8,7 @@ The Honeycomb provider enables proxied access to the Honeycomb API through Warde
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- A Honeycomb account with a management key (key ID + key secret) for dynamic key minting, **or** a static ingest/configuration key
+- A Honeycomb ingest or configuration key — in your secret store, for the recommended chained setup
 - Team slug from your Honeycomb organization (visible in your Honeycomb URL)
 
 :::note[New to Warden?]
@@ -91,32 +91,7 @@ warden read honeycomb/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Key
-
-Use this when you already have a Honeycomb ingest or configuration key and want Warden to proxy requests with it.
-
-<p align="center"><img alt="Warden reads a static Honeycomb key from its encrypted storage and injects it to the Honeycomb API for every caller" src="/images/warden-prov-honeycomb-inline-apikey.png" width="860"></p>
-
-The key sits in Warden's encrypted storage and is injected for every caller — shortest to
-set up, weakest custody. Option B keeps it in the store that can rotate it.
-
-```bash
-warden cred source create honeycomb-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://api.honeycomb.io \
-  -config=display_name=Honeycomb
-```
-
-Create a credential spec with your API key:
-
-```bash
-warden cred spec create honeycomb-ops \
-  -source honeycomb-src \
-  -config api_key=your-honeycomb-api-key
-```
-
-### Option B: Keyless — the key held in a vault, fetched per request
+### Option A: Keyless — the key held in your secret store, fetched per request (recommended)
 
 :::caution[The `honeycomb` credential driver was removed in v0.20.0]
 Warden used to mint Honeycomb API keys from a management key. That driver is gone: the
@@ -158,6 +133,32 @@ warden cred source create honeycomb-src \
 See [credential chaining](/federation/credential-chaining/) for the producer options —
 OpenBao/Vault, AWS Secrets Manager or GCP Secret Manager — and for templating a different
 key per team or per user.
+
+### Option B: Static API key in Warden ⚠️
+
+The quick start: Warden stores the ingest or configuration key itself.
+
+<p align="center"><img alt="Warden reads a static Honeycomb key from its encrypted storage and injects it to the Honeycomb API for every caller" src="/images/warden-prov-honeycomb-inline-apikey.png" width="860"></p>
+
+The key sits in Warden's encrypted storage and is injected for every caller — shortest to
+set up, weakest custody. Option A keeps it in the store that can rotate it; use this one to
+try the mount out, then move the key there.
+
+```bash
+warden cred source create honeycomb-src \
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://api.honeycomb.io \
+  -config=display_name=Honeycomb
+```
+
+Create a credential spec with your API key:
+
+```bash
+warden cred spec create honeycomb-ops \
+  -source honeycomb-src \
+  -config api_key=your-honeycomb-api-key
+```
 
 ### Option C: Vault/OpenBao as Credential Source
 
@@ -398,14 +399,13 @@ curl --cert client.pem --key client-key.pem \
 | **Rotation** | Manual -- generate a new key in Honeycomb and update the spec |
 | **Lifetime** | Does not expire unless deleted in Honeycomb |
 
-### Dynamic API Keys (Honeycomb Source Driver)
+### Chained Key
 
 | Aspect | Details |
 |--------|---------|
-| **Storage** | Key secret is captured at creation and managed by Warden |
-| **Rotation** | Automatic -- Warden creates a new key and deletes the old one on the configured rotation period |
-| **Lifetime** | Controlled by `key_ttl` in the spec config; keys are revoked (deleted) when the lease expires |
-| **Revocation** | On lease expiry or manual revocation, Warden calls `DELETE /2/teams/{team}/api-keys/{id}` |
+| **Storage** | Key stays in your secret store; Warden fetches it per mint and stores nothing |
+| **Rotation** | Rotate it in the store — the next mint picks up the new value |
+| **Lifetime** | Does not expire unless deleted in Honeycomb |
 
 **To rotate static credentials:**
 
@@ -416,14 +416,3 @@ curl --cert client.pem --key client-key.pem \
      -config api_key=your-new-api-key
    ```
 3. Delete the old key in Honeycomb
-
-**To rotate the management key (source driver):**
-
-1. Create a new management key in Honeycomb
-2. Update the credential source:
-   ```bash
-   warden cred source update honeycomb-src \
-     -config management_key_id=new-key-id \
-     -config management_key_secret=new-key-secret
-   ```
-3. Delete the old management key in Honeycomb

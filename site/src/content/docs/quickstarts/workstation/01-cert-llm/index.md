@@ -12,7 +12,7 @@ originates the mTLS leg.
 
 | Credential | Before this rung | After this rung |
 |------------|------------------|-----------------|
-| Anthropic API key | in your shell / `~/.claude/settings.json` | **only inside Warden** ✅ |
+| Anthropic API key | in your shell / `~/.claude/settings.json` | **never on the workstation** ✅ |
 | Client private key | — | on disk (`./certs/client.key`) — removed in [03](/quickstarts/workstation/03-spiffe-llm-mcp/) |
 
 ---
@@ -169,7 +169,7 @@ export ANTHROPIC_API_KEY="placeholder"
 claude
 ```
 
-Every prompt is now routed through Warden: the Console key lives only in Warden, and you can cap
+Every prompt is now routed through Warden: the Console key never reaches the workstation, and you can cap
 `model`/`max_tokens` centrally in the `anthropic-access` policy (proven in Step 7). (To persist
 it, put `ANTHROPIC_BASE_URL` under `env` in `~/.claude/settings.json`.)
 
@@ -260,11 +260,23 @@ against the caller's identity.
 
 ## Scorecard
 
-The **Anthropic API key is gone from the laptop** ✅ — it lives only in Warden, with central
-revocation and body-level policy. What's still on disk is the mTLS **client private key**
+The **Anthropic API key is gone from the laptop** ✅ — it never reaches the workstation, with
+central revocation and body-level policy. What's still on disk is the mTLS **client private key**
 (`./certs/client.key`): cert auth traded an API key for a private key. That's exactly what
 [**03 — SPIFFE → LLM + MCP**](/quickstarts/workstation/03-spiffe-llm-mcp/) removes. First, [**02**](/quickstarts/workstation/02-cert-llm-mcp/) adds an
 MCP server so we also stop storing MCP tokens.
+
+## In production
+
+This rung stores the Console key in Warden, which is why `cred spec create` warns that the
+spec stores a secret. In production, Warden need not hold one:
+
+- **Go keyless.** Anthropic's [keyless source](/credential-drivers/anthropic/) exchanges a
+  short-lived assertion from Warden for an Anthropic token through workload identity
+  federation, so there is no Console key anywhere.
+- **Or chain the key.** Keep the Console key in the secret store you already run and let
+  Warden fetch it per request with [credential chaining](/federation/credential-chaining/);
+  the spec names a `secret_spec` instead of carrying `api_key`.
 
 ## Troubleshooting
 

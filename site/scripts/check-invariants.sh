@@ -95,6 +95,12 @@ check "Discovery: no \`get_skill\` or \`(skill: …)\` description convention" \
   'get_skill|\(skill: [a-z0-9_-]+' \
   "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}" core/seed/skills
 
+# Provider intros said only a stored static key works, contradicting each page's
+# own chaining advice. Lead with keyless or chaining instead (v0.21.0).
+check "Provider intros: no \"One credential mode is supported: static\"" \
+  'One credential mode is supported: static' \
+  "$docs"
+
 # --- Pending checks -----------------------------------------------------------
 #
 # A check may only be enabled by the PR that removes the LAST occurrence of its

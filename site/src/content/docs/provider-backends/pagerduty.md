@@ -1,9 +1,9 @@
 ---
 title: "PagerDuty"
-description: "Proxy the PagerDuty API through Warden: mint an access token per request from OAuth2 client credentials held in a vault."
+description: "Proxy the PagerDuty API through Warden: inject an API token chained per request from your secret store, or stored in Warden."
 ---
 
-The PagerDuty provider enables proxied access to the PagerDuty REST API v2 through Warden. It forwards requests to PagerDuty endpoints (incidents, services, users, schedules, etc.) with automatic credential injection and policy evaluation. Two credential modes are supported: static API tokens (`apikey` source type) and OAuth2 client credentials (`oauth2` source type).
+The PagerDuty provider enables proxied access to the PagerDuty REST API v2 through Warden. It forwards requests to PagerDuty endpoints (incidents, services, users, schedules, etc.) with automatic credential injection and policy evaluation. Chain the API token from your secret store (recommended), or store it in Warden (`apikey` source type).
 
 ## How a request flows
 
@@ -65,7 +65,7 @@ key.
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- A **PagerDuty API Token** (from PagerDuty > Integrations > API Access Keys) **or** a **PagerDuty OAuth2 App** (client_id and client_secret from PagerDuty > Integrations > App Registration)
+- A **PagerDuty API Token** (from PagerDuty > Integrations > API Access Keys)
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
@@ -430,25 +430,3 @@ curl --cert client.pem --key client-key.pem \
      -config api_key=your-new-api-token
    ```
 3. Revoke the old token in PagerDuty
-
-### OAuth2 Client Credentials
-
-| Aspect | Details |
-|--------|---------|
-| **Storage** | Client credentials are stored on the credential source |
-| **Validation** | Spec is verified at creation by minting a test token and calling `GET /users/me` |
-| **Rotation** | Client credentials are managed in PagerDuty; bearer tokens are minted automatically |
-| **Lifetime** | Bearer tokens have a TTL set by PagerDuty's `expires_in` response field |
-
-Bearer tokens are minted on demand and cached for their TTL. When a token expires, Warden automatically mints a new one using the stored client credentials.
-
-**To rotate OAuth2 client credentials:**
-
-1. Generate new credentials in PagerDuty (Integrations > App Registration)
-2. Update the credential source:
-   ```bash
-   warden cred source update pagerduty-oauth-src \
-     -config=client_id=new-client-id \
-     -config=client_secret=new-client-secret
-   ```
-3. Revoke the old credentials in PagerDuty

@@ -2,7 +2,7 @@
 title: "Splunk"
 ---
 
-The Splunk provider enables proxied access to the Splunk REST API through Warden. It forwards requests to Splunk management endpoints (Search Jobs, Saved Searches, Dashboards, Indexes, Token Management, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header using Splunk's JWT token authentication (v7.3+). One credential mode is supported: static bearer tokens (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Splunk provider enables proxied access to the Splunk REST API through Warden. It forwards requests to Splunk management endpoints (Search Jobs, Saved Searches, Dashboards, Indexes, Token Management, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header using Splunk's JWT token authentication (v7.3+). Chain the token from your secret store (recommended), or store it in Warden (`apikey` source type).
 
 ## How a request flows
 

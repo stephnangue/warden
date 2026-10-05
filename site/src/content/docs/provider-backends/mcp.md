@@ -55,13 +55,14 @@ in whether the upstream can tell *who* the call was for.
 | **Delegated exchange** ✅ *best when the upstream supports it* | A token minted for **this user**, with the agent recorded as the actor | The user, and the agent acting for them |
 | **Chaining** ✅ *best fallback when the upstream has a plain OAuth token endpoint* | A fresh access token minted per request from **this user's** consented grant, held in OpenBao/Vault | The user |
 | **Keyless federation** ✅ *when the upstream federates Warden's issuer* | A token minted for an assertion describing the agent, and optionally the user | The agent |
+| **Chained static key** | A long-lived key held in your secret store, scoped by the read path | Whoever the path names — a team, or a person |
 | **Static inline** ⚠️ *discouraged* | One long-lived key, the same for everybody | Nobody in particular |
 | **OAuth2 browser consent** ⛔ *development only* | A token from one human's consent, shared by every caller of the spec | The person who happened to consent |
 
 The first three are all production-grade — pick whichever the upstream supports, in that
-order. Fall to **static inline** only when the upstream offers nothing better, such as a
-self-hosted server that authenticates one fixed bearer; even then the key at least stays
-inside Warden rather than on an agent host.
+order. When the upstream offers nothing better — a self-hosted server that authenticates
+one fixed bearer, say — **chain that key from your secret store**, so it stays where it is
+managed. Fall to **static inline** only when there is no store to chain from.
 
 **OAuth2 browser consent is not a production option at all.** It needs someone at a browser
 to provision, and the grant it captures belongs to one person while serving everyone. Use
@@ -131,6 +132,16 @@ Nothing is stored. As with the AWS providers, the KMS leg is optional and **reco
 production**: with a [`signer` stanza](/configuration/signer/) configured, the issuer's
 private key never lives in Warden.
 
+### Chained static key
+
+When the upstream accepts nothing but a fixed bearer, chaining still buys you custody: the
+key stays in the store that manages it, read per mint, and the read path scopes which
+callers reach which key. Nothing is minted — the key is served **verbatim**, which is the
+difference from the chaining row above, where an OAuth engine mints a fresh token per read.
+
+What the key represents is the path's choice: `{{user.team}}` in the path gives one key per
+team, `{{user.sub}}` one per person, `{{agent.sub}}` one per agent.
+
 ### Static inline ⚠️
 
 One long-lived API key, stored encrypted in Warden and injected for every caller.
@@ -138,9 +149,9 @@ One long-lived API key, stored encrypted in Warden and injected for every caller
 <p align="center"><img alt="Warden reads a static API key from its encrypted storage and injects it as a bearer token to the MCP server for every caller" src="/images/warden-prov-mcp-inline-static-key.png" width="860"></p>
 
 The upstream cannot distinguish callers, the key does not expire, and revoking it affects
-everyone at once. Use it when the upstream offers nothing better — a self-hosted server
-that authenticates a fixed bearer — and prefer any row above it. Even then, the key lives
-only in Warden and never on an agent host, which is the one thing this mode still buys you.
+everyone at once. The chained static key above is the same credential with better custody;
+use this only when there is no store to chain from. The key still never reaches an agent
+host.
 
 :::note[Credentials are cached]
 Whichever mode you choose, the minted credential is cached, so the fetch, exchange or
@@ -437,13 +448,54 @@ exception is a source that derives the audience from its own config, like the `h
 source in Option B. `assertion_user_claims` is opt-in and fails closed on a claim the
 user's login does not carry; omit it and the assertion describes the agent only.
 
-### Option D: Static inline ⚠️
+### Option D: Chained static key
 
-A single long-lived bearer, injected for every caller. Prefer any option above.
+For an upstream that authenticates one fixed bearer. The key lives in your store, and the
+**spec** names a `secret_spec` instead of carrying it. The producer reads it through the
+keyless source from Option B:
+
+```bash
+# Producer: the key, read from KV v2. The team comes from the user's claims.
+warden cred spec create mcp-key -json '{
+  "source": "mcp-vault-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_user_claims": "team",
+    "kv2_mount": "secret",
+    "secret_path": "mcp/{{user.team}}"
+  }
+}'
+
+# Consumer: a plain apikey source, with the key named on the spec
+warden cred source create svc-mcp-src -json '{
+  "type": "apikey"
+}'
+
+warden cred spec create mcp-creds -json '{
+  "source": "svc-mcp-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "secret_spec": "mcp-key"
+  }
+}'
+```
+
+The referenced payload supplies the key under `api_key`; name a different field with
+`secret_field`. See [credential chaining](/federation/credential-chaining/) for the other
+stores you can chain from.
+
+### Option E: Static inline ⚠️
+
+A single long-lived bearer, stored in Warden and injected for every caller. Prefer any
+option above.
 
 ```bash
 warden cred source create svc-mcp-src -json '{
-  "type": "api_key"
+  "type": "apikey"
 }'
 
 warden cred spec create mcp-creds -json '{
@@ -460,7 +512,7 @@ The minted credential is an `api_key`. This fits servers documenting a fixed
 `Authorization: Bearer <token>`; a server expecting the token in a non-`Authorization`
 header (e.g. `x-api-key`) needs a dedicated provider, not this one.
 
-### Option E: OAuth2 authorization-code — development only
+### Option F: OAuth2 authorization-code — development only
 
 :::danger[Not for production]
 This flow binds a **single human's browser consent** to a spec that every caller then

@@ -3,7 +3,7 @@ title: "Dynatrace"
 description: "Proxy the Dynatrace API through Warden: mint an access token per request from OAuth2 client credentials held in a vault."
 ---
 
-The Dynatrace provider enables proxied access to the Dynatrace REST API through Warden. It forwards requests to Dynatrace endpoints (Entities, Metrics, Logs, Problems, Settings, Tokens, etc.) with automatic credential injection and policy evaluation. Two authentication modes are supported: static API tokens (`apikey` source type) using the `Api-Token` authorization scheme, and OAuth2 client credentials (`oauth2` source type) using the `Bearer` authorization scheme. Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Dynatrace provider enables proxied access to the Dynatrace REST API through Warden. It forwards requests to Dynatrace endpoints (Entities, Metrics, Logs, Problems, Settings, Tokens, etc.) with automatic credential injection and policy evaluation. It takes an access token minted from OAuth2 client credentials (`oauth2` source type, `Bearer` scheme) or a static API token (`apikey` source type, `Api-Token` scheme): chain either secret from your secret store (recommended), or store it in Warden.
 
 ## How a request flows
 

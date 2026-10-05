@@ -305,6 +305,16 @@ compromised) agent has nothing to hand over.
 You climbed both axes — from a certificate-with-a-key to a keyless SVID, and from one secret
 removed to all of them. Same Claude Code, same workflow; the laptop just stopped holding the keys.
 
+## In production
+
+The SVID already removed the last secret from the workstation. What remains is on the
+server side: this rung stores the Anthropic key and the GitHub PAT in Warden, which is why
+each `cred spec create` warns. In production, keep both in the secret store you already run
+and let Warden fetch them per request with
+[credential chaining](/federation/credential-chaining/), or replace the Anthropic key
+outright with its [keyless source](/credential-drivers/anthropic/) — so neither the
+workstation nor Warden holds a long-lived upstream secret.
+
 ## Troubleshooting
 
 - **GitHub `HTTP 404`** — the gateway URL must end `…/gateway/` (trailing slash).

@@ -12,8 +12,8 @@ never holds the token.
 
 | Credential | Before this rung | After this rung |
 |------------|------------------|-----------------|
-| GitHub MCP token | in `~/.claude.json` | **only inside Warden** ✅ |
-| Anthropic API key | (removed in 01) | only inside Warden ✅ |
+| GitHub MCP token | in `~/.claude.json` | **never on the workstation** ✅ |
+| Anthropic API key | (removed in 01) | never on the workstation ✅ |
 | Client private key | — | on disk (`./certs/client.key`) — removed in [03](/quickstarts/workstation/03-spiffe-llm-mcp/) |
 
 > This rung builds on **01** and reuses the identical cert stack. Finish 01 first (its Steps
@@ -101,7 +101,7 @@ warden write github-mcp/config <<'EOF'
 { "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/cert/", "max_body_size": 10485760 }
 EOF
 
-# Credential — GitHub PAT, injected upstream as a bearer token (stays inside Warden)
+# Credential — GitHub PAT, injected upstream as a bearer token (never on the workstation)
 warden cred source create github-src -type=github -rotation-period=0 \
   -config=github_url=https://api.github.com
 
@@ -136,12 +136,9 @@ warden write auth/cert/role/github-user \
   cred_spec_name="github-ops"
 ```
 
-> **Want the interactive OAuth consent flow instead of a PAT?** Warden supports GitHub-App
-> user-to-server OAuth (`auth_method=authorization_code` + `warden cred spec connect`, which runs
-> a loopback listener and opens your browser for one-time consent — the host CLI handles this
-> fine). It's the better fit for real use (per-user consent, refresh tokens), but needs a GitHub
-> App and a callback URL; a PAT keeps this tutorial's setup short and demonstrates the same point
-> — the token lives only in Warden.
+> **Why a stored PAT?** It keeps this tutorial short and makes the same point — the token never
+> reaches the workstation. Beyond a tutorial, keep the token in your secret store and chain it
+> instead; see [In production](#in-production) below.
 
 ### Step 3 — smoke-test through the tunnel
 
@@ -232,10 +229,18 @@ gateway, recorded, and never executed.**
 
 ## Scorecard
 
-The **GitHub token is gone from the laptop** ✅ — injected per request inside Warden, with
+The **GitHub token is gone from the laptop** ✅ — injected per request by Warden, with
 central revocation (delete the role) and one audit trail. Combined with 01, **no API key and no
 MCP token** remain. What's *still* on disk is the mTLS **client private key**
 (`./certs/client.key`). Removing that is the whole point of [**03 — SPIFFE → LLM + MCP**](/quickstarts/workstation/03-spiffe-llm-mcp/).
+
+## In production
+
+This rung stores the PAT in Warden, which is why `cred spec create` warns that the spec
+stores a secret. In production, keep the token in the secret store you already run and let
+Warden fetch it per request with [credential chaining](/federation/credential-chaining/) —
+the `github-ops` spec names a `secret_spec` instead of carrying `token`, and rotating the
+token is a change in the store, not in Warden. The same goes for 01's Anthropic key.
 
 ## Troubleshooting
 
