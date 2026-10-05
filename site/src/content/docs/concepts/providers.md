@@ -165,6 +165,31 @@ Some read-only or protocol-negotiation paths can be served without
 authentication (for example, a Git smart-HTTP probe that needs the upstream's
 `WWW-Authenticate` challenge before the client retries with credentials).
 
+### When Warden itself refuses
+
+A request can fail at Warden before the upstream sees it: the identity has expired, policy
+denies the call, the credential cannot be minted, or the upstream does not answer within the
+mount's `timeout`. Where the client is an SDK built for the upstream, a provider answers
+these failures **in the upstream's own error format**, so the SDK parses the error and
+shows Warden's reason instead of failing on an unfamiliar body:
+
+| Provider | A failure Warden raises is answered as |
+|---|---|
+| `aws` | The error each AWS service sends, in its own protocol — query and REST-XML, EC2, S3, JSON — so a refused SigV4 call reads like any other AWS error. |
+| `openai` | OpenAI's error body, with a `warden_`-prefixed `code` (`warden_permission_denied`, `warden_upstream_timeout`, …). |
+| `anthropic` | Anthropic's error body, with the error type for the status. |
+| `mcp`, `mcp_aws` | A JSON-RPC error that echoes the call's `id`, so the client's session survives — see [MCP](/provider-backends/mcp/#when-a-call-is-refused). |
+
+Every message starts with `Warden:`, so it cannot be mistaken for one from the upstream,
+and the status is the one Warden chose — the format changes, the status does not. Other
+providers answer with Warden's generic JSON error.
+
+The status says whether a retry can help. A mint the upstream **refused** — a rejected
+grant, a `401` or `403` from a token endpoint — answers `403`, which clients do not retry;
+an upstream that was **unreachable or briefly unable** to issue answers `503`, which they
+do. When the mount's `timeout` passes before the upstream answers, the client gets
+`504 Gateway Timeout`.
+
 ## MCP and Non-MCP Providers
 
 Server-side every provider is the same gateway. What differs is **how an agent
@@ -180,8 +205,8 @@ talks to it** — and that splits providers into two kinds:
   [Discovery → Connective for non-MCP, advisory for MCP](/concepts/discovery-and-skills/#connective-for-non-mcp-advisory-for-mcp)).
 - **Non-MCP providers** (everything else — `vault`, `github`, `openai`, `aws`,
   `rds`, `rest`, …) front a REST, DB, or cloud API. The agent makes the
-  **request itself over HTTP**, to the gateway URL it reads from the role's
-  description (see [Discovery and Skills](/concepts/discovery-and-skills/)), presenting
+  **request itself over HTTP**, to the gateway URL that `list_roles` returns for the
+  role (see [Discovery and Skills](/concepts/discovery-and-skills/)), presenting
   its identity on each call.
 
 Either way the **role** rides in the gateway URL (`…/role/<role>/gateway/`, or

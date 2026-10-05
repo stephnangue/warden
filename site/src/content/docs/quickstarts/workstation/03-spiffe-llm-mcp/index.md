@@ -60,7 +60,7 @@ claude --version
 Download the **Warden CLI** onto your `PATH` (swap `darwin_arm64` for `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.20.0
+VER=0.21.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -112,7 +112,7 @@ Register these **before** starting Warden — it fails closed without an availab
 
 ```bash
 docker compose up -d warden ghostunnel
-docker compose logs warden       # "starting HTTPS server address=127.0.0.1:8400"
+docker compose logs warden       # "starting HTTPS server address=0.0.0.0:8400"
 docker compose logs ghostunnel   # "using SPIFFE Workload API as certificate source"
 curl -s http://127.0.0.1:8200/v1/sys/health    # 200 ⇒ mTLS via SVID works end-to-end
 ```
@@ -260,7 +260,8 @@ curl -sS http://127.0.0.1:8200/v1/github-mcp/role/github/gateway/ \
   -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
        "params":{"name":"delete_repository","arguments":{"owner":"me","repo":"demo"}}}'
-# {"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed."}  (403)
+# {"jsonrpc":"2.0","id":2,"error":{"code":-32090,"message":"Warden: Tool 'delete_repository' not allowed.",
+#   "data":{"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed.",…}}}  (403)
 ```
 
 The audit log now holds two decisions under the same keyless SVID — `allowed: true` for the read,
@@ -287,7 +288,7 @@ Warden's policy, and lands in one audit trail.
 
 4. **Policy + audit (Step 9):** the read tool's audit entry shows
    `auth.principal_id = "spiffe://example.org/ghostunnel"` with `allowed:true`; the `delete_*`
-   call returns `403 insufficient_permissions` and logs `allowed:false` — same keyless identity,
+   call returns `403` with JSON-RPC error `-32090` and logs `allowed:false` — same keyless identity,
    no repository changed.
 
 The workstation holds **zero long-lived credentials** — so even a fully cooperative (or fully

@@ -28,11 +28,32 @@ EOF
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `proxy_domains` | list(string) | `["localhost"]` | Domains Warden listens on for proxied requests. In production, set this to your Warden server's domain. |
-| `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB). |
-| `timeout` | duration | per provider | How long a **single** proxied call may take. The `mcp` and `mcp_aws` providers default to `60s`; others carry their own default. |
+| `max_body_size` | int | `10485760` (10 MB) | Maximum request body size in bytes (max 100 MB). It also caps the body Warden reads for policy; a larger one is refused with `413`. |
+| `timeout` | duration | per provider | How long a **single** proxied call may take; when it passes before the upstream answers, the client gets `504`. The `mcp` and `mcp_aws` providers default to `60s`; others carry their own default. |
 | `listen_timeout` | duration | `10m` | **`mcp` / `mcp_aws` only.** Bounds a long-lived stream — `subscriptions/listen` and the legacy SSE GET — instead of `timeout`. |
 | `auto_auth_path` | string | Required | Path to the auth mount used for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`). See [JWT auth](/auth-methods/jwt/) and [Certificate auth](/auth-methods/cert/). |
 | `default_role` | string | — | Auth role used when the request names none. It is the **lowest**-precedence source, not the highest — see [Selecting a role](/concepts/roles/#selecting-a-role). |
+
+## Request bodies and policy
+
+Most providers that front a token-authenticated HTTP API — the LLM, Git, observability
+and ITSM providers, `vault`, `kubernetes` — read a request's body before policy runs, so a
+[condition](/concepts/cel-conditions/) can gate on its fields as `request.data.<field>`.
+The [`rest`](/provider-backends/rest/#request-bodies-and-policy) provider does so when its
+`parse_request_body` setting is on. The `mcp` providers parse the JSON-RPC call instead, for
+[MCP policy](/concepts/mcp/); the cloud providers (`aws`, `azure`, `gcp`, …) do not parse
+bodies.
+
+| Body | What policy sees |
+|---|---|
+| `application/json`, `text/json`, any `+json` type, or no `Content-Type` | Its fields. A body that is not valid JSON is refused with `400`. |
+| `application/x-www-form-urlencoded` | Its fields. |
+| Anything else — multipart, octet-stream, text, XML, `application/jsonl` | No fields; the body is streamed untouched. |
+
+Media types are matched case-insensitively, and a body is read only up to the mount's
+`max_body_size`. Because an unread body has no fields, write body conditions to fail
+closed — `has(request.data.amount) && request.data.amount <= 100` — never with a default
+such as `orValue(0)`, which lets a relabelled body through.
 
 ## Secondary user authentication
 

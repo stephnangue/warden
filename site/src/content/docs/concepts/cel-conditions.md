@@ -32,13 +32,18 @@ pages link here rather than repeating it.
 | Namespace | Fields |
 | --- | --- |
 | `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
-| `agent` | `principal`, `role`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject}`), `token_type`, `token_ttl_seconds`, `token_expires_at` |
+| `agent` | `principal`, `role`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, issuer}`), `token_type`, `token_ttl_seconds`, `token_expires_at` |
 | `user` | `present`, `principal`, `role`, `namespace`, `metadata.<key>`, `actors`, `token_type`, `token_ttl_seconds`, `token_expires_at`. There is no `user.policies` ([why](#13-what-user-does-not-give-you)) |
 | `now` | the request timestamp |
 | `call` | `method`, `tool`, `args.<key>`, `batch_index` — **MCP policies only** |
 
 `agent` is the request's authenticating principal and the **sole authorizer**. `user` is
 the optional second principal the agent acts for; it is identity-only and never authorizes.
+
+`actors` is the token's verified RFC 8693 `act` chain, outermost first. An actor carries
+`issuer` only when its `act` layer named one, so read it behind a guard. To require that
+the party acting now was vouched for by your IdP:
+`size(agent.actors) > 0 && has(agent.actors[0].issuer) && agent.actors[0].issuer == 'https://idp.example.com'`.
 
 Values you will reference often:
 
@@ -65,7 +70,8 @@ Functions available: the CEL standard library (`has()`, `size()`, `in`, `startsW
 **Runtime typing** — `request.data.amount` is compared as the type it arrived as; the
 string `"1000"` does *not* satisfy `> 1000`, it denies. **Absent-is-OK** — when a missing
 field should pass, use `has(...)` or `x.?field.orValue(default)` rather than a bare
-reference.
+reference — but never default a **body** field on a gateway: a body Warden did not read has
+no fields, so the default lets it through ([recipe 17](#17-optional-field-with-a-safe-default)).
 :::
 
 ---
@@ -340,6 +346,23 @@ path "db/issue-grant" {
 }
 ```
 
+This is for API paths, where `request.data` is always read. **On a gateway, do not default
+a body field.** Warden reads a body only when it is JSON (`application/json`, `text/json`,
+any `+json` type, or unlabelled) or form data, up to the mount's `max_body_size`; any other
+type streams through with no fields. A caller who labels the body `text/plain` therefore
+passes `request.data.?amount.orValue(0) <= 100` with any amount. Fail closed instead:
+
+```hcl
+path "billing-api/role/+/gateway/v1/withdrawals" {
+  capabilities = ["create"]
+  condition    = "has(request.data.amount) && request.data.amount <= 100"
+}
+```
+
+See [Request bodies and policy](/provider-backends/configuration/#request-bodies-and-policy)
+for which providers read bodies, and [`rest`](/provider-backends/rest/#request-bodies-and-policy)
+for its `parse_request_body` setting.
+
 ### 18. Closed key set
 
 Reject any request carrying a body field outside an allowed set:
@@ -360,9 +383,12 @@ path "admin/*" {
 }
 ```
 
-`request.client_ip` is only as trustworthy as your proxy chain — it derives from
-`X-Real-IP` / `X-Forwarded-For`, which a client can forge if those headers are not
-stripped at the edge.
+`request.client_ip` is the address of the connection, unless that connection comes from a
+load balancer listed in the listener's
+[`trusted_proxies`](/configuration/listener/#trusted-proxies): only then does Warden take the
+client's address from `X-Forwarded-For` (or `X-Real-IP`), so a client cannot forge its IP by
+sending those headers itself. Behind a load balancer, list it in `trusted_proxies`, or
+every request resolves to the balancer's address and this condition sees that instead.
 
 ### 20. Business hours, weekdays only
 

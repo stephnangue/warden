@@ -162,6 +162,13 @@ namespace fails to load. See
   reading an **absent** field denies — the safe default for an authorization
   gate. To treat a missing value as acceptable, say so explicitly with optional
   syntax: `request.data.?ttl_seconds.orValue(0) <= 3600`.
+- **A body Warden did not read has no fields.** On a gateway, `request.data` holds the
+  body only when it is JSON (`application/json`, `text/json`, any `+json` type, or
+  unlabelled) or form data, within the mount's `max_body_size`; any other type streams
+  through with no fields. So a default like `orValue(0)` lets a caller past a body
+  condition by relabelling the body. Gate a body field with `has()` instead —
+  `has(request.data.amount) && request.data.amount <= 100` — so an unread body is
+  refused. See [Request bodies and policy](/provider-backends/configuration/#request-bodies-and-policy).
 - **Typing is runtime.** `request.data` / `call.args` values are typed from the
   request, so `request.data.amount > 1000` is a real numeric comparison and a
   string `"1000"` does **not** satisfy it (it denies, fail-closed).

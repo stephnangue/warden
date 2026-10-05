@@ -126,13 +126,16 @@ chain — the subjects it is being made *for* — and the audit entry records th
 The chain is the cryptographically-verified RFC 8693 `act` chain from the caller's token,
 extracted from the signed JWT `act` claim and persisted on the token, so it survives
 transparent-token caching. Because every actor is verified at source, each `actors[]`
-entry is just `{subject}` — there is no `verified` field.
+entry is `{subject}`, plus `issuer` when that `act` layer named one — there is no
+`verified` field.
 
 **User attribution.** When a request carries a [user principal](/concepts/delegation/)
 — a human or another agent the agent acts for, presented by secondary transparent
 authentication — both the request and response entries stamp `auth.user` with the user's
-`subject`, token ID, and namespace. The mint the user scopes is thereby traceable to that
-user, while the **raw user credential is never logged** — only the identity is recorded.
+`subject`, token ID, namespace, the `role_name` the user's token was validated under, and
+the user token's **own** `act` chain as `actors` — who handled the user's token before the
+agent presented it. The mint the user scopes is thereby traceable to that user, while the
+**raw user credential is never logged** — only the identity is recorded.
 
 **MCP decisions.** For [MCP](/concepts/mcp/) traffic the entry records which rule decided the
 call, under `auth.policy_results.mcp_decision`: the JSON-RPC method, the tool or resource
@@ -199,8 +202,8 @@ request with a bad token logs `error` and no `auth`, because no identity existed
 | `token_ttl`, `expires_at` | Seconds remaining; Unix expiry. |
 | `namespace_id`, `namespace_path` | Token's namespace. |
 | `created_by_ip` | Where the token was issued from. |
-| `actors` | The verified RFC 8693 delegation chain, each entry `{subject}`. |
-| `user` | The user principal — `subject`, `token_id`, `namespace_id`. |
+| `actors` | The **agent** token's verified RFC 8693 delegation chain, outermost first. Each entry is `{subject}`, plus `issuer` when that `act` layer named one. |
+| `user` | The user principal — `subject`, `token_id`, `namespace_id`, `namespace_path`, `role_name`, and `actors`, the **user** token's own `act` chain in the same shape. Empty fields are omitted; `namespace_path` is empty in the root namespace. |
 
 :::note[There is no `auth.metadata`]
 A token's login-derived metadata is **not** written as its own field. It reaches the log only
@@ -272,7 +275,7 @@ another in a log and for nothing else. **Never gate on it.**
 | `source_name`, `source_type`, `spec_name` | Which [source and spec](/concepts/credentials/) produced it. |
 | `revocable` | Whether Warden can revoke it. |
 | `data` | The secret values — **HMAC'd by default**. |
-| `metadata` | Non-secret descriptive attributes. In clear; salt-able per key. |
+| `metadata` | Non-secret descriptive attributes. In clear; salt-able per key. For a federated Anthropic, OpenAI, GCP or token-exchange mint, `subject` is the `sub` of the token the upstream verified and `actor` its `act.sub` — under a delegation spec, the user and the agent acting for them. |
 
 ### `response.auth_result`
 
@@ -460,7 +463,8 @@ request also carried a user principal, recorded under `auth.user`.
     "user": {
       "subject": "U012ABCDEF",
       "token_id": "wtkn_7a1b...",
-      "namespace_id": "root"
+      "namespace_id": "root",
+      "role_name": "employees"
     },
     "namespace_id": "root"
   }

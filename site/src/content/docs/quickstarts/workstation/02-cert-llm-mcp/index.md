@@ -60,7 +60,7 @@ inject. Download the **Warden CLI** onto your `PATH` (swap `darwin_arm64` for `d
 `linux_*`):
 
 ```bash
-VER=0.20.0
+VER=0.21.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -202,12 +202,15 @@ curl -sS http://127.0.0.1:9000/v1/github-mcp/role/github-user/gateway/ \
   -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
        "params":{"name":"delete_repository","arguments":{"owner":"me","repo":"demo"}}}'
-# {"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed."}  (403)
+# {"jsonrpc":"2.0","id":2,"error":{"code":-32090,"message":"Warden: Tool 'delete_repository' not allowed.",
+#   "data":{"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed.",…}}}  (403)
 ```
 
-The audit entry for that call shows `allowed: false` with the offending `tool`. Ask Claude to do
-the same ("delete the demo repo") and it gets the identical refusal — the model can *propose* a
-dangerous tool, but Warden won't run it. **A hallucinated or injected write is contained at the
+The refusal is a JSON-RPC error for that one call (code `-32090`, echoing its `id`), so an MCP
+client fails the call and keeps its session. The audit entry for that call shows
+`allowed: false` with the offending `tool`. Ask Claude to do the same ("delete the demo repo")
+and it gets the identical refusal, then carries on with the next call — the model can
+*propose* a dangerous tool, but Warden won't run it. **A hallucinated or injected write is contained at the
 gateway, recorded, and never executed.**
 
 ---
@@ -223,7 +226,8 @@ gateway, recorded, and never executed.**
    holds only the gateway URL.
 5. **Audit is real:** the `tools/list` call has an entry with `auth.role_name = "github-user"`,
    `allowed:true`; the injected token is salted to `hmac-sha256:…`.
-6. **Policy bites:** the `delete_*` `tools/call` returns `403 insufficient_permissions`, shows
+6. **Policy bites:** the `delete_*` `tools/call` returns `403` with JSON-RPC error `-32090`
+   (`insufficient_permissions` under `error.data`), shows
    `allowed:false` with the tool name in the audit log, and no repository was changed.
 
 ## Scorecard

@@ -58,7 +58,7 @@ Download the **Warden CLI** onto your `PATH` (Apple Silicon shown — swap `darw
 `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.20.0
+VER=0.21.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -228,8 +228,12 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 curl -sS http://127.0.0.1:9000/v1/anthropic/role/anthropic-user/gateway/v1/messages \
   -H 'content-type: application/json' \
   -d '{"model":"some-other-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
-# {"errors":["permission denied"]}   (HTTP 403)
+# {"type":"error","error":{"type":"permission_error","message":"Warden: permission denied"},"request_id":"…"}   (HTTP 403)
 ```
+
+The refusal comes back in Anthropic's own error shape, so Claude Code and the Anthropic SDKs
+show it as a normal API error; the `Warden:` prefix tells you it came from the gateway, not
+from Anthropic.
 
 In the audit tail the two calls sit side by side — same `id` and `role`, but `allowed: true` on
 the first and `allowed: false` on the second. That's the whole point made real: the limit lives
@@ -251,7 +255,7 @@ against the caller's identity.
    `auth.role_name = "anthropic-user"` and `response.credential.type = "api_key"` (the key value
    salted to `hmac-sha256:…`).
 6. **Policy bites:** the pinned-model curl returns `200`, the other-model curl returns `403`
-   `permission denied`, and both show in the audit log — `allowed:true` and `allowed:false`
+   `permission_error` (`Warden: permission denied`), and both show in the audit log — `allowed:true` and `allowed:false`
    under the same identity.
 
 ## Scorecard

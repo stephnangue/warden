@@ -603,13 +603,43 @@ path "cloudflare-mcp/role/+/gateway*" {
 EOF
 ```
 
-When a request hits the MCP policy gate and is denied, Warden returns HTTP 403
-with a structured JSON body and an RFC 6750 `WWW-Authenticate` header; MCP client
-SDKs surface this to the agent as a tool-call failure with an actionable message.
-The audit log records the matched rule and the offending tool/parameter.
 An MCP mount with **no MCP policy in scope denies every call** (`no_mcp_policy`).
 There is no pass-through default: to leave a mount open, write a wildcard MCP
 policy and let the token's scopes enforce authorization upstream.
+
+The policy is enforced on **every POST** to the mount, whatever its `Content-Type`:
+a `tools/call` relabelled `text/plain`, or sent with no `Content-Type`, is judged on
+what it asks for, and a POST body that is not JSON-RPC is refused. GET (the SSE
+stream) and DELETE (session close) carry no call, so only the capability policy
+applies to them.
+
+### When a call is refused
+
+A refused call is answered with a **JSON-RPC error** for that call: code `-32090`,
+the call's own `id`, and a message starting `Warden:`. The client fails that one
+call and keeps its session, so the agent's next call goes through:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "error": {
+    "code": -32090,
+    "message": "Warden: Tool 'delete_repository' not allowed.",
+    "data": {
+      "error": "insufficient_permissions",
+      "error_description": "Tool 'delete_repository' not allowed.",
+      "request_id": "host.local/Kp3nZ2wQxT-000164"
+    }
+  }
+}
+```
+
+The status is `403`, with an RFC 6750 `WWW-Authenticate` header carrying the same
+`error_description`. `error` and `error_description` sit under `error.data` — a
+client that read them at the top level before v0.21.0 reads them there now. A batch
+or a notification, which has no single `id` to echo, is answered with `"id": null`.
+The audit log records the matched rule and the offending tool or parameter.
 
 ## Step 5: Point an MCP Client at Warden
 
