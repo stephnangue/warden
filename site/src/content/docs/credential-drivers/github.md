@@ -29,7 +29,7 @@ warden cred spec create gh-app \
   -config=secret_spec=github-key-in-vault
 ```
 
-The **producer** is the spec that yields that secret. Any of the three below can serve it;
+The **producer** is the spec that yields that secret. Any of the four below can serve it;
 pick the one where the secret already lives. Each is itself keyless, so nothing is stored
 at either hop.
 
@@ -66,7 +66,20 @@ warden cred spec create github-key-in-sm \
   -config=subject_token_source=warden_identity
 ```
 
-`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+**Azure Key Vault — `secret_read`**
+
+```bash
+warden cred spec create github-key-in-kv \
+  -source=azure-keyless \
+  -config=mint_method=secret_read \
+  -config=vault_name=acme-prod-kv \
+  -config=secret_name=github-app-private-key \
+  -config=tenant_id=00000000-0000-0000-0000-000000000000 \
+  -config=client_id=33333333-3333-3333-3333-333333333333 \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless`, `gcp-keyless` and `azure-keyless` are ordinary
 [keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
 
 **Scoped secrets: An App key per organisation.** A producer's locator key templates on verified
@@ -97,6 +110,44 @@ The driver always issues the `github_token` type. In `app` mode the token is **d
 
 - **Spec verification** — validates a spec at create/update time. In `pat` mode it confirms the token with a lightweight identity call; in `app` mode the spec is exercised by a trial mint against the GitHub API.
 - **Not rotatable — by design.** GitHub App installation tokens are ephemeral (~1h) and are simply re-minted on demand, and GitHub exposes no API to rotate a PAT. There is nothing long-lived on the source to rotate, so the driver does not implement source rotation.
+
+## Scoping App tokens
+
+An installation token covers every repository the App is installed on, with every
+permission it was granted — unless the spec narrows it. Two `app` spec keys do, and
+GitHub enforces the result on the token itself:
+
+- **`repositories`** — comma-separated **bare** repository names, at most 500. The
+  installation already fixes the owner, so `acme/api` is refused; write `api`.
+- **`permissions`** — comma-separated `name:level` pairs, where the level is `read`,
+  `write` or `admin`, such as `contents:read,pull_requests:write`.
+
+```bash
+warden cred spec create ci-reader -json '{
+  "source": "github-prod",
+  "config": {
+    "mint_method": "app",
+    "app_id": "123456",
+    "installation_id": "7891011",
+    "secret_spec": "github-key-in-vault",
+    "repositories": "api,web",
+    "permissions": "contents:read,issues:read"
+  }
+}'
+```
+
+A scope can only narrow what the App was granted; asking for more is refused by GitHub
+at mint with a `422`. Both keys apply to `mint_method=app` only — a PAT's scope is fixed
+when it is created — and are refused on a `local` source.
+
+:::caution[Changed in v0.21.0]
+The singular **`repository`** key is refused, on write and at mint; use `repositories`.
+A spec update merges into the stored config, so clear the old key in the same write
+(`"repository": ""`). A stored `permissions` value used to be ignored and is now
+enforced, so a spec may mint a narrower token than before. A caller holding a cached
+token sees a narrowed scope when that token expires, within the hour. See
+[Upgrading from v0.20.0](/upgrade/from-v0-20/#7-githubs-singular-repository-is-refused).
+:::
 
 ## Examples
 
@@ -171,6 +222,8 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `private_key` | For `app` (inline) | — | PEM-encoded RSA private key for the GitHub App (PKCS1 or PKCS8). Omit when chained via `secret_spec`. |
 | `app_id` | For `app` | — | GitHub App ID (JWT issuer). |
 | `installation_id` | For `app` | — | Installation ID the token is minted for. |
+| `repositories` | No | all the installation's | `app` only: comma-separated bare repository names the token is limited to, at most 500. |
+| `permissions` | No | all the App's | `app` only: comma-separated `name:level` pairs (`read`, `write` or `admin`) the token is limited to. |
 | `token` | For `pat` (inline) | — | The Personal Access Token to pass through. Omit when chained via `secret_spec`. |
 | `secret_spec` | No | — | Source the App private key / PAT from another cred spec via [credential chaining](/federation/credential-chaining/) (keyless). |
 | `secret_field` | No | — | Field of the referenced `secret_spec`'s credential holding the key/PAT, when its payload has multiple keys. |

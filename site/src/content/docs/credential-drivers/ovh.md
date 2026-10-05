@@ -10,7 +10,7 @@ This driver supports a **keyless mode** — use it instead of storing a secret i
 
 The OVHcloud driver mints credentials for **OVHcloud** APIs and Public Cloud services. It talks to OVHcloud's OAuth2 token endpoint and cloud API to issue either short-lived **bearer tokens** or an existing **S3 key pair** served from elsewhere. The choice is made per **spec** through the `mint_method` parameter.
 
-The privileged, long-lived secret is an OAuth2 service account — its `client_id` and `client_secret` — held in the **source** config. One source can back many specs that mint different credential shapes from the same service account.
+The driver authenticates as an OAuth2 service account — its `client_id` and `client_secret`. Chained, that pair stays in your secret store and is fetched per request; with a stored secret, the **source** holds it. One source can back many specs that mint different credential shapes from the same service account.
 
 ## Keyless (via chaining)
 

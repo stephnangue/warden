@@ -24,12 +24,15 @@ the **source**; the target audience, scope, and token-exchange wiring live on th
 
 ## Sourcing the client secret keylessly
 
-The token endpoint requires client authentication (`client_secret_*` or a
-`private_key_jwt` client assertion). Rather than storing that secret inline, a source can
+Most token endpoints require client authentication (`client_secret_*` or a
+`private_key_jwt` client assertion) — one that accepts a
+[public client](#public-clients--client_authnone) needs none at all. Rather than storing
+that secret inline, a source can
 **chain it**: set `secret_spec` (and optional `secret_field`) to fetch the `client_secret`
 — or the `private_key` for `client_auth=private_key_jwt` — from another cred spec at mint
-time. `client_id` stays in config and the inline secret is omitted, so the exchange
-becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`,
+time. The referenced payload carries the `client_id` beside the secret, so both are
+omitted from the source — setting either alongside `secret_spec` is refused — and the
+exchange becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`,
 `private_key_jwt`, and both legs of an ID-JAG exchange. Set `secret_spec` on the
 **source** (client authentication is a source concern) — not on the spec. See
 [credential chaining](/federation/credential-chaining/).
@@ -108,6 +111,28 @@ empty, and cannot span a path segment; any `.` or `..` segment it composes is re
 after substitution. A caller therefore cannot steer the template at a key it was not
 meant to reach.
 
+## Public clients — `client_auth=none`
+
+Some token endpoints accept a **public client** (RFC 6749 §2.1): the caller is identified
+by the subject token alone, and no client credential is presented. Set `client_auth=none`
+and the source holds nothing — keyless without chaining. Warden sends `client_id` only
+when one is set.
+
+```bash
+warden cred source create idp-public -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/v1/token",
+    "client_auth": "none",
+    "client_id": "warden-gateway"
+  }
+}'
+```
+
+With `none`, `client_secret`, `private_key`, `client_assertion_alg`,
+`client_assertion_kid`, `secret_spec`, `secret_field` and `secret_cache_ttl` are refused:
+a public client presents no client credential.
+
 ## Grant modes
 
 - **`rfc8693`** — `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` with
@@ -183,16 +208,21 @@ credential's audit metadata records the exchanged `subject`.
 
 ### Keyless (recommended)
 
-**Chained client secret (`private_key_jwt`)** — Warden signs a client assertion with a private key fetched from another cred spec, so no secret is stored inline.
+**Chained client secret (`private_key_jwt`)** — Warden signs a client assertion with a private key fetched from another cred spec, so no secret is stored inline. The referenced payload carries `client_id` beside `private_key`.
 
 ```bash
-warden cred source create idp-pkjwt \
-  -type=token_exchange \
-  -config=token_url=https://idp.example.com/oauth2/v1/token \
-  -config=client_auth=private_key_jwt \
-  -config=client_id=warden-gateway \
-  -config=secret_spec=idp-client-key
+warden cred source create idp-pkjwt -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/v1/token",
+    "client_auth": "private_key_jwt",
+    "secret_spec": "idp-client-key"
+  }
+}'
 ```
+
+**Public client (`none`)** — no client credential at all; see
+[Public clients](#public-clients--client_authnone).
 
 ### Inline secret (discouraged)
 
@@ -282,11 +312,11 @@ Keys for `warden cred source create <name> -type=token_exchange -config=key=valu
 |-----|----------|---------|-------------|
 | `token_url` | Yes | — | Token endpoint (HTTPS) of the STS/IdP performing the exchange. |
 | `grant` | No | `rfc8693` | Exchange grant: `rfc8693`, `jwt_bearer`, or `id_jag`. |
-| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_basic`, `client_secret_post`, `private_key_jwt`, or `kms_private_key_jwt`. |
-| `client_id` | Yes | — | OAuth2 client ID Warden presents to the token endpoint. |
+| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_basic`, `client_secret_post`, `private_key_jwt`, `kms_private_key_jwt`, or `none` (a [public client](#public-clients--client_authnone)). |
+| `client_id` | Inline auth | — | OAuth2 client ID Warden presents to the token endpoint. Optional with `client_auth=none`; omitted when sourced via `secret_spec`, whose payload carries it. |
 | `client_secret` | For secret auth | — | Client secret (masked on read). Omit when sourced via `secret_spec`. |
 | `private_key` | For `private_key_jwt` | — | PEM RSA private key that signs the client assertion (masked). Omit when sourced via `secret_spec`. |
-| `secret_spec` | No | — | Source the `client_secret`/`private_key` from another cred spec via [credential chaining](/federation/credential-chaining/) instead of storing it inline. |
+| `secret_spec` | No | — | Source the whole client credential — `client_id` with the `client_secret`/`private_key` — from another cred spec via [credential chaining](/federation/credential-chaining/) instead of storing it inline. Refused with `client_auth=none`. |
 | `secret_field` | No | — | Field of the referenced `secret_spec`'s credential holding the secret (when its payload has multiple keys). |
 | `secret_cache_ttl` | No | *(off)* | Cache the chained secret for a bounded TTL, keyed on the source. |
 | `client_assertion_alg` | No | `RS256` | Signing algorithm for the client assertion. `RS256` is the only supported value. |

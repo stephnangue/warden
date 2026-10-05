@@ -1,6 +1,6 @@
 ---
 title: "Azure"
-description: "Proxy Azure APIs through Warden: federate the agent and the user it acts for into a short-lived Entra ID access token, injected per request."
+description: "Proxy Azure APIs through Warden: federate the agent into a short-lived Entra ID access token, injected per request — no client secret stored."
 ---
 
 The Azure provider proxies Azure API traffic through Warden. The agent presents its own
@@ -9,27 +9,30 @@ asserted, injects it as a bearer, and forwards. The agent never holds a client s
 
 ## How a request flows
 
-This mount can carry **two principals** — the agent, and the user it is acting for — and
-both can be described to Entra ID in the same assertion.
+The recommended setup stores **no Azure credentials at all**. The mount can carry **two
+principals** — the agent, and the user it is acting for — but only the agent is described
+to Entra ID.
 
-The recommended setup stores **no Azure credentials at all**.
-
-<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, presents it to Azure STS as a client assertion, and injects the returned access token as a bearer token to the Azure service API" src="/images/warden-prov-azure-oidc-fed.png" width="860"></p>
+<p align="center"><img alt="An agent presents its identity to Warden, which builds an assertion, has an external KMS sign it, presents it to Azure STS as a client assertion, and injects the returned access token as a bearer token to the Azure service API" src="/images/warden-prov-azure-oidc-fed.png" width="860"></p>
 
 1. The user authenticates and the agent holds their ID token.
 2. The agent calls Warden presenting **both** credentials and asserting a role. Warden
    authenticates each against its own auth mount.
 3. The asserted role selects the credential spec. Warden builds the assertion that spec
-   calls for — agent claims, plus the user's under a nested `warden_user` claim when the
-   spec opts in — and sends it to an **external KMS** unsigned.
+   calls for — under the `minimal` profile new Azure specs use, the registered claims
+   only, naming the agent — and sends it to an **external KMS** unsigned.
 4. The KMS returns it signed. No signing key lives in Warden.
 5. Warden presents it to **Entra ID** as a federated client assertion, in place of a
    client secret.
 6. Entra ID verifies it against the trusted issuer and returns an access token.
 7. Warden injects that token as `Authorization: Bearer <token>` and forwards.
 
-Because the user's claims reach Entra ID inside the assertion, a federated-credential
-policy can condition on them.
+An Entra ID federated identity credential matches the assertion's issuer, subject and
+audience **exactly** and reads no other claim. So the assertion carries the agent's
+composite subject and nothing Entra cannot use, and the user — though authenticated at
+step 2, and available to [policy](/concepts/cel-conditions/#agent-acting-for-a-user) — is
+never disclosed to Entra ID. See
+[Assertion claims](/federation/assertion-claims/#when-a-user-is-disclosed).
 
 :::note[Steps 3–6 run only on a cache miss]
 Warden caches the minted credential, so most requests skip from step 2 to step 7. The
@@ -52,17 +55,16 @@ the client secret in encrypted storage and rotates it through Microsoft Graph.
 
 Steps 3 and 4 become a storage read instead of a signing call, and step 5 presents the
 client secret rather than an assertion. The user is still authenticated at step 2 and
-policy can still require them, but **the user no longer reaches Entra ID** — there is no
-assertion to carry them.
+policy can still require them.
 
 ## Credential modes
 
 | Mode | Supported | How |
 |---|---|---|
-| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`; the only mode that carries the user through to Entra ID |
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`. **Nothing stored.** |
 | **Stored root → short-lived mint** | Yes | `auth_method=static`; a client secret in Warden storage, rotated via Microsoft Graph |
 | **Static inline** | No | Every mode mints a fresh token |
-| **Chaining** | No | An `azure` source takes no `secret_spec` |
+| **Chaining** | Not as a consumer | An `azure` source takes no `secret_spec`. It is a chaining **producer**: `mint_method=secret_read` serves a Key Vault secret to other specs |
 | **Delegated user token** | No | The upstream receives a token minted for the app, not a forwarded user token |
 
 See the [Azure credential driver](/credential-drivers/azure/) for every source and spec key.
@@ -70,7 +72,9 @@ See the [Azure credential driver](/credential-drivers/azure/) for every source a
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- A Microsoft Entra ID **App Registration** (service principal) with a client secret
+- A Microsoft Entra ID **App Registration** (service principal). Keyless, it needs a
+  federated credential trusting Warden's issuer and no client secret; with a stored
+  secret, it needs a client secret
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
@@ -83,7 +87,10 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 3. Click **Register** and note the following values:
    - **Application (client) ID** — used as `client_id`
    - **Directory (tenant) ID** — used as `tenant_id`
-4. Go to **Certificates & secrets** > **New client secret**, set a description and expiry, then copy the **Value** — used as `client_secret`.
+4. Keyless: go to **Certificates & secrets** > **Federated credentials** and add one for
+   Warden's issuer (see [3a](#3a-keyless-federation-recommended)). With a stored secret
+   instead: **Certificates & secrets** > **New client secret**, set a description and
+   expiry, then copy the **Value** — used as `client_secret`.
 
 ### Azure Roles & Permissions
 
@@ -113,7 +120,7 @@ If you want Warden to automatically rotate service principal credentials, the so
 3. Add `Application.ReadWrite.OwnedBy` (sufficient for rotating the app's own credentials). Use `Application.ReadWrite.All` only if Warden manages credentials for other applications.
 4. Click **Grant admin consent** for your tenant.
 
-> **Note:** Without Graph API permissions, credential rotation will be unavailable but all other features (token minting, proxying, Key Vault secret fetching) will work normally.
+> **Note:** Graph permissions matter only with a stored secret. Without them, credential rotation will be unavailable but all other features (token minting, proxying, Key Vault secret fetching) will work normally.
 
 ### Network Access
 
@@ -164,7 +171,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with `auto_auth_path`. This allows clients to authenticate with their JWT directly — no explicit Warden login required:
+Configure the provider with `auto_auth_path`. This allows clients to authenticate with their JWT directly — no explicit Warden login required. `auto_auth_path` must be in the same write as the settings it goes with: a write that leaves the mount without one is refused, and a refused write changes nothing.
 
 ```bash
 warden write azure/config <<EOF
@@ -191,10 +198,9 @@ on the [Azure credential driver page](/credential-drivers/azure/).
 
 ### 3a. Keyless federation (recommended)
 
-A federated source still names the app registration (`tenant_id`, `client_id`), because
-that is the identity Entra ID is being asked to issue for. What it does **not** hold is the
-secret: `client_secret` and `secret_id` are rejected outright, and there is no
-`rotation_period` because there is nothing to rotate.
+A federated source holds **no secret**: `client_secret` and `secret_id` are rejected
+outright, and there is no `rotation_period` because there is nothing to rotate. The app
+registration it acts as is named on each spec.
 
 `audience` defaults to `api://AzureADTokenExchange`, which is what Entra ID expects for a
 federated credential.
@@ -204,19 +210,12 @@ warden cred source create azure-src -json '{
   "type": "azure",
   "config": {
     "auth_method": "oidc_federation",
-    "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "subscription_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
     "audience": "api://AzureADTokenExchange"
   }
 }'
 ```
 
-On the Azure side, add a **federated credential** to that app registration pointing at
-Warden's issuer — see [Keyless credentials](/federation/keyless-credentials/).
-
-A spec on a keyless source **must** set `subject_token_source`, and
-`assertion_user_claims` is what carries the user into the assertion:
+A spec on a keyless source **must** set `subject_token_source`:
 
 ```bash
 warden cred spec create azure-ops -json '{
@@ -228,33 +227,59 @@ warden cred spec create azure-ops -json '{
     "subject_token_source": "warden_identity",
     "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
     "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "resource_uri": "https://management.azure.com/",
-    "assertion_user_claims": "sub,email"
+    "resource_uri": "https://management.azure.com/"
   }
 }'
 ```
 
+The spec is stored with
+[`assertion_profile=minimal`](/federation/assertion-claims/#the-minimal-profile): the
+assertion carries the registered claims only, and its `sub` is the agent's composite
+`wid:<namespaceID>:<mountAccessor>:<principalID>`. On the Azure side, add a
+**federated credential** to the spec's app registration with Warden's issuer URL, that
+exact subject, and the audience — see [Keyless credentials](/federation/keyless-credentials/).
+Read the subject from the audit log, or from the `subject` recorded on the credential.
+
 Three things about a federated spec are easy to get wrong:
 
-- **`client_id` is still required.** It names the **workload** service principal the token
-  is minted for, which need not be the one on the source.
+- **`client_id` is still required.** It names the **workload** app registration the token
+  is minted for, and must be a UUID.
 - **`tenant_id` is required too.** On a static spec it is optional and defaults to the
   source's; on a federated one it must be explicit.
 - **`client_secret` and `secret_id` must be omitted** — there is no stored secret to name,
   and leaving one behind is rejected rather than ignored.
 
-Only `bearer_token` works over federation. **`key_vault_secret` is rejected on a federated
-spec** (*"not supported over federation"*) — fetching a Key Vault secret needs the static
-path below.
+Both mint methods work over federation. **`secret_read`** reads a Key Vault secret as the
+app registration the spec names — for an agent, or as the producer at the far end of a
+[credential chain](/federation/credential-chaining/):
 
-`assertion_user_claims` is opt-in and **fails closed** on a claim the user's login does not
-carry; omit it and the assertion describes the agent only.
+```bash
+warden cred spec create azure-kv -json '{
+  "source": "azure-src",
+  "config": {
+    "mint_method": "secret_read",
+    "subject_token_source": "warden_identity",
+    "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "vault_name": "my-key-vault",
+    "secret_name": "my-secret"
+  }
+}'
+```
+
+:::caution[`key_vault_secret` is removed]
+`mint_method=key_vault_secret` fails every mint, and a write naming it is refused. Move
+such specs to `secret_read` (type `key_value`, inferred). Writes also refuse
+`azure_db_iam_token`, the retired `scopes` key (use `resource_uri`), and a `client_id` or
+`tenant_id` that is not a UUID. See
+[Upgrading from v0.20.0](/upgrade/from-v0-20/#6-azure-key_vault_secret-specs-fail-every-mint).
+:::
 
 ### 3b. Stored service principal
 
-The source holds the app registration's client secret. `secret_id` is what lets Warden
-rotate it through Microsoft Graph, and `rotation_period` is integer seconds in JSON
-(`2592000` = 30 days).
+With a stored secret, the source holds the app registration's client secret. `secret_id`
+is what lets Warden rotate it through Microsoft Graph, and `rotation_period` is integer
+seconds in JSON (`2592000` = 30 days).
 
 ```bash
 warden cred source create azure-static -json '{
@@ -265,8 +290,7 @@ warden cred source create azure-static -json '{
     "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
     "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
     "client_secret": "<your-client-secret>",
-    "secret_id": "<secret-id-for-rotation>",
-    "subscription_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    "secret_id": "<secret-id-for-rotation>"
   }
 }'
 ```
@@ -282,9 +306,8 @@ Verify the source:
 warden cred source read azure-static
 ```
 
-A static spec names the workload service principal and its secret.
-
-**`bearer_token`** — mints an Entra ID access token for `resource_uri`:
+**`bearer_token`** — a static spec names the workload service principal, its secret, and
+the secret's id:
 
 ```bash
 warden cred spec create azure-ops -json '{
@@ -295,24 +318,20 @@ warden cred spec create azure-ops -json '{
     "mint_method": "bearer_token",
     "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
     "client_secret": "<workload-sp-client-secret>",
+    "secret_id": "<workload-secret-id>",
     "resource_uri": "https://management.azure.com/"
   }
 }'
 ```
 
-**`key_vault_secret`** — fetches a secret straight from Azure Key Vault. Its credential
-type cannot be inferred from the mint method, so pass `type` explicitly:
+**`secret_read`** — on a static source, the source's own service principal reads the
+secret, so the spec names no app registration:
 
 ```bash
 warden cred spec create azure-kv -json '{
   "source": "azure-static",
-  "type": "azure_bearer_token",
-  "min_ttl": 600,
-  "max_ttl": 3600,
   "config": {
-    "mint_method": "key_vault_secret",
-    "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "client_secret": "<workload-sp-client-secret>",
+    "mint_method": "secret_read",
     "vault_name": "my-key-vault",
     "secret_name": "my-secret"
   }
@@ -536,8 +555,11 @@ curl --cert client.pem --key client-key.pem \
 ### "credential not found" or "invalid credential type" errors
 
 1. Verify the credential spec exists and is configured correctly
-2. Ensure the credential type is `azure_bearer_token`
-3. Check that the `client_id` and `client_secret` are valid
+2. Ensure the credential type is `azure_bearer_token` for a token, or `key_value` for a
+   `secret_read`
+3. Keyless: check that the federated credential's subject matches the agent's composite
+   subject exactly. With a stored secret: check that the `client_id` and `client_secret`
+   are valid
 
 ### Token acquisition failures
 
@@ -552,9 +574,11 @@ curl --cert client.pem --key client-key.pem \
 
 ### Key Vault secret retrieval failures
 
-1. Ensure the service principal has the `Key Vault Secrets User` role on the vault
+1. Ensure the reading principal — the spec's app registration when federated, the
+   source's service principal otherwise — has the `Key Vault Secrets User` role on the vault
 2. Verify the `vault_name` and `secret_name` are correct
 3. Check that the Key Vault firewall allows access from the Warden server
+4. A disabled secret, one not yet valid or past its expiry, or one over 25 KB is refused
 
 ### Rotation not available
 

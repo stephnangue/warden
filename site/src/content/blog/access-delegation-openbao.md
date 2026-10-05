@@ -2,9 +2,20 @@
 title: "Per-User Access Delegation for AI Agents, on OpenBao"
 description: "How Warden leverages OpenBao to enforce access delegation: an AI agent calls GitHub as a specific human, and the vault refuses any agent the user never authorized."
 publishDate: 2026-09-17
+updatedDate: 2026-10-05
 tags: [openbao, delegation, identity, mcp]
 heroImage: /images/blog/warden-blog-openbao-access-delegation-for-ai-agent.png
 ---
+
+> **Updated 2026-10-05.** Since v0.21.0, Warden's own assertion *is* the RFC 8693
+> delegation token this post builds toward: when a spec discloses the user, `sub` is
+> the user — qualified by `warden_namespace`, which a verifier binds beside it — and
+> the agent sits in `act`. `warden_user` and `warden_sub` are gone. The CEL program
+> below is written for v0.20.0; on v0.21.0 read the user from `claims.sub`, the agent
+> from `claims.act.sub`, and the user's projected claims, such as `authorized_agent`,
+> from `claims.warden_metadata`. See
+> [Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user) and
+> [Upgrading from v0.20.0](/upgrade/from-v0-20/).
 
 Almost every "the agent acts on behalf of the user" system built today is
 **impersonation, not delegation**. The distinction is RFC 8693's own (§1.1): under

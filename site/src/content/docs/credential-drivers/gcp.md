@@ -8,16 +8,17 @@ title: "GCP"
 This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
 :::
 
-The GCP driver brokers **Google Cloud** access. It holds a **service-account JSON key**
-in the **source** config and exchanges that key for short-lived **OAuth2 access tokens**,
-either for the source service account itself or, by **impersonation**, for another service
-account it is authorized to act as. The minted token is what Warden injects into the
-workload's Google Cloud API request.
+The GCP driver brokers **Google Cloud** access. It obtains short-lived **OAuth2 access
+tokens** — keylessly, by exchanging a Warden identity assertion through Workload Identity
+Federation, or by exchanging a **service-account JSON key** held in the **source** config —
+either for that principal itself or, by **impersonation**, for another service account it
+is authorized to act as. It can also read a **Secret Manager** secret. The minted token is
+what Warden injects into the workload's Google Cloud API request.
 
-The privileged secret — the SA key — lives only in the source config and is masked on
-read. Each **spec** selects a `mint_method` and the scopes, target account, and lifetime
-of the token to issue. An operator reaches for this driver to hand workloads scoped,
-expiring Google Cloud tokens without ever exposing the underlying key.
+With a stored key, the SA key lives only in the source config and is masked on read.
+Each **spec** selects a `mint_method` and the scopes, target account, and lifetime of the
+token to issue. An operator reaches for this driver to hand workloads scoped, expiring
+Google Cloud tokens without ever exposing a long-lived key.
 
 ## Keyless (OIDC federation)
 
@@ -25,13 +26,20 @@ Set `auth_method = "oidc_federation"` on the source to hold **no service-account
 Warden exchanges an [identity assertion](/federation/oidc-issuer/) through **Workload
 Identity Federation** at `sts.googleapis.com` for a Google access token. Set the full
 `workload_identity_provider` resource name on the source; the spec's `mint_method` is
-`access_token` or `impersonated_access_token` (the latter impersonates a
-`target_service_account`), and it sets `subject_token_source` (`warden_identity` or
-`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/).
+`access_token`, `impersonated_access_token` (which impersonates a
+`target_service_account`) or `secret_read`, and it sets `subject_token_source`
+(`warden_identity` or `agent_identity`). See
+[Keyless credential sources](/federation/keyless-credentials/).
+
+A GCP attribute condition can read any claim of the assertion. When a spec
+[discloses a user](/federation/assertion-claims/#when-a-user-is-disclosed), `sub` is the
+user's raw id: map `attribute.warden_namespace=assertion.warden_namespace` and bind it
+beside `sub` in the condition, and read the agent from `assertion.act.sub`.
 
 ## Credential issued
 
-Both mint methods issue a credential of type `gcp_access_token`. It is **dynamic** — it
+Both token mint methods issue a credential of type `gcp_access_token`; `secret_read`
+issues a `key_value`, described below. A token is **dynamic** — it
 carries the token's natural expiry as its TTL — but it is **not revocable**: a GCP access
 token cannot be invalidated early and simply expires. See
 [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
@@ -138,8 +146,9 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `lifetime` | No | `3600s` | Requested token lifetime (impersonation only) |
 
 A `subject_token_source=warden_identity` spec also accepts the assertion-shaping keys
-(`assertion_audience`, `assertion_resource`, `assertion_metadata_claims`,
-`assertion_user_claims`, `assertion_algorithm`) — see
+(`assertion_profile`, `assertion_audience`, `assertion_resource`,
+`assertion_metadata_claims`, `assertion_user_claims`, `assertion_algorithm`,
+`assertion_ttl`) — see
 [Assertion claims](/federation/assertion-claims/).
 
 ## See Also

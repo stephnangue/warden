@@ -23,8 +23,8 @@ identity assertion describing the agent and trades it at STS for temporary crede
    SDK expects an access key, and **asserts a role** as it does so. Warden authenticates
    the identity against `auto_auth_path` and verifies the SigV4 signature.
 3. The asserted role selects the credential spec, and Warden builds the assertion that
-   spec calls for — agent claims, scoped to one audience. It goes to an **external KMS**
-   unsigned.
+   spec calls for — the agent's subject, with its role and any projected metadata as
+   **session tags**, scoped to one audience. It goes to an **external KMS** unsigned.
 4. The KMS returns it signed. No signing key ever lives in Warden.
 5. Warden presents the assertion to **STS** as `AssumeRoleWithWebIdentity`, against the
    spec's `role_arn`.
@@ -113,10 +113,11 @@ Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local d
 :::
 
 On the AWS side, the keyless path needs an **IAM OIDC identity provider** pointed at
-Warden's issuer, and target roles whose trust policy accepts
-`sts:AssumeRoleWithWebIdentity` from it. That setup lives in
-[Keyless credentials](/federation/keyless-credentials/), which covers the issuer and the
-trust policy together.
+Warden's issuer, and target roles whose trust policy allows both
+`sts:AssumeRoleWithWebIdentity` and **`sts:TagSession`** from it — new specs carry the
+agent's role as a session tag, and STS refuses a tagged token without the second action.
+That setup lives in [Keyless credentials](/federation/keyless-credentials/), which covers
+the issuer and the trust policy together.
 
 There is **no IAM user and no access key** to create. If you cannot federate and must fall
 back to stored keys, [Appendix: IAM setup for stored keys](#appendix-iam-setup-for-stored-keys)
@@ -173,6 +174,11 @@ EOF
 
 - `auto_auth_path`: the auth backend Warden uses to validate the embedded credential (JWT or certificate).
 - `default_role`: the **fallback** role, used only when a request carries no role of its own.
+
+A config write **merges** into the stored config: a key the write leaves out keeps its
+current value, so `warden write aws/config timeout=60s` changes the timeout and nothing
+else. To reset a key, name it — `tls_skip_verify=false`, `ca_data=""`, `timeout=30s`. A
+refused write changes nothing.
 
 The role that actually applies is resolved per request, highest wins:
 
@@ -242,8 +248,37 @@ warden cred spec create developer -json '{
 }'
 ```
 
-The target role's trust policy must accept the assertion — federated `AssumeRoleWithWebIdentity`
-against Warden's issuer, not the IAM-user trust shown in the Prerequisites. See
+The spec is stored with `assertion_profile=aws`: the assertion's `sub` is the agent's
+composite `wid:…` subject, and the agent's role travels as the `warden_role`
+[session tag](/federation/assertion-claims/#the-aws-profile), with each key listed in
+`assertion_metadata_claims` as a tag of its own. The target role's trust policy must
+accept it — federated `AssumeRoleWithWebIdentity` against Warden's issuer, plus
+`sts:TagSession`, not the IAM-user trust shown in the Prerequisites:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/warden.example.com"
+      },
+      "Action": ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
+      "Condition": {
+        "StringEquals": {
+          "warden.example.com:aud": "sts.amazonaws.com",
+          "aws:RequestTag/warden_role": "aws-user"
+        }
+      }
+    }
+  ]
+}
+```
+
+The `aws:RequestTag/warden_role` condition pins the role to one Warden role; drop it to
+trust every agent the issuer vouches for. To mint without tags — and without
+`sts:TagSession` — set `assertion_profile=default` on the spec. See
 [Keyless credentials](/federation/keyless-credentials/) for the IAM OIDC provider setup.
 
 Over `auth_method=oidc_federation`, three mint methods are available: `sts_assume_role`,
@@ -661,6 +696,29 @@ The provider includes specialized processors for:
 
 Standard S3 Access Points **are fully supported**. The AWS SDK places the Access Point ARN in the request path, and Warden correctly routes these requests.
 
+## How Warden reports its own failures
+
+When Warden itself fails a SigV4 request — authentication, policy, credential issuance —
+it answers the way the target AWS service would, so the SDK parses the error, shows its
+real cause, and retries only what is transient. The protocol is inferred from the
+request: S3, EC2, the query protocol (STS, IAM, SNS…), REST-XML (S3 Control, Route 53,
+CloudFront), or JSON and CBOR. The message always starts with `Warden: `, so a reader can
+tell Warden's answer from AWS's.
+
+| Failure | Status | Query / REST-XML | EC2 | S3 | JSON |
+|---|---|---|---|---|---|
+| Authentication (bad or expired identity) | `403` | `InvalidClientTokenId` | `AuthFailure` | `InvalidAccessKeyId` | `UnrecognizedClientException` |
+| Signature does not verify | `403` | `SignatureDoesNotMatch` | `AuthFailure` | `SignatureDoesNotMatch` | `InvalidSignatureException` |
+| Denied by policy | `403` | `AccessDenied` | `UnauthorizedOperation` | `AccessDenied` | `AccessDeniedException` |
+| Bad request | `400` | `ValidationError` | `ValidationError` | `InvalidRequest` | `ValidationException` |
+| Upstream or issuer unavailable | `503` | `ServiceUnavailable` | `Unavailable` | `ServiceUnavailable` | `ServiceUnavailableException` |
+| Internal | `500` | `InternalFailure` | `InternalError` | `InternalError` | `InternalFailure` |
+
+When **STS refuses** to issue the credential, its own code and status pass through,
+with the message `Warden: could not obtain AWS credentials: <STS's message>`; STS's
+`IDPCommunicationError` is answered `503` so the SDK retries it. A mount **timeout**
+answers `504`, with the unavailable code. A request that is not SigV4-signed keeps Warden's JSON error.
+
 ## Troubleshooting
 
 ### "Signature does not match" errors
@@ -671,7 +729,7 @@ Standard S3 Access Points **are fully supported**. The AWS SDK places the Access
    ```
 2. Check that the Host header matches what the SDK signed.
 3. Ensure Warden is listening on the resolved address.
-4. In JWT mode, ensure the JWT has not expired — an expired JWT will cause a signature mismatch because the SDK signs with the old token value.
+4. Warden answers a signature that does not verify with `SignatureDoesNotMatch` (`InvalidSignatureException` on JSON services, `AuthFailure` on EC2), status `403`.
 
 ### Requests fail to reach Warden
 
@@ -679,12 +737,23 @@ Standard S3 Access Points **are fully supported**. The AWS SDK places the Access
 2. `proxy_domains` doesn't match the endpoint URL configured in your AWS SDK.
 3. Firewall rules are blocking the connection.
 
-### Request returns 401/403
+### Request returns 403
 
-1. Check that `auto_auth_path` points to a valid, enabled auth backend (e.g., `auth/jwt/`).
-2. Ensure the auth role exists and has a valid `cred_spec_name`.
-3. For JWT mode: verify the JWT is valid and not expired.
-4. For cert mode: verify the client certificate is signed by the trusted CA configured in the cert auth backend.
+Read the error code: Warden answers in the service's own protocol (see
+[How Warden reports its own failures](#how-warden-reports-its-own-failures)).
+
+- **An authentication code** — `InvalidClientTokenId`, `AuthFailure` (EC2),
+  `InvalidAccessKeyId` (S3) or `UnrecognizedClientException` (JSON services):
+  1. Check that `auto_auth_path` points to a valid, enabled auth backend (e.g., `auth/jwt/`).
+  2. Ensure the auth role exists and has a valid `cred_spec_name`.
+  3. For JWT mode: verify the JWT is valid and not expired — an expired JWT is the
+     usual cause.
+  4. For cert mode: verify the client certificate is signed by the trusted CA configured in the cert auth backend.
+- **An access-denied code** — `AccessDenied`, `UnauthorizedOperation` (EC2) or
+  `AccessDeniedException`: the request authenticated, and a Warden policy refused it.
+- **STS's own code**, with a message starting `Warden: could not obtain AWS credentials:`
+  — STS refused the assume-role. With `assertion_profile=aws`, a missing
+  `sts:TagSession` in the trust policy is the usual cause.
 
 ### S3 Control API returns 403
 

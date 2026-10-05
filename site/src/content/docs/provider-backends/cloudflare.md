@@ -1,6 +1,6 @@
 ---
 title: "Cloudflare"
-description: "Proxy the Cloudflare API and R2 through Warden: the API token and R2 keys stay in Warden rather than on agent hosts."
+description: "Proxy the Cloudflare API and R2 through Warden: the API token and R2 keys stay in your secret store, fetched per request — never on agent hosts."
 ---
 
 The Cloudflare provider enables proxied access to Cloudflare APIs through Warden. It supports two authentication modes, auto-detected per request:
@@ -14,6 +14,10 @@ The Cloudflare provider enables proxied access to Cloudflare APIs through Warden
 - A **Cloudflare account** with:
   - An API token (from Cloudflare Dashboard > My Profile > API Tokens) for the REST API
   - R2 API credentials (access key ID + secret access key) for Object Storage — generate via Cloudflare Dashboard > R2 > Manage R2 API Tokens
+- A secret store to keep them in — a Vault/OpenBao KV v2 mount, AWS Secrets Manager, GCP
+  Secret Manager or Azure Key Vault — reached through a
+  [keyless source](/federation/keyless-credentials/). Storing them in Warden instead is the
+  quick start ([Option B](#option-b-stored-in-warden-quick-start))
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
@@ -96,32 +100,74 @@ warden read cloudflare/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static Keys
+Cloudflare issues no short-lived credential to federate for, so the token has to come
+from somewhere. The recommended place is the secret store that already holds it.
+
+### Option A: Chained from your secret store (recommended)
+
+A `cloudflare` source stores **nothing** — not even config. Each spec names, in its own
+`secret_spec`, the spec that reads the credential from your store; Warden fetches it per
+request, as the caller, and keeps nothing. See the
+[Cloudflare credential driver](/credential-drivers/cloudflare/) for every key.
+
+First, the producer: a keyless read of the secret holding `api_token` and/or
+`access_key_id` + `secret_access_key`. Here, a KV v2 secret at `secret/cloudflare/prod`
+read through a keyless Vault source:
+
+```bash
+warden cred spec create cloudflare-from-vault -json '{
+  "source": "vault-keyless",
+  "config": {
+    "mint_method": "kv2_read",
+    "kv2_mount": "secret",
+    "secret_path": "cloudflare/prod",
+    "subject_token_source": "warden_identity"
+  }
+}'
+```
+
+Then the `cloudflare` source and the spec the role binds:
+
+```bash
+warden cred source create cloudflare-src -json '{
+  "type": "cloudflare",
+  "config": {}
+}'
+
+warden cred spec create cloudflare-ops -json '{
+  "source": "cloudflare-src",
+  "config": {
+    "secret_spec": "cloudflare-from-vault"
+  }
+}'
+```
+
+The type, `cloudflare_keys`, is inferred. The spec serves whatever the secret holds — the
+API token, the R2 pair, or both — so one secret can back dual-mode access. When the token is
+stored under another field name, set `secret_field` to it. The credential is served for
+30 minutes (`secret_cache_ttl` to change it) and then fetched again, so rotating the token
+in the store takes effect without touching Warden.
+
+`vault-keyless` is an ordinary [keyless source](/federation/keyless-credentials/); an
+AWS, GCP or Azure `secret_read` spec serves just as well as the producer.
+
+### Option B: Stored in Warden (quick start)
 
 <p align="center"><img alt="Warden reads the Cloudflare API token from its encrypted storage and injects it to the Cloudflare API for every caller" src="/images/warden-prov-cloudflare-inline-apikey.png" width="860"></p>
 
-Create a Cloudflare credential source and spec. You can configure both modes or just the one you need:
-
-:::caution[This provider cannot chain its credential from a vault]
-Unlike most providers, Cloudflare's credential cannot be
-[chained](/federation/credential-chaining/). It consumes a `cloudflare_keys` credential,
-which **requires a `local` source** — a `secret_spec` is not honored, and the spec still
-demands `api_token` (or the R2 pair) inline. Chaining it would need a `static_cloudflare`
-mint method that the Vault driver has never implemented.
-
-So the token does live in Warden's encrypted storage on this mount. What you still get is
-that it never sits on an agent host, every use is policy-checked, and revocation is
-central — delete the spec.
-:::
+To try the provider without a secret store, put the credential on a spec of the built-in
+`local` source. It then lives in Warden's encrypted storage — never on an agent host, every
+use policy-checked, revocation central — but it is a stored secret: the write warns, and a
+server at `keyless_enforcement_level=enforce` refuses it. Move to Option A for production.
 
 **Dual-mode (API + R2):**
 
 ```bash
-warden cred source create cloudflare-src \
+warden cred source create cloudflare-local \
   -type=local
 
 warden cred spec create cloudflare-ops \
-  -source cloudflare-src \
+  -source cloudflare-local \
   -type=cloudflare_keys \
   -config mint_method=static_keys \
   -config access_key_id=your-r2-access-key-id \
@@ -133,7 +179,7 @@ warden cred spec create cloudflare-ops \
 
 ```bash
 warden cred spec create cloudflare-api-only \
-  -source cloudflare-src \
+  -source cloudflare-local \
   -type=cloudflare_keys \
   -config mint_method=static_keys \
   -config api_token=your-cloudflare-api-token
@@ -143,41 +189,20 @@ warden cred spec create cloudflare-api-only \
 
 ```bash
 warden cred spec create cloudflare-r2-only \
-  -source cloudflare-src \
+  -source cloudflare-local \
   -type=cloudflare_keys \
   -config mint_method=static_keys \
   -config access_key_id=your-r2-access-key-id \
   -config secret_access_key=your-r2-secret-access-key
 ```
 
-### Option B: Vault/OpenBao as Credential Source
+`secret_spec` is not supported on a `local` source.
 
-Store your Cloudflare credentials in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Cloudflare credentials (e.g., at `secret/cloudflare/prod` with at least `api_token` and/or `access_key_id` + `secret_access_key` fields)
-- An AppRole configured for Warden access
-
-```bash
-warden cred source create cloudflare-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
-
-warden cred spec create cloudflare-ops \
-  -source cloudflare-vault-src \
-  -type=cloudflare_keys \
-  -config mint_method=static_cloudflare \
-  -config kv2_mount=secret \
-  -config secret_path=cloudflare/prod
-```
-
-The KV v2 secret at `secret/cloudflare/prod` should contain at least `api_token` (for API mode) and/or `access_key_id` + `secret_access_key` (for R2 mode).
+:::caution[`static_cloudflare` on an `hvault` source is gone]
+`cloudflare_keys` accepts a `local` or `cloudflare` source only. A spec that read the
+credential with `mint_method=static_cloudflare` on an `hvault` source moves to Option A: a
+`kv2_read` producer on that Vault, chained through a `cloudflare` source.
+:::
 
 Verify:
 
@@ -443,7 +468,15 @@ aws s3 ls s3://my-bucket/ \
 
 ## Token Management
 
-### Static Keys
+### Chained (Option A)
+
+| Aspect | Details |
+|--------|---------|
+| **Storage** | In your secret store. Warden stores nothing on the source or the spec |
+| **Rotation** | Rotate the token where it is stored; Warden picks it up when the served credential expires (30 minutes by default, `secret_cache_ttl`) |
+| **Lifetime** | Served for `secret_cache_ttl`, then fetched again; it also expires with the secret it was read from |
+
+### Stored in Warden (Option B)
 
 | Aspect | Details |
 |--------|---------|
@@ -451,7 +484,7 @@ aws s3 ls s3://my-bucket/ \
 | **Rotation** | Manual — regenerate in Cloudflare Dashboard and update the spec |
 | **Lifetime** | Static — no expiration or auto-refresh |
 
-**To rotate static credentials:**
+**To rotate stored credentials:**
 
 1. Generate new credentials in Cloudflare Dashboard (R2 > Manage R2 API Tokens for R2 keys, My Profile > API Tokens for API tokens)
 2. Update the credential spec with the fields you use:

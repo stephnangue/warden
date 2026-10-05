@@ -2,14 +2,39 @@
 title: "Anthropic"
 ---
 
-The Anthropic provider enables proxied access to the Anthropic API through Warden. It streams requests to Anthropic endpoints (messages, models) with automatic API key injection and policy evaluation on AI request fields. Credentials are injected via the `x-api-key` header. One credential mode is supported: static API keys (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Anthropic provider enables proxied access to the Anthropic API through Warden. It streams requests to Anthropic endpoints (messages, models) with credential injection and policy evaluation on AI request fields. The recommended credential needs no API key at all: an `anthropic` source exchanges a Warden identity assertion for a short-lived Anthropic token through workload identity federation, injected as `Authorization: Bearer`. Where an API key is needed, chain it from your secret store, or store it in Warden as the quick start; a key is injected as `x-api-key`.
 
 ## How a request flows
 
-This mount injects an **`api_key`** credential into the `x-api-key` header, and adds
-`anthropic-version: 2023-06-01`. The question is where that API key lives.
+The recommended setup holds **no Anthropic key anywhere**. Warden mints a short-lived
+identity assertion for the agent and exchanges it at Anthropic for a token that acts as one
+Anthropic **service account**:
 
-The recommended setup keeps it in the vault that manages it, read per request.
+1. The agent calls Warden with its own identity, asserting a role.
+2. The asserted role selects the credential spec — an `oauth_bearer_token` spec on an
+   `anthropic` source.
+3. Warden builds the assertion the spec calls for and has the issuer sign it — in an external
+   KMS, where one is configured.
+4. Warden exchanges it at Anthropic's token endpoint (no client secret) under the spec's
+   federation rule, for a token bound to the spec's service account.
+5. Warden injects it as `Authorization: Bearer <token>`, with the mount's
+   `anthropic-version`, and forwards.
+
+A federated token is issued for one workspace and already binds it, so the mount sends no
+`anthropic-workspace-id` with it. See the
+[Anthropic credential driver](/credential-drivers/anthropic/).
+
+:::note[Steps 3–4 run only on a cache miss]
+Warden caches the token until shortly before it expires, so most requests skip from step 2
+to step 5. The entry is keyed by namespace, the agent's token id and the spec name — plus
+the user's token id when the mount carries a user.
+:::
+
+### Chained: an API key from your store
+
+Where an API key is required, keep it in the vault that manages it and read it per request.
+The mount injects an **`api_key`** credential into the `x-api-key` header, and the mount's
+`anthropic-version`.
 
 <p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Anthropic API key from an external vault at a path templated by the user's team and the agent's environment, and injects it to the Claude API" src="/images/warden-prov-anthropic-vault-apikey.png" width="860"></p>
 
@@ -26,44 +51,46 @@ The recommended setup keeps it in the vault that manages it, read per request.
 The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
 it stays in the store that manages it, and the read path decides who reaches which one.
 
-:::note[Steps 3–6 run only on a cache miss]
-Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
-keyed by namespace, the agent's token id and the spec name — plus the user's token id when
-the mount carries a user.
-:::
-
 ### The simpler variant
 
 <p align="center"><img alt="Warden reads a static Anthropic API key from its encrypted storage and injects it to the Claude API for every caller" src="/images/warden-prov-anthropic-inline-secret.png" width="860"></p>
 
-**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
-one long-lived credential for every caller.
+**Inline.** The API key sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller — the quick start, not the production setup.
 
 ## Credential modes
 
 | Mode | What Anthropic sees | Where the credential lives |
 |---|---|---|
-| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
-| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+| **Keyless federation** ✅ *recommended* | A short-lived token for one service account | Nowhere — minted per cache miss |
+| **Chained** | One long-lived API key, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived API key, shared | Warden's storage |
 
-Anthropic exposes no workload-identity federation and mints nothing per request, so the
-credential is long-lived in both rows; what changes is whether Warden holds it.
+Federation removes the API key entirely. Where you still need one, chaining keeps it out of
+Warden.
 
-:::note[Anthropic authenticates with the key alone]
-There is no organization or project header to pair with it, so a chained spec can read the
-vault directly with `mint_method=static_apikey`. A provider that needs a second field
-beside the key cannot — adjunct fields are dropped for any non-`apikey` driver, and the
-read has to go through a producer spec.
-[OpenAI](/provider-backends/openai/#carrying-an-organization-or-project-id) shows that shape.
+:::note[A key used across workspaces needs a `workspace_id`]
+An API key an operator may use in several workspaces is refused upstream unless the request
+names one. Carry it as a `workspace_id` adjunct beside the key — declared on an `apikey`
+source with `credential_fields=workspace_id` and set on the spec — and the mount sends it as
+`anthropic-workspace-id`. The workspace is also Anthropic's prompt-cache partition, so prefer
+one spec per tenant or team over one per agent. Only an `apikey` source carries adjunct
+fields: a chained `static_apikey` spec on another driver cannot, and a spec setting
+`workspace_id` there is refused on write. A keyless spec names its workspace on the
+federation exchange instead.
 :::
 
-See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
-key.
+See the [Anthropic credential driver](/credential-drivers/anthropic/) for the keyless
+source, and the [apikey credential driver](/credential-drivers/apikey/) for every API-key
+source and spec key.
 
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- An **Anthropic API key** from [console.anthropic.com](https://console.anthropic.com)
+- Keyless: Warden's issuer registered as a **federation issuer** in your Anthropic
+  organization, a **federation rule** matching its assertions, and a **service account**
+  the rule may act as. With an API key instead: an **Anthropic API key** from
+  [console.anthropic.com](https://console.anthropic.com)
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
@@ -124,6 +151,26 @@ EOF
 
 See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
+The mount also governs Anthropic's own headers. A client cannot set them itself: the mount
+strips `anthropic-version`, `anthropic-beta`, `anthropic-workspace-id` and
+`anthropic-user-profile-id` from every request and sends its own.
+
+| Key | Default | Description |
+|---|---|---|
+| `anthropic_version` | `2023-06-01` | Sent as `anthropic-version` on every request. An empty value restores the default. |
+| `beta_allowlist` | `*` | Comma-separated `anthropic-beta` values a client may send. `*` passes every one; an empty value passes none. Others are dropped, not refused. |
+| `beta_required` | *(none)* | Comma-separated `anthropic-beta` values added to every request, whatever the allowlist says. |
+| `user_profile_metadata_key` | *(none)* | Key in the **user's** verified token metadata holding their Anthropic profile id (`uprof_…`), sent as `anthropic-user-profile-id`. Read from the user principal only — never the agent's — and a value that is not a profile id is dropped. Requires a `user-profiles-YYYY-MM-DD` beta in `beta_required`. |
+
+```bash
+warden write anthropic/config \
+    beta_allowlist="prompt-caching-2024-07-31" \
+    beta_required="user-profiles-2025-01-01" \
+    user_profile_metadata_key=anthropic_profile
+```
+
+The beta names here are placeholders — use the ones Anthropic documents.
+
 Verify the configuration:
 
 ```bash
@@ -132,7 +179,37 @@ warden read anthropic/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Chained (recommended)
+### Option A: Keyless federation (recommended)
+
+The source names the Anthropic organization whose federation issuer trusts Warden, and
+stores nothing — no `rotation_period`, no key. Each spec names the federation rule and the
+service account its token acts as.
+
+```bash
+warden cred source create anthropic-wif -json '{
+  "type": "anthropic",
+  "config": {
+    "auth_method": "oidc_federation",
+    "organization_id": "<organization-uuid>",
+    "audience": "https://warden.example.com/anthropic"
+  }
+}'
+
+warden cred spec create anthropic-ops -json '{
+  "source": "anthropic-wif",
+  "config": {
+    "subject_token_source": "warden_identity",
+    "federation_rule_id": "fdrl_...",
+    "service_account_id": "svac_..."
+  }
+}'
+```
+
+Add `"workspace_id": "wrkspc_..."` when the rule covers more than one workspace. `audience` is
+what the federation rule matches; leave it unset and every spec must set
+`assertion_audience` instead. The type, `oauth_bearer_token`, is inferred.
+
+### Option B: Chained
 
 The flow in the first diagram. The vault holds the API key; Warden reads it per request and
 injects it.
@@ -179,7 +256,7 @@ warden cred spec create anthropic-ops -json '{
 `warden cred spec create` accepts `{{user.team}}` and `{{agent.env}}` without checking that either claim can ever be produced — the substitution happens on each credential request. A claim resolves only if the spec projects it: `{{user.*}}` requires the claim in `assertion_user_claims` **and** `subject_token_source=warden_identity`; `{{agent.*}}` requires it in `assertion_metadata_claims`, except `{{agent.sub}}`, which is always available. An unprojected claim fails the request closed rather than reading some other path.
 :::
 
-### Option B: Inline
+### Option C: Inline
 
 The second diagram. The key sits in Warden's encrypted storage rather than a vault — no
 assertion, no outbound hop to fetch it. Quickest to a working mount, and the reason it
@@ -281,7 +358,7 @@ warden policy read anthropic-access
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
-Requests use role-based paths. Warden performs implicit JWT authentication and injects the Anthropic API key (via `x-api-key` header) and `anthropic-version` header automatically.
+Requests use role-based paths. Warden performs implicit JWT authentication and injects the credential — a federated token as `Authorization: Bearer`, an API key as `x-api-key` — and the `anthropic-version` header automatically.
 
 The URL pattern is: `/v1/anthropic/role/{role}/gateway/{anthropic-api-path}`
 
@@ -440,6 +517,40 @@ This allows operators to enforce policies such as:
 - Enforce maximum token limits
 - Require streaming mode for cost visibility
 
+## Errors from Warden
+
+When Warden itself fails a request — authentication, policy, credential issuance, the
+upstream not answering — it answers in **Anthropic's error shape**, so an Anthropic SDK
+surfaces Warden's reason instead of failing to parse a foreign body. The status is
+unchanged, and it is what the SDKs retry on:
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "permission_error",
+    "message": "Warden: permission denied"
+  },
+  "request_id": "…"
+}
+```
+
+Anthropic's error has no code field, so the **`Warden: ` prefix** on the message is what
+tells Warden's answer from Anthropic's. The request id is in the body and the `request-id`
+header. The `type` follows the status, as Anthropic documents it:
+
+| Status | `type` |
+|---|---|
+| `401` | `authentication_error` |
+| `403` | `permission_error` |
+| `413` | `request_too_large` |
+| `504` (the mount's `timeout`) | `timeout_error` |
+| Other `5xx`, and any failure inside Warden | `api_error` |
+| Other `4xx` | `invalid_request_error` |
+
+A credential Anthropic refuses at issuance answers `403`; one that could not be obtained
+right now answers `503`.
+
 ## TLS Certificate Authentication
 
 Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
@@ -509,6 +620,9 @@ curl --cert client.pem --key client-key.pem \
 ```
 
 ## Key Management
+
+Keyless, there is no key to manage: the token is minted per cache miss and expires on its
+own. The rest of this section applies to an API key stored in Warden.
 
 | Aspect | Details |
 |--------|---------|

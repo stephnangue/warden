@@ -72,8 +72,12 @@ spec key.
 
 ## Prerequisites
 
-- An **Alicloud account** with a RAM user holding a programmatic access key. Depending on the mint method you pick in [Step 3](#step-3-create-a-credential-source-and-spec):
-  - **`assume_role`** (recommended): the management key needs `AliyunSTSAssumeRoleAccess` (or an equivalent policy allowing `sts:AssumeRole`), and the target RAM role must trust the management user.
+- An **Alicloud account**. Keyless ([Option A](#option-a-keyless-federation-recommended)),
+  it needs a RAM **OIDC provider** trusting Warden's issuer and target RAM roles that trust
+  it — no RAM user and no access key. With a stored key instead, a RAM user holding a
+  programmatic access key; depending on the mint method you pick in
+  [Step 3](#step-3-create-a-credential-source-and-spec):
+  - **`assume_role`**: the management key needs `AliyunSTSAssumeRoleAccess` (or an equivalent policy allowing `sts:AssumeRole`), and the target RAM role must trust the management user.
   - **Management key rotation** (optional): the management key additionally needs `ram:ListAccessKeys`, `ram:CreateAccessKey`, and `ram:DeleteAccessKey` scoped to its own RAM user. See [Management key rotation](#management-key-rotation).
   - **`static_alicloud`**: a pair of RAM access keys stored in a Vault/OpenBao KV v2 mount, with whatever Alicloud permissions your workloads need.
 - Warden running (see `deploy/docker-compose.quickstart.yml` in the repository root)
@@ -120,7 +124,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with `auto_auth_path` and — if Warden is behind a reverse proxy — `proxy_domains` (see [Prerequisite: host-based routing](#prerequisite-host-based-routing)):
+Configure the provider with `auto_auth_path` and — if Warden is behind a reverse proxy — `proxy_domains` (see [Prerequisite: host-based routing](#prerequisite-host-based-routing)). A config write **merges** into the stored config: a key the write leaves out keeps its current value. To reset one, name it — `tls_skip_verify=false`, `ca_data=""`, `timeout=30s`. A refused write changes nothing.
 
 ```bash
 warden write alicloud/config <<EOF
@@ -146,7 +150,7 @@ Alicloud credentials come from one of two source types. Pick the one that matche
 | `alicloud` | `assume_role` | **Temporary** STS credentials (900-3600s) | Short-lived, least-privilege access (recommended) |
 | `hvault` | `static_alicloud` | Permanent RAM keys from Vault KV v2 | Keys already live in your Vault/OpenBao |
 
-The `alicloud` source requires a *management* access key that Warden uses to call the STS `AssumeRole` API per request. When keys are managed elsewhere (e.g., Vault/OpenBao), use the `hvault` source.
+An `alicloud` source either federates — exchanging a Warden assertion at STS `AssumeRoleWithOIDC`, with no key at all — or holds a *management* access key that Warden uses to call STS `AssumeRole` per request. When keys are managed elsewhere (e.g., Vault/OpenBao), use the `hvault` source.
 
 > **Why no `dynamic_keys`?** Alicloud RAM access keys created via `CreateAccessKey` can take seconds to minutes to propagate across regions. Minting a fresh RAM key per request would produce spurious `InvalidAccessKeyId` errors on the first use. `assume_role` issues STS session tokens that avoid that propagation window, so it's the only dynamic mint method the driver exposes.
 
@@ -184,7 +188,14 @@ warden cred spec create alicloud-ops -json '{
 
 `assume_role` is the **only** mint method supported over federation. The target RAM role's
 trust policy must accept `AssumeRoleWithOIDC` from that provider rather than trusting a
-management user — see [Keyless credentials](/federation/keyless-credentials/).
+management user — see [Keyless credentials](/federation/keyless-credentials/). `audience`
+has no default: it must match a client ID registered on the RAM OIDC provider.
+
+RAM binds only the token's `oidc:iss`, `oidc:aud` and `oidc:sub`, so condition the trust
+policy on `oidc:sub` — the agent's composite `wid:<namespaceID>:<mountAccessor>:<principalID>`.
+No user is ever disclosed to RAM: a spec's `assertion_user_claims` still drives request
+templating, but the assertion keeps naming the agent. See
+[Assertion claims](/federation/assertion-claims/#when-a-user-is-disclosed).
 
 ### Option B: Alicloud source with a stored management key
 

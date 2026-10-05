@@ -51,6 +51,20 @@ recommended way to keep secrets out of the file — for example the Postgres DSN
 be supplied out of band via the `WARDEN_PG_CONNECTION_URL` environment variable
 instead of `connection_url`.
 
+### Outbound proxy
+
+Warden's credential clients — every credential source, and the Kubernetes auth method's
+client for the cluster API — honour the standard **`HTTPS_PROXY`**, **`HTTP_PROXY`** and
+**`NO_PROXY`** variables in the server's environment, and may negotiate HTTP/2, whatever
+their TLS settings.
+
+:::caution[Changed in v0.21.0]
+Sources that set `ca_data` or `tls_skip_verify`, and Kubernetes auth with a CA
+certificate or `tls_skip_verify`, used to ignore the proxy variables. They now honour
+them: if Warden's environment sets a proxy, add internal hosts — an in-cluster vault, a
+private token endpoint, the cluster API — to `NO_PROXY`.
+:::
+
 ## A minimal configuration
 
 ```hcl
@@ -67,7 +81,7 @@ listener "tcp" {
 }
 ```
 
-With no `seal` stanza the server uses the [`shamir`](/configuration/seal/#shamir)
+With no `seal` stanza the server uses the [`shamir`](/configuration/seal/shamir/)
 seal, which requires operators to supply unseal keys at startup. Configure an
 [auto-unseal seal](/configuration/seal/) for any unattended deployment.
 
@@ -91,6 +105,7 @@ These are set at the top level of the file, outside any block.
 | `max_cred_source_rotation_period` | *(none)* | Upper bound on a credential source's rotation period. Must be ≥ the minimum. |
 | `min_cred_spec_rotation_period` | *(none)* | Lower bound on the rotation period a credential spec may request (Go duration, e.g. `1h`). |
 | `max_cred_spec_rotation_period` | *(none)* | Upper bound on a credential spec's rotation period. Must be ≥ the minimum. |
+| `keyless_enforcement_level` | `warn` | What happens to an operator write that would leave a secret stored in Warden: `off` accepts it, `warn` accepts it with a warning, `enforce` refuses it. Judged at write time only — existing sources and specs keep minting. Read at startup. See [Keyless enforcement](/federation/keyless-credentials/#keyless-enforcement). |
 
 ## High-availability tuning
 

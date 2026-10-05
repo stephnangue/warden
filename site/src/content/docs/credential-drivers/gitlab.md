@@ -10,7 +10,7 @@ This driver supports a **keyless mode** — use it instead of storing a secret i
 
 The GitLab driver mints **project access tokens** and **group access tokens** from a GitLab server. Warden calls the GitLab API to create short-lived, scoped tokens on demand and revokes them when their lease ends, so workloads never hold a long-lived credential.
 
-The privileged secret lives in the **source** config. The driver authenticates to GitLab one of two ways, set by `auth_method`: **PAT mode** (default) uses a **personal access token**, and **OAuth2 mode** uses an application ID and secret via the client-credentials flow. Each **spec** then names a project or group and the scopes the minted token should carry. An operator reaches for this driver to broker CI and automation access to specific GitLab projects or groups without distributing standing tokens.
+The driver authenticates to GitLab one of two ways, set by `auth_method`: **PAT mode** (default) uses a **personal access token**, and **OAuth2 mode** uses an application ID and secret via the client-credentials flow. Chained, that credential stays in your secret store and is fetched per request; with a stored secret, the **source** holds it. Each **spec** then names a project or group and the scopes the minted token should carry. An operator reaches for this driver to broker CI and automation access to specific GitLab projects or groups without distributing standing tokens.
 
 ## Keyless (via chaining)
 

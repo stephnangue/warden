@@ -64,10 +64,11 @@ per-request assertion.
 
 ### Consumers
 
-Ten drivers can source their standing secret this way, so a secret-backed provider
+Eleven drivers can source their standing secret this way, so a secret-backed provider
 becomes keyless at Warden: **`elastic`**, **`github`**, **`gitlab`**, **`grafana`**,
-**`ibm`**, **`oauth2`**, **`ovh`**, **`scaleway`**, **`apikey`**, and
-**`token_exchange`**.
+**`ibm`**, **`oauth2`**, **`ovh`**, **`scaleway`**, **`apikey`**, **`token_exchange`**,
+and **`cloudflare`** — whose source stores nothing at all, so every `cloudflare_keys` spec
+on it names its own `secret_spec`. See [Cloudflare](/credential-drivers/cloudflare/).
 
 Two are worth calling out because what they chain is not a generic "the secret":
 
@@ -81,13 +82,14 @@ Two are worth calling out because what they chain is not a generic "the secret":
 
 ### Producers
 
-The referenced spec produces the material. Four mint methods can sit at that end:
+The referenced spec produces the material. Five mint methods can sit at that end:
 
 | Producer | Mint method | What it yields |
 |---|---|---|
 | OpenBao / Vault KV v2 | `kv2_read` | The secret, with the **`key_value`** credential type — the payload is preserved verbatim (no forced primary field), so it rides under its natural key names. |
 | AWS Secrets Manager | `secret_read` | The stored secret's payload, verbatim. |
 | GCP Secret Manager | `secret_read` | The stored secret's payload. Federation-first, with optional `target_service_account` impersonation. |
+| Azure Key Vault | `secret_read` | The secret's payload, optionally narrowed with `json_key_map`. Federated as the app registration the spec names, or read as a static source's own service principal. See [Azure](/credential-drivers/azure/). |
 | OpenBao / Vault transit | `transit_signer` | **Not a secret at all** — a scoped signing *capability*. |
 
 `transit_signer` is the one that changes the shape of the guarantee: it moves no key
@@ -96,13 +98,18 @@ the KMS to sign, so the private key is read by nobody — including Warden. See
 [`transit_signer`](/credential-drivers/vault/#transit_signer--signing-without-the-key) for
 what it mints and the constraints that follow.
 
-A producer can itself be keyless — an AWS or GCP `secret_read` on an `oidc_federation`
-source, or a Vault source using per-request JWT login — which is what makes a chain
-keyless end to end, with nothing standing stored at either hop.
+A producer can itself be keyless — an AWS, GCP or Azure `secret_read` on an
+`oidc_federation` source, or a Vault source using per-request JWT login — which is what
+makes a chain keyless end to end, with nothing standing stored at either hop.
+
+The referenced spec must run as the caller — it sets `subject_token_source`
+(`warden_identity` or `agent_identity`) — and must yield a credential with no lease; a
+write that names a missing spec, or one that itself sets `secret_spec`, is refused.
 
 ## Configuration
 
-Set these on the **consuming** source/spec:
+Set these on the **consuming** spec, or on its source to apply to every spec bound to
+it; a spec's own `secret_spec` wins:
 
 | Key | Description |
 |---|---|
@@ -128,6 +135,9 @@ in the error.
   chain cannot fan out.
 - **In-use protection** — a referenced spec cannot be deleted while another spec chains
   it (`ErrSpecInUse`).
+- **Bounded by the secret's lifetime** — when the referenced secret expires (a Key Vault
+  secret's `exp`, for example), the credential minted from it expires too, and so does
+  its cache entry. A secret already expired when the consumer is issued fails the mint.
 
 Together these defeat the "key-trove" class, where a compromised broker leaks a pile of
 standing secrets: there is no pile to leak.

@@ -10,7 +10,7 @@ This driver supports a **keyless mode** — use it instead of storing a secret i
 
 The Alibaba Cloud driver mints temporary credentials from **Alibaba Cloud STS** (Security Token Service). It exposes a single mint method — **`assume_role`** — which calls STS `AssumeRole` and returns a session-based access key trio (ID, secret, and security token) scoped to a RAM role. RAM dynamic access keys are intentionally not offered: freshly created RAM keys take seconds to minutes to propagate across regions, so first requests routinely fail; STS session tokens sidestep that window.
 
-The privileged **management access key** lives in the **source** config, and it is what STS signs mint requests with. Each **spec** names the `role_arn` to assume and optional session parameters. An operator reaches for this driver to hand short-lived, role-scoped Alibaba Cloud credentials to a workload without ever exposing the long-lived management key.
+Keyless, the **source** holds nothing and STS trusts a Warden identity assertion instead. With a stored key, the source holds a privileged **management access key**, and it is what STS signs mint requests with. Each **spec** names the `role_arn` to assume and optional session parameters. An operator reaches for this driver to hand short-lived, role-scoped Alibaba Cloud credentials to a workload without ever exposing a long-lived key.
 
 ## Keyless (OIDC federation)
 

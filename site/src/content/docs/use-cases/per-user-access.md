@@ -35,11 +35,12 @@ Carrying the user through to the upstream works two ways:
   user's token. With **RFC 8693** or **ID-JAG** the downstream token carries both identities
   (`sub`=user, `act`=agent); **RFC 7523** (jwt-bearer, e.g. Entra OBO) has no actor slot, so it
   is impersonation — `sub`=user, no `act`. And with
-  [keyless federation](/federation/keyless-credentials/), a Warden assertion can carry the user
-  under a `warden_user` claim — so a verifier that evaluates arbitrary claims (a GCP attribute
-  condition, an OpenBao/Vault `jwt` auth mount) scopes access to that user while still binding
-  the agent. (AWS and Azure STS bind trust only on `sub`/`aud`, so the `warden_user` claim is
-  informational there.)
+  [keyless federation](/federation/keyless-credentials/), Warden's own assertion becomes the
+  same kind of delegation token — the user as `sub`, qualified by `warden_namespace`, and the
+  agent in `act` — so a verifier that evaluates arbitrary claims (a GCP attribute condition,
+  a secrets vault's `jwt` auth mount) scopes access to that user while still binding the
+  agent. (AWS STS, Entra ID and Alibaba Cloud RAM bind trust only on `sub`/`aud`, so there
+  the assertion names the agent alone.)
 - **A per-user token from OpenBao / Vault — at scale.** For the many upstreams without
   ID-JAG, Warden reaches a Vault/OpenBao **OAuth-app secrets engine** (an OAuth secrets-engine
   plugin) with a per-user identity assertion; a single **templated policy** scopes the read to
@@ -73,6 +74,6 @@ tomorrow's request for Bob reuses the same one policy with no new role to create
 ## See Also
 
 - [Delegation](/concepts/delegation/) — the dual-principal model and the two on-behalf-of mechanisms.
-- [Keyless credential sources](/federation/keyless-credentials/) — carrying the user in the `warden_user` claim.
+- [Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user) — carrying the user in Warden's own assertion.
 - [Credential chaining](/federation/credential-chaining/) — the per-user secret fetch.
 - [Audit & attribution](/use-cases/audit-attribution/) — where the per-user action is recorded.

@@ -8,7 +8,7 @@ title: "Elasticsearch"
 This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
 :::
 
-The Elasticsearch driver mints short-lived **API keys** from an Elasticsearch cluster's Security API. The privileged secret is a pre-encoded API key held in the **source** config; Warden authenticates to the cluster with it and, for each **credential**, creates a scoped, expiring API key via the cluster's Security API.
+The Elasticsearch driver mints short-lived **API keys** from an Elasticsearch cluster's Security API. Warden authenticates to the cluster with a pre-encoded API key — chained from your secret store per request, or, with a stored key, held in the **source** config — and, for each **credential**, creates a scoped, expiring API key via the cluster's Security API.
 
 Operators reach for this driver when a workload needs to talk to Elasticsearch and should carry its own narrowly-scoped key rather than a shared cluster credential. Per-spec parameters control the key's name, lifetime, and role descriptors, so one source can back many specs with different privilege sets.
 

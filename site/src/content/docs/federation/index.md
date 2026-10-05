@@ -19,14 +19,16 @@ Everything else builds on that:
   signs assertions, where the signing key lives (in-process or an external KMS), and
   how the public keys reach internet-facing upstreams through a publisher.
 - **[Keyless credential sources](/federation/keyless-credentials/)** — set
-  `auth_method=oidc_federation` to federate an assertion for a short-lived cloud
-  credential, holding no stored secret (AWS, Azure, GCP, Alibaba Cloud, Kubernetes,
-  and OpenBao/Vault).
-- **[Assertion claims](/federation/assertion-claims/)** — how the assertion is scoped:
-  audience, `warden_resource`, login metadata, per-user, and the signing algorithm.
+  `auth_method=oidc_federation` to federate an assertion for a short-lived credential,
+  holding no stored secret (AWS, Azure, GCP, Alibaba Cloud, Kubernetes, OpenBao/Vault,
+  Anthropic and OpenAI) — and `keyless_enforcement_level` to warn about, or refuse,
+  writes that would store one.
+- **[Assertion claims](/federation/assertion-claims/)** — how the assertion is shaped
+  and scoped: the profile per verifier, audience, `warden_resource`, login metadata,
+  the user an agent acts for, lifetime and the signing algorithm.
 - **[Credential chaining](/federation/credential-chaining/)** — source a provider's
-  standing secret from a keyless-federated vault per request (`secret_spec`), so a
-  secret-backed provider stores nothing at Warden.
+  standing secret from your own secret store per request (`secret_spec`), reached
+  keylessly, so a secret-backed provider stores nothing at Warden.
 - **[OAuth 3LO credential store](/federation/oauth-3lo-store/)** — keep a user's OAuth
   refresh token in an OpenBao/Vault OAuth app engine and read a freshly minted access token
   per caller, with a templated policy on the store gating which credential each login may

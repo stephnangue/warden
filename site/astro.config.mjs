@@ -228,8 +228,10 @@ export default defineConfig({
           items: [
             { slug: 'credential-drivers' },
             { slug: 'credential-drivers/alicloud' },
+            { slug: 'credential-drivers/anthropic' },
             { slug: 'credential-drivers/aws' },
             { slug: 'credential-drivers/azure' },
+            { slug: 'credential-drivers/cloudflare' },
             { slug: 'credential-drivers/elastic' },
             { slug: 'credential-drivers/gcp' },
             { slug: 'credential-drivers/github' },
@@ -240,6 +242,7 @@ export default defineConfig({
             { slug: 'credential-drivers/kubernetes' },
             { slug: 'credential-drivers/local' },
             { slug: 'credential-drivers/oauth2' },
+            { slug: 'credential-drivers/openai' },
             { slug: 'credential-drivers/ovh' },
             { slug: 'credential-drivers/scaleway' },
             { slug: 'credential-drivers/apikey' },

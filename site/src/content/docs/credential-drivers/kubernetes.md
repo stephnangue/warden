@@ -10,7 +10,7 @@ This driver supports a **keyless mode** — use it instead of storing a secret i
 
 The Kubernetes driver mints short-lived **ServiceAccount tokens** through the cluster's **TokenRequest API**. Each token is an audience-scoped bearer credential that a workload presents to the Kubernetes API server (or to any service that trusts the cluster's token issuer) as a specific service account.
 
-The privileged secret — a bearer **token** with permission to create tokens for the target service accounts — lives in the **source** config alongside the API server URL and TLS settings. Each **spec** names the service account and namespace to mint for, plus optional audiences and TTL. An operator reaches for this driver to hand workloads narrowly-scoped, expiring identities without distributing long-lived service-account secrets.
+The **source** carries the API server URL and TLS settings, and reaches the cluster keylessly — presenting a Warden identity assertion the cluster trusts — or, with a stored token, the source holds a bearer **token** with permission to create tokens for the target service accounts. Each **spec** names the service account and namespace to mint for, plus optional audiences and TTL. An operator reaches for this driver to hand workloads narrowly-scoped, expiring identities without distributing long-lived service-account secrets.
 
 ## Keyless (OIDC federation)
 
