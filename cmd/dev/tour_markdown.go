@@ -28,12 +28,21 @@ const docsSetupAddr = "http://127.0.0.1:8400"
 // page renders one fragment per client, and their ids would collide) and no
 // asides (Starlight applies those to its own pages only).
 func renderTourMarkdown(w io.Writer, setup []string, scenarios []playground.Scenario, c client) {
-	fmt.Fprintln(w, "**Setup, once.** In the Warden tab, where you set the root token above:")
+	fmt.Fprintln(w, "**Setup, once.** "+mdText("In the Warden tab, where you set the root token above:"))
 	fmt.Fprintln(w)
 	cmds := append([]string{"export WARDEN_ADDR=" + docsSetupAddr}, setup...)
-	writeCodeBlock(w, []string{chainCommands(append(cmds, c.setup...))})
+	writeCodeBlock(w, append(cmds, c.setup...))
 	fmt.Fprintln(w, mdText(c.launch))
 	fmt.Fprintln(w)
+	if c.start != "" {
+		fmt.Fprintln(w, mdText(agentTabLabel))
+		fmt.Fprintln(w)
+		writeCodeBlock(w, []string{c.start})
+	}
+	if c.startNote != "" {
+		fmt.Fprintln(w, mdText(c.startNote))
+		fmt.Fprintln(w)
+	}
 
 	var current state
 	for _, s := range scenarios {
@@ -47,15 +56,15 @@ func renderTourMarkdown(w io.Writer, setup []string, scenarios []playground.Scen
 			cmds = append(cmds, writeInstructions(c.instructions, s.Instructions))
 		}
 		if len(cmds) > 0 {
-			fmt.Fprintln(w, "In the Warden tab:")
+			fmt.Fprintln(w, mdText("In the Warden tab:"))
 			fmt.Fprintln(w)
 			writeCodeBlock(w, cmds)
 		}
 		switch {
 		case len(s.Export) > 0:
-			fmt.Fprintf(w, "Then, in the agent's tab, load them and restart your agent: `%s`, then %s.\n\n", sourceAgentEnv, mdText(c.restart))
+			writeAgentTabStepMarkdown(w, c, true, true)
 		case s.Attach != nil && len(before.attached) > 0 || len(s.Detach) > 0:
-			writeReconnectMarkdown(w, c)
+			writeAgentTabStepMarkdown(w, c, addsServer(before, s.Attach), false)
 		}
 		if len(s.Ask) > 0 {
 			fmt.Fprintln(w, "Ask your agent:")
@@ -97,21 +106,28 @@ func writeFollowUpMarkdown(w io.Writer, c client, current state, v playground.Va
 		writeCodeBlock(w, cmds)
 	}
 	if v.Attach != nil {
-		writeReconnectMarkdown(w, c)
+		writeAgentTabStepMarkdown(w, c, addsServer(current, v.Attach), false)
 	}
 	if v.Ask != "" {
 		fmt.Fprintf(w, "> %s\n\n", mdText(v.Ask))
 	}
 }
 
-func writeReconnectMarkdown(w io.Writer, c client) {
-	fmt.Fprintf(w, "Then %s.\n\n", mdText(c.reconnect))
+// writeAgentTabStepMarkdown is printAgentTabStep's Markdown.
+func writeAgentTabStepMarkdown(w io.Writer, c client, restart, loadEnv bool) {
+	text, cmds := agentTabStep(c, restart, loadEnv)
+	fmt.Fprintf(w, "%s\n\n", mdText(text))
+	if len(cmds) > 0 {
+		writeCodeBlock(w, cmds)
+	}
 }
 
 // writeCodeBlock writes commands as one shell block, set apart as
-// printCommands sets them apart, flush left so a heredoc's EOF ends it.
+// printCommands sets them apart, flush left so a heredoc's EOF ends it, and
+// chained as printCommands chains them.
 func writeCodeBlock(w io.Writer, cmds []string) {
 	fmt.Fprintln(w, "```bash")
+	cmds = chainCommands(cmds)
 	for i, c := range cmds {
 		fmt.Fprintln(w, c)
 		if strings.Contains(c, "\n") && i < len(cmds)-1 {
@@ -124,11 +140,19 @@ func writeCodeBlock(w io.Writer, cmds []string) {
 
 // mdText escapes prose for Markdown. Text between backticks is a code span
 // and kept as it is; elsewhere <, > and & are escaped, or Markdown would read
-// <owner>/<repo> as HTML tags and drop them.
+// <owner>/<repo> as HTML tags and drop them, and the two tabs are set as code,
+// highlighted like the commands: which one a command is typed in is what the
+// reader must not miss.
 func mdText(s string) string {
 	parts := strings.Split(s, "`")
 	for i := 0; i < len(parts); i += 2 {
-		parts[i] = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(parts[i])
+		parts[i] = mdProse.Replace(parts[i])
 	}
 	return strings.Join(parts, "`")
 }
+
+var mdProse = strings.NewReplacer(
+	"&", "&amp;", "<", "&lt;", ">", "&gt;",
+	"Warden tab", "`Warden tab`",
+	"agent's tab", "`agent's tab`",
+)

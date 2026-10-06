@@ -34,11 +34,19 @@ type client struct {
 	// launch is printed after the setup: where to start the agent, so it
 	// reads what the tour attaches. It always opens with agentTab.
 	launch string
-	// reconnect tells the reader how the running agent picks up a change.
+	// start is the command the agent's tab runs, printed as a command of its
+	// own after launch. The agent must start in the playground directory: a
+	// client started elsewhere reads that directory's servers, not the tour's,
+	// and goes on calling ones a previous run attached, with dead tokens.
+	start string
+	// startNote, when set, follows start: what the client does once there.
+	startNote string
+	// reconnect tells the reader how the running agent picks up a replaced
+	// server, from inside it. Empty: the client has no reconnect, and restarts.
 	reconnect string
-	// restart tells the reader how to restart the agent, in its own tab, so
-	// it inherits the variables loaded there.
-	restart string
+	// stop says how to stop the agent before start runs it again, so it
+	// reads the new servers and inherits the variables loaded in its tab.
+	stop string
 	// rawResult, when set, says how to see a tool's raw result.
 	rawResult string
 	// instructions names the file, in the playground directory, the client
@@ -66,61 +74,64 @@ var clients = map[string]client{
 		remove: func(server string) string { return "claude mcp remove " + server },
 		// claude mcp add attaches a server to the directory it runs in, so the
 		// setup and the agent's tab share one.
-		setup: []string{"mkdir -p " + playgroundDir + " && cd " + playgroundDir},
-		launch: agentTab + " Once scenario 1 has added the bank, run there: cd " + playgroundDir + " && claude. " +
-			"Claude Code reads the servers added in that directory.",
+		setup:     []string{"mkdir -p " + playgroundDir + " && cd " + playgroundDir},
+		launch:    agentTab + " Once scenario 1 has added the bank, start Claude Code from the playground directory.",
+		start:     "cd " + playgroundDir + " && claude",
+		startNote: "Claude Code reads the servers added in that directory, and only there: started anywhere else, it calls servers the tour never attached.",
 		reconnect: "reconnect the server in your agent (/mcp in Claude Code), or restart it",
-		restart:   "exit Claude Code, then run claude again",
+		stop:      "exit Claude Code",
 		rawResult: "In Claude Code, press ctrl+o.",
 	},
 	"gemini": {
-		name:   "gemini",
-		add:    geminiAdd,
-		remove: func(server string) string { return "gemini mcp remove " + server },
-		setup:  []string{"mkdir -p " + playgroundDir + " && cd " + playgroundDir},
-		launch: agentTab + " Once scenario 1 has added the bank, run there: cd " + playgroundDir + " && gemini. " +
-			"Trust the folder when it asks: it reads the servers from .gemini/settings.json there.",
+		name:      "gemini",
+		add:       geminiAdd,
+		remove:    func(server string) string { return "gemini mcp remove " + server },
+		setup:     []string{"mkdir -p " + playgroundDir + " && cd " + playgroundDir},
+		launch:    agentTab + " Once scenario 1 has added the bank, start Gemini CLI from the playground directory.",
+		start:     "cd " + playgroundDir + " && gemini",
+		startNote: "Trust the folder when it asks: it reads the servers from .gemini/settings.json there, and only there.",
 		// /mcp refresh reconnects the servers Gemini CLI started with; it does
-		// not read the settings again.
-		reconnect:    "restart Gemini CLI",
-		restart:      "exit Gemini CLI, then run gemini again",
+		// not read the settings again, so it has no reconnect.
+		stop:         "exit Gemini CLI",
 		instructions: "GEMINI.md",
 	},
 	"codex": {
-		name: "codex",
-		file: codexConfig,
-		launch: agentTab + " Once scenario 1 has written the bank, run there: cd " + playgroundDir + " && codex. " +
-			"Trust the directory when Codex asks: it reads the servers from .codex/config.toml there.",
-		reconnect:    "restart Codex",
-		restart:      "exit Codex, then run codex again",
+		name:         "codex",
+		file:         codexConfig,
+		launch:       agentTab + " Once scenario 1 has written the bank, start Codex from the playground directory.",
+		start:        "cd " + playgroundDir + " && codex",
+		startNote:    "Trust the directory when Codex asks: it reads the servers from .codex/config.toml there, and only there.",
+		stop:         "exit Codex",
 		instructions: "AGENTS.md",
 	},
 	"cursor": {
-		name: "cursor",
-		file: cursorConfig,
-		launch: agentTab + " Once scenario 1 has written the bank, quit Cursor fully and run there: cursor " + playgroundDir + ". " +
-			"An open Cursor never sees that tab's variables, and scenario 8 needs them. Approve the MCP servers when it asks.",
+		name:      "cursor",
+		file:      cursorConfig,
+		launch:    agentTab + " Once scenario 1 has written the bank, quit Cursor fully, then open the playground directory from that tab.",
+		start:     "cursor " + playgroundDir,
+		startNote: "An open Cursor never sees that tab's variables, and scenario 8 needs them. Approve the MCP servers when it asks.",
 		// Cursor can keep a server's old tools across a reconnect; a restart
-		// is the reliable way.
-		reconnect:    "quit Cursor fully, then run cursor " + playgroundDir + " again",
-		restart:      "quit Cursor fully, then run cursor " + playgroundDir + " again",
+		// is the reliable way, so it has no reconnect.
+		stop:         "quit Cursor fully",
 		instructions: "AGENTS.md",
 	},
 	"vscode": {
-		name: "vscode",
-		file: vscodeConfig,
-		launch: agentTab + " Once scenario 1 has written the bank, quit VS Code fully and run there: code " + playgroundDir + ". " +
-			"An open VS Code never sees that tab's variables, and scenario 8 needs them. Trust the workspace when it asks.",
+		name:         "vscode",
+		file:         vscodeConfig,
+		launch:       agentTab + " Once scenario 1 has written the bank, quit VS Code fully, then open the playground directory from that tab.",
+		start:        "code " + playgroundDir,
+		startNote:    "An open VS Code never sees that tab's variables, and scenario 8 needs them. Trust the workspace when it asks.",
 		reconnect:    "send your next message: VS Code restarts a server whose config changed. If it does not, MCP: List Servers > Restart",
-		restart:      "quit VS Code fully, then run code " + playgroundDir + " again",
+		stop:         "quit VS Code fully",
 		instructions: "AGENTS.md",
 	},
 	"opencode": {
 		name:         "opencode",
 		file:         opencodeConfig,
-		launch:       agentTab + " Once scenario 1 has written the bank, run there: cd " + playgroundDir + " && opencode. It reads the servers from opencode.json there.",
-		reconnect:    "restart opencode",
-		restart:      "exit opencode, then run opencode again",
+		launch:       agentTab + " Once scenario 1 has written the bank, start opencode from the playground directory.",
+		start:        "cd " + playgroundDir + " && opencode",
+		startNote:    "It reads the servers from opencode.json there, and only there.",
+		stop:         "exit opencode",
 		instructions: "AGENTS.md",
 	},
 	"generic": {
@@ -129,7 +140,6 @@ var clients = map[string]client{
 		remove:    func(server string) string { return `# Remove the MCP server "` + server + `" from your client.` },
 		launch:    agentTab,
 		reconnect: "reconnect the server in your agent, or restart it",
-		restart:   "restart your agent",
 	},
 }
 

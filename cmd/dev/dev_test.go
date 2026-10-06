@@ -133,7 +133,14 @@ func TestRenderTour(t *testing.T) {
 		assert.NotContains(t, ninth, bootstrapped, "the playground did this already")
 	}
 	assert.NotContains(t, ninth, "claude mcp remove")
-	assert.Contains(t, ninth, "Then reconnect")
+	// A server added beside the bank is one the running agent never loaded:
+	// /mcp lists only the servers Claude Code started with, so it restarts.
+	restart := "   Then, in the agent's tab, exit Claude Code and start it again:\n\ncd $HOME/warden-playground && claude\n"
+	assert.Contains(t, ninth, restart)
+	assert.NotContains(t, ninth, "Then reconnect")
+	seventh := renderTourFor(7)
+	assert.Contains(t, seventh, restart, "the warden server is new, so the agent restarts")
+	assert.NotContains(t, seventh, "Then reconnect")
 	assert.Contains(t, ninth, "read -rs GITHUB_PAT", "the PAT is read without echo")
 }
 
@@ -166,6 +173,18 @@ func TestRenderTour_CommandsPasteAsPrinted(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)
 	assert.Equal(t, "pasted\n", string(out), "the heredoc ended, and the next command ran")
+}
+
+// Every block pastes as one command: a replaced bank is added only once the old
+// one is removed. A heredoc ends the chain, since && after its delimiter would
+// stop the delimiter ending it, and a comment never joins one.
+func TestChainCommands(t *testing.T) {
+	assert.Contains(t, renderTourFor(4), "claude mcp remove bank &&\nclaude mcp add --transport http bank")
+	assert.Equal(t, []string{"a &&\nb"}, chainCommands([]string{"a", "b"}))
+	assert.Equal(t, []string{"a &&\ncat > f <<EOF\nx\nEOF", "b"},
+		chainCommands([]string{"a", "cat > f <<EOF\nx\nEOF", "b"}), "a heredoc can close a chain, never continue one")
+	assert.Equal(t, []string{"# remove it", "b"}, chainCommands([]string{"# remove it", "b"}))
+	assert.Equal(t, []string{"a", "# then this"}, chainCommands([]string{"a", "# then this"}))
 }
 
 // The Docker install's warden is docker exec -i, which reads the terminal: in a
@@ -237,12 +256,30 @@ func TestRenderTour_Clients(t *testing.T) {
 				assert.NotContains(t, all, "claude mcp")
 				assert.NotContains(t, all, "Claude Code")
 			}
-			assert.Contains(t, all, "Then "+c.reconnect+".")
-			assert.Contains(t, renderTourAs(name, 8),
-				"Then, in the agent's tab, load them and restart your agent: "+sourceAgentEnv+", then "+c.restart+".",
-				"scenario 8's variables reach only an agent started after they are loaded")
 			assert.Contains(t, all, c.launch)
 			assert.True(t, strings.HasPrefix(c.launch, agentTab), "every launch sends the agent to its own tab")
+			// An agent started anywhere else reads that directory's servers, not
+			// the tour's: what the reader types in the agent's tab is a command of
+			// its own, under its own heading, never words in a sentence, and every
+			// restart repeats the start.
+			if name == "generic" {
+				assert.Contains(t, all, "Then "+c.reconnect+".")
+				assert.Contains(t, renderTourAs(name, 8),
+					"Then, in the agent's tab, load the variables, then restart your agent from there:\n\n"+sourceAgentEnv+"\n")
+			} else {
+				assert.Contains(t, c.start, playgroundDir, "the agent starts in the playground directory")
+				assert.Contains(t, all, agentTabLabel+"\n\n"+c.start+"\n", "the start is printed as a command")
+				restart := "Then, in the agent's tab, " + c.stop + " and start it again:\n\n" + c.start + "\n"
+				assert.Contains(t, renderTourAs(name, 7), restart, "a new server takes a restart")
+				if c.reconnect != "" {
+					assert.Contains(t, renderTourAs(name, 4), "Then "+c.reconnect+".", "a replaced server takes a reconnect")
+				} else {
+					assert.Contains(t, renderTourAs(name, 4), restart, "a client with no reconnect restarts")
+				}
+				assert.Contains(t, renderTourAs(name, 8),
+					"Then, in the agent's tab, "+c.stop+", load the variables and start it again:\n\n"+sourceAgentEnv+" &&\n"+c.start+"\n",
+					"scenario 8's variables reach only an agent started after they are loaded")
+			}
 			for _, line := range strings.Split(all, "\n") {
 				if strings.TrimSpace(line) == "EOF" {
 					assert.Equal(t, "EOF", line, "an indented delimiter never ends the heredoc")
@@ -259,7 +296,7 @@ func TestRenderTour_Clients(t *testing.T) {
 		"gemini mcp add writes .gemini/settings.json where it runs")
 	assert.Contains(t, renderTourFor(0), "mkdir -p $HOME/warden-playground && cd $HOME/warden-playground",
 		"claude mcp add attaches to the directory it runs in, which the agent's tab must share")
-	assert.Contains(t, clients["claude"].launch, "cd $HOME/warden-playground && claude")
+	assert.Equal(t, "cd $HOME/warden-playground && claude", clients["claude"].start)
 
 	// Only Claude Code's raw-result shortcut is known.
 	assert.Contains(t, renderTourFor(1), "read access_token. In Claude Code, press ctrl+o.")

@@ -204,14 +204,33 @@ func stepCommands(c client, before state, s step, wardenAddr string) []string {
 	return cmds
 }
 
-// chainCommands joins the setup into one command, line by line with &&. A
-// pasted block runs one line at a time otherwise, and a command that reads the
-// terminal swallows the lines pasted after it: the Docker install's warden is
-// docker exec -i, which left ALICE and BOB unset with no error. Chained, the
-// shell reads the whole block before it runs any of it, and a failed mint stops
-// the setup there instead of leaving its variable empty.
-func chainCommands(cmds []string) string {
-	return strings.Join(cmds, " &&\n")
+// chainCommands joins a block's commands with &&, so the block pastes as one
+// command. Pasted as separate lines it runs one line at a time, and a command
+// that reads the terminal swallows the lines pasted after it: the Docker
+// install's warden is docker exec -i, which left ALICE and BOB unset with no
+// error. Chained, the shell reads the whole block before it runs any of it,
+// and a failure stops the block there: an add never runs after a failed
+// remove, nor a step after a failed mint.
+//
+// A heredoc ends the chain: && after its delimiter would stop the delimiter
+// ending it. A comment never joins one, since && after it would be commented
+// out.
+func chainCommands(cmds []string) []string {
+	var out []string
+	for _, c := range cmds {
+		if n := len(out); n > 0 && chainable(out[n-1]) && !strings.HasPrefix(c, "#") {
+			out[n-1] += " &&\n" + c
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// chainable reports whether a command can be joined to the next with &&: not
+// a comment, and not one ending in a heredoc's delimiter.
+func chainable(c string) bool {
+	return !strings.HasPrefix(c, "#") && !strings.HasSuffix(c, "\nEOF")
 }
 
 // renderTour prints the scenarios as a walkthrough. only selects one scenario;
@@ -221,9 +240,18 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		fmt.Fprintln(w, "Setup, once:")
 		fmt.Fprintln(w)
 		setup := append([]string{"export WARDEN_ADDR=" + wardenAddr}, resp.Setup...)
-		printCommands(w, []string{chainCommands(append(setup, c.setup...))})
+		printCommands(w, append(setup, c.setup...))
 		if c.launch != "" {
 			fmt.Fprintf(w, "   %s\n\n", c.launch)
+		}
+		// A command of its own, not words in a sentence: an agent started
+		// outside the playground directory never sees what the tour attaches.
+		if c.start != "" {
+			fmt.Fprintf(w, "   %s\n\n", agentTabLabel)
+			printCommands(w, []string{c.start})
+		}
+		if c.startNote != "" {
+			fmt.Fprintf(w, "   %s\n\n", c.startNote)
 		}
 	}
 	// Scenarios run in order, each keeping what the last one left: one printed
@@ -244,9 +272,9 @@ func renderTour(w io.Writer, resp scenariosResponse, only int, wardenAddr string
 		printCommands(w, cmds)
 		switch {
 		case len(s.Export) > 0:
-			fmt.Fprintf(w, "   Then, in the agent's tab, load them and restart your agent: %s, then %s.\n\n", sourceAgentEnv, c.restart)
+			printAgentTabStep(w, c, true, true)
 		case s.Attach != nil && len(before.attached) > 0 || len(s.Detach) > 0:
-			printReconnectHint(w, c)
+			printAgentTabStep(w, c, addsServer(before, s.Attach), false)
 		}
 		for _, ask := range s.Ask {
 			fmt.Fprintf(w, "   Ask: %q\n", ask)
@@ -290,24 +318,69 @@ func printFollowUp(w io.Writer, c client, current state, v playground.Variant, w
 	if v.Attach != nil {
 		// A running agent keeps the old headers until it reconnects, and
 		// would go on acting as the previous person.
-		printReconnectHint(w, c)
+		printAgentTabStep(w, c, addsServer(current, v.Attach), false)
 	}
 	if v.Ask != "" {
 		fmt.Fprintf(w, "   Ask: %q\n\n", v.Ask)
 	}
 }
 
-func printReconnectHint(w io.Writer, c client) {
-	fmt.Fprintf(w, "   Then %s.\n\n", c.reconnect)
+// agentTabLabel heads the commands typed in the agent's tab, set apart from
+// those of the Warden tab.
+const agentTabLabel = "In the agent's tab:"
+
+// addsServer reports whether a step attaches a server the agent does not have
+// yet. A reconnect reloads a server the agent already has, which is enough
+// when the step replaces one. A server added beside the others is one the
+// running agent never loaded: Claude Code's /mcp, for one, lists only the
+// servers it started with. That takes a restart.
+func addsServer(before state, attach *playground.Attachment) bool {
+	return attach != nil && !before.attached.has(attach.Server)
+}
+
+// agentTabStep is what the reader does for the running agent to pick up a
+// change: a sentence, then the commands to type in the agent's tab, if any. A
+// reconnect is done inside the agent and has none. A restart stops the agent
+// and starts it again from the playground directory, after loading the
+// exported variables when loadEnv is set. A client with no reconnect always
+// restarts.
+func agentTabStep(c client, restart, loadEnv bool) (string, []string) {
+	if !restart && !loadEnv && c.reconnect != "" {
+		return "Then " + c.reconnect + ".", nil
+	}
+	var cmds []string
+	if loadEnv {
+		cmds = append(cmds, sourceAgentEnv)
+	}
+	// A client the tour cannot start: the reader restarts it their own way.
+	if c.start == "" {
+		if loadEnv {
+			return "Then, in the agent's tab, load the variables, then restart your agent from there:", cmds
+		}
+		return "Then restart your agent.", nil
+	}
+	again := " and start it again:"
+	if loadEnv {
+		again = ", load the variables and start it again:"
+	}
+	return "Then, in the agent's tab, " + c.stop + again, append(cmds, c.start)
+}
+
+func printAgentTabStep(w io.Writer, c client, restart, loadEnv bool) {
+	text, cmds := agentTabStep(c, restart, loadEnv)
+	fmt.Fprintf(w, "   %s\n\n", text)
+	printCommands(w, cmds)
 }
 
 // printCommands prints commands flush left, unlike the prose around them, so
 // they paste as they are: a shell ends a heredoc only on a line that is its
-// delimiter alone, and an indented EOF would leave it waiting for more.
+// delimiter alone, and an indented EOF would leave it waiting for more. The
+// commands are chained first, so the block pastes as one command.
 func printCommands(w io.Writer, cmds []string) {
 	if len(cmds) == 0 {
 		return
 	}
+	cmds = chainCommands(cmds)
 	for i, c := range cmds {
 		lines := strings.Split(c, "\n")
 		for _, line := range lines {
