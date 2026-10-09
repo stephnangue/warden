@@ -705,7 +705,14 @@ func TestGenerateAppJWT(t *testing.T) {
 
 	// JWT should have 3 parts separated by dots
 	parts := splitJWT(jwt)
-	assert.Len(t, parts, 3)
+	require.Len(t, parts, 3)
+
+	// GitHub expects exactly alg and typ: no kid, nothing else.
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var hdr map[string]string
+	require.NoError(t, json.Unmarshal(headerJSON, &hdr))
+	assert.Equal(t, map[string]string{"alg": "RS256", "typ": "JWT"}, hdr)
 }
 
 func TestGenerateAppJWT_NilKey(t *testing.T) {

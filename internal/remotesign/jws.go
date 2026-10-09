@@ -5,6 +5,8 @@ import (
 	"crypto"
 	"crypto/elliptic"
 	"crypto/rand"
+	_ "crypto/sha256" // registers SHA-256 for crypto.Hash.New()
+	_ "crypto/sha512" // registers SHA-384 for crypto.Hash.New()
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"

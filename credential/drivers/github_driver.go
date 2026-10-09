@@ -3,17 +3,14 @@ package drivers
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -600,46 +597,20 @@ func (d *GitHubDriver) doGitHubRequest(ctx context.Context, method, path string,
 // The JWT is used to authenticate as the App and request installation tokens.
 // Format: RS256, iss=app_id, iat=now-60, exp=now+600 (10min max per GitHub docs)
 func generateAppJWT(key *rsa.PrivateKey, appID string) (string, error) {
-	if key == nil {
-		return "", fmt.Errorf("private key not configured")
-	}
-
 	now := time.Now()
-	header := map[string]string{
-		"alg": "RS256",
-		"typ": "JWT",
-	}
 	payload := map[string]interface{}{
 		"iss": appID,
 		"iat": now.Add(-60 * time.Second).Unix(),
 		"exp": now.Add(10 * time.Minute).Unix(),
 	}
 
-	headerJSON, err := json.Marshal(header)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal JWT header: %w", err)
-	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal JWT payload: %w", err)
-	}
-
-	headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
-	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
-
-	signingInput := headerB64 + "." + payloadB64
-
-	// Sign with RS256
-	h := rsaSHA256Hash()
-	h.Write([]byte(signingInput))
-	signature, err := rsa.SignPKCS1v15(nil, key, rsaSHA256HashType(), h.Sum(nil))
+	// The header is exactly {"alg":"RS256","typ":"JWT"}: signRS256JWT sets both, and
+	// a nil key fails there with "private key not configured".
+	jwt, err := signRS256JWT(key, nil, payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign JWT: %w", err)
 	}
-
-	signatureB64 := base64.RawURLEncoding.EncodeToString(signature)
-
-	return signingInput + "." + signatureB64, nil
+	return jwt, nil
 }
 
 // --- Helper functions ---
@@ -694,14 +665,4 @@ func validateGitHubURL(rawURL string, tlsSkipVerify bool) error {
 		return fmt.Errorf("github_url must include a host")
 	}
 	return nil
-}
-
-// rsaSHA256Hash returns a new SHA-256 hasher for RS256 JWT signing
-func rsaSHA256Hash() hash.Hash {
-	return crypto.SHA256.New()
-}
-
-// rsaSHA256HashType returns the crypto.Hash for RS256
-func rsaSHA256HashType() crypto.Hash {
-	return crypto.SHA256
 }

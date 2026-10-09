@@ -11,9 +11,8 @@ import (
 )
 
 // signRS256JWT signs the given header and claims as a compact RS256 JWS with a key held
-// in this process. It is the general-purpose counterpart to the GitHub App JWT signer,
-// used to build RFC 7523 client-assertion JWTs for private_key_jwt client
-// authentication.
+// in this process. It signs the GitHub App JWT and the RFC 7523 client-assertion JWTs
+// for private_key_jwt client authentication.
 //
 // The encoding and signing are delegated so that a key held here and a key held
 // elsewhere produce their assertions through one code path rather than two that can

@@ -7,8 +7,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"encoding/asn1"
+	_ "crypto/sha512" // registers SHA-384 for crypto.Hash.New()
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"math/big"
 	"strings"
@@ -49,29 +50,14 @@ func TestSignJWT_LocalByteEquivalence(t *testing.T) {
 			"RS256 signature must be byte-identical to the pre-refactor path")
 	})
 
-	// ECDSA signing is randomized, so we can't compare two independent signings. Instead
-	// we prove the ASN.1→R‖S conversion is byte-identical to the old inline concat given
-	// the SAME signature, and that a full signJWT ES256 token verifies.
-	t.Run("ES256_conversion_identical_and_verifies", func(t *testing.T) {
+	// ECDSA signing is randomized, so two independent signings can't be compared. The
+	// ASN.1→R‖S conversion itself is covered in remotesign; here a full signJWT ES256
+	// token must be fixed-width R‖S and verify against the public key.
+	t.Run("ES256_fixed_width_and_verifies", func(t *testing.T) {
 		sk := mustGen(t, oidcAlgES256)
 		key := sk.key.(*ecdsa.PrivateKey)
-
-		digest := sha256.Sum256([]byte("a.b"))
-		der, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
-		require.NoError(t, err)
-
-		jwsSig, err := ecSigASN1ToJWS(der, key.Curve)
-		require.NoError(t, err)
-
-		// Old path: parse (r,s) from the same DER and fixed-width concat.
-		var parsed struct{ R, S *big.Int }
-		_, err = asn1.Unmarshal(der, &parsed)
-		require.NoError(t, err)
 		n := ecByteLen(key.Curve)
-		oldSig := append(ecCoord(parsed.R, n), ecCoord(parsed.S, n)...)
-		assert.Equal(t, oldSig, jwsSig, "ES256 R‖S must match the pre-refactor concat")
 
-		// Full signJWT output must verify against the public key.
 		header := map[string]string{"alg": oidcAlgES256, "typ": "JWT", "kid": sk.kid}
 		tok, err := signJWT(context.Background(), sk, header, claims)
 		require.NoError(t, err)
@@ -85,6 +71,66 @@ func TestSignJWT_LocalByteEquivalence(t *testing.T) {
 		d := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 		assert.True(t, ecdsa.Verify(&key.PublicKey, d[:], r, s), "ES256 JWS signature must verify")
 	})
+}
+
+// TestSignJWT_EveryIssuerAlgIsSignable walks oidcAlgSpecs by key, so an algorithm
+// added to the issuer's table but not to remotesign's (which now does the signing)
+// fails here rather than at mint time. TestOIDCIssuer_AlgSpec_Extensible mints a
+// fixed list; this one follows the table.
+func TestSignJWT_EveryIssuerAlgIsSignable(t *testing.T) {
+	for alg, spec := range oidcAlgSpecs {
+		t.Run(alg, func(t *testing.T) {
+			sk := mustGen(t, alg)
+			tok, err := signJWT(context.Background(), sk,
+				map[string]string{"typ": "JWT", "kid": sk.kid}, map[string]interface{}{"aud": "a"})
+			require.NoError(t, err)
+			parts := strings.Split(tok, ".")
+			require.Len(t, parts, 3)
+
+			assert.Equal(t, alg, decodeJWSHeader(t, parts[0])["alg"])
+
+			h := crypto.SHA256
+			if strings.HasSuffix(alg, "384") {
+				h = crypto.SHA384
+			}
+			hasher := h.New()
+			hasher.Write([]byte(parts[0] + "." + parts[1]))
+			digest := hasher.Sum(nil)
+			sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+			require.NoError(t, err)
+
+			if spec.curve != nil {
+				n := ecByteLen(spec.curve)
+				require.Len(t, sig, 2*n)
+				pub := sk.key.Public().(*ecdsa.PublicKey)
+				assert.True(t, ecdsa.Verify(pub, digest,
+					new(big.Int).SetBytes(sig[:n]), new(big.Int).SetBytes(sig[n:])))
+				return
+			}
+			assert.NoError(t, rsa.VerifyPKCS1v15(sk.key.Public().(*rsa.PublicKey), h, digest, sig))
+		})
+	}
+}
+
+// TestSignJWT_AlgHeaderComesFromTheKey proves a caller's header cannot name an alg
+// other than the key's: the signed header carries sk.alg whatever was passed.
+func TestSignJWT_AlgHeaderComesFromTheKey(t *testing.T) {
+	sk := mustGen(t, oidcAlgRS256)
+	tok, err := signJWT(context.Background(), sk,
+		map[string]string{"alg": "none", "typ": "JWT", "kid": sk.kid}, map[string]interface{}{"aud": "a"})
+	require.NoError(t, err)
+	hdr := decodeJWSHeader(t, strings.Split(tok, ".")[0])
+	assert.Equal(t, oidcAlgRS256, hdr["alg"])
+	assert.Equal(t, sk.kid, hdr["kid"])
+}
+
+func decodeJWSHeader(t *testing.T, seg string) map[string]string {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(seg)
+	require.NoError(t, err)
+	var hdr map[string]string
+	require.NoError(t, json.Unmarshal(raw, &hdr))
+	return hdr
 }
 
 // stubSigner is a crypto.Signer that records whether it was reached through a

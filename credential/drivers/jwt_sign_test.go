@@ -44,9 +44,9 @@ func TestSignRS256JWT_ByteIdenticalToInlineSigning(t *testing.T) {
 	require.NoError(t, err)
 	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." +
 		base64.RawURLEncoding.EncodeToString(claimsJSON)
-	h := rsaSHA256Hash()
+	h := crypto.SHA256.New()
 	h.Write([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(nil, key, rsaSHA256HashType(), h.Sum(nil))
+	sig, err := rsa.SignPKCS1v15(nil, key, crypto.SHA256, h.Sum(nil))
 	require.NoError(t, err)
 	want := signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
 
