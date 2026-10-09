@@ -361,8 +361,8 @@ func TestCore_setupOIDCIssuer_Remote(t *testing.T) {
 	})
 	require.NoError(t, err, "remotely-signed assertion must verify against the JWKS")
 
-	// ES256 through the remote path too: transit returns ASN.1, signJWT converts to
-	// R‖S, and the assertion must verify — the combination no other test exercises.
+	// ES256 through the remote path too: transit returns ASN.1, SignCompactJWS
+	// converts to R‖S, and the assertion must verify — the combination no other test exercises.
 	tokES, err := iss.MintIdentityAssertion(ctx,
 		&logical.TokenEntry{PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"},
 		AssertionClaims{Audience: "aud", TTL: time.Minute, Alg: oidcAlgES256})

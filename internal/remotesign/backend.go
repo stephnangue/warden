@@ -77,10 +77,10 @@ type Backend interface {
 	NewVersion(ctx context.Context, alg string) (KeyInfo, error)
 }
 
-// algParams maps a JWS alg to the backend-neutral signing parameters. Duplicated
-// from the core alg table by value (these are standard wire constants) to keep
-// this package free of a core import. What a particular store calls a key type
-// or a hash lives with that store's backend.
+// algParams maps a JWS alg to the backend-neutral signing parameters. This is the
+// table every compact JWS is signed by, the OIDC issuer's included; the core alg
+// table keeps only how to generate a key, and its algs must all appear here. What
+// a particular store calls a key type or a hash lives with that store's backend.
 type algParams struct {
 	hash  crypto.Hash    // the digest the caller must have used
 	isRSA bool           //
@@ -159,7 +159,7 @@ func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byt
 
 // WithContext returns a shallow copy bound to ctx, so the mint request's
 // deadline/cancellation reaches the backend round-trip. Implements the optional
-// interface signJWT type-asserts.
+// interface SignCompactJWS type-asserts.
 func (s *Signer) WithContext(ctx context.Context) crypto.Signer {
 	cp := *s
 	cp.ctx = ctx

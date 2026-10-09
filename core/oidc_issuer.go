@@ -8,12 +8,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	_ "crypto/sha512" // registers SHA-384/512 for crypto.Hash.New()
-	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +18,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/profiles"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -91,22 +89,22 @@ const (
 	oidcAlgES384 = "ES384"
 )
 
-// algSpec describes how to generate and sign for one JWS algorithm. All of the
-// generate / sign / JWK / thumbprint code is driven by this table, so ADDING an
-// algorithm is a single entry here. Enabling it for the issuer additionally means
-// adding the name to oidcSupportedAlgs (below) and to the credential package's
-// assertion_algorithm OneOf validation.
+// algSpec describes how to generate a key for one JWS algorithm. The generate /
+// JWK / thumbprint code is driven by this table; how to sign with each algorithm
+// lives in remotesign, which signs for local and remote keys alike. ADDING an
+// algorithm is an entry here and one in remotesign's alg table. Enabling it for
+// the issuer additionally means adding the name to oidcSupportedAlgs (below) and
+// to the credential package's assertion_algorithm OneOf validation.
 type algSpec struct {
-	hash    crypto.Hash    // signing digest (SHA-256/384/512)
 	curve   elliptic.Curve // the EC curve for ES*, or nil for RSA
 	rsaBits int            // RSA modulus size for RS*, 0 for EC
 }
 
 var oidcAlgSpecs = map[string]algSpec{
-	oidcAlgRS256: {hash: crypto.SHA256, rsaBits: 2048},
-	oidcAlgRS384: {hash: crypto.SHA384, rsaBits: 3072},
-	oidcAlgES256: {hash: crypto.SHA256, curve: elliptic.P256()},
-	oidcAlgES384: {hash: crypto.SHA384, curve: elliptic.P384()},
+	oidcAlgRS256: {rsaBits: 2048},
+	oidcAlgRS384: {rsaBits: 3072},
+	oidcAlgES256: {curve: elliptic.P256()},
+	oidcAlgES384: {curve: elliptic.P384()},
 }
 
 // oidcSupportedAlgs is the subset of oidcAlgSpecs the issuer actually maintains a
@@ -496,7 +494,8 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 		return "", fmt.Errorf("oidc issuer: assertion profile %q: %w", profile.Name(), err)
 	}
 
-	header := map[string]string{"alg": active.alg, "typ": typ, "kid": active.kid}
+	// No alg here: signJWT sets it from the key, so the header cannot name another.
+	header := map[string]string{"typ": typ, "kid": active.kid}
 
 	return signJWT(ctx, active, header, claims)
 }
@@ -788,18 +787,10 @@ func ecThumbprint(pub *ecdsa.PublicKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
-// ecByteLen is the byte width of a coordinate or signature scalar on curve c
-// (e.g. 32 for P-256, 48 for P-384).
+// ecByteLen is the byte width of a coordinate on curve c (e.g. 32 for P-256, 48
+// for P-384).
 func ecByteLen(c elliptic.Curve) int {
 	return (c.Params().BitSize + 7) / 8
-}
-
-// ecCoord renders an EC coordinate (or ECDSA signature scalar) as a fixed
-// byteLen-wide big-endian slice — the width JWK/JWS require, left-padded with zeros.
-func ecCoord(n *big.Int, byteLen int) []byte {
-	b := make([]byte, byteLen)
-	n.FillBytes(b)
-	return b
 }
 
 // bigEndianExponent renders an RSA public exponent as a minimal big-endian byte
@@ -812,74 +803,17 @@ func bigEndianExponent(e int) []byte {
 	return b
 }
 
-// signJWT signs header+claims as a compact JWS using the key's algorithm. It
-// signs through the crypto.Signer interface (sk.key), so the same path serves a
-// local in-process key and a remote signer that holds no key material and reaches
-// an external KMS to sign. A signer that honors context binds ctx to that call so
-// the mint request's deadline/cancellation reaches the KMS round-trip. Kept
-// self-contained (the driver package has an equivalent private signer; core does
-// not reach into it).
+// signJWT signs header+claims as a compact JWS with the key's algorithm. The
+// encoding is remotesign's, the one path a local in-process key and a remote KMS
+// signer both go through, so the two cannot drift apart in header handling or
+// ECDSA width. The alg header always comes from sk.alg, and the mint request's
+// deadline/cancellation reaches the KMS round-trip of a signer that honors context.
 func signJWT(ctx context.Context, sk *signingKey, header map[string]string, claims map[string]interface{}) (string, error) {
-	headerJSON, err := json.Marshal(header)
+	jws, err := remotesign.SignCompactJWS(ctx, sk.key, sk.alg, header, claims)
 	if err != nil {
-		return "", fmt.Errorf("oidc issuer: marshal header: %w", err)
+		return "", fmt.Errorf("oidc issuer: %w", err)
 	}
-	claimsJSON, err := json.Marshal(claims)
-	if err != nil {
-		return "", fmt.Errorf("oidc issuer: marshal claims: %w", err)
-	}
-	spec, ok := oidcAlgSpecs[sk.alg]
-	if !ok {
-		return "", fmt.Errorf("oidc issuer: unsupported signing algorithm %q", sk.alg)
-	}
-	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
-	h := spec.hash.New()
-	h.Write([]byte(signingInput))
-	digest := h.Sum(nil)
-
-	// Bind the request context if the signer supports it (the remote KMS signer
-	// does; a local *rsa/*ecdsa key does not and ignores ctx).
-	signer := sk.key
-	if b, ok := signer.(interface {
-		WithContext(context.Context) crypto.Signer
-	}); ok && ctx != nil {
-		signer = b.WithContext(ctx)
-	}
-	// crypto.Signer.Sign expects the already-hashed digest and returns, for RSA,
-	// PKCS#1 v1.5 bytes (opts is a plain crypto.Hash, not *rsa.PSSOptions) and, for
-	// ECDSA, an ASN.1/DER SEQUENCE{r,s}.
-	sig, err := signer.Sign(rand.Reader, digest, spec.hash)
-	if err != nil {
-		return "", fmt.Errorf("oidc issuer: sign: %w", err)
-	}
-	if spec.curve != nil {
-		// JWS ES* signature is the fixed-width concatenation R‖S (each the curve's
-		// coordinate width), NOT the ASN.1/DER form crypto.Signer produces for ECDSA.
-		sig, err = ecSigASN1ToJWS(sig, spec.curve)
-		if err != nil {
-			return "", err
-		}
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
-}
-
-// ecSigASN1ToJWS converts an ECDSA signature from the ASN.1/DER SEQUENCE{r,s} form
-// that crypto.Signer produces into the fixed-width R‖S concatenation JWS requires
-// (each scalar the curve's coordinate width, left-padded with zeros).
-func ecSigASN1ToJWS(der []byte, curve elliptic.Curve) ([]byte, error) {
-	var parsed struct{ R, S *big.Int }
-	rest, err := asn1.Unmarshal(der, &parsed)
-	if err != nil {
-		return nil, fmt.Errorf("oidc issuer: parse ECDSA signature: %w", err)
-	}
-	if len(rest) != 0 {
-		return nil, fmt.Errorf("oidc issuer: trailing bytes after ECDSA signature")
-	}
-	if parsed.R == nil || parsed.S == nil || parsed.R.Sign() <= 0 || parsed.S.Sign() <= 0 {
-		return nil, fmt.Errorf("oidc issuer: invalid ECDSA signature scalars")
-	}
-	n := ecByteLen(curve)
-	return append(ecCoord(parsed.R, n), ecCoord(parsed.S, n)...), nil
+	return jws, nil
 }
 
 // randomJTI returns a random assertion identifier.
