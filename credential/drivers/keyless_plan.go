@@ -197,7 +197,19 @@ func (f *OAuth2DriverFactory) PlanKeyless(current credential.Config, inputs map[
 		leftover.Kind = "client assertion signing key"
 		leftover.WhereToDelete = "retire it at the authorization server once the chained credential works"
 	}
-	return chainedSourcePlan(current, inputs, clear, []credential.Leftover{leftover}), nil
+	return chainedSourcePlan(current, inputs, kmsTargetClears(current, inputs, clear), []credential.Leftover{leftover}), nil
+}
+
+// kmsTargetClears adds what a kms_private_key_jwt source refuses to the keys a keyless
+// plan clears, when that is the method the plan moves the source to. Its payload is
+// read by fixed names and its algorithm travels with the key, so a secret_field or a
+// client_assertion_alg carried over from the source as it stood would leave a config
+// that does not validate.
+func kmsTargetClears(current credential.Config, inputs map[string]string, clear []string) []string {
+	if inputOr(inputs, current, "client_auth") != clientAuthKMSPrivateKeyJWT {
+		return clear
+	}
+	return append(clear, "client_assertion_alg", credential.ConfigSecretField)
 }
 
 // PlanKeylessSpec clears a client credential a spec carries itself: on a
@@ -230,11 +242,17 @@ func (f *OAuth2DriverFactory) PlanKeylessSpec(_ string, spec, _, _ credential.Co
 }
 
 func (f *OAuth2DriverFactory) KeylessPrerequisites(keyless credential.Config, _ []credential.PlannedSpec, _ credential.TrustEnv) []credential.Prerequisite {
-	if credential.GetString(keyless, "client_auth", clientAuthSecretPost) == clientAuthPrivateKeyJWT {
+	switch credential.GetString(keyless, "client_auth", clientAuthSecretPost) {
+	case clientAuthPrivateKeyJWT:
 		return chainedPrerequisites(keyless, "client_id and private_key (with client_assertion_kid or kid when the authorization server selects keys by id)")
+	case clientAuthKMSPrivateKeyJWT:
+		return chainedPrerequisites(keyless, kmsSignerPayload)
 	}
 	return chainedPrerequisites(keyless, "client_id and client_secret")
 }
+
+// kmsSignerPayload is what a kms_private_key_jwt source's referenced spec has to yield.
+const kmsSignerPayload = "a signing capability (e.g. mint_method=transit_signer) with payload.client_id naming the client"
 
 // TokenExchangeDriverFactory
 
@@ -255,7 +273,7 @@ func (f *TokenExchangeDriverFactory) PlanKeyless(current credential.Config, inpu
 		kind = "client assertion signing key"
 	}
 	leftovers := []credential.Leftover{{Kind: kind, ID: orUnknown(current.Get("client_id")), WhereToDelete: "retire it at the authorization server once the chained credential works"}}
-	return chainedSourcePlan(current, inputs, clear, leftovers), nil
+	return chainedSourcePlan(current, inputs, kmsTargetClears(current, inputs, clear), leftovers), nil
 }
 
 func (f *TokenExchangeDriverFactory) PlanKeylessSpec(_ string, _, _, _ credential.Config, inputs map[string]string) (*credential.KeylessSpecPlan, error) {
@@ -268,6 +286,8 @@ func (f *TokenExchangeDriverFactory) KeylessPrerequisites(keyless credential.Con
 		return nil // no referenced secret to prepare
 	case clientAuthPrivateKeyJWT:
 		return chainedPrerequisites(keyless, "client_id and private_key (with client_assertion_kid or kid when the authorization server selects keys by id)")
+	case clientAuthKMSPrivateKeyJWT:
+		return chainedPrerequisites(keyless, kmsSignerPayload)
 	}
 	return chainedPrerequisites(keyless, "client_id and client_secret")
 }
