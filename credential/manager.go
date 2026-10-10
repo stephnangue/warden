@@ -15,6 +15,7 @@ import (
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/google/uuid"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 	"golang.org/x/sync/singleflight"
 )
@@ -605,10 +606,26 @@ func (m *Manager) resolveAndMintChained(
 	if err != nil {
 		return nil, err
 	}
+	// A signing capability is spent the moment the consumer is minted: what it signed
+	// was a client assertion, and the token the authorization server issued for it
+	// lives by its own expiry, not the capability's. Bounding the consumer by the
+	// capability would only make every caller re-sign and re-exchange each time a
+	// short-lived capability lapsed. The cache entry above is still bounded by it, so
+	// a lapsed capability is never handed to a driver.
+	if isSigningCapability(cs.Data) {
+		return cred, nil
+	}
 	if err := capToSecretLifetime(cred, cs.ExpiresAt, secretRef); err != nil {
 		return nil, err
 	}
 	return cred, nil
+}
+
+// isSigningCapability reports whether fetched material is a signing capability rather
+// than a secret: permission to sign with a key, which a consumer spends while it is
+// being minted and never again.
+func isSigningCapability(data map[string]string) bool {
+	return data[remotesign.CapabilityBackendKey] != ""
 }
 
 // capToSecretLifetime bounds a consuming credential by the lifetime of the secret it
