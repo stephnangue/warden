@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
@@ -221,8 +222,9 @@ func provisionSigningKey(t *testing.T) (pubPEM string, version int) {
 
 // setupKMSAssertionChain provisions the narrow role the capability is minted under, then
 // the three objects the chain needs: the signing-capability spec, the token_exchange
-// source that references it, and the consuming spec a role binds to.
-func setupKMSAssertionChain(t *testing.T, stsURL, signingAlg string) {
+// source that references it, and the consuming spec a role binds to. signerMaxTTL, in
+// seconds, bounds the capability's lifetime below the role's; 0 leaves the role's.
+func setupKMSAssertionChain(t *testing.T, stsURL, signingAlg string, signerMaxTTL int) {
 	t.Helper()
 
 	mustWrite := func(method, path, body, what string) {
@@ -278,7 +280,7 @@ func setupKMSAssertionChain(t *testing.T, stsURL, signingAlg string) {
 	// travels in the payload because the consumer needs it and this driver only carries
 	// it.
 	mustWrite("POST", "sys/cred/specs/"+kmsSignerSpec, fmt.Sprintf(`{
-		"type":"key_value","source":"vault-warden-fed-e2e","config":{
+		"type":"key_value","source":"vault-warden-fed-e2e","max_ttl":%d,"config":{
 			"mint_method":"transit_signer",
 			"jwt_role":%q,
 			"transit_mount":"transit",
@@ -286,7 +288,7 @@ func setupKMSAssertionChain(t *testing.T, stsURL, signingAlg string) {
 			"signing_alg":%q,
 			"payload.client_id":%q,
 			"subject_token_source":"warden_identity"}}`,
-		kmsSignerRole, kmsTransitKey, signingAlg, kmsClientID),
+		signerMaxTTL, kmsSignerRole, kmsTransitKey, signingAlg, kmsClientID),
 		"create the signing-capability spec")
 
 	// The source stores no key and no client id: both reach it through the chain. No
@@ -322,7 +324,7 @@ func TestKMSClientAssertion_SignsWithAKeyWardenNeverHolds(t *testing.T) {
 
 	pubPEM, version := provisionSigningKey(t)
 	sts, assertions := serveAssertionVerifyingSTS(t, pubPEM)
-	setupKMSAssertionChain(t, sts.URL, "RS256")
+	setupKMSAssertionChain(t, sts.URL, "RS256", 0)
 	upstream.Reset()
 
 	agentToken := h.GetJWT(t, txAgentA, "agent-secret")
@@ -398,7 +400,7 @@ func TestKMSClientAssertion_RefusesAKeyItCannotUse(t *testing.T) {
 	// ES256 against an RSA key: a mismatch only the store can settle, so the chain is
 	// built asking for it from the start rather than edited afterwards — a referenced
 	// spec cannot be replaced while something points at it.
-	setupKMSAssertionChain(t, sts.URL, "ES256")
+	setupKMSAssertionChain(t, sts.URL, "ES256", 0)
 	upstream.Reset()
 
 	status, body, _ := h.ChainRequest(t, leaderPort, restEnv, h.ChainOpts{
@@ -413,6 +415,46 @@ func TestKMSClientAssertion_RefusesAKeyItCannotUse(t *testing.T) {
 	}
 	if n := len(assertions()); n != 0 {
 		t.Errorf("the STS saw %d assertions; the mismatch should have failed before anything was sent", n)
+	}
+}
+
+// TestKMSClientAssertion_BearerOutlivesTheCapability: the capability is spent on the
+// one assertion that earns the bearer, so the bearer is served for as long as the STS
+// said it lives — not cut short to the capability's lifetime. The capability here lasts
+// 15s (above the 10s it is treated as spent ahead of its expiry, or no mint could use
+// it); the STS issues an 1800s bearer. A request after the capability lapsed is still
+// served from the cached bearer, without another exchange.
+func TestKMSClientAssertion_BearerOutlivesTheCapability(t *testing.T) {
+	ensureEnv(t)
+	useJWTAgentLeg(t, restEnv)
+
+	pubPEM, _ := provisionSigningKey(t)
+	sts, assertions := serveAssertionVerifyingSTS(t, pubPEM)
+	setupKMSAssertionChain(t, sts.URL, "RS256", 15)
+	upstream.Reset()
+
+	agentToken := h.GetJWT(t, txAgentA, "agent-secret")
+	mint := func(what string) {
+		t.Helper()
+		status, body, _ := h.ChainRequest(t, leaderPort, restEnv, h.ChainOpts{
+			AgentToken: agentToken,
+			Role:       kmsChainRole,
+		})
+		if status != 200 {
+			t.Fatalf("%s got status %d: %s", what, status, body)
+		}
+	}
+
+	mint("first request")
+	time.Sleep(16 * time.Second)
+	mint("request after the capability lapsed")
+
+	got := assertions()
+	if len(got) != 1 {
+		t.Fatalf("the STS saw %d exchanges, want 1 — the bearer was bounded by the capability's lifetime instead of its own", len(got))
+	}
+	if !got[0].verified {
+		t.Fatalf("the assertion was refused: %s", got[0].reason)
 	}
 }
 

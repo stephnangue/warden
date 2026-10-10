@@ -352,6 +352,59 @@ func TestChaining_ConsumerBoundedByReferencedLifetime(t *testing.T) {
 		"past the secret's expiry the consumer is re-minted from a fresh fetch, not served from the session-long cache")
 }
 
+// TestChaining_ConsumerOutlivesSigningCapability: a signing capability is spent while
+// the consumer is minted, so the consumer keeps its own lifetime rather than the
+// capability's. Capping it would make every caller re-sign and re-exchange each time a
+// short-lived capability lapsed, for a token the authorization server still honours.
+func TestChaining_ConsumerOutlivesSigningCapability(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"kms_backend": "transit", "token": "hvs.capability"}, nil, time.Second, "", nil
+	}
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec"})})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	cred, err := env.manager.IssueCredential(ctx, caller, "consumer", nil)
+	require.NoError(t, err)
+	assert.Zero(t, cred.LeaseTTL, "the consumer keeps its own lifetime, not the capability's")
+
+	time.Sleep(1500 * time.Millisecond)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.secretDriver.mintCalls.Load(),
+		"past the capability's expiry the consumer is still served from its cache")
+	assert.Equal(t, int32(1), env.consumerDriver.mintFromCalls.Load())
+}
+
+// TestChaining_CachedCapabilityIsNotServedPastItsExpiry: the consumer outlives the
+// capability, but a cached capability does not outlive itself. A second consumer
+// minted after the capability lapsed fetches a fresh one rather than being handed one
+// it would sign with in vain.
+func TestChaining_CachedCapabilityIsNotServedPastItsExpiry(t *testing.T) {
+	env := newChainingEnv(t)
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"kms_backend": "transit", "token": "hvs.capability"}, nil, time.Second, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	env.store.AddSpec(&CredSpec{Name: "consumer1", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+
+	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
+	require.NoError(t, err)
+
+	time.Sleep(1500 * time.Millisecond)
+	_, err = env.manager.IssueCredential(ctx, caller, "consumer2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.secretDriver.mintCalls.Load(),
+		"a lapsed cached capability is fetched fresh, not handed to the consumer")
+}
+
 // TestChaining_CachedSecretCarriesRemainingLifetime: a consumer minted from a cached
 // secret is capped by what is left of the secret's lifetime, not by the lifetime it
 // had when it was fetched.
