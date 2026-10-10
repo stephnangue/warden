@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -391,12 +392,31 @@ func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential
 	if err != nil {
 		return nil, err
 	}
-	tokenURL := credential.GetString(d.credSource.Config, "token_url", "")
-	headers := map[string]string{}
-	if err := d.applyClientAuth(ctx, form, headers, tokenURL, chained); err != nil {
-		return nil, err
+	return d.postWithClientAuth(ctx, credential.GetString(d.credSource.Config, "token_url", ""), form, chained)
+}
+
+// postWithClientAuth POSTs form to tokenEndpoint authenticated as the client.
+//
+// The client authentication is applied afresh on every attempt, so a retry presents a
+// new client assertion rather than replaying one: a server enforcing single use refuses
+// a repeated jti as invalid_client, and a request it received but whose answer was lost
+// would otherwise turn a blip into a failed mint. The base form is never touched; each
+// attempt decorates its own copy.
+//
+// A failure to authenticate — a key that will not parse, a capability found spent — is
+// returned as it is: nothing was sent, so it is not a token-endpoint error to classify.
+func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, tokenEndpoint string, form url.Values, chained *chainedClientAuth) (*oauth2TokenResponse, error) {
+	var authErr error
+	resp, err := postOAuthTokenFormFunc(ctx, d.httpClient, tokenEndpoint, func() (url.Values, error) {
+		attempt := maps.Clone(form)
+		if authErr = d.applyClientAuth(ctx, attempt, tokenEndpoint, chained); authErr != nil {
+			return nil, authErr
+		}
+		return attempt, nil
+	}, d.clientAuthHeaders(chained))
+	if authErr != nil {
+		return nil, authErr
 	}
-	resp, err := postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, headers)
 	if err != nil {
 		return nil, chainedClientAuthError(err, chained != nil)
 	}
@@ -436,13 +456,9 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	for k, v := range credential.GetPrefixed(cfg, "token_param.") {
 		leg1.Set(k, v)
 	}
-	h1 := map[string]string{}
-	if err := d.applyClientAuth(ctx, leg1, h1, idpURL, chained); err != nil {
-		return nil, err
-	}
-	jag, err := postOAuthTokenForm(ctx, d.httpClient, idpURL, leg1, h1)
+	jag, err := d.postWithClientAuth(ctx, idpURL, leg1, chained)
 	if err != nil {
-		return nil, chainedClientAuthError(err, chained != nil)
+		return nil, err
 	}
 	if jag.AccessToken == "" {
 		return nil, fmt.Errorf("id_jag: leg 1 returned no ID-JAG assertion")
@@ -463,15 +479,7 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	// RFC 8707 resource indicators scope the final access token, so they belong on
 	// leg 2 (the resource-AS redemption), not leg 1 (which mints the ID-JAG).
 	d.addResources(leg2, spec)
-	h2 := map[string]string{}
-	if err := d.applyClientAuth(ctx, leg2, h2, resURL, chained); err != nil {
-		return nil, err
-	}
-	final, err := postOAuthTokenForm(ctx, d.httpClient, resURL, leg2, h2)
-	if err != nil {
-		return nil, chainedClientAuthError(err, chained != nil)
-	}
-	return final, nil
+	return d.postWithClientAuth(ctx, resURL, leg2, chained)
 }
 
 // buildExchangeForm assembles the token-endpoint form for the configured grant.
@@ -517,29 +525,45 @@ func (d *TokenExchangeDriver) buildExchangeForm(spec *credential.CredSpec, input
 	return form, nil
 }
 
-// applyClientAuth decorates the request with the configured client
-// authentication. tokenEndpoint is the audience for a private_key_jwt assertion
-// (each ID-JAG leg authenticates against its own endpoint). chained, when non-nil,
-// supplies the whole client credential from credential chaining in place of config.
+// clientCredential returns the client id and secret this mint authenticates with.
+// chained, when non-nil, supplies both from credential chaining in place of config.
 //
 // Both halves move together: an id from config beside a secret from the chain would
 // name one client while presenting another's, which the token endpoint answers with
 // invalid_client.
-func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Values, headers map[string]string, tokenEndpoint string, chained *chainedClientAuth) error {
-	cfg := d.credSource.Config
-	clientID := credential.GetString(cfg, "client_id", "")
-	clientSecret := credential.GetString(cfg, "client_secret", "")
+func (d *TokenExchangeDriver) clientCredential(chained *chainedClientAuth) (clientID, clientSecret string) {
 	if chained != nil {
-		clientID = chained.clientID
-		clientSecret = chained.secret
+		return chained.clientID, chained.secret
 	}
+	return credential.GetString(d.credSource.Config, "client_id", ""),
+		credential.GetString(d.credSource.Config, "client_secret", "")
+}
+
+// clientAuthHeaders returns the headers the configured client authentication sends:
+// client_secret_basic's Authorization header, and nothing for the other methods. They
+// are the same on every attempt, so they are settled once rather than per attempt.
+func (d *TokenExchangeDriver) clientAuthHeaders(chained *chainedClientAuth) map[string]string {
+	if credential.GetString(d.credSource.Config, "client_auth", clientAuthSecretPost) != clientAuthSecretBasic {
+		return nil
+	}
+	return map[string]string{"Authorization": basicClientAuthHeader(d.clientCredential(chained))}
+}
+
+// applyClientAuth decorates the form with the configured client authentication.
+// tokenEndpoint is the audience for a private_key_jwt assertion (each ID-JAG leg
+// authenticates against its own endpoint). It runs once per attempt, so an assertion
+// is never sent twice; client_secret_basic travels in a header instead (see
+// clientAuthHeaders).
+func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Values, tokenEndpoint string, chained *chainedClientAuth) error {
+	cfg := d.credSource.Config
+	clientID, clientSecret := d.clientCredential(chained)
 
 	switch credential.GetString(cfg, "client_auth", clientAuthSecretPost) {
 	case clientAuthSecretPost, "":
 		form.Set("client_id", clientID)
 		form.Set("client_secret", clientSecret)
 	case clientAuthSecretBasic:
-		headers["Authorization"] = basicClientAuthHeader(clientID, clientSecret)
+		// Sent in the Authorization header; nothing goes in the body.
 	case clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT:
 		// One case for both: the assertion, and everything the endpoint sees, is
 		// identical. Only where the signature comes from differs.

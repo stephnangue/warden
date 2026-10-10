@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,6 +16,25 @@ import (
 // the response, through postOAuthToken.
 func postOAuthTokenForm(ctx context.Context, httpClient *http.Client, tokenURL string, form url.Values, extraHeaders map[string]string) (*oauth2TokenResponse, error) {
 	return postOAuthToken(ctx, httpClient, tokenURL, "application/x-www-form-urlencoded", []byte(form.Encode()), extraHeaders)
+}
+
+// postOAuthTokenFormFunc is postOAuthTokenForm for a form that may be sent only once:
+// build is called afresh for every attempt, so a retry carries a new client assertion
+// rather than replaying one the authorization server may already have recorded — a
+// server enforcing single use (OIDC Core §9) refuses a repeated jti as invalid_client.
+//
+// A build error means nothing was sent, so it is returned as the builder's own error,
+// not as a token-endpoint failure: a signing capability found spent keeps its sentinel
+// and its wording, exactly as when it failed before the request was assembled.
+func postOAuthTokenFormFunc(ctx context.Context, httpClient *http.Client, tokenURL string, build func() (url.Values, error), extraHeaders map[string]string) (*oauth2TokenResponse, error) {
+	bodyFunc := func(int) ([]byte, error) {
+		form, err := build()
+		if err != nil {
+			return nil, err
+		}
+		return []byte(form.Encode()), nil
+	}
+	return postOAuthTokenRequest(ctx, httpClient, tokenURL, "application/x-www-form-urlencoded", nil, bodyFunc, extraHeaders)
 }
 
 // postOAuthTokenJSON is postOAuthTokenForm for a token endpoint that takes its
@@ -72,6 +92,12 @@ func federatedLeaseTTL(lifetime, buffer, maxTTL time.Duration) time.Duration {
 // so grant assembly and body encoding stay per-driver while the transport, retry,
 // and error-classification behaviour is defined once.
 func postOAuthToken(ctx context.Context, httpClient *http.Client, tokenURL, contentType string, body []byte, extraHeaders map[string]string) (*oauth2TokenResponse, error) {
+	return postOAuthTokenRequest(ctx, httpClient, tokenURL, contentType, body, nil, extraHeaders)
+}
+
+// postOAuthTokenRequest is postOAuthToken with the body given either once (body) or
+// per attempt (bodyFunc); exactly one is set.
+func postOAuthTokenRequest(ctx context.Context, httpClient *http.Client, tokenURL, contentType string, body []byte, bodyFunc func(int) ([]byte, error), extraHeaders map[string]string) (*oauth2TokenResponse, error) {
 	retryConfig := httputil.HTTPRetryConfig{
 		MaxAttempts:       oauth2MaxRetryAttempts,
 		MaxBodySize:       httputil.DefaultMaxBodySize,
@@ -93,10 +119,11 @@ func postOAuthToken(ctx context.Context, httpClient *http.Client, tokenURL, cont
 		headers[k] = v
 	}
 	httpReq := httputil.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     tokenURL,
-		Body:    body,
-		Headers: headers,
+		Method:   http.MethodPost,
+		URL:      tokenURL,
+		Body:     body,
+		BodyFunc: bodyFunc,
+		Headers:  headers,
 		// RFC 6749 §5.2 returns the error body on HTTP 400 (and 401 for
 		// invalid_client). Treat those as readable so the error code can be
 		// parsed and classified, rather than discarded as a transport error.
@@ -104,6 +131,10 @@ func postOAuthToken(ctx context.Context, httpClient *http.Client, tokenURL, cont
 	}
 
 	respBody, status, err := httputil.ExecuteWithRetry(ctx, httpClient, httpReq, retryConfig)
+	if be := (*httputil.BodyError)(nil); errors.As(err, &be) {
+		// The request was never sent; the failure is the builder's, reported as is.
+		return nil, be.Err
+	}
 	if err != nil {
 		// Transport failure, or a status outside OKStatuses (e.g. 5xx after
 		// retries). Carry the status so callers can classify it.
