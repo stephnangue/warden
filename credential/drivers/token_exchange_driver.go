@@ -134,6 +134,31 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 			Describe("Optional key id (kid) header for the client assertion (inline only; when secret_spec is set it travels in the referenced payload beside the key, under 'client_assertion_kid' or 'kid')").
 			Example("key-1"),
 
+		credential.StringField("client_assertion_aud").
+			OneOf(clientAssertionAudTokenURL, clientAssertionAudIssuer).
+			Describe("Audience of the client assertion: token_url (default) names each endpoint the assertion is sent to; issuer names the server's issuer identifier, which an authorization server enforcing RFC 7523bis requires (needs issuer, and resource_issuer for grant=id_jag)").
+			Example("token_url"),
+
+		credential.StringField("issuer").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				return validateIssuerIdentifier(v, "issuer", skip)
+			}).
+			Describe("Issuer identifier of the authorization server behind token_url, named as the client assertion's audience when client_assertion_aud=issuer").
+			Example("https://idp.example.com"),
+
+		credential.StringField("resource_issuer").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				return validateIssuerIdentifier(v, "resource_issuer", skip)
+			}).
+			Describe("Issuer identifier of the resource authorization server behind resource_token_url (id_jag leg 2), named as that leg's client assertion audience when client_assertion_aud=issuer").
+			Example("https://auth.resourceapp.example.com"),
+
 		credential.StringField("ca_data").
 			Custom(ValidateCAData).
 			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
@@ -159,10 +184,42 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 	}
 
 	// id_jag needs a second (resource authorization-server) endpoint for leg 2.
-	if credential.GetString(config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantIDJAG {
+	idJAG := credential.GetString(config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantIDJAG
+	if idJAG {
 		if credential.GetString(config, "resource_token_url", "") == "" {
 			return fmt.Errorf("resource_token_url is required for grant=id_jag")
 		}
+	}
+
+	// The audience a client assertion names. Only an assertion has one, and naming the
+	// issuer needs the issuer of every server an assertion is sent to: id_jag
+	// authenticates to two. Anything that would never be read is refused rather than
+	// stored, so the config says what is sent.
+	switch clientAuth := credential.GetString(config, "client_auth", clientAuthSecretPost); clientAuth {
+	case clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT:
+	default:
+		if credential.GetString(config, "client_assertion_aud", "") != "" {
+			return fmt.Errorf("client_assertion_aud must be omitted for client_auth=%s; it applies to client_auth=%s or %s",
+				clientAuth, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT)
+		}
+	}
+	if credential.GetString(config, "client_assertion_aud", "") != clientAssertionAudIssuer {
+		// Unlike an oauth2 source's, these name nothing but an assertion's audience.
+		for _, key := range []string{"issuer", "resource_issuer"} {
+			if credential.GetString(config, key, "") != "" {
+				return fmt.Errorf("%s is read only when client_assertion_aud=%s; set that, or omit %s", key, clientAssertionAudIssuer, key)
+			}
+		}
+	} else {
+		if credential.GetString(config, "issuer", "") == "" {
+			return fmt.Errorf("client_assertion_aud=%s requires issuer, the issuer identifier of the server behind token_url", clientAssertionAudIssuer)
+		}
+		if idJAG && credential.GetString(config, "resource_issuer", "") == "" {
+			return fmt.Errorf("resource_issuer is required for grant=id_jag when client_assertion_aud=%s: leg 2 authenticates to the resource authorization server, which has an issuer of its own", clientAssertionAudIssuer)
+		}
+	}
+	if !idJAG && credential.GetString(config, "resource_issuer", "") != "" {
+		return fmt.Errorf("resource_issuer applies only to grant=id_jag, whose leg 2 authenticates to the resource authorization server")
 	}
 
 	// Client-auth method determines which credentials are required. A source in
@@ -253,6 +310,21 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 		if protected[key] {
 			return fmt.Errorf("token_param.%s cannot override a core token-exchange field", key)
 		}
+	}
+	return nil
+}
+
+// validateIssuerIdentifier checks an RFC 8414 issuer identifier: an https URL with a host
+// and no query or fragment. It is only ever named as an assertion's audience, never
+// called, so it needs no SSRF guard — but a server compares it exactly, so a value with
+// a query or fragment could never match and is refused here instead of at every mint.
+func validateIssuerIdentifier(rawURL, fieldName string, tlsSkipVerify bool) error {
+	if err := validateOAuth2HTTPSURL(rawURL, fieldName, tlsSkipVerify); err != nil {
+		return err
+	}
+	parsed, _ := url.Parse(rawURL) // already parsed cleanly above
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be an issuer identifier, which has no query or fragment", fieldName)
 	}
 	return nil
 }
@@ -392,10 +464,14 @@ func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential
 	if err != nil {
 		return nil, err
 	}
-	return d.postWithClientAuth(ctx, credential.GetString(d.credSource.Config, "token_url", ""), form, chained)
+	cfg := d.credSource.Config
+	return d.postWithClientAuth(ctx, credential.GetString(cfg, "token_url", ""), credential.GetString(cfg, "issuer", ""), form, chained)
 }
 
-// postWithClientAuth POSTs form to tokenEndpoint authenticated as the client.
+// postWithClientAuth POSTs form to tokenEndpoint authenticated as the client. issuer is
+// the issuer identifier of the server behind tokenEndpoint, which a client assertion
+// names as its audience when the source asks for it (client_assertion_aud=issuer); it
+// otherwise names tokenEndpoint.
 //
 // The client authentication is applied afresh on every attempt, so a retry presents a
 // new client assertion rather than replaying one: a server enforcing single use refuses
@@ -405,11 +481,12 @@ func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential
 //
 // A failure to authenticate — a key that will not parse, a capability found spent — is
 // returned as it is: nothing was sent, so it is not a token-endpoint error to classify.
-func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, tokenEndpoint string, form url.Values, chained *chainedClientAuth) (*oauth2TokenResponse, error) {
+func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, tokenEndpoint, issuer string, form url.Values, chained *chainedClientAuth) (*oauth2TokenResponse, error) {
+	aud := clientAssertionAudience(credential.GetString(d.credSource.Config, "client_assertion_aud", ""), tokenEndpoint, issuer)
 	var authErr error
 	resp, err := postOAuthTokenFormFunc(ctx, d.httpClient, tokenEndpoint, func() (url.Values, error) {
 		attempt := maps.Clone(form)
-		if authErr = d.applyClientAuth(ctx, attempt, tokenEndpoint, chained); authErr != nil {
+		if authErr = d.applyClientAuth(ctx, attempt, aud, chained); authErr != nil {
 			return nil, authErr
 		}
 		return attempt, nil
@@ -456,7 +533,7 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	for k, v := range credential.GetPrefixed(cfg, "token_param.") {
 		leg1.Set(k, v)
 	}
-	jag, err := d.postWithClientAuth(ctx, idpURL, leg1, chained)
+	jag, err := d.postWithClientAuth(ctx, idpURL, credential.GetString(cfg, "issuer", ""), leg1, chained)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +556,7 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	// RFC 8707 resource indicators scope the final access token, so they belong on
 	// leg 2 (the resource-AS redemption), not leg 1 (which mints the ID-JAG).
 	d.addResources(leg2, spec)
-	return d.postWithClientAuth(ctx, resURL, leg2, chained)
+	return d.postWithClientAuth(ctx, resURL, credential.GetString(cfg, "resource_issuer", ""), leg2, chained)
 }
 
 // buildExchangeForm assembles the token-endpoint form for the configured grant.
@@ -549,12 +626,11 @@ func (d *TokenExchangeDriver) clientAuthHeaders(chained *chainedClientAuth) map[
 	return map[string]string{"Authorization": basicClientAuthHeader(d.clientCredential(chained))}
 }
 
-// applyClientAuth decorates the form with the configured client authentication.
-// tokenEndpoint is the audience for a private_key_jwt assertion (each ID-JAG leg
-// authenticates against its own endpoint). It runs once per attempt, so an assertion
-// is never sent twice; client_secret_basic travels in a header instead (see
-// clientAuthHeaders).
-func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Values, tokenEndpoint string, chained *chainedClientAuth) error {
+// applyClientAuth decorates the form with the configured client authentication. aud is
+// the audience for a private_key_jwt assertion (each ID-JAG leg authenticates against
+// its own server). It runs once per attempt, so an assertion is never sent twice;
+// client_secret_basic travels in a header instead (see clientAuthHeaders).
+func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Values, aud string, chained *chainedClientAuth) error {
 	cfg := d.credSource.Config
 	clientID, clientSecret := d.clientCredential(chained)
 
@@ -567,7 +643,7 @@ func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Valu
 	case clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT:
 		// One case for both: the assertion, and everything the endpoint sees, is
 		// identical. Only where the signature comes from differs.
-		assertion, err := d.buildClientAssertion(ctx, clientID, tokenEndpoint, chained)
+		assertion, err := d.buildClientAssertion(ctx, clientID, aud, chained)
 		if err != nil {
 			return err
 		}
@@ -587,13 +663,13 @@ func (d *TokenExchangeDriver) applyClientAuth(ctx context.Context, form url.Valu
 }
 
 // buildClientAssertion builds and signs an RFC 7523 client-assertion JWT: a
-// short-lived JWT with iss=sub=client_id and aud=tokenEndpoint, signed with the RSA
-// private key. chained, when non-nil, supplies the PEM key and its key id from
-// credential chaining in place of the source-configured ones; clientID is then the
-// chained id its caller already substituted, so the assertion names the client whose key
-// signs it, under the key id that key was stored beside.
-func (d *TokenExchangeDriver) buildClientAssertion(ctx context.Context, clientID, tokenEndpoint string, chained *chainedClientAuth) (string, error) {
-	claims, err := clientAssertionClaims(clientID, tokenEndpoint)
+// short-lived JWT with iss=sub=client_id and the given aud, signed with the RSA private
+// key. chained, when non-nil, supplies the PEM key and its key id from credential
+// chaining in place of the source-configured ones; clientID is then the chained id its
+// caller already substituted, so the assertion names the client whose key signs it,
+// under the key id that key was stored beside.
+func (d *TokenExchangeDriver) buildClientAssertion(ctx context.Context, clientID, aud string, chained *chainedClientAuth) (string, error) {
+	claims, err := clientAssertionClaims(clientID, aud)
 	if err != nil {
 		return "", err
 	}
