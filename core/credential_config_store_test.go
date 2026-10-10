@@ -2387,6 +2387,110 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 		require.Error(t, err, key)
 		assert.Contains(t, err.Error(), key+" must be omitted when the source sets secret_spec")
 	}
+
+	// The same holds for a key and the kid stored beside it: on a chained
+	// private_key_jwt source both come from the payload, together.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "oauth-keyless-jwt", Type: credential.SourceTypeOAuth2,
+		Config: credential.NewConfig(map[string]string{
+			"token_url":                 "https://identity.example.com/oauth/token",
+			"client_auth":               "private_key_jwt",
+			credential.ConfigSecretSpec: "idp-client-credential",
+		}),
+	}))
+	for _, key := range []string{"client_id", "private_key", "client_assertion_kid"} {
+		err = store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "inline-jwt-" + key, Type: credential.TypeOAuthBearerToken, Source: "oauth-keyless-jwt",
+			Config: credential.NewConfig(map[string]string{key: "inline-value"}),
+		})
+		require.Error(t, err, key)
+		assert.Contains(t, err.Error(), key+" must be omitted when the source sets secret_spec")
+	}
+}
+
+// TestCredentialConfigStore_OAuth2ClientAuthMismatch: a spec's client credential is
+// presented with its source's client_auth, so a spec may hold only the half that method
+// sends. Anything else would be stored, and reported as stored, while never sent.
+func TestCredentialConfigStore_OAuth2ClientAuthMismatch(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+
+	for name, clientAuth := range map[string]string{"oauth-post": "", "oauth-basic": "client_secret_basic", "oauth-jwt": "private_key_jwt"} {
+		cfg := map[string]string{"token_url": "https://identity.example.com/oauth/token"}
+		if clientAuth != "" {
+			cfg["client_auth"] = clientAuth
+		}
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: name, Type: credential.SourceTypeOAuth2, Config: credential.NewConfig(cfg),
+		}))
+	}
+
+	cases := []struct {
+		source string
+		config map[string]string
+		errMsg string
+	}{
+		{"oauth-post", map[string]string{"auth_method": "authorization_code", "client_id": "c", "client_secret": "s"}, ""},
+		{"oauth-post", map[string]string{"auth_method": "authorization_code", "client_id": "c", "private_key": "PEM"}, "private_key must be omitted from a spec on an oauth2 source with client_auth=client_secret_post"},
+		{"oauth-basic", map[string]string{"auth_method": "authorization_code", "client_id": "c", "client_assertion_kid": "k"}, "client_assertion_kid must be omitted from a spec on an oauth2 source with client_auth=client_secret_basic"},
+		{"oauth-jwt", map[string]string{"auth_method": "authorization_code", "client_id": "c", "private_key": "PEM", "client_assertion_kid": "k"}, ""},
+		{"oauth-jwt", map[string]string{"auth_method": "authorization_code", "client_id": "c", "client_secret": "s"}, "client_secret must be omitted from a spec on an oauth2 source with client_auth=private_key_jwt"},
+		// A kid names the key stored beside it; with no key of its own the spec signs
+		// with the source's, under the source's kid, and its own would be ignored.
+		{"oauth-jwt", map[string]string{"client_id": "c", "client_assertion_kid": "k"}, "client_assertion_kid names the key stored beside it, and this spec has none"},
+		// A client id of its own with the source's key is an ordinary override.
+		{"oauth-jwt", map[string]string{"auth_method": "authorization_code", "client_id": "other-client"}, ""},
+	}
+	for i, tc := range cases {
+		err := store.CreateSpec(ctx, &credential.CredSpec{
+			Name: fmt.Sprintf("spec-%d", i), Type: credential.TypeOAuthBearerToken, Source: tc.source,
+			Config: credential.NewConfig(tc.config),
+		})
+		if tc.errMsg == "" {
+			assert.NoError(t, err, "case %d", i)
+			continue
+		}
+		require.Error(t, err, "case %d", i)
+		assert.Contains(t, err.Error(), tc.errMsg, "case %d", i)
+	}
+}
+
+// TestCredentialConfigStore_OAuth2ClientAuthChangeStrandsNoSpec: changing a source's
+// client_auth changes which half of each bound spec's client credential is sent. A
+// spec still holding the other half would keep reporting a stored secret while every
+// mint failed, so the source edit is refused until the spec is fixed.
+func TestCredentialConfigStore_OAuth2ClientAuthChangeStrandsNoSpec(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	cfg := map[string]string{
+		"token_url": "https://identity.example.com/oauth/token",
+		"auth_url":  "https://identity.example.com/oauth/authorize",
+	}
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "oauth", Type: credential.SourceTypeOAuth2, Config: credential.NewConfig(cfg),
+	}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "alice", Type: credential.TypeOAuthBearerToken, Source: "oauth",
+		Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code", "client_id": "c", "client_secret": "s"}),
+	}))
+
+	jwtCfg := map[string]string{"client_auth": "private_key_jwt"}
+	for k, v := range cfg {
+		jwtCfg[k] = v
+	}
+	err := store.UpdateSource(ctx, &credential.CredSource{
+		Name: "oauth", Type: credential.SourceTypeOAuth2, Config: credential.NewConfig(jwtCfg),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `spec "alice"`)
+	assert.Contains(t, err.Error(), "client_secret must be omitted from a spec on an oauth2 source with client_auth=private_key_jwt")
+
+	// Basic sends the same half as post, so that change strands nothing.
+	basicCfg := map[string]string{"client_auth": "client_secret_basic"}
+	for k, v := range cfg {
+		basicCfg[k] = v
+	}
+	require.NoError(t, store.UpdateSource(ctx, &credential.CredSource{
+		Name: "oauth", Type: credential.SourceTypeOAuth2, Config: credential.NewConfig(basicCfg),
+	}))
 }
 
 // leasingDriver mints a credential that carries a lease, so tests can observe

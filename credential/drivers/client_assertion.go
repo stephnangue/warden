@@ -46,6 +46,27 @@ const clientAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bea
 // clientAssertionTTL bounds the lifetime of a signed client assertion.
 const clientAssertionTTL = 5 * time.Minute
 
+// Values of a source's `client_assertion_aud`: what a client assertion names as its
+// audience. token_url is the token endpoint the assertion is sent to, which is what
+// RFC 7523 allowed and what Okta and Entra document. issuer is the authorization
+// server's issuer identifier, which draft-ietf-oauth-rfc7523bis requires as the sole
+// audience to close the audience-injection attack, and which a server enforcing it
+// accepts and nothing else.
+const (
+	clientAssertionAudTokenURL = "token_url"
+	clientAssertionAudIssuer   = "issuer"
+)
+
+// clientAssertionAudience is the aud a client assertion carries: issuer when the
+// source asks for the issuer identifier, else the endpoint the assertion is sent to.
+// Validation guarantees issuer is set whenever mode asks for it.
+func clientAssertionAudience(mode, endpoint, issuer string) string {
+	if mode == clientAssertionAudIssuer {
+		return issuer
+	}
+	return endpoint
+}
+
 // kmsCapabilitySkew is how far ahead of a capability's expiry it is treated as already
 // spent. Building and sending an assertion is not instantaneous, and a capability that
 // expires mid-flight fails at the token endpoint as an opaque client-auth error rather
@@ -91,7 +112,7 @@ func chainedClientAuthFromMaterial(clientAuth string, material credential.Secret
 	// pair, which the endpoint answers with invalid_client and the chained path then
 	// misreads as a rotated secret.
 	if material.Field == "client_id" {
-		return nil, fmt.Errorf("the fetched secret material holds a client id but no secret: %w", credential.ErrChainedSecretIncomplete)
+		return nil, fmt.Errorf("the fetched secret material holds a client id but no secret (secret_field resolved to 'client_id', which names the id and never the secret): %w", credential.ErrChainedSecretIncomplete)
 	}
 
 	secret := material.Secret()
