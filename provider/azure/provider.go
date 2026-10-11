@@ -9,6 +9,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -191,8 +192,14 @@ func (b *azureBackend) Initialize(ctx context.Context) error {
 		b.SetMaxBodySize(config.MaxBodySize)
 		b.setTLSSettings(config.TLSSkipVerify, config.CAData)
 		if config.Timeout != "" {
-			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
+			// A stored zero keeps the default: the timeout is the only bound
+			// on how long an upstream may take.
+			if timeout, err := time.ParseDuration(config.Timeout); err == nil && timeout > 0 {
 				b.SetTimeout(timeout)
+			} else if err == nil {
+				b.Logger.Warn("ignoring stored timeout that is not positive; keeping the default",
+					logger.String("timeout", config.Timeout),
+					logger.String("default", b.Timeout().String()))
 			}
 		}
 

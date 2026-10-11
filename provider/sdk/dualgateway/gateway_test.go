@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
@@ -235,6 +236,58 @@ func TestHandleAPIRequest_UpstreamError(t *testing.T) {
 		},
 	})
 	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// silentUpstream never answers: it waits for the request's context to end.
+var silentUpstream = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+})
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func apiRequest(rec *httptest.ResponseRecorder) *logical.Request {
+	return &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/test", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "val"},
+		},
+	}
+}
+
+// The mount's timeout passing before the upstream answers is a 504: the
+// client is still waiting. Only the outgoing request carries that deadline,
+// so the inbound request's context alone would never show it.
+func TestHandleAPIRequest_UpstreamTooSlowAnswers504(t *testing.T) {
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = "http://upstream.test"
+	b.SetTimeout(20 * time.Millisecond)
+	b.SetTransport(silentUpstream)
+
+	rec := httptest.NewRecorder()
+	b.handleAPIRequest(context.Background(), apiRequest(rec))
+
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	assert.Equal(t, "Gateway Timeout\n", rec.Body.String())
+}
+
+// A client that went away gets nothing written: no one is reading.
+func TestHandleAPIRequest_ClientGoneWritesNothing(t *testing.T) {
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = "http://upstream.test"
+	b.SetTransport(silentUpstream)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	b.handleAPIRequest(ctx, apiRequest(rec))
+
+	assert.Empty(t, rec.Header())
+	assert.Zero(t, rec.Body.Len())
 }
 
 // --- Proxy/Warden headers are stripped, custom headers survive ---

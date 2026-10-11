@@ -467,8 +467,14 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		}
 
 		if timeoutStr, ok := config["timeout"].(string); ok && timeoutStr != "" {
-			if timeout, err := time.ParseDuration(timeoutStr); err == nil {
+			// A stored zero keeps the default: the timeout is the only bound
+			// on how long an upstream may take.
+			if timeout, err := time.ParseDuration(timeoutStr); err == nil && timeout > 0 {
 				b.SetTimeout(timeout)
+			} else if err == nil {
+				b.Logger.Warn("ignoring stored timeout that is not positive; keeping the default",
+					logger.String("timeout", timeoutStr),
+					logger.String("default", b.Timeout().String()))
 			}
 		}
 

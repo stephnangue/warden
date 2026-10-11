@@ -192,6 +192,21 @@ func writeConfig(b *awsBackend, raw map[string]interface{}) *logical.Response {
 	return resp
 }
 
+// A zero timeout is refused rather than quietly replaced by the default: the
+// timeout is the only bound on how long an upstream may take. "500ms"
+// truncates to zero seconds.
+func TestConfigWrite_ZeroTimeoutRefused(t *testing.T) {
+	for _, timeout := range []any{0, "0s", "500ms"} {
+		storage := newInmemStorage()
+		b := configuredBackend(storage)
+		resp := writeConfig(b, map[string]interface{}{"timeout": timeout})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "timeout %v", timeout)
+		assert.Contains(t, resp.Err.Error(), "timeout must be at least 1s")
+		assert.Equal(t, 30*time.Second, b.Timeout())
+		assert.Empty(t, storage.data)
+	}
+}
+
 // verifiesTLS reports whether the backend's transport verifies a server's
 // certificate: a request to a self-signed server fails verification exactly
 // then.

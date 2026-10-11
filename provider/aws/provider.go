@@ -241,8 +241,14 @@ func (b *awsBackend) Initialize(ctx context.Context) error {
 		b.setSettings(config.ProxyDomains, config.TLSSkipVerify, config.CAData)
 		b.SetMaxBodySize(config.MaxBodySize)
 		if config.Timeout != "" {
-			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
+			// A stored zero keeps the default: the timeout is the only bound
+			// on how long an upstream may take.
+			if timeout, err := time.ParseDuration(config.Timeout); err == nil && timeout > 0 {
 				b.SetTimeout(timeout)
+			} else if err == nil {
+				b.Logger.Warn("ignoring stored timeout that is not positive; keeping the default",
+					logger.String("timeout", config.Timeout),
+					logger.String("default", b.Timeout().String()))
 			}
 		}
 		b.initializeProcessors()

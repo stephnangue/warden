@@ -3,6 +3,7 @@ package dualgateway
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -212,6 +213,25 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {
+		// ctx, not the inbound request's context: only outReq carries the
+		// mount's deadline. It passed before the upstream answered, and the
+		// client is still waiting for an answer.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			b.Logger.Error("API forward timed out",
+				logger.Err(err),
+				logger.String("request_id", req.RequestID),
+			)
+			http.Error(req.ResponseWriter, "Gateway Timeout", http.StatusGatewayTimeout)
+			return
+		}
+		// The client went away first: nobody is reading a response.
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			b.Logger.Debug("API forward aborted: client closed connection",
+				logger.Err(err),
+				logger.String("request_id", req.RequestID),
+			)
+			return
+		}
 		b.Logger.Error("API forward failed", logger.Err(err))
 		http.Error(req.ResponseWriter, "Bad Gateway", http.StatusBadGateway)
 		return

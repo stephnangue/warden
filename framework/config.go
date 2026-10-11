@@ -154,7 +154,10 @@ func ValidateMaxBodySize(conf map[string]any) error {
 	return nil
 }
 
-// ValidateTimeout validates that timeout is a valid duration string or integer.
+// ValidateTimeout validates that timeout is a positive duration string or
+// integer. Zero is refused: the timeout is the deadline of every forwarded
+// request and the only bound on how long an upstream may take, so it cannot
+// be turned off.
 func ValidateTimeout(conf map[string]any) error {
 	timeout, ok := conf["timeout"]
 	if !ok {
@@ -162,16 +165,21 @@ func ValidateTimeout(conf map[string]any) error {
 	}
 	switch v := timeout.(type) {
 	case string:
-		if _, err := time.ParseDuration(v); err != nil {
+		d, err := time.ParseDuration(v)
+		if err != nil {
 			return fmt.Errorf("invalid timeout format: %w (expected format: '30s', '5m', '1h')", err)
 		}
+		if d <= 0 {
+			return fmt.Errorf("timeout must be greater than 0")
+		}
 	case int:
-		if v < 0 {
-			return fmt.Errorf("timeout must be greater than 0 seconds")
+		// Whole seconds: a config write's "500ms" arrives here as 0.
+		if v <= 0 {
+			return fmt.Errorf("timeout must be at least 1s")
 		}
 	case float64:
-		if v < 0 {
-			return fmt.Errorf("timeout must be greater than 0 seconds")
+		if v <= 0 {
+			return fmt.Errorf("timeout must be at least 1s")
 		}
 	default:
 		return fmt.Errorf("timeout must be a duration string (e.g., '30s') or integer (seconds)")

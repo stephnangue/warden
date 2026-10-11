@@ -31,9 +31,11 @@ func newBaseTransport() *http.Transport {
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 
-		// Timeout settings — higher for AI inference (streaming responses can be slow)
+		// No ResponseHeaderTimeout: the mount's timeout (or the deadline
+		// SelectTimeout picks) bounds every forwarded request, headers
+		// included. A fixed one here would fail a non-streaming generation
+		// that outlasts it, whatever the mount's timeout is set to.
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
 
 		// HTTP/2 optimization
 		ForceAttemptHTTP2: true,

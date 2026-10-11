@@ -281,7 +281,9 @@ func TestValidateConfig(t *testing.T) {
 		{"valid string timeout", map[string]any{"timeout": "30s"}, ""},
 		{"valid int timeout", map[string]any{"timeout": 30}, ""},
 		{"valid float timeout", map[string]any{"timeout": 30.0}, ""},
-		{"negative float timeout", map[string]any{"timeout": -1.0}, "greater than 0"},
+		{"negative float timeout", map[string]any{"timeout": -1.0}, "at least 1s"},
+		{"zero int timeout", map[string]any{"timeout": 0}, "at least 1s"},
+		{"zero string timeout", map[string]any{"timeout": "0s"}, "greater than 0"},
 		{"bad timeout type", map[string]any{"timeout": true}, "duration string"},
 		{"auto_auth_path not string", map[string]any{"auto_auth_path": 123}, "must be a string"},
 		{"default_role not string", map[string]any{"default_role": 123}, "must be a string"},
@@ -362,6 +364,13 @@ func TestNewTransport(t *testing.T) {
 	assert.Equal(t, 50, transport.MaxIdleConnsPerHost)
 	assert.True(t, transport.ForceAttemptHTTP2)
 	assert.Equal(t, 90*time.Second, transport.IdleConnTimeout)
+	// No header timeout of its own: the mount's timeout bounds the request,
+	// and a fixed one would cut a long non-streaming generation short of it.
+	assert.Zero(t, transport.ResponseHeaderTimeout)
+
+	tlsTransport, err := NewTransportWithTLS("", true)
+	require.NoError(t, err)
+	assert.Zero(t, tlsTransport.ResponseHeaderTimeout)
 }
 
 func TestShutdownTransport(t *testing.T) {
@@ -766,6 +775,47 @@ func TestConfigWrite_ZeroMaxBodySize(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// The timeout is the only bound on how long an upstream may take, so a write
+// that would remove it is refused. "500ms" truncates to zero seconds.
+func TestConfigWrite_ZeroTimeout(t *testing.T) {
+	for _, timeout := range []any{0, "0s", "500ms"} {
+		b := setupBackend(t, testSpec())
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.UpdateOperation,
+			Path:      "config",
+			Data: map[string]any{
+				"timeout":        timeout,
+				"auto_auth_path": "auth/jwt/",
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "timeout %v", timeout)
+		assert.Contains(t, resp.Err.Error(), "timeout must be at least 1s")
+		assert.Equal(t, testSpec().DefaultTimeout, b.(*proxyBackend).Timeout())
+	}
+}
+
+// A zero timeout already in storage keeps the spec's default rather than
+// leaving the mount with no deadline.
+func TestInitialize_StoredZeroTimeoutKeepsDefault(t *testing.T) {
+	spec := testSpec()
+	storage := newInmemStorage()
+	entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{
+		"timeout":        "0s",
+		"auto_auth_path": "auth/jwt/",
+	})
+	_ = storage.Put(context.Background(), entry)
+
+	b, err := NewFactory(spec)(context.Background(), &logical.BackendConfig{
+		StorageView: storage,
+		Logger:      testLogger(),
+	})
+	require.NoError(t, err)
+	pb := b.(*proxyBackend)
+	require.NoError(t, pb.Initialize(context.Background()))
+	assert.Equal(t, spec.DefaultTimeout, pb.Timeout())
 }
 
 func TestConfigWrite_OversizedMaxBodySize(t *testing.T) {

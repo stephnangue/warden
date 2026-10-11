@@ -175,11 +175,19 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		}
 	}
 
+	// The timeout is the only bound on how long an upstream may take, so zero
+	// is refused.
 	var newTimeout time.Duration
 	var hasTimeout bool
 	if val, ok := d.GetOk("timeout"); ok {
 		newTimeout = time.Duration(val.(int)) * time.Second
 		hasTimeout = true
+		if newTimeout <= 0 {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest("timeout must be at least 1s"),
+			}, nil
+		}
 	}
 
 	// Transparent mode settings — TransparentConfig() is atomic, no lock needed.

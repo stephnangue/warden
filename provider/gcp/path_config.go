@@ -104,11 +104,18 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		maxBodySize = framework.DefaultMaxBodySize
 	}
 
-	// For timeout: use provided value, or apply default if not yet set
+	// For timeout: use provided value, or apply default if not yet set. It is
+	// the only bound on how long an upstream may take, so zero is refused.
 	timeout := b.Timeout()
 	if val, ok := d.GetOk("timeout"); ok {
 		// TypeDurationSecond returns int (seconds)
 		timeout = time.Duration(val.(int)) * time.Second
+		if timeout <= 0 {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest("timeout must be at least 1s"),
+			}, nil
+		}
 	} else if timeout == 0 {
 		timeout = framework.DefaultTimeout
 	}
