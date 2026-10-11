@@ -357,9 +357,10 @@ func (t *AWSIAMAccessKeysCredType) RequiresSpecRotation() bool {
 	return false
 }
 
-// SensitiveConfigFields returns spec config keys that should be masked in output
+// SensitiveConfigFields returns spec config keys that should be masked in output.
+// A spec on a local source holds the IAM user's secret key inline.
 func (t *AWSIAMAccessKeysCredType) SensitiveConfigFields() []string {
-	return nil
+	return []string{"secret_access_key"}
 }
 
 // StoredSecrets reports the secret config keys this spec holds. access_key_id is
