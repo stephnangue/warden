@@ -3,6 +3,7 @@ package httputil
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -36,6 +37,17 @@ func (e *StatusError) Unwrap() error { return e.Err }
 
 // HTTPStatus is the status the upstream answered with.
 func (e *StatusError) HTTPStatus() int { return e.Status }
+
+// BodyError is a failure of an HTTPRequest's BodyFunc: the request was never sent, so
+// it is not a transport failure and is never retried. A caller unwraps it to report
+// the builder's own error rather than one about the upstream.
+type BodyError struct {
+	Err error
+}
+
+func (e *BodyError) Error() string { return e.Err.Error() }
+
+func (e *BodyError) Unwrap() error { return e.Err }
 
 // HTTPRetryConfig configures HTTP retry behavior.
 type HTTPRetryConfig struct {
@@ -79,6 +91,14 @@ type HTTPRequest struct {
 	// Body is the request body (optional)
 	Body []byte
 
+	// BodyFunc, when set, builds the body afresh for each attempt instead of Body,
+	// which must then be nil. It is for a body that may be sent only once — one
+	// carrying a single-use client assertion, say — so a retry presents a new one
+	// rather than a replay. It runs after any backoff, immediately before the request
+	// is built, so anything time-bound in it reflects when it is sent. attempt counts
+	// from 0. An error is returned as a *BodyError and ends the call without a retry.
+	BodyFunc func(attempt int) ([]byte, error)
+
 	// Headers are request headers
 	Headers map[string]string
 
@@ -94,6 +114,10 @@ func ExecuteWithRetry(
 	req HTTPRequest,
 	config HTTPRetryConfig,
 ) ([]byte, int, error) {
+	if req.Body != nil && req.BodyFunc != nil {
+		return nil, 0, errors.New("request sets both Body and BodyFunc")
+	}
+
 	var lastErr error
 	var lastStatus int
 
@@ -112,9 +136,16 @@ func ExecuteWithRetry(
 		}
 
 		// Build HTTP request
+		body := req.Body
+		if req.BodyFunc != nil {
+			var err error
+			if body, err = req.BodyFunc(attempt); err != nil {
+				return nil, 0, &BodyError{Err: err}
+			}
+		}
 		var bodyReader io.Reader
-		if req.Body != nil {
-			bodyReader = bytes.NewReader(req.Body)
+		if body != nil {
+			bodyReader = bytes.NewReader(body)
 		}
 
 		httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bodyReader)

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -194,6 +196,130 @@ func TestExecuteWithRetry_HeadersAreSent(t *testing.T) {
 	}
 	if gotHeader != "abc" {
 		t.Fatalf("expected header sent, got %q", gotHeader)
+	}
+}
+
+// A body that may be sent only once is built afresh for every attempt, so a retry
+// presents a new one rather than replaying the first.
+func TestExecuteWithRetry_BodyFuncBuildsEachAttempt(t *testing.T) {
+	var (
+		calls  int32
+		mu     sync.Mutex
+		bodies []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		if atomic.AddInt32(&calls, 1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var built []int
+	cfg := HTTPRetryConfig{MaxAttempts: 3, MaxBodySize: DefaultMaxBodySize, RetryableStatuses: []int{500}, BaseBackoff: time.Millisecond, JitterPercent: 10}
+	_, status, err := ExecuteWithRetry(context.Background(), srv.Client(), HTTPRequest{
+		Method: http.MethodPost,
+		URL:    srv.URL,
+		BodyFunc: func(attempt int) ([]byte, error) {
+			built = append(built, attempt)
+			return []byte(fmt.Sprintf("attempt-%d", attempt)), nil
+		},
+	}, cfg)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("got status %d, err %v", status, err)
+	}
+	if fmt.Sprint(built) != "[0 1 2]" {
+		t.Errorf("BodyFunc called for attempts %v, want [0 1 2]", built)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(bodies) != "[attempt-0 attempt-1 attempt-2]" {
+		t.Errorf("server received %v, want one fresh body per attempt", bodies)
+	}
+}
+
+// The body is built after the backoff, not before it, so a time-bound body (an
+// assertion's iat, a capability's expiry check) reflects when it is actually sent.
+func TestExecuteWithRetry_BodyFuncRunsAfterBackoff(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	const backoff = 50 * time.Millisecond
+	var at []time.Time
+	cfg := HTTPRetryConfig{MaxAttempts: 2, MaxBodySize: DefaultMaxBodySize, RetryableStatuses: []int{429}, BaseBackoff: backoff, JitterPercent: 10}
+	_, _, err := ExecuteWithRetry(context.Background(), srv.Client(), HTTPRequest{
+		Method:   http.MethodPost,
+		URL:      srv.URL,
+		BodyFunc: func(int) ([]byte, error) { at = append(at, time.Now()); return []byte("x"), nil },
+	}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(at) != 2 {
+		t.Fatalf("BodyFunc called %d times, want 2", len(at))
+	}
+	if gap := at[1].Sub(at[0]); gap < backoff {
+		t.Errorf("the second body was built %v after the first, before the %v backoff elapsed", gap, backoff)
+	}
+}
+
+// A body that cannot be built was never sent: it is reported as itself, wrapped so a
+// caller can tell it from an upstream failure, and not retried.
+func TestExecuteWithRetry_BodyFuncErrorIsNotRetried(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	sentinel := errors.New("signing failed")
+	built := 0
+	cfg := HTTPRetryConfig{MaxAttempts: 3, MaxBodySize: DefaultMaxBodySize, RetryableStatuses: []int{500}, BaseBackoff: time.Millisecond, JitterPercent: 10}
+	_, _, err := ExecuteWithRetry(context.Background(), srv.Client(), HTTPRequest{
+		Method: http.MethodPost,
+		URL:    srv.URL,
+		BodyFunc: func(attempt int) ([]byte, error) {
+			built++
+			if attempt == 1 {
+				return nil, sentinel
+			}
+			return []byte("x"), nil
+		},
+	}, cfg)
+	var be *BodyError
+	if !errors.As(err, &be) {
+		t.Fatalf("got %v (%T), want a *BodyError", err, err)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("the builder's error is not in the chain: %v", err)
+	}
+	if built != 2 || atomic.LoadInt32(&calls) != 1 {
+		t.Errorf("built %d bodies and sent %d requests, want 2 and 1 — a failed build ends the call", built, calls)
+	}
+}
+
+func TestExecuteWithRetry_BodyAndBodyFuncAreExclusive(t *testing.T) {
+	_, _, err := ExecuteWithRetry(context.Background(), http.DefaultClient, HTTPRequest{
+		Method:   http.MethodPost,
+		URL:      "http://127.0.0.1:0",
+		Body:     []byte("x"),
+		BodyFunc: func(int) ([]byte, error) { return []byte("y"), nil },
+	}, DefaultHTTPRetryConfig())
+	if err == nil {
+		t.Fatal("a request setting both Body and BodyFunc was accepted")
 	}
 }
 
