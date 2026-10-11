@@ -37,8 +37,9 @@ func TestOAuth2DriverFactory_SensitiveConfigFields(t *testing.T) {
 	f := &OAuth2DriverFactory{}
 	fields := f.SensitiveConfigFields()
 	assert.Contains(t, fields, "client_secret")
+	assert.Contains(t, fields, "private_key")
 	assert.Contains(t, fields, "ca_data")
-	assert.Len(t, fields, 2)
+	assert.Len(t, fields, 3)
 }
 
 func TestOAuth2DriverFactory_InferCredentialType(t *testing.T) {
