@@ -296,6 +296,9 @@ func newProcessorRegistry(proxyDomains []string, log *logger.GatedLogger) *proce
 	registry.Register(s3.NewS3AccessPointProcessor(proxyDomains, log))
 	registry.Register(s3.NewS3ControlProcessor(proxyDomains, log))
 	registry.Register(s3.NewS3Processor(proxyDomains, log))
+	// The service lookup tries a service's processors in registration order,
+	// not by priority: a second "bedrock" processor must be ordered here.
+	registry.Register(processor.NewBedrockRuntimeProcessor(proxyDomains, log))
 	registry.Register(processor.NewGenericAWSProcessor(proxyDomains, log))
 	return registry
 }
@@ -327,6 +330,9 @@ Examples:
 
 Service-specific processors handle URL rewriting for virtual-hosted S3 buckets,
 S3-Control ARN paths, and other services that require special treatment.
+Bedrock Runtime calls (Converse, InvokeModel and their streaming forms, async
+invocations, guardrails) sign as "bedrock" like the control plane and are sent
+to bedrock-runtime.<region> by their path.
 
 Configuration:
 - proxy_domains: Allowlist of permitted AWS service domains

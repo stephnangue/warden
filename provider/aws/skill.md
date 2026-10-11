@@ -60,6 +60,11 @@ aws ec2 describe-instances --region us-east-1
 
 # Lambda
 aws lambda list-functions
+
+# Bedrock models
+aws bedrock-runtime converse --region us-east-1 \
+    --model-id amazon.nova-lite-v1:0 \
+    --messages '[{"role": "user", "content": [{"text": "Say hi"}]}]'
 ```
 
 For any AWS service: just run the normal SDK or CLI command. Warden
@@ -88,4 +93,15 @@ extracts the service and region from the SigV4 Authorization header.
   doesn't yet implement).
 - Standard Single-Region Access Points work; the ARN goes in the
   request path and Warden routes correctly.
+- **Bedrock: model calls work, agents do not.** `bedrock-runtime`
+  (Converse, InvokeModel, their streaming forms, guardrails) and the
+  `bedrock` control plane both work. `bedrock-agent`,
+  `bedrock-agent-runtime` (agents, knowledge bases, flows) and
+  `bedrock-data-automation(-runtime)` are unsupported, and so is
+  `InvokeModelWithBidirectionalStream`.
+- **Long or large model calls.** The mount's `timeout` bounds the whole
+  call, a streamed one included, and its `max_body_size` (10MB by
+  default) the request. A generation cut off or answered `504`, or a
+  `400` on a request with images or documents, means the operator must
+  raise them on the mount; retrying will not help.
 
