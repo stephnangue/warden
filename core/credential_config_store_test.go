@@ -2406,6 +2406,26 @@ func TestCredentialConfigStore_OAuth2Chaining(t *testing.T) {
 		require.Error(t, err, key)
 		assert.Contains(t, err.Error(), key+" must be omitted when the source sets secret_spec")
 	}
+
+	// A kms source sends a kid — the capability's — so a spec's is refused for the real
+	// reason, that the payload supplies the whole credential, not as a half the method
+	// never sends.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "oauth-kms", Type: credential.SourceTypeOAuth2,
+		Config: credential.NewConfig(map[string]string{
+			"token_url":                 "https://identity.example.com/oauth/token",
+			"client_auth":               "kms_private_key_jwt",
+			credential.ConfigSecretSpec: "idp-client-credential",
+		}),
+	}))
+	for _, key := range []string{"client_id", "client_secret", "private_key", "client_assertion_kid"} {
+		err = store.CreateSpec(ctx, &credential.CredSpec{
+			Name: "inline-kms-" + key, Type: credential.TypeOAuthBearerToken, Source: "oauth-kms",
+			Config: credential.NewConfig(map[string]string{key: "inline-value"}),
+		})
+		require.Error(t, err, key)
+		assert.Contains(t, err.Error(), key+" must be omitted when the source sets secret_spec")
+	}
 }
 
 // TestCredentialConfigStore_OAuth2ClientAuthMismatch: a spec's client credential is
