@@ -674,6 +674,72 @@ func TestSystemBackend_HandleCredentialSpecUpdate_MaskedValueIsNotPersisted(t *t
 	assert.Equal(t, "org-2", stored.Config.Get("organization_id"))
 }
 
+// An aws_access_keys spec on a local source holds the IAM user's secret key
+// inline. Reads and lists mask it, and a read sent back keeps it: before, both
+// returned it in clear.
+func TestSystemBackend_InlineAWSKeysAreMasked(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+	sourceSchema := backend.pathCredentials()[0].Fields
+	sourceRaw := map[string]interface{}{"name": "inline-aws", "type": "local"}
+	_, err := backend.handleCredentialSourceCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/sources/inline-aws", sourceRaw), createFieldData(sourceSchema, sourceRaw))
+	require.NoError(t, err)
+
+	specSchema := backend.pathCredentials()[2].Fields
+	specRaw := map[string]interface{}{
+		"name":   "inline-keys",
+		"type":   "aws_access_keys",
+		"source": "inline-aws",
+		"config": map[string]interface{}{
+			"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+			"secret_access_key": secret,
+		},
+	}
+	resp, err := backend.handleCredentialSpecCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/specs/inline-keys", specRaw), createFieldData(specSchema, specRaw))
+	require.NoError(t, err)
+	require.False(t, resp.IsError(), "create: %v", resp.Data)
+	// The create response shows the config as a read does.
+	assert.Equal(t, maskValue, resp.Data["config"].(map[string]string)["secret_access_key"])
+
+	readRaw := map[string]interface{}{"name": "inline-keys"}
+	readResp, err := backend.handleCredentialSpecRead(ctx,
+		createTestRequest(logical.ReadOperation, "cred/specs/inline-keys", readRaw), createFieldData(specSchema, readRaw))
+	require.NoError(t, err)
+	readConfig := readResp.Data["config"].(map[string]string)
+	assert.Equal(t, maskValue, readConfig["secret_access_key"])
+	assert.Equal(t, "AKIAIOSFODNN7EXAMPLE", readConfig["access_key_id"], "the key id is an identifier, not a secret")
+
+	listResp, err := backend.handleCredentialSpecList(ctx,
+		createTestRequest(logical.ListOperation, "cred/specs", nil), createFieldData(specSchema, map[string]interface{}{}))
+	require.NoError(t, err)
+	listed := false
+	for _, spec := range listResp.Data["specs"].([]map[string]any) {
+		if spec["name"] != "inline-keys" {
+			continue
+		}
+		listed = true
+		assert.Equal(t, maskValue, spec["config"].(map[string]string)["secret_access_key"], "list returned the secret key")
+	}
+	require.True(t, listed, "the spec is not in the list")
+
+	// Send the read back: the secret survives.
+	resend := map[string]interface{}{}
+	for k, v := range readConfig {
+		resend[k] = v
+	}
+	updateRaw := map[string]interface{}{"name": "inline-keys", "config": resend}
+	updateResp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/inline-keys", updateRaw), createFieldData(specSchema, updateRaw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, updateResp.StatusCode)
+	stored, err := backend.core.credConfigStore.GetSpec(ctx, "inline-keys")
+	require.NoError(t, err)
+	assert.Equal(t, secret, stored.Config.Get("secret_access_key"))
+}
+
 // TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted is the
 // same hazard on the source path, where the sensitive fields are the driver's.
 func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t *testing.T) {

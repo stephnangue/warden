@@ -241,14 +241,22 @@ func (b *SystemBackend) maskSourceConfig(sourceType string, config map[string]st
 		}
 	}
 
-	// Build sensitive fields lookup
-	sensitive := make(map[string]bool)
-	for _, f := range sensitiveFields {
-		sensitive[f] = true
-	}
+	// A secret the driver says the server holds is masked whether or not its
+	// list names it.
+	return maskFields(config, sensitiveFields, b.core.sourceStoredSecrets(sourceType, credential.NewConfig(config)))
+}
 
-	// Mask sensitive values. An empty value is left as is: it is a field an
-	// update cleared, and masking it would read back as a secret still held.
+// maskFields replaces the value of each field named in any of the lists with
+// the mask. An empty value is left as is: it is a field an update cleared, and
+// masking it would read back as a secret still held. The lists are only read,
+// so a type or driver may hand back a slice it shares.
+func maskFields(config map[string]string, fieldLists ...[]string) map[string]string {
+	sensitive := make(map[string]bool)
+	for _, fields := range fieldLists {
+		for _, f := range fields {
+			sensitive[f] = true
+		}
+	}
 	masked := make(map[string]string, len(config))
 	for k, v := range config {
 		if sensitive[k] && v != "" {
@@ -320,23 +328,10 @@ func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string
 		}
 	}
 
-	// Build sensitive fields lookup
-	sensitive := make(map[string]bool)
-	for _, f := range sensitiveFields {
-		sensitive[f] = true
-	}
-
-	// Mask sensitive values. An empty value is left as is: it is a field an
-	// update cleared, and masking it would read back as a secret still held.
-	masked := make(map[string]string, len(config))
-	for k, v := range config {
-		if sensitive[k] && v != "" {
-			masked[k] = maskValue
-		} else {
-			masked[k] = v
-		}
-	}
-	return masked
+	// A secret the type says the spec holds is masked whether or not its list
+	// names it: the two are declared apart, and a list that misses one would
+	// hand the secret to every reader.
+	return maskFields(config, sensitiveFields, b.core.specStoredSecrets(specType, credential.NewConfig(config)))
 }
 
 // Credential Source Handlers
@@ -380,7 +375,7 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 	data := map[string]any{
 		"name":            source.Name,
 		"type":            source.Type,
-		"config":          source.Config,
+		"config":          b.maskSourceConfig(source.Type, source.Config.Map()),
 		"rotation_period": int64(source.RotationPeriod.Seconds()),
 		"message":         fmt.Sprintf("Successfully created credential source %s", name),
 	}
@@ -708,7 +703,7 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		"name":            spec.Name,
 		"type":            spec.Type,
 		"source":          spec.Source,
-		"config":          spec.Config,
+		"config":          b.maskSpecConfig(spec.Type, spec.Config.Map()),
 		"min_ttl":         int64(spec.MinTTL.Seconds()),
 		"max_ttl":         int64(spec.MaxTTL.Seconds()),
 		"rotation_period": int64(spec.RotationPeriod.Seconds()),
