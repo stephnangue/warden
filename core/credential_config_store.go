@@ -1540,6 +1540,12 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 		}
 	}
 
+	if source.Type == credential.SourceTypeOAuth2 {
+		if err := oauth2SpecClientAuthError(spec.Config, source.Config); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
+	}
+
 	// Credential chaining: when this spec (spec-level, wins) or its source
 	// (source-level) references another cred spec as its secret source, validate the
 	// referenced secret-spec. The consuming driver's eligibility (it must implement
@@ -1616,9 +1622,9 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 			if credential.GetString(spec.Config, "auth_method", "") == "authorization_code" {
 				return logical.ErrBadRequestf("a chained oauth2 source (secret_spec %q) supports auth_method=client_credentials only; the consent flow runs without a caller and cannot fetch the chained client credential", chainedRef)
 			}
-			// client_id/client_secret resolve spec-over-source, so a half left here would
+			// The client credential resolves spec-over-source, so a half left here would
 			// be presented against the other half fetched from the chain.
-			for _, key := range []string{"client_id", "client_secret"} {
+			for _, key := range []string{"client_id", "client_secret", "private_key", "client_assertion_kid"} {
 				if credential.GetString(spec.Config, key, "") != "" {
 					return logical.ErrBadRequestf("%s must be omitted when the source sets secret_spec (%q); the referenced spec supplies the whole client credential", key, chainedRef)
 				}
@@ -1949,6 +1955,40 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 	return refs, nil
 }
 
+// oauth2SpecClientAuthError reports an oauth2 spec whose client credential does not fit
+// its source's client_auth. The credential resolves spec-over-source, but the method it
+// is presented with is the source's alone, so only a layer that sees both configs can
+// tell. It runs when a spec is written and again when its source is, since either
+// write can introduce the mismatch.
+func oauth2SpecClientAuthError(specCfg, sourceCfg credential.Config) error {
+	clientAuth := credential.GetString(sourceCfg, "client_auth", "client_secret_post")
+
+	// A spec holding the half another method uses would be stored, and reported as a
+	// stored secret, while never being sent.
+	unused := []string{"private_key", "client_assertion_kid"}
+	if clientAuth == "private_key_jwt" {
+		unused = []string{"client_secret"}
+	}
+	for _, key := range unused {
+		if credential.GetString(specCfg, key, "") != "" {
+			return fmt.Errorf("%s must be omitted from a spec on an oauth2 source with client_auth=%s; that method never sends it", key, clientAuth)
+		}
+	}
+
+	// A kid names the key it was stored beside. A spec without a key of its own signs
+	// with the source's, under the source's kid, so a kid of its own would be ignored —
+	// and an authorization server choosing keys by kid would be told about the wrong one.
+	// (On a chained source the whole credential comes from the payload, and the
+	// chaining guard refuses any of it on the spec, naming why.)
+	if clientAuth == "private_key_jwt" &&
+		credential.GetString(sourceCfg, credential.ConfigSecretSpec, "") == "" &&
+		credential.GetString(specCfg, "client_assertion_kid", "") != "" &&
+		credential.GetString(specCfg, "private_key", "") == "" {
+		return fmt.Errorf("client_assertion_kid names the key stored beside it, and this spec has none: set private_key beside it, or drop it to sign with the source's key under the source's kid")
+	}
+	return nil
+}
+
 // checkBoundSpecsStillCarried rejects a source edit that would stop a bound spec's
 // credential fields from travelling.
 //
@@ -1962,8 +2002,11 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 //
 // Takes no lock and fills no cache: it runs inside UpdateSource's critical
 // section, where the referenced specs must not be able to change underneath it.
+//
+// It also re-applies oauth2SpecClientAuthError, since a changed client_auth strands a
+// spec as surely as a narrowed credential_fields does.
 func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(namespaceID string, source *credential.CredSource) error {
-	if s.core == nil || s.core.credentialTypeRegistry == nil {
+	if s.core == nil {
 		return nil
 	}
 
@@ -1977,6 +2020,19 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(namespaceID st
 	}
 
 	for _, spec := range refs {
+		// A changed client_auth changes which half of a spec's client credential is
+		// sent. A spec still holding the other half would keep reporting a stored
+		// secret while every mint failed for want of the one it lacks. Needs no type
+		// registry: it reads the two configs alone.
+		if source.Type == credential.SourceTypeOAuth2 {
+			if err := oauth2SpecClientAuthError(spec.Config, source.Config); err != nil {
+				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
+			}
+		}
+
+		if s.core.credentialTypeRegistry == nil {
+			continue
+		}
 		credType, err := s.core.credentialTypeRegistry.GetByName(spec.Type)
 		if err != nil {
 			continue

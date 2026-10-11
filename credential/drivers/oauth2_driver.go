@@ -2,9 +2,11 @@ package drivers
 
 import (
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -52,25 +54,24 @@ var _ credential.ChainedSecretMinter = (*OAuth2Driver)(nil)
 //
 // The token endpoint and connection options live in the source config (token_url
 // required; auth_url, default_scopes, verify_url, verify_method, auth_header_type,
-// auth_header_name, display_name, ca_data, tls_skip_verify optional). client_id and
-// client_secret may live on the source (client_credentials) or the spec, resolved
-// spec-over-source, or be fetched per mint from another cred spec (secret_spec,
-// source-level). The spec's auth_method selects the flow (default
-// client_credentials); the driver POSTs to the token endpoint and returns the
-// resulting access_token as an api_key field.
+// auth_header_name, display_name, ca_data, tls_skip_verify optional). The source's
+// client_auth selects how the driver authenticates to the token endpoint: a client
+// secret in the form (client_secret_post, the default) or in an Authorization header
+// (client_secret_basic), or an RFC 7523 client assertion signed with a private key
+// (private_key_jwt). The client credential — client_id with client_secret or
+// private_key — may live on the source or the spec, resolved spec-over-source, or be
+// fetched per mint from another cred spec (secret_spec, source-level). The spec's
+// auth_method selects the flow (default client_credentials); the driver POSTs to the
+// token endpoint and returns the resulting access_token as an api_key field.
 type OAuth2Driver struct {
 	credSource *credential.CredSource
 	logger     *logger.GatedLogger
 	httpClient *http.Client
-}
-
-// oauth2ChainedAuth carries the client credential a single mint fetched through
-// credential chaining. It is threaded by parameter rather than held on the driver,
-// which is shared: two concurrent mints resolving different pairs must not see each
-// other's. nil means the credential comes from config.
-type oauth2ChainedAuth struct {
-	clientID     string
-	clientSecret string
+	// sourceKey is the source's private_key, parsed once when the driver is built: a
+	// changed source builds a new driver, so it can never go stale, and a mint is
+	// spared an RSA parse on the data path. nil when the source holds no key; a spec
+	// or a chain may still supply one, parsed per mint.
+	sourceKey *rsa.PrivateKey
 }
 
 // OAuth2DriverFactory creates OAuth2Driver instances.
@@ -94,6 +95,36 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 		credential.StringField("client_secret").
 			Describe("OAuth2 client secret (source-level for client_credentials; may be set per-spec)").
 			Example("your-client-secret"),
+
+		credential.StringField("client_auth").
+			OneOf(clientAuthSecretPost, clientAuthSecretBasic, clientAuthPrivateKeyJWT).
+			Describe("How Warden authenticates to the token endpoint: client_secret_post (default) sends the secret in the form, client_secret_basic in an Authorization header, private_key_jwt sends an RFC 7523 client assertion signed with private_key").
+			Example("client_secret_post"),
+
+		credential.StringField("private_key").
+			Custom(func(v string) error {
+				if v == "" {
+					return nil
+				}
+				_, err := parseRSAPrivateKey(v)
+				return err
+			}).
+			Describe("PEM RSA private key for client_auth=private_key_jwt (masked on read; may be set per-spec; omit when secret_spec is set)").
+			Example("-----BEGIN PRIVATE KEY----- ..."),
+
+		credential.StringField("client_assertion_alg").
+			OneOf("RS256").
+			Describe("Signing algorithm for the private_key_jwt client assertion (RS256)").
+			Example("RS256"),
+
+		credential.StringField("client_assertion_kid").
+			Describe("Optional key id (kid) header for the client assertion, naming private_key at the authorization server (may be set per-spec beside the key; when secret_spec is set it travels in the referenced payload, under 'client_assertion_kid' or 'kid')").
+			Example("key-1"),
+
+		credential.StringField("client_assertion_aud").
+			OneOf(clientAssertionAudTokenURL, clientAssertionAudIssuer).
+			Describe("Audience of the client assertion: token_url (default) names the token endpoint; issuer names the issuer identifier, which an authorization server enforcing RFC 7523bis requires (needs issuer)").
+			Example("token_url"),
 
 		credential.StringField("token_url").
 			Required().
@@ -183,7 +214,7 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 			Example("idp-client-credential"),
 
 		credential.StringField("secret_field").
-			Describe("Which field of the referenced secret_spec's credential holds the client secret (when its payload has multiple keys); the client id travels beside it under 'client_id'").
+			Describe("Which field of the referenced secret_spec's credential holds the client secret, or for client_auth=private_key_jwt the private key (when its payload has multiple keys); the client id travels beside it under 'client_id'").
 			Example("client_secret"),
 
 		credential.StringField("secret_cache_ttl").
@@ -193,18 +224,50 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 		return err
 	}
 
+	// The client_auth method decides which half of the client credential is meaningful.
+	clientAuth := credential.GetString(config, "client_auth", clientAuthSecretPost)
+	switch clientAuth {
+	case clientAuthSecretPost, clientAuthSecretBasic:
+		// A key left on a secret-based source would be stored, and reported as stored,
+		// while never being sent.
+		for _, key := range []string{"private_key", "client_assertion_alg", "client_assertion_kid", "client_assertion_aud"} {
+			if credential.GetString(config, key, "") != "" {
+				return fmt.Errorf("%s must be omitted for client_auth=%s; it applies to client_auth=%s", key, clientAuth, clientAuthPrivateKeyJWT)
+			}
+		}
+	case clientAuthPrivateKeyJWT:
+		// The key replaces the secret; a secret kept beside it would never be sent.
+		if credential.GetString(config, "client_secret", "") != "" {
+			return fmt.Errorf("client_secret must be omitted for client_auth=%s; the client authenticates with private_key", clientAuthPrivateKeyJWT)
+		}
+		if credential.GetString(config, "client_assertion_aud", "") == clientAssertionAudIssuer &&
+			credential.GetString(config, "issuer", "") == "" {
+			return fmt.Errorf("client_assertion_aud=%s requires issuer, the authorization server's issuer identifier", clientAssertionAudIssuer)
+		}
+		// A kid names the key stored beside it. With no key here, every spec brings its
+		// own key and its own kid, so this one would name nothing that ever signs. (A
+		// chained source is refused a kid outright, below.)
+		if credential.GetString(config, "client_assertion_kid", "") != "" &&
+			credential.GetString(config, "private_key", "") == "" &&
+			credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
+			return fmt.Errorf("client_assertion_kid names the key stored beside it, and this source has none: set private_key beside it, or set the kid on each spec beside its own key")
+		}
+	}
+
 	// A source in chaining mode holds NEITHER half of the client credential. The secret
 	// is excluded because a source that reads as keyless must not still store the very
 	// secret chaining exists to remove, and the id follows it because the two
 	// authenticate as a pair: an id kept here beside a secret fetched from the chain
 	// would name one client while presenting another's, which the token endpoint answers
 	// with invalid_client and the chained path then reads as a rejected secret and
-	// retries pointlessly.
+	// retries pointlessly. The key id goes with the key for the same reason: a kid names
+	// one key among the several an authorization server may hold for a client, so kept
+	// here it would stamp assertions signed by every agent's key with one agent's kid.
 	//
 	// Requiring both from the payload also lets one source and one spec serve many
 	// clients, since the pair is resolved per mint rather than pinned to the source.
 	if credential.GetString(config, credential.ConfigSecretSpec, "") != "" {
-		if err := rejectInlineClientCredential(config, "client_secret"); err != nil {
+		if err := rejectInlineClientCredential(config, "client_secret", "private_key", "client_assertion_kid"); err != nil {
 			return err
 		}
 		// auth_method resolves spec-over-source, and the spec-side rule lives in the
@@ -219,9 +282,11 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 
 	// Validate token_param.* keys don't override core form fields
 	protectedFields := map[string]bool{
-		"grant_type":    true,
-		"client_id":     true,
-		"client_secret": true,
+		"grant_type":            true,
+		"client_id":             true,
+		"client_secret":         true,
+		"client_assertion":      true,
+		"client_assertion_type": true,
 	}
 	for key := range credential.GetPrefixed(config, "token_param.") {
 		if protectedFields[key] {
@@ -241,12 +306,12 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 
 // SensitiveConfigFields returns the list of source config keys that should be masked.
 func (f *OAuth2DriverFactory) SensitiveConfigFields() []string {
-	return []string{"client_secret", "ca_data"}
+	return []string{"client_secret", "private_key", "ca_data"}
 }
 
 // StoredSecrets reports the secret config keys this source holds.
 func (f *OAuth2DriverFactory) StoredSecrets(config credential.Config) []string {
-	return config.Present("client_secret")
+	return config.Present("client_secret", "private_key")
 }
 
 // InferCredentialType returns the credential type for OAuth2 sources.
@@ -269,6 +334,12 @@ func (f *OAuth2DriverFactory) Create(config credential.Config, log *logger.Gated
 		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 	}
 	driver.httpClient = httpClient
+
+	if pemKey := credential.GetString(config, "private_key", ""); pemKey != "" {
+		if driver.sourceKey, err = parseRSAPrivateKey(pemKey); err != nil {
+			return nil, fmt.Errorf("invalid private_key: %w", err)
+		}
+	}
 
 	return driver, nil
 }
@@ -348,37 +419,33 @@ func (d *OAuth2Driver) MintCredential(ctx context.Context, spec *credential.Cred
 }
 
 // mintFromClientCredentials exchanges client credentials for a bearer token. chained,
-// when non-nil, supplies both halves of the pair from credential-chaining material
+// when non-nil, supplies the whole client credential from credential-chaining material
 // instead of config.
-func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *credential.CredSpec, chained *oauth2ChainedAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *credential.CredSpec, chained *chainedClientAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	config := d.credSource.Config
 	name := d.displayName()
 
-	clientID := d.resolve(spec, "client_id", "")
-	clientSecret := d.resolve(spec, "client_secret", "")
 	if chained != nil {
 		// Validation refuses a chained source or spec that also names a client, so a
-		// leftover here means config drifted past it. Refusing beats presenting a pair
-		// half from config and half from the chain, which the endpoint rejects as
-		// invalid_client and the chained path then misreads as a stale secret.
-		if clientID != "" || clientSecret != "" {
-			return nil, nil, 0, "", fmt.Errorf("%s OAuth2 chained mint: client_id/client_secret must not be configured when secret_spec is set; the referenced spec supplies the whole client credential", name)
+		// leftover here means config drifted past it. Refusing beats presenting a
+		// credential half from config and half from the chain, which the endpoint
+		// rejects as invalid_client and the chained path then misreads as a stale one.
+		for _, key := range []string{"client_id", "client_secret", "private_key", "client_assertion_kid"} {
+			if d.resolve(spec, key, "") != "" {
+				return nil, nil, 0, "", fmt.Errorf("%s OAuth2 chained mint: %s must not be configured when secret_spec is set; the referenced spec supplies the whole client credential", name, key)
+			}
 		}
-		clientID, clientSecret = chained.clientID, chained.clientSecret
 	}
-	if clientID == "" || clientSecret == "" {
-		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 source missing client_id or client_secret", name)
+	auth, err := d.resolveClientAuth(spec, chained, "source")
+	if err != nil {
+		return nil, nil, 0, "", err
 	}
 
 	defaultScopes := credential.GetString(config, "default_scopes", "")
 	scope := credential.GetString(spec.Config, "scope", defaultScopes)
 
-	// Build token request body
-	form := url.Values{
-		"grant_type":    {oauth2GrantClientCredentials},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
-	}
+	// Build token request body; the client authentication is added per attempt.
+	form := url.Values{"grant_type": {oauth2GrantClientCredentials}}
 	if scope != "" {
 		form.Set("scope", scope)
 	}
@@ -388,7 +455,7 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 		form.Set(k, v)
 	}
 
-	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
+	tokenResp, err := d.postWithClientAuth(ctx, auth, form)
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token exchange failed: %w", name, oauth2ChainedClientAuthError(err, chained != nil))
 	}
@@ -425,20 +492,17 @@ func (d *OAuth2Driver) mintFromRefreshToken(ctx context.Context, spec *credentia
 func (d *OAuth2Driver) refreshGrant(ctx context.Context, spec *credential.CredSpec, refreshToken string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	name := d.displayName()
 
-	clientID := d.resolve(spec, "client_id", "")
-	clientSecret := d.resolve(spec, "client_secret", "")
-	if clientID == "" || clientSecret == "" {
-		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 spec missing client_id or client_secret", name)
+	auth, err := d.resolveClientAuth(spec, nil, "spec")
+	if err != nil {
+		return nil, nil, 0, "", err
 	}
 
 	form := url.Values{
 		"grant_type":    {oauth2GrantRefreshToken},
 		"refresh_token": {refreshToken},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
 	}
 
-	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
+	tokenResp, err := d.postWithClientAuth(ctx, auth, form)
 	if err != nil {
 		if isRefreshTokenRejection(err) {
 			// Signal the minting layer to re-read the spec and retry once (the
@@ -492,7 +556,9 @@ func (d *OAuth2Driver) MintFromSecret(ctx context.Context, spec *credential.Cred
 			name, oauth2AuthMethodClientCredentials, authMethod)
 	}
 
-	chained, err := oauth2ChainedAuthFromMaterial(material)
+	// The payload is read the same way token_exchange reads one: client_auth decides
+	// whether it carries a client secret or a private key.
+	chained, err := chainedClientAuthFromMaterial(credential.GetString(d.credSource.Config, "client_auth", ""), material)
 	if err != nil {
 		// %w, so the ErrChainedSecretIncomplete the manager acts on survives the wrap.
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 chained mint: %w", name, err)
@@ -500,46 +566,124 @@ func (d *OAuth2Driver) MintFromSecret(ctx context.Context, spec *credential.Cred
 	return d.mintFromClientCredentials(ctx, spec, chained)
 }
 
-// oauth2ChainedAuthFromMaterial reads a whole client credential out of fetched secret
-// material.
-//
-// secret_field names the secret alone, so a field that resolved to nothing is a
-// misconfigured source rather than an invitation to look elsewhere: the conventional
-// client_secret key is consulted only when no field was resolved at all. The id is read
-// by convention for the same reason, and has nowhere to fall back to — a source in
-// chaining mode holds no client_id — so its absence is an error raised here, before any
-// request is sent.
-//
-// Every "the payload lacks what I need" error carries ErrChainedSecretIncomplete, so a
-// cached payload that predates a key it now has to hold is refetched once rather than
-// failing for the rest of its secret_cache_ttl.
-func oauth2ChainedAuthFromMaterial(material credential.SecretMaterial) (*oauth2ChainedAuth, error) {
-	// The id is never the secret. A payload holding nothing but an id resolves that lone
-	// key as the secret field — the single-key shortcut has no way to know better — and
-	// without this the same value would be spent as both halves of the pair, which the
-	// endpoint answers with invalid_client and the chained path then misreads as a
-	// rotated secret.
-	if material.Field == "client_id" {
-		return nil, fmt.Errorf("secret_field resolved to 'client_id', which names the id and never the secret: %w", credential.ErrChainedSecretIncomplete)
+// oauth2ClientAuth is the client authentication one mint presents: who the client is
+// and what it proves itself with. It is resolved once per mint — a key is parsed once,
+// a missing credential reported before anything is sent — and then applied to every
+// attempt, so each attempt signs an assertion of its own. It is built per mint and
+// never stored on the shared driver, so concurrent mints cannot see each other's.
+type oauth2ClientAuth struct {
+	method       string
+	clientID     string
+	clientSecret string          // client_secret_post / client_secret_basic
+	key          *rsa.PrivateKey // private_key_jwt
+	kid          string          // the kid stored beside key, if any
+	aud          string          // the audience a client assertion names
+}
+
+// resolveClientAuth settles the client authentication for one mint. chained, when
+// non-nil, supplies the whole client credential from credential chaining in place of
+// config; otherwise each half resolves spec-over-source, which is how an
+// authorization_code spec brings a client of its own. where names the config a
+// missing credential was expected in.
+func (d *OAuth2Driver) resolveClientAuth(spec *credential.CredSpec, chained *chainedClientAuth, where string) (*oauth2ClientAuth, error) {
+	cfg := d.credSource.Config
+	name := d.displayName()
+	auth := &oauth2ClientAuth{
+		method: credential.GetString(cfg, "client_auth", clientAuthSecretPost),
+		aud: clientAssertionAudience(credential.GetString(cfg, "client_assertion_aud", ""),
+			d.tokenURL(), credential.GetString(cfg, "issuer", "")),
 	}
 
-	secret := material.Secret()
-	if secret == "" && material.Field == "" {
-		secret = material.Data["client_secret"]
-	}
-	if secret == "" {
-		if material.Field != "" {
-			return nil, fmt.Errorf("secret_field %q is empty or absent in the fetched secret material: %w", material.Field, credential.ErrChainedSecretIncomplete)
+	if auth.method != clientAuthPrivateKeyJWT {
+		if chained != nil {
+			auth.clientID, auth.clientSecret = chained.clientID, chained.secret
+		} else {
+			auth.clientID, auth.clientSecret = d.resolve(spec, "client_id", ""), d.resolve(spec, "client_secret", "")
 		}
-		return nil, fmt.Errorf("no client secret in fetched secret material (set secret_field, or store it under 'client_secret'): %w", credential.ErrChainedSecretIncomplete)
+		if auth.clientID == "" || auth.clientSecret == "" {
+			return nil, fmt.Errorf("%s OAuth2 %s missing client_id or client_secret", name, where)
+		}
+		return auth, nil
 	}
 
-	clientID := material.Data["client_id"]
-	if clientID == "" {
-		return nil, fmt.Errorf("no client id in fetched secret material (store it under 'client_id' alongside the secret): %w", credential.ErrChainedSecretIncomplete)
+	// The kid goes with the key it was stored beside: a spec that brings its own key
+	// brings its own kid and never inherits the source's, which names another key.
+	var pemKey string
+	switch {
+	case chained != nil:
+		auth.clientID, pemKey, auth.kid = chained.clientID, chained.secret, chained.kid
+	case spec != nil && credential.GetString(spec.Config, "private_key", "") != "":
+		auth.clientID = d.resolve(spec, "client_id", "")
+		pemKey, auth.kid = credential.GetString(spec.Config, "private_key", ""), credential.GetString(spec.Config, "client_assertion_kid", "")
+	default:
+		auth.clientID = d.resolve(spec, "client_id", "")
+		auth.key, auth.kid = d.sourceKey, credential.GetString(cfg, "client_assertion_kid", "")
 	}
+	if pemKey != "" {
+		key, err := parseRSAPrivateKey(pemKey)
+		if err != nil {
+			return nil, fmt.Errorf("%s OAuth2 invalid private_key: %w", name, err)
+		}
+		auth.key = key
+	}
+	if auth.clientID == "" || auth.key == nil {
+		return nil, fmt.Errorf("%s OAuth2 %s missing client_id or private_key", name, where)
+	}
+	return auth, nil
+}
 
-	return &oauth2ChainedAuth{clientID: clientID, clientSecret: secret}, nil
+// headers returns the headers this client authentication sends: client_secret_basic's
+// Authorization header, nothing for the other methods. They do not vary between
+// attempts, so they are settled once.
+func (a *oauth2ClientAuth) headers() map[string]string {
+	if a.method != clientAuthSecretBasic {
+		return nil
+	}
+	return map[string]string{"Authorization": basicClientAuthHeader(a.clientID, a.clientSecret)}
+}
+
+// applyClientAuth adds the client authentication to one attempt's form. A client
+// assertion is signed here, per attempt, so none is ever sent twice.
+//
+// client_secret_basic adds nothing: RFC 6749 §2.3 allows one authentication method per
+// request, and §4.1.3 asks for client_id in the body only from a client that is not
+// authenticating.
+func (d *OAuth2Driver) applyClientAuth(_ context.Context, auth *oauth2ClientAuth, form url.Values) error {
+	switch auth.method {
+	case clientAuthSecretBasic:
+		// Sent in the Authorization header (see headers).
+	case clientAuthPrivateKeyJWT:
+		claims, err := clientAssertionClaims(auth.clientID, auth.aud)
+		if err != nil {
+			return err
+		}
+		assertion, err := signClientAssertionLocal(auth.key, auth.kid, claims)
+		if err != nil {
+			return err
+		}
+		form.Set("client_id", auth.clientID)
+		form.Set("client_assertion_type", clientAssertionType)
+		form.Set("client_assertion", assertion)
+	default:
+		form.Set("client_id", auth.clientID)
+		form.Set("client_secret", auth.clientSecret)
+	}
+	return nil
+}
+
+// postWithClientAuth POSTs form to the token endpoint authenticated as the client. The
+// client authentication is applied afresh to a copy of the form on every attempt, so a
+// retry presents a new client assertion: a server enforcing single use refuses a
+// repeated jti as invalid_client, and one that recorded the assertion before its answer
+// was lost would otherwise turn a blip into a failed mint.
+func (d *OAuth2Driver) postWithClientAuth(ctx context.Context, auth *oauth2ClientAuth, form url.Values) (*oauth2TokenResponse, error) {
+	return postOAuthTokenFormFunc(ctx, d.httpClient, d.tokenURL(), func() (url.Values, error) {
+		attempt := maps.Clone(form)
+		if err := d.applyClientAuth(ctx, auth, attempt); err != nil {
+			return nil, err
+		}
+		return attempt, nil
+	}, auth.headers())
 }
 
 // oauth2ChainedClientAuthError reports a token endpoint error as a rejected chained
@@ -590,24 +734,21 @@ func (d *OAuth2Driver) ExchangeAuthorizationCode(ctx context.Context, spec *cred
 		return nil, err
 	}
 
-	clientID := d.resolve(spec, "client_id", "")
-	clientSecret := d.resolve(spec, "client_secret", "")
-	if clientID == "" || clientSecret == "" {
-		return nil, fmt.Errorf("%s OAuth2 spec missing client_id or client_secret", name)
+	auth, err := d.resolveClientAuth(spec, nil, "spec")
+	if err != nil {
+		return nil, err
 	}
 
 	form := url.Values{
-		"grant_type":    {oauth2GrantAuthorizationCode},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
+		"grant_type":   {oauth2GrantAuthorizationCode},
+		"code":         {code},
+		"redirect_uri": {redirectURI},
 	}
 	if codeVerifier != "" {
 		form.Set("code_verifier", codeVerifier)
 	}
 
-	tokenResp, err := d.postTokenRequest(ctx, d.tokenURL(), form)
+	tokenResp, err := d.postWithClientAuth(ctx, auth, form)
 	if err != nil {
 		return nil, fmt.Errorf("%s OAuth2 authorization-code exchange failed: %w", name, err)
 	}
@@ -684,14 +825,7 @@ func (d *OAuth2Driver) BuildAuthorizeURL(spec *credential.CredSpec, redirectURI,
 	return parsed.String(), nil
 }
 
-// postTokenRequest POSTs a form-encoded token request and decodes the response.
-// It delegates to the package-level postOAuthTokenForm, which is shared with the
-// token_exchange driver.
-func (d *OAuth2Driver) postTokenRequest(ctx context.Context, tokenURL string, form url.Values) (*oauth2TokenResponse, error) {
-	return postOAuthTokenForm(ctx, d.httpClient, tokenURL, form, nil)
-}
-
-// tokenEndpointError is returned by postTokenRequest when the token endpoint
+// tokenEndpointError is returned by postOAuthToken when the token endpoint
 // rejects the request. It carries the HTTP status and, when the body was parsed,
 // the OAuth2 error code, so the refresh path can classify an invalid_grant
 // without fragile string matching.
@@ -729,7 +863,7 @@ func (e *tokenEndpointError) HTTPStatus() int {
 	return e.status
 }
 
-// isRefreshTokenRejection reports whether a postTokenRequest error indicates the
+// isRefreshTokenRejection reports whether a postOAuthToken error indicates the
 // refresh token (grant) was rejected: an explicit invalid_grant code, or — when
 // the body carried no code — an HTTP 400/401 status (the RFC 6749 statuses for a
 // rejected grant).

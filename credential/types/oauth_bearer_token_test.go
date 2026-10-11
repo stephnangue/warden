@@ -1,6 +1,13 @@
 package types
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -540,10 +547,54 @@ func TestOAuthBearerTokenCredType_RequiresSpecRotation(t *testing.T) {
 	assert.False(t, ct.RequiresSpecRotation())
 }
 
+// A spec's private_key is parsed in full at write time: an authorization_code spec is
+// not test-minted, so anything the driver could not sign with would otherwise first
+// fail at connect.
+func TestValidateRSAPrivateKeyPEM(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	require.NoError(t, err)
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ecDER, err := x509.MarshalPKCS8PrivateKey(ecKey)
+	require.NoError(t, err)
+	certTemplate := &x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour)}
+	certDER, err := x509.CreateCertificate(rand.Reader, certTemplate, certTemplate, &rsaKey.PublicKey, rsaKey)
+	require.NoError(t, err)
+
+	encode := func(typ string, der []byte) string {
+		return string(pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}))
+	}
+	cases := []struct {
+		name   string
+		value  string
+		errMsg string
+	}{
+		{"unset", "", ""},
+		{"PKCS8 RSA", encode("PRIVATE KEY", pkcs8), ""},
+		{"PKCS1 RSA", encode("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(rsaKey)), ""},
+		{"not PEM", "not-a-pem", "must be a PEM-encoded RSA private key"},
+		{"a certificate", encode("CERTIFICATE", certDER), "is not a private key"},
+		{"an EC key", encode("PRIVATE KEY", ecDER), "must be an RSA key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRSAPrivateKeyPEM(tc.value)
+			if tc.errMsg == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errMsg)
+		})
+	}
+}
+
 func TestOAuthBearerTokenCredType_SensitiveConfigFields(t *testing.T) {
 	ct := NewOAuthBearerTokenCredType()
 	assert.ElementsMatch(t,
-		[]string{"client_secret", "refresh_token", "access_token"},
+		[]string{"client_secret", "private_key", "refresh_token", "access_token"},
 		ct.SensitiveConfigFields(),
 	)
 }

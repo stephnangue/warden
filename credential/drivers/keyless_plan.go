@@ -190,8 +190,14 @@ func (f *GitLabDriverFactory) KeylessPrerequisites(keyless credential.Config, _ 
 // OAuth2DriverFactory
 
 func (f *OAuth2DriverFactory) PlanKeyless(current credential.Config, inputs map[string]string) (*credential.KeylessSourcePlan, error) {
-	leftovers := []credential.Leftover{{Kind: "OAuth2 client secret", ID: orUnknown(current.Get("client_id")), WhereToDelete: "rotate or delete the client's secret at the authorization server"}}
-	return chainedSourcePlan(current, inputs, []string{"client_id", "client_secret"}, leftovers), nil
+	clear := []string{"client_id", "client_secret"}
+	leftover := credential.Leftover{Kind: "OAuth2 client secret", ID: orUnknown(current.Get("client_id")), WhereToDelete: "rotate or delete the client's secret at the authorization server"}
+	if credential.GetString(current, "client_auth", clientAuthSecretPost) == clientAuthPrivateKeyJWT {
+		clear = []string{"client_id", "private_key", "client_assertion_kid"}
+		leftover.Kind = "client assertion signing key"
+		leftover.WhereToDelete = "retire it at the authorization server once the chained credential works"
+	}
+	return chainedSourcePlan(current, inputs, clear, []credential.Leftover{leftover}), nil
 }
 
 // PlanKeylessSpec clears a client credential a spec carries itself: on a
@@ -203,19 +209,30 @@ func (f *OAuth2DriverFactory) PlanKeylessSpec(_ string, spec, _, _ credential.Co
 		return &credential.KeylessSpecPlan{Blocker: "the authorization_code flow has no keyless form: its consent runs without a caller to fetch a chained client credential as"}, nil
 	}
 	delta := map[string]string{}
-	clearPresent(delta, spec, "client_id", "client_secret")
+	clearPresent(delta, spec, "client_id", "client_secret", "private_key", "client_assertion_kid")
 	plan := &credential.KeylessSpecPlan{Delta: withInputs(delta, inputs)}
+	clientID := credential.GetString(spec, "client_id", "client id not recorded in the spec config")
 	if spec.Get("client_secret") != "" {
-		plan.Leftovers = []credential.Leftover{{
+		plan.Leftovers = append(plan.Leftovers, credential.Leftover{
 			Kind:          "OAuth2 client secret",
-			ID:            credential.GetString(spec, "client_id", "client id not recorded in the spec config"),
+			ID:            clientID,
 			WhereToDelete: "rotate or delete the client's secret at the authorization server",
-		}}
+		})
+	}
+	if spec.Get("private_key") != "" {
+		plan.Leftovers = append(plan.Leftovers, credential.Leftover{
+			Kind:          "client assertion signing key",
+			ID:            clientID,
+			WhereToDelete: "retire it at the authorization server once the chained credential works",
+		})
 	}
 	return plan, nil
 }
 
 func (f *OAuth2DriverFactory) KeylessPrerequisites(keyless credential.Config, _ []credential.PlannedSpec, _ credential.TrustEnv) []credential.Prerequisite {
+	if credential.GetString(keyless, "client_auth", clientAuthSecretPost) == clientAuthPrivateKeyJWT {
+		return chainedPrerequisites(keyless, "client_id and private_key (with client_assertion_kid or kid when the authorization server selects keys by id)")
+	}
 	return chainedPrerequisites(keyless, "client_id and client_secret")
 }
 

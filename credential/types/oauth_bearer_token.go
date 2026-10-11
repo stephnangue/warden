@@ -1,6 +1,9 @@
 package types
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"strings"
 	"time"
@@ -67,6 +70,15 @@ func (t *OAuthBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 		credential.StringField("client_secret").
 			Describe("OAuth2 client secret (per-spec for authorization_code; sealed)").
 			Example("@/path/to/client_secret"),
+
+		credential.StringField("private_key").
+			Custom(validateRSAPrivateKeyPEM).
+			Describe("PEM RSA private key for a client_auth=private_key_jwt oauth2 source (per-spec for authorization_code; sealed)").
+			Example("@/path/to/private_key.pem"),
+
+		credential.StringField("client_assertion_kid").
+			Describe("Key id (kid) naming this spec's private_key at the authorization server, when it selects keys by id").
+			Example("key-1"),
 
 		credential.StringField("scopes").
 			Describe("OAuth2 scopes for authorization_code (comma- or space-separated)").
@@ -295,19 +307,44 @@ func (t *OAuthBearerTokenCredType) RequiresSpecRotation() bool {
 	return false
 }
 
+// validateRSAPrivateKeyPEM refuses a private_key the oauth2 driver could not sign
+// with: not PEM, not a private key, or not RSA. It parses the key in full, as the
+// driver will, because an authorization_code spec is not test-minted at create and
+// would otherwise first fail at connect. The key is parsed and discarded.
+func validateRSAPrivateKeyPEM(v string) error {
+	if v == "" {
+		return nil
+	}
+	block, _ := pem.Decode([]byte(v))
+	if block == nil {
+		return fmt.Errorf("private_key must be a PEM-encoded RSA private key")
+	}
+	if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return nil
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("private_key is not a private key (tried PKCS1 and PKCS8): %w", err)
+	}
+	if _, ok := key.(*rsa.PrivateKey); !ok {
+		return fmt.Errorf("private_key must be an RSA key, got %T", key)
+	}
+	return nil
+}
+
 // SensitiveConfigFields returns spec config keys that should be masked in output.
 // For authorization_code specs these secrets live on the spec (resolved
 // spec-over-source), so they are masked here in addition to the source-level
 // masking the driver factory applies.
 func (t *OAuthBearerTokenCredType) SensitiveConfigFields() []string {
-	return []string{"client_secret", "refresh_token", "access_token"}
+	return []string{"client_secret", "private_key", "refresh_token", "access_token"}
 }
 
 // StoredSecrets reports the secret config keys this spec holds. An
 // authorization_code spec that has not been connected yet still reports the
 // token connect will seal: creating it commits the server to storing one.
 func (t *OAuthBearerTokenCredType) StoredSecrets(config credential.Config) []string {
-	held := config.Present("client_secret", "refresh_token", "access_token")
+	held := config.Present("client_secret", "private_key", "refresh_token", "access_token")
 	if t.RequiresConnect(config) && !t.IsConnected(config) {
 		held = append(held, credential.StoredSecretSealedRefreshToken)
 	}
