@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/aws/processor"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -626,6 +628,146 @@ func signedGatewayRequest(t *testing.T, method, service string, header http.Head
 	creds := awssdk.Credentials{AccessKeyID: "gw-role", SecretAccessKey: secret, SessionToken: gatewayJWT}
 	require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), creds, r, hash, service, "us-east-1", at))
 	return r
+}
+
+// An agent signs with its own JWT, so it picks the region and service in its
+// credential scope, and the upstream host is built from them. One that would
+// move the request to another host is refused, and nothing is forwarded:
+// before, "x.attacker.example#" as the region sent the request, re-signed
+// with the real AWS credential, to ec2.x.attacker.example.
+func TestHandleGateway_RefusesHostChangingScope(t *testing.T) {
+	for _, scope := range []struct{ service, region string }{
+		{"ec2", "x.attacker.example#"},
+		{"ec2", "us-east-1@attacker.example"},
+		{"ec2.attacker.example#", "us-east-1"},
+	} {
+		var forwarded bool
+		b := newGatewayBackend(recordingUpstream(&forwarded))
+		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+
+		body := "Action=DescribeRegions&Version=2016-11-15"
+		r := httptest.NewRequest(http.MethodPost, "http://warden.test/v1/aws/gateway/", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+		signAsAgent(t, r, body, scope.service, scope.region)
+
+		rec := httptest.NewRecorder()
+		b.handleGateway(context.Background(), &logical.Request{
+			Path: "gateway/", HTTPRequest: r, ResponseWriter: rec,
+			RequestID: "rid-scope", Credential: gatewayCredential(),
+		})
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "scope %v", scope)
+		assert.False(t, forwarded, "scope %v: the request was forwarded", scope)
+	}
+}
+
+// An access point ARN in the path names the region and access point the
+// upstream host is built from. One that would move the request to another
+// host is refused: before, a region of "attacker.example/" sent it, re-signed,
+// to ap-123456789012.s3-accesspoint.attacker.example.
+func TestHandleGateway_RefusesHostChangingAccessPointARN(t *testing.T) {
+	for _, arnPath := range []string{
+		"/arn:aws:s3:attacker.example/:123456789012:accesspoint/ap/key.txt",
+		"/arn:aws:s3:us-east-1@attacker.example:123456789012:accesspoint/ap/key.txt",
+		"/arn:aws:s3:attacker.example%2F:123456789012:accesspoint/ap/key.txt",
+		"/arn:aws:s3:us-east-1:123456789012:accesspoint/ap@attacker.example%23/key.txt",
+		"/arn:aws:s3::123456789012:accesspoint/x@attacker.example%23.mrap/key.txt",
+	} {
+		var forwarded bool
+		b := newGatewayBackend(recordingUpstream(&forwarded))
+		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+
+		r := httptest.NewRequest(http.MethodGet, "http://warden.test/v1/aws/gateway"+arnPath, nil)
+		r.Header.Set("X-Amz-Content-Sha256", sigv4.ComputePayloadHash(nil))
+		signAsAgent(t, r, "", "s3", "us-east-1")
+
+		rec := httptest.NewRecorder()
+		b.handleGateway(context.Background(), &logical.Request{
+			Path: "gateway" + r.URL.Path[len("/v1/aws/gateway"):], HTTPRequest: r, ResponseWriter: rec,
+			RequestID: "rid-arn", Credential: gatewayCredential(),
+		})
+
+		if forwarded {
+			t.Errorf("%s: the request was forwarded", arnPath)
+		}
+	}
+}
+
+// offAWSProcessor names a target outside AWS, as a processor with a parsing
+// gap would.
+type offAWSProcessor struct{ processor.BaseProcessor }
+
+func (offAWSProcessor) CanProcess(*processor.ProcessorContext) bool { return true }
+func (offAWSProcessor) Metadata() *processor.ProcessorMetadata {
+	return &processor.ProcessorMetadata{ServiceNames: []string{"ec2"}}
+}
+func (p offAWSProcessor) Process(*processor.ProcessorContext) (*processor.ProcessorResult, error) {
+	return &processor.ProcessorResult{
+		TargetURL:  "https://ec2@attacker.example#.amazonaws.com",
+		TargetHost: "ec2@attacker.example#.amazonaws.com",
+	}, nil
+}
+
+// Whatever a processor builds, only an AWS host is reached: the gateway
+// refuses any other target before re-signing.
+func TestHandleGateway_RefusesTargetOutsideAWS(t *testing.T) {
+	var forwarded bool
+	b := newGatewayBackend(recordingUpstream(&forwarded))
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	registry := processor.NewProcessorRegistry()
+	registry.Register(&offAWSProcessor{processor.BaseProcessor{ProcName: "off-aws"}})
+	b.processorRegistry.Store(registry)
+
+	body := "Action=DescribeRegions&Version=2016-11-15"
+	r := httptest.NewRequest(http.MethodPost, "http://warden.test/v1/aws/gateway/", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+	signAsAgent(t, r, body, "ec2", "us-east-1")
+
+	rec := httptest.NewRecorder()
+	b.handleGateway(context.Background(), &logical.Request{
+		Path: "gateway/", HTTPRequest: r, ResponseWriter: rec,
+		RequestID: "rid-off", Credential: gatewayCredential(),
+	})
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.False(t, forwarded)
+}
+
+func TestIsAWSTarget(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://ec2.us-east-1.amazonaws.com":                            true,
+		"https://bucket.s3.cn-north-1.amazonaws.com.cn":                  true,
+		"https://ap-123456789012.s3-accesspoint.us-east-1.amazonaws.com": true,
+		"http://ec2.us-east-1.amazonaws.com":                             false,
+		"https://ec2.attacker.example":                                   false,
+		"https://ec2.attacker.example#.amazonaws.com":                    false,
+		"https://ec2@attacker.example#.amazonaws.com":                    false,
+		"https://x@ec2.us-east-1.amazonaws.com":                          false,
+		"https://ap.s3-accesspoint.attacker.example/.amazonaws.com":      false,
+		"https://ec2.us-east-1.amazonaws.com:8443":                       false,
+		"https://amazonaws.com.attacker.example":                         false,
+	} {
+		target, err := url.Parse(raw)
+		require.NoError(t, err)
+		host := strings.TrimPrefix(strings.TrimPrefix(raw, "https://"), "http://")
+		assert.Equal(t, want, isAWSTarget(target, host), raw)
+	}
+}
+
+// recordingUpstream answers 200 and records that a request reached it.
+func recordingUpstream(forwarded *bool) http.RoundTripper {
+	return roundTripFunc(func(*http.Request) (*http.Response, error) {
+		*forwarded = true
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})
+}
+
+// signAsAgent signs r as an agent's SDK does on the transparent path.
+func signAsAgent(t *testing.T, r *http.Request, body, service, region string) {
+	t.Helper()
+	creds := awssdk.Credentials{AccessKeyID: "gw-role", SecretAccessKey: gatewayJWT, SessionToken: gatewayJWT}
+	require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), creds, r,
+		sigv4.ComputePayloadHash([]byte(body)), service, region, time.Now()))
 }
 
 // TestHandleGateway_FailuresAnsweredAsAWS drives each failure the gateway
