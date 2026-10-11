@@ -756,3 +756,80 @@ func TestHandleGateway_FailuresAnsweredAsAWS(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleGateway_BedrockRuntime drives Bedrock calls, signed as an AWS SDK
+// signs them, through handleGateway: runtime calls reach bedrock-runtime with
+// the model id as the client escaped it, control plane calls reach bedrock,
+// and both are re-signed as "bedrock" with a signature that holds over the
+// request as it leaves.
+func TestHandleGateway_BedrockRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		method   string
+		rawPath  string
+		body     string
+		wantHost string
+		wantPath string
+	}{
+		{"Converse", http.MethodPost, "/model/amazon.nova-lite-v1%3A0/converse",
+			`{"messages":[{"role":"user","content":[{"text":"Say hi"}]}]}`,
+			"bedrock-runtime.us-east-1.amazonaws.com", "/model/amazon.nova-lite-v1%3A0/converse"},
+		{"Converse on an inference profile ARN", http.MethodPost,
+			"/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Ainference-profile%2Fus.amazon.nova-lite-v1%3A0/converse",
+			`{"messages":[]}`,
+			"bedrock-runtime.us-east-1.amazonaws.com",
+			"/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Ainference-profile%2Fus.amazon.nova-lite-v1%3A0/converse"},
+		{"ListFoundationModels", http.MethodGet, "/foundation-models", "",
+			"bedrock.us-east-1.amazonaws.com", "/foundation-models"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var forwarded *http.Request
+			var forwardedBody []byte
+			b := newGatewayBackend(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				forwarded = r
+				if r.Body != nil {
+					forwardedBody, _ = io.ReadAll(r.Body)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+			}))
+			b.SetMaxBodySize(framework.DefaultMaxBodySize)
+
+			r := httptest.NewRequest(tc.method, "http://warden.test/v1/bedrock/gateway"+tc.rawPath, strings.NewReader(tc.body))
+			r.Header.Set("Content-Type", "application/json")
+			creds := awssdk.Credentials{AccessKeyID: "gw-role", SecretAccessKey: gatewayJWT, SessionToken: gatewayJWT}
+			require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), creds, r,
+				sigv4.ComputePayloadHash([]byte(tc.body)), "bedrock", "us-east-1", time.Now()))
+
+			rec := httptest.NewRecorder()
+			b.handleGateway(context.Background(), &logical.Request{
+				Path:           "gateway" + r.URL.Path[len("/v1/bedrock/gateway"):],
+				HTTPRequest:    r,
+				ResponseWriter: rec,
+				RequestID:      "rid-bedrock",
+				Credential:     gatewayCredential(),
+			})
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.NotNil(t, forwarded)
+			assert.Equal(t, tc.wantHost, forwarded.URL.Host)
+			assert.Equal(t, tc.wantHost, forwarded.Host)
+			assert.Equal(t, tc.wantPath, forwarded.URL.EscapedPath())
+			assert.Equal(t, tc.body, string(forwardedBody))
+
+			auth := forwarded.Header.Get("Authorization")
+			assert.Contains(t, auth, "Credential=AKIAEXAMPLE/")
+			assert.Contains(t, auth, "/us-east-1/bedrock/aws4_request")
+
+			// Re-sign what left with the upstream credential: the same
+			// signature means the signed path is the path on the wire.
+			signedAt, err := sigv4.ParseAWSDate(forwarded.Header.Get("X-Amz-Date"))
+			require.NoError(t, err)
+			check := forwarded.Clone(context.Background())
+			check.Header.Del("Authorization")
+			upstream := awssdk.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "upstream-secret"}
+			require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), upstream, check,
+				sigv4.ComputePayloadHash(forwardedBody), "bedrock", "us-east-1", signedAt))
+			assert.Equal(t, check.Header.Get("Authorization"), auth)
+		})
+	}
+}
