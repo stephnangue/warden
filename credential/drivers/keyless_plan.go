@@ -197,19 +197,26 @@ func (f *OAuth2DriverFactory) PlanKeyless(current credential.Config, inputs map[
 		leftover.Kind = "client assertion signing key"
 		leftover.WhereToDelete = "retire it at the authorization server once the chained credential works"
 	}
-	return chainedSourcePlan(current, inputs, kmsTargetClears(current, inputs, clear), []credential.Leftover{leftover}), nil
+	return chainedSourcePlan(current, inputs, targetMethodClears(current, inputs, clear, "client_assertion_alg", "client_assertion_aud"), []credential.Leftover{leftover}), nil
 }
 
-// kmsTargetClears adds what a kms_private_key_jwt source refuses to the keys a keyless
-// plan clears, when that is the method the plan moves the source to. Its payload is
-// read by fixed names and its algorithm travels with the key, so a secret_field or a
-// client_assertion_alg carried over from the source as it stood would leave a config
-// that does not validate.
-func kmsTargetClears(current credential.Config, inputs map[string]string, clear []string) []string {
-	if inputOr(inputs, current, "client_auth") != clientAuthKMSPrivateKeyJWT {
+// targetMethodClears adds to the keys a keyless plan clears whatever the client_auth
+// the plan moves the source to refuses, so the planned config validates rather than
+// carrying over settings of the method the source is leaving:
+//
+//   - kms_private_key_jwt reads its payload by fixed names and takes its algorithm
+//     from the key, so it refuses secret_field and client_assertion_alg.
+//   - a method that sends no client assertion refuses assertionKeys, the driver's
+//     settings for one.
+func targetMethodClears(current credential.Config, inputs map[string]string, clear []string, assertionKeys ...string) []string {
+	switch inputOr(inputs, current, "client_auth") {
+	case clientAuthKMSPrivateKeyJWT:
+		return append(clear, "client_assertion_alg", credential.ConfigSecretField)
+	case clientAuthPrivateKeyJWT:
 		return clear
+	default:
+		return append(clear, assertionKeys...)
 	}
-	return append(clear, "client_assertion_alg", credential.ConfigSecretField)
 }
 
 // PlanKeylessSpec clears a client credential a spec carries itself: on a
@@ -273,7 +280,7 @@ func (f *TokenExchangeDriverFactory) PlanKeyless(current credential.Config, inpu
 		kind = "client assertion signing key"
 	}
 	leftovers := []credential.Leftover{{Kind: kind, ID: orUnknown(current.Get("client_id")), WhereToDelete: "retire it at the authorization server once the chained credential works"}}
-	return chainedSourcePlan(current, inputs, kmsTargetClears(current, inputs, clear), leftovers), nil
+	return chainedSourcePlan(current, inputs, targetMethodClears(current, inputs, clear, "client_assertion_aud", "issuer", "resource_issuer"), leftovers), nil
 }
 
 func (f *TokenExchangeDriverFactory) PlanKeylessSpec(_ string, _, _, _ credential.Config, inputs map[string]string) (*credential.KeylessSpecPlan, error) {
