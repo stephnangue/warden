@@ -256,6 +256,20 @@ func writeConfig(b *alicloudBackend, raw map[string]interface{}) *logical.Respon
 	return resp
 }
 
+// A zero timeout is refused rather than quietly replaced by the default: the
+// timeout is the only bound on how long an upstream may take. "500ms"
+// truncates to zero seconds.
+func TestConfigWrite_ZeroTimeoutRefused(t *testing.T) {
+	for _, timeout := range []any{0, "0s", "500ms"} {
+		b := setupBackend(t)
+		before := b.Timeout()
+		resp := writeConfig(b, map[string]interface{}{"timeout": timeout, "auto_auth_path": "auth/jwt/"})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "timeout %v", timeout)
+		assert.Contains(t, resp.Err.Error(), "timeout must be at least 1s")
+		assert.Equal(t, before, b.Timeout())
+	}
+}
+
 // verifiesTLS reports whether the backend's transport verifies a server's
 // certificate: a request to a self-signed server fails verification exactly
 // then.

@@ -6,12 +6,43 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// A model call that outlasts the mount's timeout is answered 504, the
+// deadline being the only bound on how long the upstream may take. That the
+// transport has no header timeout of its own is TestTransport_NoResponseHeaderTimeout.
+func TestHandleGateway_SlowUpstreamAnswers504(t *testing.T) {
+	silent := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+	b := setupBackend(t)
+	b.StreamingBackend.InitProxy(silent)
+	b.SetTimeout(20 * time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	b.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest: httptest.NewRequest("POST",
+			"/azure/gateway/my-resource.openai.azure.com/openai/v1/chat/completions", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: credential.TypeAzureBearerToken,
+			Data: map[string]string{"access_token": "test-token"},
+		},
+	})
+
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestHandleGateway(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

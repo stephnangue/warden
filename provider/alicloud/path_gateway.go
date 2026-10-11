@@ -3,6 +3,7 @@ package alicloud
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -204,6 +205,24 @@ func (b *alicloudBackend) forward(req *logical.Request, body []byte) {
 
 	resp, err := transport.RoundTrip(r)
 	if err != nil {
+		// The mount's timeout passed before the upstream answered; the
+		// client is still waiting for an answer.
+		if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+			b.Logger.Error("forward timed out",
+				logger.Err(err),
+				logger.String("request_id", req.RequestID),
+			)
+			http.Error(req.ResponseWriter, "Gateway Timeout", http.StatusGatewayTimeout)
+			return
+		}
+		// The client went away first: nobody is reading a response.
+		if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
+			b.Logger.Debug("forward aborted: client closed connection",
+				logger.Err(err),
+				logger.String("request_id", req.RequestID),
+			)
+			return
+		}
 		b.Logger.Error("forward failed", logger.Err(err))
 		http.Error(req.ResponseWriter, "Bad Gateway", http.StatusBadGateway)
 		return

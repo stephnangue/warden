@@ -381,3 +381,34 @@ func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	assertUnchanged(t, b)
 }
+
+// The timeout is the only bound on how long an upstream may take, so a write
+// that would remove it is refused, and changes nothing. "500ms" truncates to
+// zero seconds and is refused the same way.
+func TestConfigWrite_ZeroTimeoutRefused(t *testing.T) {
+	for _, timeout := range []any{0, "0s", "500ms"} {
+		storage := newInmemStorage()
+		b := configuredBackend(storage)
+		resp := writeConfig(b, map[string]interface{}{"timeout": timeout, "auto_auth_path": "auth/jwt/"})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "timeout %v", timeout)
+		assert.Contains(t, resp.Err.Error(), "timeout must be at least 1s")
+		assertUnchanged(t, b)
+		assert.Empty(t, storage.data)
+	}
+}
+
+// A zero timeout already in storage keeps the default rather than leaving the
+// mount with no deadline.
+func TestInitialize_StoredZeroTimeoutKeepsDefault(t *testing.T) {
+	storage := newInmemStorage()
+	entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{
+		"timeout":        "0s",
+		"auto_auth_path": "auth/jwt/",
+	})
+	_ = storage.Put(context.Background(), entry)
+
+	b := setupBackend(t)
+	b.StorageView = storage
+	require.NoError(t, b.Initialize(context.Background()))
+	assert.Equal(t, framework.DefaultTimeout, b.Timeout())
+}
