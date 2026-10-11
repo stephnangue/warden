@@ -17,11 +17,12 @@ import (
 type azureBackend struct {
 	*framework.StreamingBackend
 
-	// mu guards the TLS settings, which a config write replaces while a
-	// config read reports them.
+	// mu guards the TLS settings and the host allowlist, which a config
+	// write replaces while a config read or a gateway request reads them.
 	mu            sync.RWMutex
 	tlsSkipVerify bool
 	caData        string
+	allowedHosts  []string
 
 	// configWriteMu serializes config writes, so each one validates, persists
 	// and applies against the configuration the previous one left.
@@ -40,6 +41,56 @@ func (b *azureBackend) setTLSSettings(skipVerify bool, caData string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.tlsSkipVerify, b.caData = skipVerify, caData
+}
+
+// defaultAllowedHostSuffixes are the hosts an Azure mount forwards to when
+// the operator names none: Microsoft-run API endpoints of the public cloud.
+// Each is named where it starts, not by a broad suffix: azure.com also holds
+// hosts customers control, such as a VM's <label>.<region>.cloudapp.azure.com,
+// and a request leaves carrying an Entra token.
+var defaultAllowedHostSuffixes = []string{
+	".management.azure.com",        // Resource Manager
+	".graph.microsoft.com",         // Microsoft Graph
+	".vault.azure.net",             // Key Vault
+	".blob.core.windows.net",       // Blob Storage
+	".queue.core.windows.net",      // Queue Storage
+	".table.core.windows.net",      // Table Storage
+	".file.core.windows.net",       // File Storage
+	".dfs.core.windows.net",        // Data Lake Storage
+	".openai.azure.com",            // Azure OpenAI
+	".cognitiveservices.azure.com", // Azure AI services
+	".services.ai.azure.com",       // Azure AI Foundry
+}
+
+// hostAllowlist is the allowlist of target hosts in force: the operator's, or
+// the default when the operator named none. The slice is replaced, never
+// changed in place, so a caller may read it after the lock is released.
+func (b *azureBackend) hostAllowlist() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.allowedHosts) == 0 {
+		return defaultAllowedHostSuffixes
+	}
+	return b.allowedHosts
+}
+
+// configuredHostAllowlist is the operator's allowlist, nil when they named
+// none. It is what is persisted, so a mount on the default follows it.
+func (b *azureBackend) configuredHostAllowlist() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.allowedHosts
+}
+
+// setHostAllowlist replaces the operator's allowlist; an empty one restores
+// the default.
+func (b *azureBackend) setHostAllowlist(allowlist []string) {
+	if len(allowlist) == 0 {
+		allowlist = nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.allowedHosts = allowlist
 }
 
 // extractTokens resolves the two principals on an Azure gateway request.
@@ -138,6 +189,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.SetMaxBodySize(parsedConfig.MaxBodySize)
 		b.SetTimeout(parsedConfig.Timeout)
 		b.setTLSSettings(parsedConfig.TLSSkipVerify, parsedConfig.CAData)
+		b.setHostAllowlist(parsedConfig.AllowedHosts)
 
 		// Update transport if custom TLS config is set
 		if parsedConfig.TLSSkipVerify || parsedConfig.CAData != "" {
@@ -185,12 +237,22 @@ func (b *azureBackend) Initialize(ctx context.Context) error {
 			UserAuthPath    string `json:"user_auth_path"`
 			UserAuthRole    string `json:"user_auth_role"`
 			DefaultAuthRole string `json:"default_role"`
+			AllowedHosts    any    `json:"allowed_host_suffixes"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
+		// Writes are validated, so a bad stored allowlist means the entry was
+		// changed behind them. The default is the narrowest list there is: fall
+		// back to it rather than leave the rest of the config unloaded.
+		allowedHosts, err := framework.ParseHostAllowlist(config.AllowedHosts)
+		if err != nil {
+			b.Logger.Warn("ignoring invalid stored host allowlist; keeping the default", logger.Err(err))
+			allowedHosts = nil
+		}
 		b.SetMaxBodySize(config.MaxBodySize)
 		b.setTLSSettings(config.TLSSkipVerify, config.CAData)
+		b.setHostAllowlist(allowedHosts)
 		if config.Timeout != "" {
 			// A stored zero keeps the default: the timeout is the only bound
 			// on how long an upstream may take.
@@ -232,6 +294,8 @@ func (b *azureBackend) Initialize(ctx context.Context) error {
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
 			"user_auth_role":  tc.UserAuthRole,
+
+			framework.HostAllowlistKey: b.configuredHostAllowlist(),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)
@@ -279,7 +343,11 @@ func (b *azureBackend) handleTransparentGatewayStreaming(ctx context.Context, re
 func ValidateConfig(config map[string]any) error {
 	if err := framework.ValidateAllowedKeys(config,
 		"max_body_size", "timeout", "tls_skip_verify", "ca_data",
-		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role"); err != nil {
+		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role",
+		framework.HostAllowlistKey); err != nil {
+		return err
+	}
+	if _, err := framework.ParseHostAllowlist(config[framework.HostAllowlistKey]); err != nil {
 		return err
 	}
 	if err := framework.ValidateCommonConfig(config); err != nil {
@@ -313,7 +381,11 @@ The gateway path format is:
   /azure/gateway/{azure-host}/{path}
 
 The {azure-host} segment determines which Azure endpoint receives the request.
-Any Azure service hostname is accepted; the provider proxies to it over HTTPS.
+Only hosts in allowed_host_suffixes are reached; the provider proxies to them
+over HTTPS. The default allows the public cloud's Resource Manager, Graph, Key
+Vault, Storage (blob, queue, table, file, dfs), Azure OpenAI, Azure AI services
+and Azure AI Foundry endpoints. Sovereign clouds and other endpoints must be
+added.
 
 Examples:
   /azure/gateway/management.azure.com/subscriptions?api-version=2022-12-01
@@ -336,4 +408,6 @@ Configuration:
 - timeout: Request timeout duration (e.g., '30s', '5m')
 - auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
 - default_role: Fallback role when not specified in the URL path
+- allowed_host_suffixes: Hosts the gateway forwards to, each with a leading
+  dot; '.example.com' allows example.com and every host under it
 `

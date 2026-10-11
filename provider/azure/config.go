@@ -16,11 +16,15 @@ type ProviderConfig struct {
 	DefaultAuthRole string
 	TLSSkipVerify   bool
 	CAData          string
+	// AllowedHosts is the target host allowlist; empty means the default.
+	AllowedHosts []string
 }
 
-// parseConfig parses configuration from mount config (map[string]any from JSON)
+// parseConfig parses configuration from mount config (map[string]any from JSON).
+// conf must have passed ValidateConfig.
 func parseConfig(conf map[string]any) ProviderConfig {
 	tlsSkipVerify, caData := framework.ParseTLSConfig(conf)
+	allowedHosts, _ := framework.ParseHostAllowlist(conf[framework.HostAllowlistKey])
 	return ProviderConfig{
 		MaxBodySize:     framework.ParseMaxBodySize(conf),
 		Timeout:         framework.ParseTimeout(conf, framework.DefaultTimeout),
@@ -30,5 +34,6 @@ func parseConfig(conf map[string]any) ProviderConfig {
 		DefaultAuthRole: framework.GetConfigString(conf, "default_role", ""),
 		TLSSkipVerify:   tlsSkipVerify,
 		CAData:          caData,
+		AllowedHosts:    allowedHosts,
 	}
 }

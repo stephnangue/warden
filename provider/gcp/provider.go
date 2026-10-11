@@ -17,11 +17,12 @@ import (
 type gcpBackend struct {
 	*framework.StreamingBackend
 
-	// mu guards the TLS settings, which a config write replaces while a
-	// config read reports them.
+	// mu guards the TLS settings and the host allowlist, which a config
+	// write replaces while a config read or a gateway request reads them.
 	mu            sync.RWMutex
 	tlsSkipVerify bool
 	caData        string
+	allowedHosts  []string
 
 	// configWriteMu serializes config writes, so each one validates, persists
 	// and applies against the configuration the previous one left.
@@ -40,6 +41,41 @@ func (b *gcpBackend) setTLSSettings(skipVerify bool, caData string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.tlsSkipVerify, b.caData = skipVerify, caData
+}
+
+// defaultAllowedHostSuffixes are the hosts a GCP mount forwards to when the
+// operator names none: Google's API endpoints, regional ones included.
+var defaultAllowedHostSuffixes = []string{".googleapis.com"}
+
+// hostAllowlist is the allowlist of target hosts in force: the operator's, or
+// the default when the operator named none. The slice is replaced, never
+// changed in place, so a caller may read it after the lock is released.
+func (b *gcpBackend) hostAllowlist() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.allowedHosts) == 0 {
+		return defaultAllowedHostSuffixes
+	}
+	return b.allowedHosts
+}
+
+// configuredHostAllowlist is the operator's allowlist, nil when they named
+// none. It is what is persisted, so a mount on the default follows it.
+func (b *gcpBackend) configuredHostAllowlist() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.allowedHosts
+}
+
+// setHostAllowlist replaces the operator's allowlist; an empty one restores
+// the default.
+func (b *gcpBackend) setHostAllowlist(allowlist []string) {
+	if len(allowlist) == 0 {
+		allowlist = nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.allowedHosts = allowlist
 }
 
 // extractTokens resolves the two principals on a GCP gateway request.
@@ -138,6 +174,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.SetMaxBodySize(parsedConfig.MaxBodySize)
 		b.SetTimeout(parsedConfig.Timeout)
 		b.setTLSSettings(parsedConfig.TLSSkipVerify, parsedConfig.CAData)
+		b.setHostAllowlist(parsedConfig.AllowedHosts)
 
 		if parsedConfig.TLSSkipVerify || parsedConfig.CAData != "" {
 			transport, err := newTransportWithTLS(parsedConfig.CAData, parsedConfig.TLSSkipVerify)
@@ -184,12 +221,22 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			UserAuthPath    string `json:"user_auth_path"`
 			UserAuthRole    string `json:"user_auth_role"`
 			DefaultAuthRole string `json:"default_role"`
+			AllowedHosts    any    `json:"allowed_host_suffixes"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
 			return fmt.Errorf("failed to decode config: %w", err)
 		}
+		// Writes are validated, so a bad stored allowlist means the entry was
+		// changed behind them. The default is the narrowest list there is: fall
+		// back to it rather than leave the rest of the config unloaded.
+		allowedHosts, err := framework.ParseHostAllowlist(config.AllowedHosts)
+		if err != nil {
+			b.Logger.Warn("ignoring invalid stored host allowlist; keeping the default", logger.Err(err))
+			allowedHosts = nil
+		}
 		b.SetMaxBodySize(config.MaxBodySize)
 		b.setTLSSettings(config.TLSSkipVerify, config.CAData)
+		b.setHostAllowlist(allowedHosts)
 		if config.Timeout != "" {
 			// A stored zero keeps the default: the timeout is the only bound
 			// on how long an upstream may take.
@@ -230,6 +277,8 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
 			"user_auth_role":  tc.UserAuthRole,
+
+			framework.HostAllowlistKey: b.configuredHostAllowlist(),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create default config entry: %w", err)
@@ -277,7 +326,11 @@ func (b *gcpBackend) handleTransparentGatewayStreaming(ctx context.Context, req 
 func ValidateConfig(config map[string]any) error {
 	if err := framework.ValidateAllowedKeys(config,
 		"max_body_size", "timeout", "tls_skip_verify", "ca_data",
-		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role"); err != nil {
+		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role",
+		framework.HostAllowlistKey); err != nil {
+		return err
+	}
+	if _, err := framework.ParseHostAllowlist(config[framework.HostAllowlistKey]); err != nil {
 		return err
 	}
 	if err := framework.ValidateCommonConfig(config); err != nil {
@@ -312,8 +365,8 @@ The gateway path format is:
   /gcp/gateway/{googleapis-host}/{path}
 
 The {googleapis-host} segment determines which Google Cloud API receives the
-request. Any *.googleapis.com hostname is accepted; the provider proxies to
-it over HTTPS.
+request. Only hosts in allowed_host_suffixes are reached (default: any
+*.googleapis.com host); the provider proxies to them over HTTPS.
 
 Examples:
   /gcp/gateway/storage.googleapis.com/storage/v1/b/my-bucket
@@ -345,4 +398,7 @@ Configuration:
 - timeout: Request timeout duration (e.g., '30s', '5m')
 - auto_auth_path: Auth mount path for implicit authentication (e.g., 'auth/jwt/')
 - default_role: Fallback role when not specified in the URL path
+- allowed_host_suffixes: Hosts the gateway forwards to, each with a leading
+  dot; '.example.com' allows example.com and every host under it
+  (default: .googleapis.com)
 `
