@@ -17,6 +17,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/helper/httputil"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -72,6 +73,9 @@ type OAuth2Driver struct {
 	// spared an RSA parse on the data path. nil when the source holds no key; a spec
 	// or a chain may still supply one, parsed per mint.
 	sourceKey *rsa.PrivateKey
+	// capSigners signs with fetched signing capabilities (kms_private_key_jwt) over
+	// pooled connections. Safe for concurrent use; it opens nothing until first used.
+	capSigners *remotesign.CapabilitySigners
 }
 
 // OAuth2DriverFactory creates OAuth2Driver instances.
@@ -97,8 +101,8 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 			Example("your-client-secret"),
 
 		credential.StringField("client_auth").
-			OneOf(clientAuthSecretPost, clientAuthSecretBasic, clientAuthPrivateKeyJWT).
-			Describe("How Warden authenticates to the token endpoint: client_secret_post (default) sends the secret in the form, client_secret_basic in an Authorization header, private_key_jwt sends an RFC 7523 client assertion signed with private_key").
+			OneOf(clientAuthSecretPost, clientAuthSecretBasic, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT).
+			Describe("How Warden authenticates to the token endpoint: client_secret_post (default) sends the secret in the form, client_secret_basic in an Authorization header, private_key_jwt sends an RFC 7523 client assertion signed with private_key; kms_private_key_jwt signs the same assertion with a key held in a KMS, reached through secret_spec").
 			Example("client_secret_post"),
 
 		credential.StringField("private_key").
@@ -210,7 +214,7 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 			Example("false"),
 
 		credential.StringField("secret_spec").
-			Describe("Source the whole client credential from another cred spec via credential chaining instead of storing it inline (client_id and client_secret then omitted; the referenced payload supplies both). client_credentials only").
+			Describe("Source the whole client credential from another cred spec via credential chaining instead of storing it inline (client_id and the secret, key or signing capability then omitted; the referenced payload supplies them). client_credentials only").
 			Example("idp-client-credential"),
 
 		credential.StringField("secret_field").
@@ -232,8 +236,29 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 		// while never being sent.
 		for _, key := range []string{"private_key", "client_assertion_alg", "client_assertion_kid", "client_assertion_aud"} {
 			if credential.GetString(config, key, "") != "" {
-				return fmt.Errorf("%s must be omitted for client_auth=%s; it applies to client_auth=%s", key, clientAuth, clientAuthPrivateKeyJWT)
+				return fmt.Errorf("%s must be omitted for client_auth=%s; it applies to client_auth=%s or %s", key, clientAuth, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT)
 			}
+		}
+	case clientAuthKMSPrivateKeyJWT:
+		// The signing capability IS the referenced material, so there is no inline form
+		// of this method: without secret_spec there is nothing to sign with. Everything
+		// naming the client travels with it, which the chaining rule below enforces.
+		if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
+			return fmt.Errorf("client_auth=%s requires secret_spec naming the spec that mints the signing capability", clientAuthKMSPrivateKeyJWT)
+		}
+		// The payload is read by fixed field names, so a field selector would either be
+		// ignored or point at one coordinate as though it were the secret.
+		if credential.GetString(config, credential.ConfigSecretField, "") != "" {
+			return fmt.Errorf("secret_field must be omitted for client_auth=%s; the referenced payload is read by its own field names", clientAuthKMSPrivateKeyJWT)
+		}
+		// The algorithm is a property of the key, checked against it when the capability
+		// is minted. Naming it again here could only ever disagree.
+		if credential.GetString(config, "client_assertion_alg", "") != "" {
+			return fmt.Errorf("client_assertion_alg must be omitted for client_auth=%s; the algorithm travels with the key in the referenced payload", clientAuthKMSPrivateKeyJWT)
+		}
+		if credential.GetString(config, "client_assertion_aud", "") == clientAssertionAudIssuer &&
+			credential.GetString(config, "issuer", "") == "" {
+			return fmt.Errorf("client_assertion_aud=%s requires issuer, the authorization server's issuer identifier", clientAssertionAudIssuer)
 		}
 	case clientAuthPrivateKeyJWT:
 		// The key replaces the secret; a secret kept beside it would never be sent.
@@ -321,12 +346,16 @@ func (f *OAuth2DriverFactory) InferCredentialType(_ credential.Config) (string, 
 
 // Create instantiates a new OAuth2Driver.
 func (f *OAuth2DriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
+	driverLog := log.WithSubsystem(credential.SourceTypeOAuth2)
 	driver := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeOAuth2,
 			Config: config,
 		},
-		logger: log.WithSubsystem(credential.SourceTypeOAuth2),
+		logger: driverLog,
+		// The source's TLS settings describe its token endpoint, not the signing
+		// store, so they are not handed to the signers.
+		capSigners: remotesign.NewCapabilitySigners(driverLog, remotesign.CapabilityOptions{}),
 	}
 
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)
@@ -574,10 +603,11 @@ func (d *OAuth2Driver) MintFromSecret(ctx context.Context, spec *credential.Cred
 type oauth2ClientAuth struct {
 	method       string
 	clientID     string
-	clientSecret string          // client_secret_post / client_secret_basic
-	key          *rsa.PrivateKey // private_key_jwt
-	kid          string          // the kid stored beside key, if any
-	aud          string          // the audience a client assertion names
+	clientSecret string                 // client_secret_post / client_secret_basic
+	key          *rsa.PrivateKey        // private_key_jwt
+	kid          string                 // the kid stored beside key, if any
+	kms          *remotesign.Capability // kms_private_key_jwt: permission to sign with a key Warden never holds
+	aud          string                 // the audience a client assertion names
 }
 
 // resolveClientAuth settles the client authentication for one mint. chained, when
@@ -592,6 +622,16 @@ func (d *OAuth2Driver) resolveClientAuth(spec *credential.CredSpec, chained *cha
 		method: credential.GetString(cfg, "client_auth", clientAuthSecretPost),
 		aud: clientAssertionAudience(credential.GetString(cfg, "client_assertion_aud", ""),
 			d.tokenURL(), credential.GetString(cfg, "issuer", "")),
+	}
+
+	if auth.method == clientAuthKMSPrivateKeyJWT {
+		// There is no inline form: the capability is only ever fetched. Validation and
+		// the chained-source guard both keep a direct mint from getting here.
+		if chained == nil || chained.kms == nil {
+			return nil, fmt.Errorf("%s OAuth2 client_auth=%s signs with a capability fetched through secret_spec, and none was fetched", name, clientAuthKMSPrivateKeyJWT)
+		}
+		auth.clientID, auth.kms = chained.clientID, chained.kms
+		return auth, nil
 	}
 
 	if auth.method != clientAuthPrivateKeyJWT {
@@ -648,16 +688,23 @@ func (a *oauth2ClientAuth) headers() map[string]string {
 // client_secret_basic adds nothing: RFC 6749 §2.3 allows one authentication method per
 // request, and §4.1.3 asks for client_id in the body only from a client that is not
 // authenticating.
-func (d *OAuth2Driver) applyClientAuth(_ context.Context, auth *oauth2ClientAuth, form url.Values) error {
+func (d *OAuth2Driver) applyClientAuth(ctx context.Context, auth *oauth2ClientAuth, form url.Values) error {
 	switch auth.method {
 	case clientAuthSecretBasic:
 		// Sent in the Authorization header (see headers).
-	case clientAuthPrivateKeyJWT:
+	case clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT:
+		// One case for both: the assertion, and everything the endpoint sees, is
+		// identical. Only where the signature comes from differs.
 		claims, err := clientAssertionClaims(auth.clientID, auth.aud)
 		if err != nil {
 			return err
 		}
-		assertion, err := signClientAssertionLocal(auth.key, auth.kid, claims)
+		var assertion string
+		if auth.kms != nil {
+			assertion, err = signClientAssertionWithCapability(ctx, d.capSigners, auth.kms, claims)
+		} else {
+			assertion, err = signClientAssertionLocal(auth.key, auth.kid, claims)
+		}
 		if err != nil {
 			return err
 		}
@@ -956,6 +1003,9 @@ func (d *OAuth2Driver) Revoke(_ context.Context, leaseID string) error {
 // Cleanup releases resources.
 func (d *OAuth2Driver) Cleanup(_ context.Context) error {
 	d.httpClient.CloseIdleConnections()
+	if d.capSigners != nil {
+		d.capSigners.Close()
+	}
 	return nil
 }
 

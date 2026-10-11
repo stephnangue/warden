@@ -1961,6 +1961,12 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 // tell. It runs when a spec is written and again when its source is, since either
 // write can introduce the mismatch.
 func oauth2SpecClientAuthError(specCfg, sourceCfg credential.Config) error {
+	// On a chained source the whole client credential comes from the payload, and the
+	// chaining guard refuses any of it on the spec, naming why. Answering here first
+	// would give a reason that is not the real one.
+	if credential.GetString(sourceCfg, credential.ConfigSecretSpec, "") != "" {
+		return nil
+	}
 	clientAuth := credential.GetString(sourceCfg, "client_auth", "client_secret_post")
 
 	// A spec holding the half another method uses would be stored, and reported as a
@@ -1978,10 +1984,7 @@ func oauth2SpecClientAuthError(specCfg, sourceCfg credential.Config) error {
 	// A kid names the key it was stored beside. A spec without a key of its own signs
 	// with the source's, under the source's kid, so a kid of its own would be ignored —
 	// and an authorization server choosing keys by kid would be told about the wrong one.
-	// (On a chained source the whole credential comes from the payload, and the
-	// chaining guard refuses any of it on the spec, naming why.)
 	if clientAuth == "private_key_jwt" &&
-		credential.GetString(sourceCfg, credential.ConfigSecretSpec, "") == "" &&
 		credential.GetString(specCfg, "client_assertion_kid", "") != "" &&
 		credential.GetString(specCfg, "private_key", "") == "" {
 		return fmt.Errorf("client_assertion_kid names the key stored beside it, and this spec has none: set private_key beside it, or drop it to sign with the source's key under the source's kid")
