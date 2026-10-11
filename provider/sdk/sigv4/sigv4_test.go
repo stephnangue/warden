@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,20 @@ func TestExtractFromAuthHeader(t *testing.T) {
 			wantAKID: "eyJhbGciOiJSUzI1NiJ9",
 		},
 		{
+			name:     "signing name with capitals",
+			header:   "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/us-east-1/IoTSecuredTunneling/aws4_request",
+			wantSvc:  "IoTSecuredTunneling",
+			wantReg:  "us-east-1",
+			wantAKID: "AKIAIOSFODNN7EXAMPLE",
+		},
+		{
+			name:     "sovereign cloud region",
+			header:   "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/eusc-de-east-1/bedrock/aws4_request",
+			wantSvc:  "bedrock",
+			wantReg:  "eusc-de-east-1",
+			wantAKID: "AKIAIOSFODNN7EXAMPLE",
+		},
+		{
 			name:    "empty header",
 			header:  "",
 			wantErr: true,
@@ -108,6 +123,31 @@ func TestExtractFromAuthHeader(t *testing.T) {
 				assert.Equal(t, tt.wantAKID, akid)
 			}
 		})
+	}
+}
+
+// The region and service become part of the upstream host, so a scope whose
+// region or service could move the request elsewhere does not parse: the
+// gateway answers it as it answers any scope that does not parse, before
+// building a host from it.
+func TestExtractFromAuthHeader_RefusesHostChangingScope(t *testing.T) {
+	for _, scope := range []string{
+		"x.attacker.example#/ec2", // '#' ends the host at the fragment
+		"us-east-1/ec2.attacker.example#",
+		"us-east-1@attacker.example/ec2", // '@' makes the rest userinfo
+		"attacker.example:443/ec2",
+		"us-east-1/ec2?x=",
+		"us-east-1.attacker.example/ec2",
+		"us-east-1/ec2%2F",
+		"us east 1/ec2",
+		"us_east_1/ec2",
+		"us-east-1/ec2․attacker", // one dot leader, not a hyphen
+		"us-east-1/" + strings.Repeat("a", 64) + ".attacker.example",
+	} {
+		header := "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/" + scope + "/aws4_request, SignedHeaders=host, Signature=00"
+		if svc, reg, _, err := ExtractFromAuthHeader(header); err == nil {
+			t.Errorf("scope %q parsed as service %q, region %q", scope, svc, reg)
+		}
 	}
 }
 

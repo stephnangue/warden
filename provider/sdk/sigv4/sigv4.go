@@ -30,7 +30,13 @@ const maxChunkSize = 10 << 20 // 10MB
 
 var (
 	// AuthRegex parses the SigV4 Authorization header into access_key_id, date, region, service.
-	AuthRegex = regexp.MustCompile(`AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request`)
+	// The region and service are the client's, and gateways build the
+	// upstream host from them, so they are held to letters, digits and
+	// hyphens: anything else ('.', '#', '@', ':', '?') could move the
+	// request to a host of the client's choosing. Every AWS region and
+	// signing name fits (IoTSecuredTunneling is the one with capitals), as
+	// do the regions of the S3-compatible stores.
+	AuthRegex = regexp.MustCompile(`AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([A-Za-z0-9-]+)/([A-Za-z0-9-]+)/aws4_request`)
 
 	// SignRegex extracts the hex signature value.
 	SignRegex = regexp.MustCompile(`Signature=([a-f0-9]+)`)

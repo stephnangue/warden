@@ -3,6 +3,8 @@ package s3
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stephnangue/warden/logical"
@@ -260,6 +262,32 @@ func TestS3AccessPointProcessor_Process_Error(t *testing.T) {
 
 	if err == nil {
 		t.Error("Expected error for invalid host, got nil")
+	}
+}
+
+// The ARN's region and access point name become part of the upstream host,
+// so an ARN whose region or name could move the request off AWS never names
+// a target there: it is refused, or the stray characters stay in the path.
+func TestS3AccessPointProcessor_Process_HostChangingARN(t *testing.T) {
+	proc := NewS3AccessPointProcessor([]string{"example.com"}, nil)
+	for _, path := range []string{
+		"/v1/aws/gateway/arn:aws:s3:attacker.example/:123456789012:accesspoint/ap/key.txt",
+		"/v1/aws/gateway/arn:aws:s3:attacker.example%2F:123456789012:accesspoint/ap/key.txt",
+		"/v1/aws/gateway/arn:aws:s3:us-east-1@attacker.example:123456789012:accesspoint/ap/key.txt",
+		"/v1/aws/gateway/arn:aws:s3:us-east-1:123456789012:accesspoint/ap@attacker.example%23/key.txt",
+		"/v1/aws/gateway/arn:aws:s3::123456789012:accesspoint/x@attacker.example%23.mrap/key.txt",
+	} {
+		result, err := proc.Process(createAccessPointTestContext("s3", "us-east-1", "localhost", path))
+		if err != nil {
+			continue
+		}
+		target, parseErr := url.Parse(result.TargetURL)
+		if parseErr != nil {
+			continue
+		}
+		if target.User != nil || target.Host != result.TargetHost || !strings.HasSuffix(target.Host, ".amazonaws.com") {
+			t.Errorf("%s: target %q is off AWS (host %q)", path, result.TargetURL, target.Host)
+		}
 	}
 }
 

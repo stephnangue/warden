@@ -204,6 +204,14 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		writeAWSError(req.ResponseWriter, req, http.StatusInternalServerError, codesInternal, "Internal server error")
 		return nil, nil, err
 	}
+	// Processors build the target from what the client sent — its credential
+	// scope, an ARN in the path, its Host — and the request leaves re-signed
+	// with the real credential. Whatever processor built it, only the AWS host
+	// the processor named is reached.
+	if !isAWSTarget(target, result.TargetHost) {
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Failed to process request")
+		return nil, nil, fmt.Errorf("processor %s built a target outside AWS: %q", proc.Name(), result.TargetURL)
+	}
 
 	req.HTTPRequest.URL.Scheme = target.Scheme
 	req.HTTPRequest.URL.Host = target.Host
@@ -256,6 +264,30 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	}
 
 	return req.HTTPRequest, bodyBytes, nil
+}
+
+// awsHostSuffixes are the DNS suffixes of the partitions the gateway serves.
+var awsHostSuffixes = []string{".amazonaws.com", ".amazonaws.com.cn"}
+
+// isAWSTarget reports whether target is exactly https://host, with host an
+// AWS hostname: nothing smuggled into it as userinfo, path or fragment, and a
+// name made of host characters under an AWS partition's suffix.
+func isAWSTarget(target *url.URL, host string) bool {
+	if target.Scheme != "https" || target.User != nil || target.Host != host ||
+		target.Path != "" || target.RawQuery != "" || target.Fragment != "" {
+		return false
+	}
+	for _, c := range host {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	for _, suffix := range awsHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *awsBackend) getCredentials(req *logical.Request) (awssdk.Credentials, error) {
