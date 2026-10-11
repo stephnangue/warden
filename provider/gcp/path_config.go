@@ -51,6 +51,10 @@ func (b *gcpBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role)",
 			},
+			framework.HostAllowlistKey: {
+				Type:        framework.TypeCommaStringSlice,
+				Description: "Hosts the gateway forwards to, each with a leading dot: '.example.com' allows example.com and every host under it (default: .googleapis.com; an empty list restores the default)",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
@@ -82,6 +86,8 @@ func (b *gcpBackend) handleConfigRead(ctx context.Context, req *logical.Request,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
 			"user_auth_role":  tc.UserAuthRole,
+
+			framework.HostAllowlistKey: b.hostAllowlist(),
 		},
 	}, nil
 }
@@ -192,6 +198,18 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		}, nil
 	}
 
+	allowedHosts := b.configuredHostAllowlist()
+	if val, ok := d.GetOk(framework.HostAllowlistKey); ok {
+		parsed, err := framework.ParseHostAllowlist(val)
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest(err.Error()),
+			}, nil
+		}
+		allowedHosts = parsed
+	}
+
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
@@ -203,6 +221,8 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
 			"user_auth_role":  tc.UserAuthRole,
+
+			framework.HostAllowlistKey: allowedHosts,
 		})
 		if err != nil {
 			return &logical.Response{
@@ -222,6 +242,7 @@ func (b *gcpBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 	b.SetMaxBodySize(maxBodySize)
 	b.SetTimeout(timeout)
 	b.setTLSSettings(skipVerify, caData)
+	b.setHostAllowlist(allowedHosts)
 	if tlsChanged {
 		b.SetTransport(transport)
 	}

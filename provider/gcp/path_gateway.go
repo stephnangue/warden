@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -73,6 +74,17 @@ func (b *gcpBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	if err != nil {
 		b.Logger.Warn("Failed to parse gateway path", logger.Err(err))
 		http.Error(req.ResponseWriter, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The host comes from the client and the request leaves for it carrying
+	// a GCP access token: only an allowed host is reached.
+	if err := framework.ValidateTargetHost(gcpHost); err != nil {
+		http.Error(req.ResponseWriter, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !framework.HostAllowed(gcpHost, b.hostAllowlist()) {
+		b.Logger.Warn("target host not allowed", logger.String("host", gcpHost))
+		http.Error(req.ResponseWriter, fmt.Sprintf("target host %q is not allowed on this mount", gcpHost), http.StatusForbidden)
 		return
 	}
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -73,6 +74,17 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	if err != nil {
 		b.Logger.Warn("Failed to parse gateway path", logger.Err(err))
 		http.Error(req.ResponseWriter, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The host comes from the client and the request leaves for it carrying
+	// an Entra token: only an allowed host is reached.
+	if err := framework.ValidateTargetHost(azureHost); err != nil {
+		http.Error(req.ResponseWriter, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !framework.HostAllowed(azureHost, b.hostAllowlist()) {
+		b.Logger.Warn("target host not allowed", logger.String("host", azureHost))
+		http.Error(req.ResponseWriter, fmt.Sprintf("target host %q is not allowed on this mount", azureHost), http.StatusForbidden)
 		return
 	}
 
