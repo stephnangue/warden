@@ -66,6 +66,7 @@ import (
 	"github.com/stephnangue/warden/provider/mcp"
 	mcp_aws "github.com/stephnangue/warden/provider/mcp_aws"
 	"github.com/stephnangue/warden/provider/mistral"
+	"github.com/stephnangue/warden/provider/msgraph"
 	"github.com/stephnangue/warden/provider/newrelic"
 	"github.com/stephnangue/warden/provider/openai"
 	"github.com/stephnangue/warden/provider/ovh"
@@ -183,6 +184,7 @@ Usage: warden server [options]
 		"mcp":           mcp.Factory,
 		"mcp_aws":       mcp_aws.Factory,
 		"mistral":       mistral.Factory,
+		"msgraph":       msgraph.Factory,
 		"newrelic":      newrelic.Factory,
 		"openai":        openai.Factory,
 		"ovh":           ovh.Factory,
@@ -214,6 +216,7 @@ Usage: warden server [options]
 		"gitlab":        gitlab.Skill(),
 		"mcp":           mcp.Skill(),
 		"mcp_aws":       mcp_aws.Skill(),
+		"msgraph":       msgraph.Skill(),
 		"openai":        openai.Skill(),
 		"rds":           rds.Skill(),
 		"rest":          rest.Skill(),

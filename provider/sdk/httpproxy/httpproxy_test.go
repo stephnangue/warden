@@ -1798,3 +1798,73 @@ func TestHandleGateway_SelectTimeout_ZeroKeepsTheMountTimeout(t *testing.T) {
 	assert.Greater(t, *seen, 20*time.Second)
 	assert.LessOrEqual(t, *seen, 30*time.Second)
 }
+
+// A request the spec refuses is answered in the gateway with the spec's status,
+// before any credential is extracted and without reaching the upstream; one it
+// lets through carries on as usual.
+func TestHandleGateway_RefuseRequest(t *testing.T) {
+	var hits int
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	refusal := fmt.Errorf("not through this gateway")
+	var gotURL string
+	spec := testSpec()
+	spec.RefuseRequest = func(r *http.Request, providerURL string, _ map[string]any) (int, error) {
+		gotURL = providerURL
+		if strings.HasSuffix(r.URL.Path, "/refused") {
+			return http.StatusBadRequest, refusal
+		}
+		return 0, nil
+	}
+	pb := setupBackend(t, spec).(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.StreamingBackend.InitProxy(upstream.Client().Transport)
+
+	send := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		pb.handleGateway(context.Background(), &logical.Request{
+			HTTPRequest: httptest.NewRequest("GET", path, nil), ResponseWriter: rec,
+			// A credential the extractor rejects proves the refusal comes first.
+			Credential: &credential.Credential{Type: "unknown"},
+		})
+		return rec
+	}
+
+	rec := send("/test/gateway/v1/refused")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), refusal.Error())
+	assert.Equal(t, 0, hits, "a refused request never reaches the upstream")
+	assert.Equal(t, upstream.URL, gotURL, "the hook sees the resolved upstream")
+
+	// Let through: it reaches credential extraction, which fails here (401).
+	rec = send("/test/gateway/v1/fine")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, 0, hits)
+}
+
+// With a renderer the refusal is answered in the provider's error shape.
+func TestHandleGateway_RefuseRequestRendered(t *testing.T) {
+	spec := testSpec()
+	spec.RefuseRequest = func(*http.Request, string, map[string]any) (int, error) {
+		return http.StatusBadRequest, fmt.Errorf("no")
+	}
+	var got *logical.GatewayFailure
+	spec.RenderGatewayError = func(_ *http.Request, f *logical.GatewayFailure) *logical.Response {
+		got = f
+		return &logical.Response{StatusCode: f.Status, Body: []byte(`{"rendered":true}`)}
+	}
+	pb := setupBackend(t, spec).(*proxyBackend)
+
+	rec := httptest.NewRecorder()
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest: httptest.NewRequest("GET", "/test/gateway/v1/x", nil), ResponseWriter: rec,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, `{"rendered":true}`, rec.Body.String())
+	require.NotNil(t, got)
+	assert.Equal(t, logical.GatewayFailureBadRequest, got.Class)
+}

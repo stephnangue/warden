@@ -160,6 +160,18 @@ type ProviderSpec struct {
 	// deterministic for a given request and state, and free of side effects.
 	ResolveUpstream func(r *http.Request, providerURL string, state map[string]any) (Dispatch, bool)
 
+	// RefuseRequest optionally refuses a request the provider will not forward —
+	// an operation it does not support, or an upstream it no longer trusts — by
+	// returning the status to answer with and the client-facing reason. A nil
+	// error lets the request through, and so does an unset hook.
+	//
+	// It runs in the gateway, after authentication, policy and credential
+	// issuance, with providerURL already resolved by ResolveUpstream and before
+	// any credential is extracted, so nothing reaches the upstream for a refused
+	// request. It only ever narrows what policy allowed. The same rules as
+	// ResolveUpstream apply: cheap, side-effect free, state read and never mutated.
+	RefuseRequest func(r *http.Request, providerURL string, state map[string]any) (int, error)
+
 	// GetAuthRoleFromRequest optionally extracts the auth role from request
 	// context. The shared httpproxy backend wires this into the core's
 	// TransparentAuthRoleExtractor flow, so the spec hook is consulted only

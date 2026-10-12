@@ -54,6 +54,23 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		}
 	}
 
+	// A request the provider will not forward is answered here, before any
+	// credential is extracted or the upstream is contacted.
+	if b.spec.RefuseRequest != nil {
+		if status, err := b.spec.RefuseRequest(req.HTTPRequest, providerURL, state); err != nil {
+			if status < 400 || status > 599 {
+				status = http.StatusBadRequest
+			}
+			if !b.writeGatewayFailure(req.ResponseWriter, req.HTTPRequest, &logical.GatewayFailure{
+				Class: logical.ClassifyGatewayFailure(status, err), Status: status, Err: err,
+				RequestID: req.RequestID,
+			}) {
+				http.Error(req.ResponseWriter, err.Error(), status)
+			}
+			return
+		}
+	}
+
 	// Apply timeout if configured
 	if timeout > 0 {
 		var cancel context.CancelFunc

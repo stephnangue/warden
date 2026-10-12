@@ -24,6 +24,7 @@ import (
 	"github.com/stephnangue/warden/provider/kubernetes"
 	"github.com/stephnangue/warden/provider/mcp"
 	"github.com/stephnangue/warden/provider/mistral"
+	"github.com/stephnangue/warden/provider/msgraph"
 	"github.com/stephnangue/warden/provider/newrelic"
 	"github.com/stephnangue/warden/provider/openai"
 	"github.com/stephnangue/warden/provider/pagerduty"
@@ -59,6 +60,7 @@ func TestRegisteredProviderSpecsValid(t *testing.T) {
 		"kubernetes":    kubernetes.Spec,
 		"mcp":           mcp.Spec,
 		"mistral":       mistral.Spec,
+		"msgraph":       msgraph.Spec,
 		"newrelic":      newrelic.Spec,
 		"openai":        openai.Spec,
 		"pagerduty":     pagerduty.Spec,
