@@ -195,6 +195,51 @@ func TestAzureBearerTokenCredType_ValidateConfig_Federation(t *testing.T) {
 			wantErr: true,
 			errMsg:  "client_id",
 		},
+		{
+			name: "on_behalf_of with the user's token as subject",
+			config: map[string]string{
+				"mint_method":          "on_behalf_of",
+				"subject_token_source": "user_identity",
+				"actor_token_source":   "warden_identity",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+				"resource_uri":         "https://graph.microsoft.com/",
+			},
+			wantErr: false,
+		},
+		{
+			name: "on_behalf_of without a subject has no user to act for",
+			config: map[string]string{
+				"mint_method": "on_behalf_of",
+				"tenant_id":   "00000000-0000-0000-0000-000000000001",
+				"client_id":   "11111111-1111-1111-1111-111111111111",
+			},
+			wantErr: true,
+			errMsg:  "subject_token_source=user_identity",
+		},
+		{
+			name: "on_behalf_of with a Warden assertion as subject is refused",
+			config: map[string]string{
+				"mint_method":          "on_behalf_of",
+				"subject_token_source": "warden_identity",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+			},
+			wantErr: true,
+			errMsg:  "subject_token_source=user_identity",
+		},
+		{
+			name: "on_behalf_of holds no secret",
+			config: map[string]string{
+				"mint_method":          "on_behalf_of",
+				"subject_token_source": "user_identity",
+				"tenant_id":            "00000000-0000-0000-0000-000000000001",
+				"client_id":            "11111111-1111-1111-1111-111111111111",
+				"client_secret":        "leftover",
+			},
+			wantErr: true,
+			errMsg:  "must not be set",
+		},
 	}
 
 	for _, tt := range tests {
