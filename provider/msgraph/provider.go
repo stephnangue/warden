@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -72,6 +73,18 @@ func newSpec(hosts []string) *httpproxy.ProviderSpec {
 		ExtractCredentials: extractGraphToken,
 		ResolveUpstream:    resolveUpstream,
 		RenderGatewayError: renderGraphError,
+		RewriteResponse:    rewriteRequested,
+		ModifyResponse:     rewriteLinks,
+		ExtraConfigFields:  linkConfigFields,
+		OnConfigRead: func(state map[string]any) map[string]any {
+			return map[string]any{stateRewriteLinks: rewriteLinksEnabled(state)}
+		},
+		OnInitialize: func(config map[string]any, state map[string]any) map[string]any {
+			if v, ok := configBool(config[stateRewriteLinks]); ok {
+				state[stateRewriteLinks] = v
+			}
+			return state
+		},
 
 		// graph_url is checked where it is set — at mount time and on every config
 		// write — and again on every request, so a value that reached storage some
@@ -88,6 +101,11 @@ func newSpec(hosts []string) *httpproxy.ProviderSpec {
 					if err := checkURL(s); err != nil {
 						return nil, err
 					}
+				}
+			}
+			if v, ok := d.GetOk(stateRewriteLinks); ok {
+				if b, ok := v.(bool); ok {
+					state[stateRewriteLinks] = b
 				}
 			}
 			return state, nil
@@ -171,6 +189,19 @@ func resolveUpstream(r *http.Request, _ string, _ map[string]any) (httpproxy.Dis
 		return httpproxy.Dispatch{BypassBodyParsing: true, SkipDefaultAccept: true}, true
 	}
 	return httpproxy.Dispatch{}, false
+}
+
+// configBool reads a boolean mount setting, which arrives as a bool from stored
+// JSON and as a string from mount-time configuration.
+func configBool(v any) (bool, bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case string:
+		b, err := strconv.ParseBool(t)
+		return b, err == nil
+	}
+	return false, false
 }
 
 func isBinaryPath(api string) bool {

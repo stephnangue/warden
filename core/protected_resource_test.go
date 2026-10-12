@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stretchr/testify/assert"
@@ -150,4 +151,40 @@ func TestProtectedResourceMetadata(t *testing.T) {
 		_, _, err := core.ProtectedResourceMetadata(ctx, "/v1/github")
 		assert.ErrorIs(t, err, ErrNotProtectedResource)
 	})
+}
+
+// The external base backends build links with is the configured resource_url,
+// served from a cache so the response path never reads storage, and dropped on
+// a write so a change takes effect at once.
+func TestExternalBaseURL(t *testing.T) {
+	core := createTestCore(t)
+	ctx := context.Background()
+	view := NewBarrierView(core.barrier, protectedResourceStorePrefix)
+
+	assert.Empty(t, core.externalBaseURL(ctx), "none configured")
+	core.invalidateExternalBaseURL()
+
+	require.NoError(t, saveProtectedResourceConfig(ctx, view, &protectedResourceConfig{ResourceURL: "https://warden.example.com/"}))
+	assert.Equal(t, "https://warden.example.com", core.externalBaseURL(ctx), "no trailing slash")
+
+	// A store that bypassed the write path is not seen until the cache is dropped.
+	require.NoError(t, saveProtectedResourceConfig(ctx, view, &protectedResourceConfig{ResourceURL: "https://other.example.com"}))
+	assert.Equal(t, "https://warden.example.com", core.externalBaseURL(ctx), "served from the cache")
+	core.invalidateExternalBaseURL()
+	assert.Equal(t, "https://other.example.com", core.externalBaseURL(ctx))
+}
+
+// A failed read keeps serving the last value, and is remembered briefly, so a
+// storage outage does not put a read and the refresh lock on every request.
+func TestExternalBaseURL_FailedReadIsRememberedBriefly(t *testing.T) {
+	core := createTestCore(t)
+	ctx := context.Background()
+	core.externalBase.Store(&externalBaseEntry{value: "https://last.example.com", loaded: time.Now().Add(-time.Hour), ttl: externalBaseTTL})
+	require.NoError(t, core.barrier.Seal())
+
+	assert.Equal(t, "https://last.example.com", core.externalBaseURL(ctx), "the last value survives the failure")
+	entry := core.externalBase.Load()
+	require.NotNil(t, entry)
+	assert.Equal(t, externalBaseRetry, entry.ttl, "the failure is retried soon, not cached for the full TTL")
+	assert.True(t, entry.fresh())
 }

@@ -172,6 +172,21 @@ type ProviderSpec struct {
 	// ResolveUpstream apply: cheap, side-effect free, state read and never mutated.
 	RefuseRequest func(r *http.Request, providerURL string, state map[string]any) (int, error)
 
+	// RewriteResponse and ModifyResponse optionally let a provider rewrite an
+	// upstream response — Graph's absolute paging links, say, back onto the
+	// gateway. RewriteResponse decides per request (state as for ResolveUpstream:
+	// read, never mutate); when it returns true and Warden knows its external base
+	// URL, the gateway asks the upstream for an uncompressed body and hands the
+	// response to ModifyResponse with a RewriteContext. Both must be set for
+	// either to take effect; a provider that sets neither pays nothing.
+	//
+	// ModifyResponse runs on the proxy's response path for every rewritten
+	// request, concurrently, so it must be safe for concurrent use and should fail
+	// open: a body it cannot rewrite is better passed through than refused. An
+	// error it returns is answered by the proxy as a 502.
+	RewriteResponse func(r *http.Request, state map[string]any) bool
+	ModifyResponse  func(resp *http.Response, rc RewriteContext) error
+
 	// GetAuthRoleFromRequest optionally extracts the auth role from request
 	// context. The shared httpproxy backend wires this into the core's
 	// TransparentAuthRoleExtractor flow, so the spec hook is consulted only
@@ -270,6 +285,10 @@ type proxyBackend struct {
 	tlsSkipVerify bool
 	caData        string
 
+	// externalBaseURL is core's ExternalBaseURL, for RewriteContext.Prefix. Nil
+	// outside core, which turns response rewriting off.
+	externalBaseURL func(ctx context.Context) string
+
 	// configWriteMu serializes config writes, so each one validates, persists
 	// and applies against the configuration the previous one left.
 	configWriteMu sync.Mutex
@@ -321,8 +340,9 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 			sharedTransport, shutdownFn = newTransport()
 		})
 		b := &proxyBackend{
-			spec:       spec,
-			extraState: make(map[string]any),
+			spec:            spec,
+			extraState:      make(map[string]any),
+			externalBaseURL: conf.ExternalBaseURL,
 		}
 
 		tokenExtractor := spec.ExtractToken

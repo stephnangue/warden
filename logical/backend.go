@@ -110,6 +110,13 @@ type BackendConfig struct {
 	// multiple times only keeps one hook. Use this for process-level cleanup like
 	// shared transport shutdown that must not run on individual unmount.
 	RegisterShutdownHook func(key string, fn func())
+
+	// ExternalBaseURL returns the external HTTPS base clients reach Warden at
+	// (the protected-resource resource_url, no trailing slash), or "" when none is
+	// configured. Cheap enough to call per response. A backend building a link
+	// back to itself uses this, never a request's Host header. Nil for backends
+	// mounted outside core.
+	ExternalBaseURL func(ctx context.Context) string
 }
 
 // Factory is the factory function to create a logical backend.

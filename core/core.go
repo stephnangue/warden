@@ -244,6 +244,14 @@ type Core struct {
 	oidcIssuer    *OIDCIssuer
 	oidcPublisher JWKSPublisher
 
+	// externalBase caches the protected-resource resource_url — the external
+	// base clients reach Warden at — for provider backends that build links to
+	// themselves on the response path, where a storage read per response would
+	// cost too much. externalBaseRefresh serializes the refreshes; readers never
+	// wait on one. See externalBaseURL.
+	externalBase        atomic.Pointer[externalBaseEntry]
+	externalBaseRefresh sync.Mutex
+
 	// oidcSignBackend is the external KMS signer for the issuer key when the
 	// signer HCL stanza is configured (nil = default in-process keys). It is built
 	// lazily on the active serving path in setupOIDCIssuer and closed in
