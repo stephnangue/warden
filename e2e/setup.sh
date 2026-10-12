@@ -165,7 +165,9 @@ echo ""
 echo "[3/10] Building Warden..."
 cd "$PROJECT_ROOT"
 mkdir -p "$BIN_DIR"
-go build -o "$BIN_DIR/warden" .
+# warden_e2e_graph_hosts lets the msgraph provider's graph_url name a local stub
+# (provider/msgraph/hosts_e2e.go), so Graph link rewriting runs end to end.
+go build -tags warden_e2e_graph_hosts -o "$BIN_DIR/warden" .
 echo "Warden built at $BIN_DIR/warden"
 
 # Generate seal key (32 bytes for AES-256-GCM-96) if it doesn't exist

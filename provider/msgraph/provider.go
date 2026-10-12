@@ -45,7 +45,7 @@ var (
 )
 
 // Spec is the Microsoft Graph provider.
-var Spec = newSpec(defaultGraphHosts)
+var Spec = newSpec(append(slices.Clone(defaultGraphHosts), buildTagHosts...))
 
 // Factory creates a new Microsoft Graph provider backend.
 var Factory = httpproxy.NewFactory(Spec)
