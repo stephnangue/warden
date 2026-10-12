@@ -391,3 +391,36 @@ func TestAzureOBO_InferAndResource(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, strings.HasSuffix(res, "contoso.sharepoint.com/"))
 }
+
+// Going keyless moves an on_behalf_of spec's app credential from the source's
+// secret to a Warden assertion in the actor slot; the user subject stays. The
+// app then needs the federated credential the plan renders.
+func TestAzureOBO_KeylessPlan(t *testing.T) {
+	static := credential.NewConfig(map[string]string{
+		"tenant_id": testAzureTenant, "client_id": testAzureClient, "client_secret": "s", "secret_id": "id",
+	})
+	spec := credential.NewConfig(map[string]string{
+		"mint_method":          "on_behalf_of",
+		"client_id":            testAzureClient,
+		"subject_token_source": "user_identity",
+	})
+	plan, err := (&AzureDriverFactory{}).PlanKeylessSpec(credential.TypeAzureBearerToken, spec, static, credential.Config{}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "warden_identity", plan.Delta["actor_token_source"])
+	_, touchesSubject := plan.Delta["subject_token_source"]
+	assert.False(t, touchesSubject, "the user stays the subject")
+	assert.Equal(t, testAzureTenant, plan.Delta["tenant_id"])
+	assert.Equal(t, "minimal", plan.Delta["assertion_profile"])
+	assert.Empty(t, plan.Leftovers, "the spec held no secret of its own")
+
+	keyless := credential.NewConfig(map[string]string{"auth_method": "oidc_federation"})
+	planned := credential.NewConfig(map[string]string{
+		"mint_method": "on_behalf_of", "client_id": testAzureClient,
+		"subject_token_source": "user_identity", "actor_token_source": "warden_identity",
+	})
+	prereqs := (&AzureDriverFactory{}).KeylessPrerequisites(keyless,
+		[]credential.PlannedSpec{{Name: "m365", Config: planned}}, testTrustEnv)
+	require.NotEmpty(t, prereqs)
+	assert.Equal(t, "app registration "+testAzureClient, prereqs[0].Where,
+		"the app an on_behalf_of spec authenticates as needs the federated credential")
+}

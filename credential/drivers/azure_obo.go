@@ -38,6 +38,59 @@ const (
 	maxEntraErrorCodes    = 8
 )
 
+// AzureOnBehalfOf reports whether a spec mints on-behalf-of tokens. It is the one
+// shape in which an azure source may take subject_token_source=user_identity and
+// an actor: the user's token becomes the OBO assertion, never the app's own
+// credential. Pure: reads spec config only.
+func AzureOnBehalfOf(specType string, specCfg credential.Config) bool {
+	return specType == credential.TypeAzureBearerToken &&
+		credential.GetString(specCfg, "mint_method", "") == azureMintMethodOnBehalfOf
+}
+
+// AzureOnBehalfOfSpecError checks an on_behalf_of spec against its source: what
+// authenticates the app depends on the source's auth_method, and a static secret
+// belongs to one app. It is applied when the spec is written and again when the
+// source changes, since a source switched between static and keyless would strand
+// the spec. Pure: reads the two configs only.
+func AzureOnBehalfOfSpecError(specCfg, sourceCfg credential.Config) error {
+	if specCfg.Get(credential.ConfigSubjectTokenSource) != credential.SourceUserIdentity {
+		return fmt.Errorf("mint_method=on_behalf_of forwards the user's Entra access token as the OBO assertion: set %s=%s",
+			credential.ConfigSubjectTokenSource, credential.SourceUserIdentity)
+	}
+	actor := specCfg.Get(credential.ConfigActorTokenSource)
+	if actor == credential.SourceNone {
+		actor = ""
+	}
+	if credential.GetString(sourceCfg, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+		// A keyless spec may name any app: the Warden assertion is checked against
+		// that app's own federated credential.
+		if actor != credential.SourceWardenIdentity {
+			return fmt.Errorf("a keyless on_behalf_of spec authenticates the app with a Warden assertion checked against its federated credential: set %s=%s",
+				credential.ConfigActorTokenSource, credential.SourceWardenIdentity)
+		}
+	} else {
+		if actor != "" {
+			return fmt.Errorf("a static azure source authenticates on_behalf_of with its client_secret: remove %s",
+				credential.ConfigActorTokenSource)
+		}
+		// A static secret belongs to the source's app, in the source's tenant.
+		for _, key := range []string{"client_id", "tenant_id"} {
+			if s, v := sourceCfg.Get(key), specCfg.Get(key); s != "" && v != "" && s != v {
+				return fmt.Errorf("on_behalf_of over a static source authenticates as the source's app: spec '%s' must match the source's", key)
+			}
+		}
+	}
+	// Keys the OBO request has no use for. The driver would ignore them, but they
+	// still change the credential cache key, and assertion_user_claims would read
+	// as projecting the user into an assertion that names only the agent.
+	for _, key := range []string{credential.ConfigAssertionUserClaims, credential.ConfigSubjectTokenType, credential.ConfigActorTokenType} {
+		if specCfg.Get(key) != "" {
+			return fmt.Errorf("'%s' does not apply to mint_method=on_behalf_of", key)
+		}
+	}
+	return nil
+}
+
 // oboAuth is how the app authenticates an OBO request: exactly one of secret or
 // assertion is set.
 type oboAuth struct {

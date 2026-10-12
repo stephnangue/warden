@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
@@ -266,9 +267,14 @@ func (c *Core) PlanKeylessSpec(ctx context.Context, name string, in KeylessPlanI
 				"create a spec of the same type there, with secret_spec naming the spec that reads the stored secret", spec.Name, where))
 		return plan, nil
 	case spec.Type == credential.TypeAzureBearerToken:
+		what := "holds an Azure client secret"
+		if drivers.AzureOnBehalfOf(spec.Type, spec.Config) {
+			// An on_behalf_of spec holds no secret; it authenticates with its source's.
+			what = "authenticates with its source's Azure client secret"
+		}
 		plan.Blockers = append(plan.Blockers, fmt.Sprintf(
-			"spec %q holds an Azure client secret, which goes keyless by federating its source: plan source %q instead",
-			spec.Name, spec.Source))
+			"spec %q %s, which goes keyless by federating its source: plan source %q instead",
+			spec.Name, what, spec.Source))
 		return plan, nil
 	}
 
