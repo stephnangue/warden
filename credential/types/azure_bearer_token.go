@@ -60,8 +60,8 @@ func NewAzureBearerTokenCredType() *AzureBearerTokenCredType {
 func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("mint_method").
-			OneOf("bearer_token").
-			Describe("Method for minting Azure credentials").
+			OneOf("bearer_token", "on_behalf_of").
+			Describe("Method for minting Azure credentials: bearer_token (the app's own token) or on_behalf_of (a delegated token for the user presenting their Entra access token)").
 			Example("bearer_token"),
 
 		credential.StringField("tenant_id").
@@ -84,7 +84,7 @@ func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("uuid-secret-id"),
 
 		credential.StringField("resource_uri").
-			Describe("Azure resource URI to request a token for; the client-credentials grant asks for its .default scope").
+			Describe("Azure resource URI to request a token for, as its .default scope (default https://management.azure.com/ for bearer_token, https://graph.microsoft.com/ for on_behalf_of)").
 			Example("https://management.azure.com/"),
 	}
 }
@@ -131,6 +131,12 @@ func (t *AzureBearerTokenCredType) ValidateConfig(config credential.Config, sour
 	// client_assertion, so it holds no client_secret. The audience/algorithm rules
 	// for warden_identity are enforced generically by ValidateExchangeSpecConfig.
 	mintMethod := config.Get("mint_method")
+	// On-behalf-of acts for the user presenting their own Entra token, which reaches
+	// the driver only as the user_identity subject.
+	if mintMethod == "on_behalf_of" && config.Get(credential.ConfigSubjectTokenSource) != credential.SourceUserIdentity {
+		return fmt.Errorf("mint_method 'on_behalf_of' exchanges the user's Entra access token: set %s=%s",
+			credential.ConfigSubjectTokenSource, credential.SourceUserIdentity)
+	}
 	if credential.SpecRequestsExchange(config) {
 		if config.Get("tenant_id") == "" {
 			return fmt.Errorf("'tenant_id' is required for a keyless federated spec (a spec with subject_token_source)")
@@ -138,8 +144,8 @@ func (t *AzureBearerTokenCredType) ValidateConfig(config credential.Config, sour
 		if config.Get("client_secret") != "" || config.Get("secret_id") != "" {
 			return fmt.Errorf("'client_secret'/'secret_id' must not be set for a keyless federated spec")
 		}
-		if mintMethod != "" && mintMethod != "bearer_token" {
-			return fmt.Errorf("mint_method %q is not supported over federation (supported: bearer_token)", mintMethod)
+		if mintMethod != "" && mintMethod != "bearer_token" && mintMethod != "on_behalf_of" {
+			return fmt.Errorf("mint_method %q is not supported over federation (supported: bearer_token, on_behalf_of)", mintMethod)
 		}
 	} else {
 		if config.Get("client_secret") == "" || config.Get("secret_id") == "" {

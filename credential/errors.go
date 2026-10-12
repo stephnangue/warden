@@ -1,6 +1,9 @@
 package credential
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrTypeNotFound is returned when a credential type is not found in the registry
@@ -92,4 +95,55 @@ var (
 	// answers the question the cache cannot — whether the payload has since been
 	// completed at the source.
 	ErrChainedSecretIncomplete = errors.New("chained secret material is incomplete")
+
+	// ErrUserChallenge is returned (wrapped, through UserChallengeError) when the
+	// upstream refused to act for the user until the user does something: re-acquire
+	// a token that satisfies a claims challenge (MFA, Conditional Access), or
+	// present a token that is still usable. Like ErrUserRequired it is a sentinel so
+	// the HTTP status is attached where the error surfaces: GetErrorCode maps it to
+	// 401 and the request handler renders the challenge into WWW-Authenticate.
+	//
+	// 401 rather than the 403 an upstream 4xx otherwise becomes: the client can fix
+	// this by authenticating the user again, and should be told so.
+	ErrUserChallenge = errors.New("the user must re-authenticate")
 )
+
+// User challenge codes. They are the only values a challenge may carry as its
+// WWW-Authenticate error, so nothing an upstream wrote can reach the header.
+const (
+	// UserChallengeInsufficientClaims asks the client to re-acquire the user's token
+	// satisfying Claims (RFC 6750 §3.1 extension used by Entra claims challenges).
+	UserChallengeInsufficientClaims = "insufficient_claims"
+
+	// UserChallengeInvalidToken says the user's token cannot be used at all —
+	// expired, revoked, or minted for the wrong audience.
+	UserChallengeInvalidToken = "invalid_token"
+)
+
+// UserChallengeError carries what the user has to do. Code is one of the
+// UserChallenge* constants. Claims is the claims request the user's next token
+// must satisfy, as compact JSON re-marshalled by the driver (never an upstream
+// string copied through). TenantID names the authority the client re-authenticates
+// against. Cause is the upstream failure, kept for logs and status.
+type UserChallengeError struct {
+	Code     string
+	Claims   string
+	TenantID string
+	Cause    error
+}
+
+func (e *UserChallengeError) Error() string {
+	if e.Cause == nil {
+		return fmt.Sprintf("%s (%s)", ErrUserChallenge, e.Code)
+	}
+	return fmt.Sprintf("%s (%s): %v", ErrUserChallenge, e.Code, e.Cause)
+}
+
+// Unwrap exposes both the sentinel and the upstream failure, so errors.Is finds
+// ErrUserChallenge and UpstreamStatus still finds the upstream's status.
+func (e *UserChallengeError) Unwrap() []error {
+	if e.Cause == nil {
+		return []error{ErrUserChallenge}
+	}
+	return []error{ErrUserChallenge, e.Cause}
+}

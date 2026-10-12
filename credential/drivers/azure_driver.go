@@ -478,7 +478,7 @@ func (f *AzureDriverFactory) StoredSecrets(config credential.Config) []string {
 func (f *AzureDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
 	mintMethod := specConfig.Get("mint_method")
 	switch mintMethod {
-	case "", "bearer_token":
+	case "", "bearer_token", azureMintMethodOnBehalfOf:
 		return credential.TypeAzureBearerToken, nil
 	case "secret_read":
 		// A Key Vault secret is vended under its own key names, the shape a chained
@@ -542,6 +542,12 @@ func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedL
 // MintCredential mints credentials based on the spec's mint_method.
 // Credentials are minted using the SP credentials stored in the spec (not the source).
 func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// On-behalf-of acts for a user, whose token arrives only through the exchange
+	// path; without it there is no one to act for.
+	if credential.GetString(spec.Config, "mint_method", "") == azureMintMethodOnBehalfOf {
+		return nil, nil, 0, "", fmt.Errorf("azure: mint_method=on_behalf_of needs the user's Entra access token; set subject_token_source=user_identity")
+	}
+
 	// A keyless source mints only through the exchange path, which carries the
 	// caller-scoped assertion. Fail closed here to avoid silently minting with
 	// no credential material.
@@ -591,7 +597,15 @@ func (d *AzureDriver) mintViaSecretRead(ctx context.Context, spec *credential.Cr
 // agent's verified inbound JWT forwarded untouched (subject_token_source=agent_identity,
 // the app's federated credential must trust the origin IdP directly). There is no
 // caller-supplied, unverified subject token.
+//
+// mint_method=on_behalf_of is the exception, and is dispatched first: its subject
+// is the user's Entra token, presented as the OBO assertion — never as the client
+// credential — and the app authenticates with the actor assertion (keyless) or the
+// source's secret (static), so it runs over either source.
 func (d *AzureDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if credential.GetString(spec.Config, "mint_method", "") == azureMintMethodOnBehalfOf {
+		return d.mintOnBehalfOf(ctx, spec, inputs)
+	}
 	if credential.GetString(d.sourceConfig(), "auth_method", azureAuthMethodStatic) != azureAuthMethodOIDCFederation {
 		return nil, nil, 0, "", fmt.Errorf("azure: workload identity federation requires auth_method=oidc_federation on the source")
 	}
@@ -656,6 +670,10 @@ func azureAssertionResource(specCfg credential.Config) (string, bool) {
 	switch credential.GetString(specCfg, "mint_method", "bearer_token") {
 	case "bearer_token":
 		uri := credential.GetString(specCfg, "resource_uri", armResource)
+		return "azure:" + uri, true
+	case azureMintMethodOnBehalfOf:
+		// Mirrors the resource_uri default in mintOnBehalfOf.
+		uri := credential.GetString(specCfg, "resource_uri", graphResource)
 		return "azure:" + uri, true
 	case "secret_read":
 		vault := credential.GetString(specCfg, "vault_name", "")
