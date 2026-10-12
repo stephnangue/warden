@@ -152,6 +152,12 @@ func GetErrorCode(err error) int {
 	// challenge naming where to go.
 	case errors.Is(err, credential.ErrUserRequired):
 		return http.StatusUnauthorized
+	// The upstream refused to act for the user until the user re-authenticates
+	// (a claims challenge, an expired or wrong-audience user token). Checked
+	// before the credential-issue rule below, which would make the upstream's
+	// 400 a 403 that no client acts on; core pairs this with the challenge.
+	case errors.Is(err, credential.ErrUserChallenge):
+		return http.StatusUnauthorized
 	}
 	// A credential that could not be issued answers with the status its
 	// cause calls for: a refusal by the upstream is not the server error it

@@ -326,7 +326,11 @@ func TestAzureOBO_ErrorClassification(t *testing.T) {
 				require.True(t, errors.As(err, &uce), "want a user challenge, got %v", err)
 				assert.ErrorIs(t, err, credential.ErrUserChallenge)
 				assert.Equal(t, tc.wantChallenge, uce.Code)
+				assert.Equal(t, tc.name == "interaction required without claims", uce.Interaction,
+					"only a claimless interaction_required needs an interactive sign-in")
 				assert.Equal(t, testAzureTenant, uce.TenantID)
+				assert.Equal(t, entra.srv.URL+"/"+testAzureTenant+"/oauth2/v2.0/authorize", uce.AuthorizationURI,
+					"the client re-authenticates at the authority the request went to")
 				if tc.wantClaims {
 					assert.JSONEq(t, claims, uce.Claims)
 				} else {

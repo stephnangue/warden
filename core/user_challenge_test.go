@@ -2,12 +2,14 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -442,5 +444,80 @@ func TestTransparentAuthFailureCarriesGitChallenge(t *testing.T) {
 		resp := handle(t, "github/gateway/user")
 		assert.Empty(t, resp.Headers.Get("WWW-Authenticate"),
 			"only git needs telling which scheme to retry with")
+	})
+}
+
+// An upstream's demand that the user re-authenticate is a 401, not the 403 an
+// upstream 4xx otherwise becomes, and it survives the wrapping it travels through.
+func TestErrUserChallengeMapsTo401(t *testing.T) {
+	upstream := &httputil.StatusError{Status: http.StatusBadRequest, Err: fmt.Errorf("entra said no")}
+	challenge := &credential.UserChallengeError{Code: credential.UserChallengeInvalidToken, Cause: upstream}
+	issued := &logical.CredentialIssueError{Spec: "m365", Err: fmt.Errorf("mint: %w", challenge)}
+	assert.Equal(t, http.StatusUnauthorized, logical.GetErrorCode(issued))
+
+	// Without the sentinel the same upstream 400 stays the refusal it was.
+	refused := &logical.CredentialIssueError{Spec: "m365", Err: fmt.Errorf("mint: %w", upstream)}
+	assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(refused))
+}
+
+func TestAttachUpstreamUserChallenge(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	req := &logical.Request{
+		Path: "github/gateway/v1.0/me", MountPoint: "github/",
+		HTTPRequest: httptest.NewRequest(http.MethodGet, "/v1/github/gateway/v1.0/me", nil),
+	}
+	const tenant = "00000000-0000-0000-0000-000000000001"
+	authorize := "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/authorize"
+	claims := `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`
+
+	t.Run("claims challenge in Microsoft's format", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("re-authenticate"))
+		challengeTestCore(t, true).attachUpstreamUserChallenge(ctx, req, resp, fmt.Errorf("mint: %w",
+			&credential.UserChallengeError{Code: credential.UserChallengeInsufficientClaims, Claims: claims,
+				TenantID: tenant, AuthorizationURI: authorize}))
+
+		got := resp.Headers.Values("WWW-Authenticate")
+		require.Len(t, got, 1, "exactly one challenge")
+		assert.Equal(t,
+			`Bearer realm="`+tenant+`", authorization_uri="`+authorize+`", error="insufficient_claims", claims="`+
+				base64.StdEncoding.EncodeToString([]byte(claims))+`"`,
+			got[0])
+	})
+
+	t.Run("an unusable user token is invalid_token at the mount's metadata", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("re-authenticate"))
+		challengeTestCore(t, true).attachUpstreamUserChallenge(ctx, req, resp,
+			&credential.UserChallengeError{Code: credential.UserChallengeInvalidToken, TenantID: tenant})
+		got := resp.Headers.Get("WWW-Authenticate")
+		assert.Contains(t, got, `error="invalid_token"`)
+		assert.Contains(t, got, "resource_metadata=")
+		assert.NotContains(t, got, "claims=")
+		assert.NotContains(t, got, "error_description", "a fresh token clears this one")
+	})
+
+	t.Run("one only an interactive sign-in clears says so", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("re-authenticate"))
+		challengeTestCore(t, true).attachUpstreamUserChallenge(ctx, req, resp,
+			&credential.UserChallengeError{Code: credential.UserChallengeInvalidToken, Interaction: true, TenantID: tenant})
+		got := resp.Headers.Values("WWW-Authenticate")
+		require.Len(t, got, 1)
+		assert.Contains(t, got[0], `error="invalid_token", error_description="interaction_required"`)
+		assert.Contains(t, got[0], "resource_metadata=")
+	})
+
+	t.Run("a claims challenge it cannot render safely degrades to invalid_token", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrUnauthorized("re-authenticate"))
+		challengeTestCore(t, true).attachUpstreamUserChallenge(ctx, req, resp,
+			&credential.UserChallengeError{Code: credential.UserChallengeInsufficientClaims, Claims: claims,
+				TenantID: tenant, AuthorizationURI: "https://evil.example\"\r\nX-Injected: 1"})
+		got := resp.Headers.Get("WWW-Authenticate")
+		assert.Contains(t, got, `error="invalid_token"`)
+		assert.NotContains(t, got, "evil.example")
+	})
+
+	t.Run("any other failure adds nothing", func(t *testing.T) {
+		resp := logical.ErrorResponse(logical.ErrForbidden("consent missing"))
+		challengeTestCore(t, true).attachUpstreamUserChallenge(ctx, req, resp, fmt.Errorf("admin consent is missing"))
+		assert.Empty(t, resp.Headers.Values("WWW-Authenticate"))
 	})
 }

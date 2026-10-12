@@ -123,13 +123,19 @@ const (
 // UserChallengeError carries what the user has to do. Code is one of the
 // UserChallenge* constants. Claims is the claims request the user's next token
 // must satisfy, as compact JSON re-marshalled by the driver (never an upstream
-// string copied through). TenantID names the authority the client re-authenticates
-// against. Cause is the upstream failure, kept for logs and status.
+// string copied through). TenantID names the tenant the client re-authenticates
+// in, and AuthorizationURI the authorize endpoint it re-authenticates at — both
+// built by the driver from validated config, never from the upstream's answer.
+// Interaction marks an invalid_token challenge that a silent token refresh will
+// not clear: the user must sign in interactively (Entra's interaction_required
+// with no claims request). Cause is the upstream failure, kept for logs and status.
 type UserChallengeError struct {
-	Code     string
-	Claims   string
-	TenantID string
-	Cause    error
+	Code             string
+	Claims           string
+	TenantID         string
+	AuthorizationURI string
+	Interaction      bool
+	Cause            error
 }
 
 func (e *UserChallengeError) Error() string {
