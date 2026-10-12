@@ -39,3 +39,24 @@ func TestIsBatchPath(t *testing.T) {
 		}
 	}
 }
+
+func TestIsGraphHost(t *testing.T) {
+	for _, h := range []string{"graph.microsoft.com", "GRAPH.microsoft.com", "graph.microsoft.com.", "graph.microsoft.us",
+		"dod-graph.microsoft.us", "microsoftgraph.chinacloudapi.cn", "x.graph.microsoft.com"} {
+		if !IsGraphHost(h) {
+			t.Errorf("IsGraphHost(%q) = false, want true", h)
+		}
+	}
+	for _, h := range []string{"management.azure.com", "graph.microsoft.com.evil.example", "notgraph.microsoft.com",
+		"microsoft.com", ""} {
+		if IsGraphHost(h) {
+			t.Errorf("IsGraphHost(%q) = true, want false", h)
+		}
+	}
+
+	got := Hosts()
+	got[0] = "changed"
+	if Hosts()[0] == "changed" {
+		t.Error("Hosts must return a copy")
+	}
+}

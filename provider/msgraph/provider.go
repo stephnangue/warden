@@ -36,12 +36,7 @@ const (
 // defaultGraphHosts are the Graph endpoints of the public and sovereign clouds.
 // graph_url may name only one of them: the mount sends every user's delegated
 // token there, so it must never be redirectable to an arbitrary host.
-var defaultGraphHosts = []string{
-	"graph.microsoft.com",
-	"graph.microsoft.us",
-	"dod-graph.microsoft.us",
-	"microsoftgraph.chinacloudapi.cn",
-}
+var defaultGraphHosts = graphbatch.Hosts()
 
 var (
 	errBatchNotSupported  = errors.New("Graph JSON batching ($batch) is not supported through Warden: send the requests individually")

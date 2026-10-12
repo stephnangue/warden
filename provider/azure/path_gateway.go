@@ -11,6 +11,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/graphbatch"
 )
 
 // maxGatewayBodySize is the default max body size if not configured
@@ -85,6 +86,13 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	if !framework.HostAllowed(azureHost, b.hostAllowlist()) {
 		b.Logger.Warn("target host not allowed", logger.String("host", azureHost))
 		http.Error(req.ResponseWriter, fmt.Sprintf("target host %q is not allowed on this mount", azureHost), http.StatusForbidden)
+		return
+	}
+	// A Graph $batch body carries requests a path policy never sees, so it is
+	// refused whatever the policy allowed. The msgraph provider refuses it too.
+	if graphbatch.IsGraphHost(azureHost) && graphbatch.IsBatchPath(azurePath) {
+		http.Error(req.ResponseWriter,
+			"Graph JSON batching ($batch) is not supported through Warden: send the requests individually", http.StatusBadRequest)
 		return
 	}
 
