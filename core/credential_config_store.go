@@ -1448,15 +1448,26 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 		return logical.ErrBadRequestf("invalid token-exchange config: %s", err.Error())
 	}
 
+	// An azure on_behalf_of spec is the one other consumer of the delegation shape:
+	// the user's Entra token is the OBO assertion and the actor (a Warden assertion)
+	// authenticates the app. Its rules replace the token_exchange pins below.
+	azureOBO := source.Type == credential.SourceTypeAzure && drivers.AzureOnBehalfOf(spec.Type, spec.Config)
+	if azureOBO {
+		if err := drivers.AzureOnBehalfOfSpecError(spec.Config, source.Config); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
+	}
+
 	// Any actor token source (agent_identity, warden_identity) is consumed only by
-	// the token_exchange driver, which forwards the actor to an RFC 8693 STS; every
-	// other driver ignores ActorToken entirely. Pin any actor source to a
-	// token_exchange source so a delegation spec can't be bound to a source that
+	// the token_exchange driver, which forwards the actor to an RFC 8693 STS, and by
+	// an azure on_behalf_of spec, which presents it as the app's client assertion;
+	// every other driver ignores ActorToken entirely. Pin any other actor source to
+	// a token_exchange source so a delegation spec can't be bound to a source that
 	// would silently drop the actor (losing the delegation and its audit
 	// attribution), and reject a grant with no actor slot — otherwise the spec is
 	// accepted but every request fails at mint time. These are source-aware, so
 	// they live here, not in the structural validator above.
-	if actorSrc := spec.Config.Get(credential.ConfigActorTokenSource); actorSrc != "" && actorSrc != credential.SourceNone {
+	if actorSrc := spec.Config.Get(credential.ConfigActorTokenSource); actorSrc != "" && actorSrc != credential.SourceNone && !azureOBO {
 		if source.Type != credential.SourceTypeTokenExchange {
 			return logical.ErrBadRequestf("field '%s': an actor token requires a '%s' source (only token exchange consumes an actor token)",
 				credential.ConfigActorTokenSource, credential.SourceTypeTokenExchange)
@@ -1470,9 +1481,12 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 	// subject_token_source=user_identity forwards the raw user credential as the
 	// RFC 8693 subject_token, which only the token_exchange driver consumes. Pin it
 	// to a token_exchange source so a federation driver (gcp/aws/azure/vault) can
-	// never be handed the raw user JWT as its own federation login token.
+	// never be handed the raw user JWT as its own federation login token. An azure
+	// on_behalf_of spec keeps that invariant: the user's token is only ever the OBO
+	// assertion, and the app authenticates with the actor assertion or the source's
+	// secret, so it is the one exception.
 	if spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceUserIdentity &&
-		source.Type != credential.SourceTypeTokenExchange {
+		source.Type != credential.SourceTypeTokenExchange && !azureOBO {
 		return logical.ErrBadRequestf("field '%s': '%s' requires a '%s' source",
 			credential.ConfigSubjectTokenSource, credential.SourceUserIdentity, credential.SourceTypeTokenExchange)
 	}
@@ -2029,6 +2043,14 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(namespaceID st
 		// registry: it reads the two configs alone.
 		if source.Type == credential.SourceTypeOAuth2 {
 			if err := oauth2SpecClientAuthError(spec.Config, source.Config); err != nil {
+				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
+			}
+		}
+		// What authenticates an on_behalf_of spec's app follows the source's
+		// auth_method, so switching a source between static and keyless strands the
+		// spec (an actor the static source cannot use, or no credential at all).
+		if source.Type == credential.SourceTypeAzure && drivers.AzureOnBehalfOf(spec.Type, spec.Config) {
+			if err := drivers.AzureOnBehalfOfSpecError(spec.Config, source.Config); err != nil {
 				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
 			}
 		}

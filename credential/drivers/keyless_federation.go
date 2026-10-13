@@ -338,6 +338,14 @@ func (f *AzureDriverFactory) PlanKeylessSpec(specType string, spec, current, _ c
 
 	switch {
 	case specType == credential.TypeAzureBearerToken:
+		// An on_behalf_of spec already exchanges the user's token, so the subject
+		// stays; going keyless moves the app's credential from the source's secret
+		// to a Warden assertion in the actor slot.
+		if spec.Get("mint_method") == azureMintMethodOnBehalfOf {
+			if a := spec.Get(credential.ConfigActorTokenSource); a == "" || a == credential.SourceNone {
+				delta[credential.ConfigActorTokenSource] = credential.SourceWardenIdentity
+			}
+		}
 		clearPresent(delta, spec, "client_secret", "secret_id")
 		if spec.Get("tenant_id") == "" && current.Get("tenant_id") != "" {
 			delta["tenant_id"] = current.Get("tenant_id")
@@ -375,7 +383,12 @@ func (f *AzureDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 		apps[id] = true
 	}
 	for _, s := range specs {
-		if id := s.Config.Get("client_id"); id != "" && usesWardenIdentity(s.Config) {
+		// An on_behalf_of spec presents Warden's assertion as the actor — the app's
+		// client assertion — while its subject is the user's token, so its app needs
+		// the same federated credential.
+		oboActor := s.Config.Get("mint_method") == azureMintMethodOnBehalfOf &&
+			s.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
+		if id := s.Config.Get("client_id"); id != "" && (usesWardenIdentity(s.Config) || oboActor) {
 			apps[id] = true
 		}
 	}
