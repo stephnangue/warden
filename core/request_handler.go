@@ -1198,6 +1198,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			)
 			errResp := logical.ErrorResponse(err)
 			c.attachUserRequiredChallenge(ctx, req, errResp, err)
+			c.attachUpstreamUserChallenge(ctx, req, errResp, err)
 			return errResp, auth, nil
 		}
 	}

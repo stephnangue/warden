@@ -134,7 +134,14 @@ func (d *AzureDriver) mintOnBehalfOf(ctx context.Context, spec *credential.CredS
 
 	tok, err := d.postOBOTokenRequest(ctx, tenantID, form)
 	if err != nil {
-		return nil, nil, 0, "", classifyEntraOBOError(err, tenantID, clientID, scope, auth.assertion != "")
+		err = classifyEntraOBOError(err, tenantID, clientID, scope, auth.assertion != "")
+		// The client re-authenticates at the same authority this request went to,
+		// whatever cloud login_endpoint names.
+		var uce *credential.UserChallengeError
+		if errors.As(err, &uce) {
+			uce.AuthorizationURI = fmt.Sprintf("%s/%s/oauth2/v2.0/authorize", d.loginBase(), tenantID)
+		}
+		return nil, nil, 0, "", err
 	}
 
 	lifetime := time.Duration(tok.ExpiresIn) * time.Second
@@ -334,6 +341,15 @@ func compactClaims(raw string) string {
 	return string(out)
 }
 
+// loginBase is the Entra authority host: the source's login_endpoint, else the
+// public cloud's.
+func (d *AzureDriver) loginBase() string {
+	if d.loginHost != "" {
+		return d.loginHost
+	}
+	return defaultAzureLoginHost
+}
+
 // postOBOTokenRequest POSTs an OBO token request to the Entra token endpoint for
 // tenantID. Unlike postTokenRequest it reads 400 and 401 bodies, so a refusal is
 // classified by its AADSTS codes, and it never embeds a response body in an error.
@@ -343,11 +359,7 @@ func (d *AzureDriver) postOBOTokenRequest(ctx context.Context, tenantID string, 
 	if err := validateTenantID(tenantID); err != nil {
 		return nil, err
 	}
-	host := d.loginHost
-	if host == "" {
-		host = defaultAzureLoginHost
-	}
-	tokenURL := fmt.Sprintf("%s/%s/oauth2/v2.0/token", host, tenantID)
+	tokenURL := fmt.Sprintf("%s/%s/oauth2/v2.0/token", d.loginBase(), tenantID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader([]byte(form.Encode())))
 	if err != nil {
@@ -420,11 +432,12 @@ func classifyEntraOBOError(err error, tenantID, clientID, scope string, federate
 	}
 	switch {
 	case ete.claims != "" || ete.code == "interaction_required" || ete.hasCode(50079, 50076):
-		code := credential.UserChallengeInsufficientClaims
 		if ete.claims == "" {
-			code = credential.UserChallengeInvalidToken
+			// Nothing to re-acquire the token with: the user has to sign in
+			// interactively, which a silent refresh would never do.
+			return &credential.UserChallengeError{Code: credential.UserChallengeInvalidToken, Interaction: true, TenantID: tenantID, Cause: ete}
 		}
-		return &credential.UserChallengeError{Code: code, Claims: ete.claims, TenantID: tenantID, Cause: ete}
+		return &credential.UserChallengeError{Code: credential.UserChallengeInsufficientClaims, Claims: ete.claims, TenantID: tenantID, Cause: ete}
 	case ete.hasCode(50013, 500133) && ete.code != "invalid_client":
 		return &credential.UserChallengeError{Code: credential.UserChallengeInvalidToken, TenantID: tenantID, Cause: ete}
 	case ete.hasCode(65001) || ete.suberror == "consent_required":

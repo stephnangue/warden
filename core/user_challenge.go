@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,12 +33,22 @@ import (
 // nowhere. A missing or invalid AGENT never reaches here — that is a plain
 // 401/403 with nothing for the user leg to fix.
 func (c *Core) attachUserChallenge(ctx context.Context, req *logical.Request, resp *logical.Response, invalidToken bool) {
+	c.attachUserChallengeDescribed(ctx, req, resp, invalidToken, "")
+}
+
+// attachUserChallengeDescribed is attachUserChallenge with an RFC 6750
+// error_description. description must be a constant: nothing a client or an
+// upstream wrote may reach the header.
+func (c *Core) attachUserChallengeDescribed(ctx context.Context, req *logical.Request, resp *logical.Response, invalidToken bool, description string) {
 	if resp == nil || req == nil {
 		return
 	}
-	params := make([]string, 0, 2)
+	params := make([]string, 0, 3)
 	if invalidToken {
 		params = append(params, `error="invalid_token"`)
+	}
+	if description != "" {
+		params = append(params, fmt.Sprintf("error_description=%q", description))
 	}
 	// Omitted when no document would be served — a mount that is not opted in,
 	// or metadata not configured. Naming a URL that 404s is worse than naming
@@ -199,6 +210,53 @@ func (c *Core) attachUserRequiredChallenge(ctx context.Context, req *logical.Req
 		return
 	}
 	c.attachUserChallenge(ctx, req, resp, false)
+}
+
+// attachUpstreamUserChallenge renders an upstream's demand that the user
+// re-authenticate (credential.UserChallengeError) into the WWW-Authenticate
+// header of the 401 GetErrorCode gives it. A no-op for any other error, so it
+// never adds a second challenge beside attachUserRequiredChallenge's.
+//
+// Two shapes. An unusable user token is RFC 6750's invalid_token, pointing at the
+// mount's metadata like any other user challenge. A claims challenge follows
+// Microsoft's format — realm, authorization_uri, error="insufficient_claims" and
+// the claims request base64-encoded — which MSAL and the Graph SDKs parse to
+// re-acquire the user's token with those claims. Every value is either a constant
+// or built by the driver from validated config and re-marshalled JSON; nothing the
+// upstream wrote as text reaches the header. A claims challenge missing a value
+// it needs degrades to invalid_token rather than emit a malformed header.
+func (c *Core) attachUpstreamUserChallenge(ctx context.Context, req *logical.Request, resp *logical.Response, err error) {
+	if resp == nil {
+		return
+	}
+	var uce *credential.UserChallengeError
+	if !errors.As(err, &uce) {
+		return
+	}
+	if uce.Code == credential.UserChallengeInsufficientClaims &&
+		uce.Claims != "" && headerSafe(uce.TenantID) && headerSafe(uce.AuthorizationURI) &&
+		strings.HasPrefix(uce.AuthorizationURI, "http") {
+		claims := base64.StdEncoding.EncodeToString([]byte(uce.Claims))
+		resp.AddHeader("WWW-Authenticate", fmt.Sprintf(
+			`Bearer realm="%s", authorization_uri="%s", error="%s", claims="%s"`,
+			uce.TenantID, uce.AuthorizationURI, credential.UserChallengeInsufficientClaims, claims))
+		return
+	}
+	if uce.Interaction {
+		// Tells the client a silent refresh will not do: the user must sign in.
+		c.attachUserChallengeDescribed(ctx, req, resp, true, interactionRequiredDescription)
+		return
+	}
+	c.attachUserChallenge(ctx, req, resp, true)
+}
+
+// interactionRequiredDescription is the error_description of an invalid_token
+// challenge only an interactive sign-in clears — Entra's own error name for it.
+const interactionRequiredDescription = "interaction_required"
+
+// headerSafe reports whether s can sit inside a quoted header parameter as is.
+func headerSafe(s string) bool {
+	return s != "" && !strings.ContainsAny(s, "\"\\\r\n")
 }
 
 // userChallengeForDeny converts a policy denial into a 401 carrying the user
