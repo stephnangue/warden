@@ -90,6 +90,42 @@ func TestHandleGateway_HostAllowlist(t *testing.T) {
 	}
 }
 
+// A Graph $batch body carries requests path policy never sees, so it is refused
+// on a Graph host whatever the policy allowed, in every spelling; ARM's own
+// /batch, and Graph paths that merely resemble it, still go through.
+func TestHandleGateway_GraphBatchRefused(t *testing.T) {
+	for _, tc := range []struct {
+		path   string
+		status int
+	}{
+		{"/azure/gateway/graph.microsoft.com/v1.0/$batch", http.StatusBadRequest},
+		{"/azure/gateway/graph.microsoft.com/beta/$batch", http.StatusBadRequest},
+		{"/azure/gateway/graph.microsoft.com/V1.0/$Batch/", http.StatusBadRequest},
+		{"/azure/gateway/graph.microsoft.com/v1.0/me/../$batch", http.StatusBadRequest},
+		{"/azure/gateway/graph.microsoft.com/v1.0/%24batch", http.StatusBadRequest},
+		{"/azure/gateway/graph.microsoft.com/v1.0%5C$batch", http.StatusBadRequest},
+		{"/azure/gateway/graph.microsoft.com/v1.0/$batch;x=1", http.StatusBadRequest},
+		{"/azure/gateway/graph.microsoft.com/v1.0/me/messages", http.StatusOK},
+		{"/azure/gateway/management.azure.com/batch", http.StatusOK},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			upstream := &forwardRecorder{}
+			b := setupBackend(t)
+			b.StreamingBackend.InitProxy(upstream)
+
+			req, rec := gatewayRequest(tc.path)
+			req.HTTPRequest.Method = http.MethodPost
+			b.handleGateway(context.Background(), req)
+
+			assert.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.status != http.StatusOK {
+				assert.Empty(t, upstream.hosts, "a refused batch must not be forwarded")
+				assert.Contains(t, rec.Body.String(), "$batch")
+			}
+		})
+	}
+}
+
 // An operator's allowlist replaces the default, and an empty one restores it.
 func TestConfigWrite_HostAllowlist(t *testing.T) {
 	storage := newInmemStorage()
