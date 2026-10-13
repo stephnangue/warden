@@ -215,6 +215,76 @@ func joinResourceURL(base, suffix string) string {
 	return strings.TrimSuffix(base, "/") + "/" + strings.TrimPrefix(suffix, "/")
 }
 
+// externalBaseTTL bounds how long a cached external base is served. A write
+// through sys/protected-resource invalidates it at once on the node that took
+// it; the bound covers every other way the stored value can change, such as a
+// failover onto a node that cached it earlier.
+const externalBaseTTL = 30 * time.Second
+
+// externalBaseRetry is how long a failed read is remembered: long enough that a
+// storage outage does not put a read — and the lock around it — on every request,
+// short enough that recovery shows within seconds.
+const externalBaseRetry = 5 * time.Second
+
+type externalBaseEntry struct {
+	value  string
+	loaded time.Time
+	ttl    time.Duration
+}
+
+func (e *externalBaseEntry) fresh() bool {
+	return e != nil && time.Since(e.loaded) < e.ttl
+}
+
+// externalBaseURL returns the external HTTPS base clients reach Warden at — the
+// protected-resource resource_url — or "" when none is configured. Backends use
+// it to build links that point back through Warden (BackendConfig.ExternalBaseURL).
+// It is never derived from a request's Host header, which the client controls.
+//
+// It runs per gateway request, so a fresh cached value is returned with no lock
+// and no storage read. One caller refreshes a stale value; the others keep
+// serving the stale one meanwhile rather than queue behind the read. A failed
+// read keeps the last known value (or none) for externalBaseRetry, so callers do
+// not queue behind the lock while storage is failing either.
+func (c *Core) externalBaseURL(ctx context.Context) string {
+	cached := c.externalBase.Load()
+	if cached.fresh() {
+		return cached.value
+	}
+	if !c.externalBaseRefresh.TryLock() {
+		if cached != nil {
+			return cached.value
+		}
+		c.externalBaseRefresh.Lock()
+	}
+	defer c.externalBaseRefresh.Unlock()
+	if current := c.externalBase.Load(); current.fresh() {
+		return current.value
+	}
+
+	cfg, err := c.protectedResourceConfig(ctx)
+	if err != nil {
+		value := ""
+		if cached != nil {
+			value = cached.value
+		}
+		c.externalBase.Store(&externalBaseEntry{value: value, loaded: time.Now(), ttl: externalBaseRetry})
+		return value
+	}
+	value := ""
+	if cfg.enabled() {
+		value = strings.TrimRight(cfg.ResourceURL, "/")
+	}
+	c.externalBase.Store(&externalBaseEntry{value: value, loaded: time.Now(), ttl: externalBaseTTL})
+	return value
+}
+
+// invalidateExternalBaseURL drops the cached external base, so the next caller
+// reads the stored one.
+func (c *Core) invalidateExternalBaseURL() {
+	c.externalBase.Store(nil)
+}
+
 // protectedResourceConfig loads the configuration from its barrier view.
 func (c *Core) protectedResourceConfig(ctx context.Context) (*protectedResourceConfig, error) {
 	view := NewBarrierView(c.barrier, protectedResourceStorePrefix)

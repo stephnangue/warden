@@ -168,6 +168,17 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		r.Header.Del("Accept-Encoding")
 	}
 
+	// A spec that rewrites this response gets it through the same hook, with
+	// where its links should point. Accept-Encoding is dropped so the body arrives
+	// uncompressed and can be read; a request with no prefix to rewrite onto is
+	// left exactly as it was.
+	if b.spec.ModifyResponse != nil && b.spec.RewriteResponse != nil && b.spec.RewriteResponse(r, state) {
+		if prefix := b.rewritePrefix(ctx, req); prefix != "" {
+			r = r.WithContext(withRewriteContext(r.Context(), RewriteContext{Prefix: prefix, MaxBodySize: maxBody}))
+			r.Header.Del("Accept-Encoding")
+		}
+	}
+
 	b.Logger.Trace("Proxying request",
 		logger.String("provider", b.spec.Name),
 		logger.String("path", r.URL.Path),

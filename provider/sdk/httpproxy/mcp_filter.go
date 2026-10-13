@@ -119,11 +119,17 @@ func (b *proxyBackend) installMCPListFilter() {
 		if mcpGovernedFrom(ctx) {
 			MarkMCPResponsePrivate(resp.Header)
 		}
-		filter := mcpListFilterFrom(ctx)
-		if filter == nil {
-			return nil // not an MCP list request — stream verbatim
+		if filter := mcpListFilterFrom(ctx); filter != nil {
+			return filterMCPListResponse(resp, filter, b.MaxBodySize())
 		}
-		return filterMCPListResponse(resp, filter, b.MaxBodySize())
+		// A provider rewriting this response (RewriteResponse/ModifyResponse).
+		// The nil check first: a provider without the hook pays nothing more.
+		if b.spec != nil && b.spec.ModifyResponse != nil {
+			if rc, ok := rewriteContextFrom(ctx); ok {
+				return b.spec.ModifyResponse(resp, rc)
+			}
+		}
+		return nil // stream verbatim
 	}
 }
 

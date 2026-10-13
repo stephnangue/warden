@@ -78,11 +78,15 @@ curl ... "$WARDEN_ADDR/v1/msgraph/role/m365-agent/gateway/v1.0/deviceManagement/
   (from Warden or from Graph): Conditional Access wants more. Re-acquire the
   user's token with those claims (MSAL: `WithClaims`) and retry.
   **401 `invalid_token`**: the user's token expired or is for the wrong
-  audience — get a fresh one for Warden's app. **403 "admin consent is
-  missing"**: ask the operator; retrying will not help.
-- **Paging:** follow `@odata.nextLink` as given; if it still points at
-  `graph.microsoft.com`, replace that origin with `$WARDEN_ADDR<gateway-url>`
-  and keep the rest (including `$skiptoken`) unchanged.
+  audience — get a fresh one for Warden's app. If the challenge also says
+  `error_description="interaction_required"`, a silent refresh will not do:
+  the user must sign in interactively. **403 "admin consent is missing"**:
+  ask the operator; retrying will not help.
+- **Paging:** Warden rewrites `@odata.nextLink` and `@odata.deltaLink` onto
+  the gateway, so follow them as given. If one still points at
+  `graph.microsoft.com` (rewriting off, a body too large, or a link nested in
+  an item), replace that origin with `$WARDEN_ADDR<gateway-url>` and keep the
+  rest — including `$skiptoken` — unchanged.
 - **Downloads and uploads:** `…/content` answers `302` to a pre-authenticated
   URL — follow it **directly, without** an Authorization header. Large uploads
   use `createUploadSession`; PUT the chunks to its `uploadUrl` directly, also

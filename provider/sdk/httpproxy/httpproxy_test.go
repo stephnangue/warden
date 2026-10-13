@@ -17,6 +17,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -1844,6 +1845,84 @@ func TestHandleGateway_RefuseRequest(t *testing.T) {
 	rec = send("/test/gateway/v1/fine")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Equal(t, 0, hits)
+}
+
+// The rewrite prefix is the client's own gateway URL: Warden's configured base,
+// the namespace and mount, and the role segment only when the client put it in
+// the path. Without a base there is nothing to rewrite onto.
+func TestRewritePrefix(t *testing.T) {
+	const base = "https://warden.example.com"
+	pb := &proxyBackend{externalBaseURL: func(context.Context) string { return base + "/" }}
+	root := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	child := namespace.ContextWithNamespace(context.Background(), &namespace.Namespace{ID: "c", Path: "team-a/"})
+
+	cases := []struct {
+		ctx       context.Context
+		auditPath string
+		want      string
+	}{
+		{root, "role/m365/gateway/v1.0/me/messages", base + "/v1/msgraph/role/m365/gateway"},
+		{root, "gateway/v1.0/me", base + "/v1/msgraph/gateway"},
+		{root, "role/gateway/gateway/v1.0/me", base + "/v1/msgraph/role/gateway/gateway"},
+		{child, "gateway/v1.0/me", base + "/v1/team-a/msgraph/gateway"},
+		{root, "config", ""},
+		{root, "role//gateway/v1.0", ""},
+	}
+	for _, tc := range cases {
+		got := pb.rewritePrefix(tc.ctx, &logical.Request{MountPoint: "msgraph/", AuditPath: tc.auditPath})
+		assert.Equal(t, tc.want, got, tc.auditPath)
+	}
+
+	assert.Empty(t, (&proxyBackend{}).rewritePrefix(root, &logical.Request{MountPoint: "m/", AuditPath: "gateway/x"}),
+		"no external base: nothing to rewrite onto")
+	empty := &proxyBackend{externalBaseURL: func(context.Context) string { return "" }}
+	assert.Empty(t, empty.rewritePrefix(root, &logical.Request{MountPoint: "m/", AuditPath: "gateway/x"}))
+}
+
+// A spec that asks for it gets the upstream response, with the prefix, through
+// the proxy's response hook; without an external base the response is untouched.
+func TestHandleGateway_RewriteResponse(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"next":"upstream"}`))
+	}))
+	defer upstream.Close()
+
+	var seen []RewriteContext
+	spec := testSpec()
+	spec.RewriteResponse = func(r *http.Request, _ map[string]any) bool { return r.Method == http.MethodGet }
+	spec.ModifyResponse = func(resp *http.Response, rc RewriteContext) error {
+		seen = append(seen, rc)
+		resp.Body = io.NopCloser(strings.NewReader(`{"next":"rewritten"}`))
+		resp.ContentLength = -1
+		resp.Header.Del("Content-Length")
+		return nil
+	}
+
+	call := func(pb *proxyBackend) string {
+		rec := httptest.NewRecorder()
+		ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+		httpReq := httptest.NewRequest(http.MethodGet, "/test/role/r/gateway/v1/list", nil).WithContext(ctx)
+		pb.handleGateway(ctx, &logical.Request{
+			HTTPRequest: httpReq, ResponseWriter: rec,
+			MountPoint: "test/", AuditPath: "role/r/gateway/v1/list",
+			Credential: &credential.Credential{Type: credential.TypeAPIKey, Data: map[string]string{"api_key": "sk-test"}},
+		})
+		return rec.Body.String()
+	}
+
+	pb := setupBackend(t, spec).(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.StreamingBackend.InitProxy(upstream.Client().Transport)
+	pb.installMCPListFilter()
+	assert.JSONEq(t, `{"next":"upstream"}`, call(pb), "no external base: untouched")
+	assert.Empty(t, seen)
+
+	pb.externalBaseURL = func(context.Context) string { return "https://warden.example.com" }
+	assert.JSONEq(t, `{"next":"rewritten"}`, call(pb))
+	require.Len(t, seen, 1)
+	assert.Equal(t, "https://warden.example.com/v1/test/role/r/gateway", seen[0].Prefix)
+	assert.Positive(t, seen[0].MaxBodySize)
 }
 
 // With a renderer the refusal is answered in the provider's error shape.

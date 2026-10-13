@@ -629,6 +629,7 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 			Config:               entry.Config,
 			BackendUUID:          entry.BackendAwareUUID,
 			RegisterShutdownHook: c.RegisterShutdownHook,
+			ExternalBaseURL:      c.externalBaseURL,
 		}
 		backend, err = factory(ctx, conf)
 		if err != nil {
