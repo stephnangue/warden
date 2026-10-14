@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	_ "crypto/sha256" // registers SHA-256 for crypto.Hash.New()
 	_ "crypto/sha512" // registers SHA-384 for crypto.Hash.New()
 	"encoding/asn1"
@@ -69,9 +70,9 @@ func SignCompactJWS(ctx context.Context, signer crypto.Signer, alg string, heade
 	}
 
 	// crypto.Signer.Sign takes the already-hashed digest and returns, for RSA, PKCS#1
-	// v1.5 bytes (opts is a plain crypto.Hash, not *rsa.PSSOptions) and, for ECDSA, an
-	// ASN.1 SEQUENCE{r,s}.
-	sig, err := signer.Sign(rand.Reader, digest, p.hash)
+	// v1.5 bytes when opts is a plain crypto.Hash and RSASSA-PSS bytes when it is
+	// *rsa.PSSOptions, and, for ECDSA, an ASN.1 SEQUENCE{r,s}.
+	sig, err := signer.Sign(rand.Reader, digest, signerOpts(p))
 	if err != nil {
 		return "", fmt.Errorf("remotesign: sign: %w", err)
 	}
@@ -82,6 +83,18 @@ func SignCompactJWS(ctx context.Context, signer crypto.Signer, alg string, heade
 		}
 	}
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// signerOpts is what crypto.Signer.Sign is handed for an alg. A PS* signature carries
+// a salt as long as the hash (RFC 7518 §3.5), which is also the only length verifiers
+// such as Entra ID accept: PSSSaltLengthAuto would sign with the longest salt the key
+// allows, a signature that is valid PSS yet refused by every verifier expecting the
+// JWS length.
+func signerOpts(p algParams) crypto.SignerOpts {
+	if p.pss {
+		return &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: p.hash}
+	}
+	return p.hash
 }
 
 // ecSigASN1ToJWS converts the ASN.1 SEQUENCE{r,s} that crypto.Signer produces for

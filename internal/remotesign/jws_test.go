@@ -96,7 +96,7 @@ func TestSignCompactJWS_Rejects(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
-	_, err = SignCompactJWS(context.Background(), key, "PS256", nil, map[string]interface{}{})
+	_, err = SignCompactJWS(context.Background(), key, "PS512", nil, map[string]interface{}{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported signing algorithm")
 

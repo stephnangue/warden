@@ -58,7 +58,19 @@ func newFakeSigningBackend(t *testing.T) (*fakeSigningBackend, string) {
 			}
 			digest, err := base64.StdEncoding.DecodeString(f.signBody["input"].(string))
 			require.NoError(t, err)
-			sig, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, digest)
+			// Like transit: PSS unless pkcs1v15 is named, with the longest salt the key
+			// allows unless salt_length says otherwise — so a request that forgets
+			// salt_length=hash yields a signature strict verifiers refuse.
+			var sig []byte
+			if f.signBody["signature_algorithm"] == "pkcs1v15" {
+				sig, err = rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, digest)
+			} else {
+				salt := rsa.PSSSaltLengthAuto
+				if f.signBody["salt_length"] == "hash" {
+					salt = rsa.PSSSaltLengthEqualsHash
+				}
+				sig, err = rsa.SignPSS(rand.Reader, f.key, crypto.SHA256, digest, &rsa.PSSOptions{SaltLength: salt, Hash: crypto.SHA256})
+			}
 			require.NoError(t, err)
 			verInt := signedKeyVersion(f.signBody)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{

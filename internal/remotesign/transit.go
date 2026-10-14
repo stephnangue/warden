@@ -54,16 +54,18 @@ type TransitBackend struct {
 
 var _ Backend = (*TransitBackend)(nil)
 
-// transitAlg is what transit calls a JWS alg's key type and hash.
+// transitAlg is what transit calls a JWS alg's key type, hash and RSA padding.
 type transitAlg struct {
 	keyType  string // transit key type, e.g. "rsa-2048"
 	hashName string // transit hash_algorithm, e.g. "sha2-256"
+	sigAlg   string // transit signature_algorithm for RSA ("pkcs1v15" or "pss"); empty for ECDSA
 }
 
 // transitAlgs covers exactly the algs in algParamsByAlg; a test keeps the two in step.
 var transitAlgs = map[string]transitAlg{
-	"RS256": {keyType: "rsa-2048", hashName: "sha2-256"},
-	"RS384": {keyType: "rsa-3072", hashName: "sha2-384"},
+	"RS256": {keyType: "rsa-2048", hashName: "sha2-256", sigAlg: "pkcs1v15"},
+	"RS384": {keyType: "rsa-3072", hashName: "sha2-384", sigAlg: "pkcs1v15"},
+	"PS256": {keyType: "rsa-2048", hashName: "sha2-256", sigAlg: "pss"},
 	"ES256": {keyType: "ecdsa-p256", hashName: "sha2-256"},
 	"ES384": {keyType: "ecdsa-p384", hashName: "sha2-384"},
 }
@@ -339,6 +341,23 @@ func (b *TransitBackend) NamedKeyInfo(ctx context.Context, name, alg, version st
 	}, nil
 }
 
+// checkPadding refuses signer options that disagree with the alg's padding. The alg
+// decides what the store is asked for, so a caller handing PSS options for an RS*
+// alg — or a hash for a PS* one — would otherwise get a signature in a padding it did
+// not ask for, which no verifier of that alg accepts.
+func checkPadding(alg string, p algParams, opts crypto.SignerOpts) error {
+	pssOpts, isPSS := opts.(*rsa.PSSOptions)
+	switch {
+	case p.pss && !isPSS:
+		return fmt.Errorf("remotesign: %s is RSASSA-PSS and needs *rsa.PSSOptions", alg)
+	case !p.pss && isPSS:
+		return fmt.Errorf("remotesign: %s does not use RSASSA-PSS", alg)
+	case isPSS && pssOpts.SaltLength != rsa.PSSSaltLengthEqualsHash && pssOpts.SaltLength != p.hash.Size():
+		return fmt.Errorf("remotesign: %s requires a salt as long as the hash", alg)
+	}
+	return nil
+}
+
 // validateKeyForAlg checks that an operator-provisioned key can sign alg. It is looser
 // than validateTransitKey, which pins an exact key type because this package created
 // that key: an RSA key of any supported size signs any RS* algorithm, so refusing
@@ -367,16 +386,17 @@ func validateKeyForAlg(kd *transitKeyData, name, alg string) error {
 }
 
 // Sign signs an already-hashed digest with the exact version in ref via
-// transit/sign. RSA is forced to PKCS#1 v1.5 (transit defaults to PSS); ECDSA is
-// requested in ASN.1 form, matching the crypto.Signer contract.
+// transit/sign. RSA padding is always named rather than left to transit's default
+// (PSS): PKCS#1 v1.5 for RS*, and for PS* PSS with a salt as long as the hash. ECDSA
+// is requested in ASN.1 form, matching the crypto.Signer contract.
 func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	if _, ok := opts.(*rsa.PSSOptions); ok {
-		return nil, fmt.Errorf("remotesign: RSA-PSS is not supported by the transit signer")
-	}
 	p, ok := algParamsByAlg[ref.Alg]
 	ta, tok := transitAlgs[ref.Alg]
 	if !ok || !tok {
 		return nil, fmt.Errorf("remotesign: unsupported signing algorithm %q", ref.Alg)
+	}
+	if err := checkPadding(ref.Alg, p, opts); err != nil {
+		return nil, err
 	}
 	version, err := transitVersion(ref.Version)
 	if err != nil {
@@ -400,7 +420,12 @@ func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, op
 		"marshaling_algorithm": "asn1",
 	}
 	if p.isRSA {
-		data["signature_algorithm"] = "pkcs1v15"
+		data["signature_algorithm"] = ta.sigAlg
+	}
+	if p.pss {
+		// transit's own default, "auto", signs with the longest salt the key allows,
+		// which verifiers holding to the JWS length refuse.
+		data["salt_length"] = "hash"
 	}
 	ctx, cancel := b.withTimeout(ctx)
 	defer cancel()

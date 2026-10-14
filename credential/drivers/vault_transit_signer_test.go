@@ -195,6 +195,20 @@ func TestTransitSigner_RequiresSpecLevelRole(t *testing.T) {
 	assert.Contains(t, err.Error(), "broader capability")
 }
 
+// TestTransitSigner_PS256 mints a capability for PSS signing, the algorithm Entra ID
+// asks of a certificate's client assertion. Any RSA key signs it.
+func TestTransitSigner_PS256(t *testing.T) {
+	_, url := newTransitSignerServer(t, map[string]signerKey{
+		"client-assertion": {keyType: "rsa-2048", versions: 1},
+	})
+	driver := federationDriver(t, url)
+
+	rawData, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(),
+		transitSignerSpec(credential.NewConfig(map[string]string{"signing_alg": "PS256"})), verifiedInputs())
+	require.NoError(t, err)
+	assert.Equal(t, "PS256", rawData["signing_alg"])
+}
+
 func TestTransitSigner_PinnedVersionAndExplicitKid(t *testing.T) {
 	_, url := newTransitSignerServer(t, map[string]signerKey{
 		"client-assertion": {keyType: "rsa-2048", versions: 4},
