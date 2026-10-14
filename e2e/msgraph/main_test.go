@@ -67,6 +67,7 @@ const (
 	entraOK int32 = iota
 	entraClaims
 	entraConsent
+	entraCertRefused // the client assertion's certificate is not registered on the app
 )
 
 // claimsChallenge is the claims request the fake Entra demands in entraClaims mode.
@@ -147,6 +148,9 @@ func startEntra() *httptest.Server {
 		case entraConsent:
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, `{"error":"invalid_grant","suberror":"consent_required","error_codes":[65001]}`)
+		case entraCertRefused:
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"invalid_client","error_description":"AADSTS700027: The certificate with identifier used to sign the client assertion is not registered on application.\r\nTrace ID: x","error_codes":[700027]}`)
 		default:
 			n := issued.Add(1)
 			fmt.Fprintf(w, `{"token_type":"Bearer","expires_in":3600,"access_token":"graph-token-%d","refresh_token":"RT-must-not-leak"}`, n)
@@ -334,7 +338,13 @@ func gatewayGET(t *testing.T, mount, apiPath, userToken string) (int, []byte, ht
 
 func gatewayCall(t *testing.T, method, mount, apiPath, userToken, body string) (int, []byte, http.Header) {
 	t.Helper()
-	u := fmt.Sprintf("%s/v1/%s/role/%s/gateway/%s", h.NodeURL(leaderPort), mount, agentRole, strings.TrimPrefix(apiPath, "/"))
+	return gatewayCallAs(t, agentRole, method, mount, apiPath, userToken, body)
+}
+
+// gatewayCallAs is gatewayCall under another agent role, and so another spec.
+func gatewayCallAs(t *testing.T, role, method, mount, apiPath, userToken, body string) (int, []byte, http.Header) {
+	t.Helper()
+	u := fmt.Sprintf("%s/v1/%s/role/%s/gateway/%s", h.NodeURL(leaderPort), mount, role, strings.TrimPrefix(apiPath, "/"))
 	if _, err := url.Parse(u); err != nil {
 		t.Fatalf("bad gateway URL %q: %v", u, err)
 	}
