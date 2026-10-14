@@ -60,6 +60,11 @@ type transitCoords struct {
 	mount     string
 }
 
+// storeID names the transit engine the coordinates point at, without the token.
+func (c transitCoords) storeID() string {
+	return c.address + "\x00" + c.namespace + "\x00" + c.mount
+}
+
 type transitCodec struct{}
 
 func (transitCodec) reserved() []string {
@@ -100,7 +105,7 @@ func (transitCodec) classify(err error) error {
 	if !errors.As(err, &respErr) {
 		// Unreachable, timed out, or failed before any answer. The capability is
 		// probably fine; replacing it would not help and would evict something usable.
-		return fmt.Errorf("failed to sign with the capability: %w", err)
+		return fmt.Errorf("using the capability: %w", err)
 	}
 	signErr := &SignError{Status: respErr.StatusCode, Err: err}
 	switch respErr.StatusCode {
@@ -115,7 +120,7 @@ func (transitCodec) classify(err error) error {
 	}
 	// The store itself is unwell. Its answer stays readable, but a new capability
 	// would be refused the same way.
-	return fmt.Errorf("failed to sign with the capability: %w", signErr)
+	return fmt.Errorf("the capability's store failed: %w", signErr)
 }
 
 func (transitCodec) newPool(opts CapabilityOptions, log *logger.GatedLogger) capabilityPool {

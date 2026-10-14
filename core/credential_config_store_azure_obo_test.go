@@ -165,6 +165,104 @@ func TestCredentialConfigStore_ValidateSpec_AzureOnBehalfOf_Certificate(t *testi
 	assert.Contains(t, err.Error(), "'client_id' must match")
 }
 
+// A certificate source whose key is held in a KMS chains a signing capability: it
+// serves on_behalf_of (an exchange spec on a chained source, which the generic chained
+// rule would refuse) and secret_read, never a bearer_token spec, and takes the
+// reference on the source only.
+func TestCredentialConfigStore_ValidateSpec_AzureKMSCertificate(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	createEntraSigner(t, ctx, store)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "azure-kms", Type: credential.SourceTypeAzure,
+		Config: credential.NewConfig(map[string]string{
+			"auth_method":               "certificate",
+			"tenant_id":                 oboTestTenant,
+			"client_id":                 oboTestClient,
+			credential.ConfigSecretSpec: "entra-signer",
+		}),
+	}))
+	create := func(name, typ string, cfg credential.Config) error {
+		return store.CreateSpec(ctx, &credential.CredSpec{Name: name, Type: typ, Source: "azure-kms", Config: cfg})
+	}
+
+	require.NoError(t, create("obo-kms", credential.TypeAzureBearerToken,
+		oboSpecConfig(map[string]string{credential.ConfigActorTokenSource: ""})))
+
+	err := create("obo-kms-actor", credential.TypeAzureBearerToken, oboSpecConfig(nil))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remove actor_token_source")
+
+	err = create("bearer-kms", credential.TypeAzureBearerToken, credential.NewConfig(map[string]string{
+		"mint_method": "bearer_token", "client_id": oboTestClient, "client_secret": "s",
+	}))
+	require.Error(t, err)
+	assertBadRequest(t, err)
+	assert.Contains(t, err.Error(), "serves mint_method=secret_read and on_behalf_of")
+
+	// A bearer_token spec asking for federation is refused here too, at write time.
+	err = create("bearer-kms-fed", credential.TypeAzureBearerToken, credential.NewConfig(map[string]string{
+		"mint_method": "bearer_token", "tenant_id": oboTestTenant, "client_id": oboTestClient,
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "serves mint_method=secret_read and on_behalf_of")
+
+	err = create("obo-spec-ref", credential.TypeAzureBearerToken, oboSpecConfig(map[string]string{
+		credential.ConfigActorTokenSource: "", credential.ConfigSecretSpec: "entra-signer",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "set secret_spec on the source")
+}
+
+// createEntraSigner creates the signer a KMS certificate source chains: a
+// transit_signer spec minted as the caller.
+func createEntraSigner(t *testing.T, ctx context.Context, store *CredentialConfigStore) {
+	t.Helper()
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "openbao", Type: credential.SourceTypeVault,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "entra-signer", Type: credential.TypeKeyValue, Source: "openbao",
+		Config: credential.NewConfig(map[string]string{
+			"mint_method":                       "transit_signer",
+			"transit_key":                       "warden-entra",
+			"signing_alg":                       "PS256",
+			"jwt_role":                          "warden-entra-signer",
+			"payload.client_id":                 oboTestClient,
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "https://openbao.example/warden",
+		}),
+	}))
+}
+
+// Moving a certificate source's key into a KMS would strand a bound bearer_token
+// spec — every mint and every scheduled rotation would fail — so the edit is refused.
+func TestCredentialConfigStore_UpdateSource_StrandsAzureBearerOnKMS(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	createEntraSigner(t, ctx, store)
+	certSource := func(extra map[string]string) *credential.CredSource {
+		cfg := map[string]string{"auth_method": "certificate", "tenant_id": oboTestTenant, "client_id": oboTestClient}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return &credential.CredSource{Name: "azure-cert", Type: credential.SourceTypeAzure, Config: credential.NewConfig(cfg)}
+	}
+	require.NoError(t, store.CreateSource(ctx, certSource(nil)))
+	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
+		Name: "workload", Type: credential.TypeAzureBearerToken, Source: "azure-cert",
+		Config: credential.NewConfig(map[string]string{
+			"mint_method": "bearer_token", "client_id": oboTestClient, "client_secret": "s",
+		}),
+	}))
+
+	err := store.UpdateSource(ctx, certSource(map[string]string{credential.ConfigSecretSpec: "entra-signer"}),
+		UpdateSourceOptions{SkipConnectionTest: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `spec "workload"`)
+	assert.Contains(t, err.Error(), "serves mint_method=secret_read and on_behalf_of")
+}
+
 // Switching a source between keyless and static changes what authenticates a bound
 // on_behalf_of spec's app, so the edit is refused until the spec is updated.
 func TestCredentialConfigStore_UpdateSource_StrandsAzureOnBehalfOf(t *testing.T) {

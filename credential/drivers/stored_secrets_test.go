@@ -42,6 +42,7 @@ var storedSecretsCases = map[string][]storedSecretsCase{
 		{name: "federation", config: map[string]string{"auth_method": "oidc_federation"}, want: nil},
 		{name: "static", config: map[string]string{"client_secret": "s", "ca_data": "pem"}, want: []string{"client_secret"}},
 		{name: "certificate", config: map[string]string{"auth_method": "certificate", "certificate": "pem", "private_key": "pem"}, want: []string{"private_key"}},
+		{name: "certificate with a KMS key", config: map[string]string{"auth_method": "certificate", "certificate": "pem", "secret_spec": "signer"}, want: nil},
 	},
 	credential.SourceTypeGCP: {
 		{name: "federation", config: map[string]string{"auth_method": "oidc_federation"}, want: nil},

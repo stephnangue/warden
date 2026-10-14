@@ -207,19 +207,20 @@ func TestAzureCertificate_ValidateConfig(t *testing.T) {
 		over map[string]string
 		want string
 	}{
-		"no tenant":             {map[string]string{"tenant_id": ""}, "tenant_id and client_id are required"},
-		"no client":             {map[string]string{"client_id": ""}, "tenant_id and client_id are required"},
-		"no certificate":        {map[string]string{"certificate": ""}, "certificate and private_key are required"},
-		"no key":                {map[string]string{"private_key": ""}, "certificate and private_key are required"},
-		"key does not match":    {map[string]string{"private_key": other.keyPEM}, "does not match the certificate"},
-		"expired":               {map[string]string{"certificate": expired.certPEM}, "expired at"},
-		"leftover secret":       {map[string]string{"client_secret": "s"}, "must not be set for auth_method=certificate"},
-		"leftover secret id":    {map[string]string{"secret_id": "22222222-2222-2222-2222-222222222222"}, "must not be set for auth_method=certificate"},
-		"audience":              {map[string]string{"audience": "api://x"}, "only valid for auth_method=oidc_federation"},
-		"secret_spec":           {map[string]string{"secret_spec": "signer"}, "secret_spec is not supported on an azure source"},
-		"secret_cache_ttl":      {map[string]string{"secret_cache_ttl": "30m"}, "secret_cache_ttl is not supported on an azure source"},
-		"certificate on static": {map[string]string{"auth_method": azureAuthMethodStatic, "client_secret": "s", "secret_id": "22222222-2222-2222-2222-222222222222", "private_key": ""}, "certificate is only valid for auth_method=certificate"},
-		"key on federation":     {map[string]string{"auth_method": azureAuthMethodOIDCFederation, "certificate": ""}, "private_key is only valid for auth_method=certificate"},
+		"no tenant":              {map[string]string{"tenant_id": ""}, "tenant_id and client_id are required"},
+		"no client":              {map[string]string{"client_id": ""}, "tenant_id and client_id are required"},
+		"no certificate":         {map[string]string{"certificate": ""}, "certificate is required"},
+		"no key":                 {map[string]string{"private_key": ""}, "needs the certificate's private_key, or a secret_spec"},
+		"key and secret_spec":    {map[string]string{"secret_spec": "signer"}, "private_key and secret_spec are exclusive"},
+		"secret_field":           {map[string]string{"secret_field": "k"}, "secret_field is not supported on an azure source"},
+		"key does not match":     {map[string]string{"private_key": other.keyPEM}, "does not match the certificate"},
+		"expired":                {map[string]string{"certificate": expired.certPEM}, "expired at"},
+		"leftover secret":        {map[string]string{"client_secret": "s"}, "must not be set for auth_method=certificate"},
+		"leftover secret id":     {map[string]string{"secret_id": "22222222-2222-2222-2222-222222222222"}, "must not be set for auth_method=certificate"},
+		"audience":               {map[string]string{"audience": "api://x"}, "only valid for auth_method=oidc_federation"},
+		"secret_cache_ttl alone": {map[string]string{"secret_cache_ttl": "30m"}, "secret_cache_ttl applies only with secret_spec"},
+		"certificate on static":  {map[string]string{"auth_method": azureAuthMethodStatic, "client_secret": "s", "secret_id": "22222222-2222-2222-2222-222222222222", "private_key": ""}, "certificate is only valid for auth_method=certificate"},
+		"key on federation":      {map[string]string{"auth_method": azureAuthMethodOIDCFederation, "certificate": ""}, "private_key is only valid for auth_method=certificate"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := factory.ValidateConfig(base(tc.over))
@@ -228,14 +229,19 @@ func TestAzureCertificate_ValidateConfig(t *testing.T) {
 		})
 	}
 
-	// A static source may not chain its secret either.
+	// A KMS-held key: the certificate and a secret_spec naming the signer, no key.
+	require.NoError(t, factory.ValidateConfig(base(map[string]string{
+		"private_key": "", "secret_spec": "signer", "secret_cache_ttl": "30m",
+	})))
+
+	// Only a certificate source chains, and only its key.
 	err := factory.ValidateConfig(credential.NewConfig(map[string]string{
 		"tenant_id": testAzureTenant, "client_id": testAzureClient,
 		"client_secret": "s", "secret_id": "22222222-2222-2222-2222-222222222222",
 		"secret_spec": "signer",
 	}))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "secret_spec is not supported on an azure source")
+	assert.Contains(t, err.Error(), "secret_spec is only valid for auth_method=certificate")
 }
 
 func TestAzureCertificate_RotationRefused(t *testing.T) {

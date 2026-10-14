@@ -318,7 +318,8 @@ func (f *VaultDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 
 func (f *AzureDriverFactory) PlanKeyless(current credential.Config, inputs map[string]string) (*credential.KeylessSourcePlan, error) {
 	delta := map[string]string{"auth_method": azureAuthMethodOIDCFederation}
-	clearPresent(delta, current, "client_secret", "secret_id", "certificate", "private_key")
+	clearPresent(delta, current, "client_secret", "secret_id", "certificate", "private_key",
+		credential.ConfigSecretSpec, credential.ConfigSecretCacheTTL)
 	withInputs(delta, inputs)
 
 	plan := &credential.KeylessSourcePlan{Delta: delta}

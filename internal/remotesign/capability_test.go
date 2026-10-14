@@ -224,6 +224,73 @@ func TestCapabilitySigners_SignsWithTheCapabilityToken(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCapabilityUnsupported)
 }
 
+// TestCapabilitySigners_PublicKey reads the exact version a capability names, with the
+// capability's token, judging the key as an operator-provisioned one: a larger RSA key
+// is fine for an RSA alg, an exportable one never is.
+func TestCapabilitySigners_PublicKey(t *testing.T) {
+	key := genKey(t, "rsa-3072")
+	var exportable atomic.Bool
+	var tokenSeen atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/transit/keys/client-assertion" {
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		tokenSeen.Store(r.Header.Get("X-Vault-Token"))
+		other := genKey(t, "rsa-2048")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"type": "rsa-3072", "exportable": exportable.Load(), "latest_version": 3,
+			"keys": map[string]interface{}{
+				"1": map[string]interface{}{"public_key": pubPEM(t, other), "creation_time": time.Now().Format(time.RFC3339Nano)},
+				"2": map[string]interface{}{"public_key": pubPEM(t, key), "creation_time": time.Now().Format(time.RFC3339Nano)},
+				"3": map[string]interface{}{"public_key": pubPEM(t, other), "creation_time": time.Now().Format(time.RFC3339Nano)},
+			},
+		}})
+	}))
+	t.Cleanup(srv.Close)
+
+	signers := NewCapabilitySigners(nil, CapabilityOptions{})
+	defer signers.Close()
+	c, err := DecodeCapability(transitCapabilityPayload(srv.URL, map[string]string{"signing_alg": "PS256"}))
+	require.NoError(t, err)
+
+	pub, err := signers.PublicKey(context.Background(), c)
+	require.NoError(t, err)
+	assert.True(t, key.Public().(*rsa.PublicKey).Equal(pub), "the version the capability pins, not the latest")
+	assert.Equal(t, "hvs.capability", tokenSeen.Load())
+
+	exportable.Store(true)
+	_, err = signers.PublicKey(context.Background(), c)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exportable")
+
+	_, err = signers.PublicKey(context.Background(), &Capability{Backend: "cloudkms"})
+	assert.ErrorIs(t, err, ErrCapabilityUnsupported)
+}
+
+// TestCapability_KeyID names the key and the store it lives in, never the credential:
+// two capabilities for one key share it whatever their tokens, and the same key name
+// and version in another store does not.
+func TestCapability_KeyID(t *testing.T) {
+	decode := func(over map[string]string) *Capability {
+		c, err := DecodeCapability(transitCapabilityPayload("https://kms-a.example", over))
+		require.NoError(t, err)
+		return c
+	}
+	base := decode(nil)
+	assert.Equal(t, base.KeyID(), decode(map[string]string{"vault_token": "hvs.other"}).KeyID())
+	assert.NotContains(t, base.KeyID(), "hvs.")
+	for name, over := range map[string]map[string]string{
+		"another store":   {"vault_address": "https://kms-b.example"},
+		"another mount":   {"transit_mount": "transit-b"},
+		"another key":     {"transit_key": "other"},
+		"another version": {"transit_key_version": "3"},
+	} {
+		assert.NotEqual(t, base.KeyID(), decode(over).KeyID(), name)
+	}
+}
+
 // TestCapabilitySigners_Classify: a refusal the store answered exposes its status
 // through HTTPStatus alone — the only thing a caller outside this package can rely on
 // for a backend it knows nothing about — and says whether a new capability would help.
