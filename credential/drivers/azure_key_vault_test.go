@@ -312,7 +312,7 @@ func TestAzureDriver_SecretRead_StaticRefusesSpecIdentity(t *testing.T) {
 	for _, key := range []string{"client_id", "tenant_id"} {
 		_, _, _, _, err := d.MintCredential(context.Background(), kvSpec(map[string]string{key: testAzureClient}))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "a static source reads as itself")
+		assert.Contains(t, err.Error(), "a static or certificate source reads as itself")
 	}
 	forms, reads := stub.seen()
 	assert.Empty(t, forms)

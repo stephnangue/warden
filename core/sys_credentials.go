@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -37,7 +38,7 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 				},
 				"rotation_period": {
 					Type:        framework.TypeDurationSecond,
-					Description: "Rotation period in seconds for credential source rotation. Required by source types that rotate a long-lived secret (e.g. hvault). Rejected at create time for a source that holds no secret of its own: any auth_method=oidc_federation source, and any source whose secret comes from a referenced spec (secret_spec).",
+					Description: "Rotation period in seconds for credential source rotation. Required by source types that rotate a long-lived secret (e.g. hvault). Rejected at create time for a source that holds no secret of its own: any auth_method=oidc_federation source, and any source whose secret comes from a referenced spec (secret_spec). Also rejected for an azure auth_method=certificate source, whose certificate is rolled over by hand.",
 					Default:     0,
 				},
 			},
@@ -405,6 +406,13 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 		"config":          maskedConfig,
 		"rotation_period": int64(source.RotationPeriod.Seconds()),
 	}, b.core.sourceStoredSecrets(source.Type, source.Config))
+
+	// A source that authenticates with a certificate shows when it expires and the
+	// thumbprints it is registered under, so it can be rolled over in time and
+	// matched against the server's list.
+	if info := drivers.DescribeCertificate(source.Config.Get("certificate"), time.Now()); info != nil {
+		data["certificate_info"] = info
+	}
 
 	// Include rotation schedule info if available
 	if b.core.rotationManager != nil {

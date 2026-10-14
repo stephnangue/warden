@@ -3,6 +3,7 @@ package drivers
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -41,10 +43,21 @@ const removePasswordMaxAttempts = 3
 
 // Source authentication methods. static uses a stored client_secret; oidc_federation
 // is keyless — a caller-scoped Warden assertion is presented as a client_assertion
-// (Azure AD Workload Identity Federation), so no secret is stored in Warden.
+// (Azure AD Workload Identity Federation), so no secret is stored in Warden;
+// certificate presents a client assertion signed with the key of a certificate
+// registered on the app (Entra's certificate credential), so no client secret exists.
 const (
 	azureAuthMethodStatic         = "static"
 	azureAuthMethodOIDCFederation = "oidc_federation"
+	azureAuthMethodCertificate    = "certificate"
+)
+
+// Certificate expiry warnings: logged once a certificate is within these of its
+// notAfter, at most once per azureCertWarnInterval per driver.
+const (
+	azureCertWarnSoon     = 30 * 24 * time.Hour
+	azureCertWarnUrgent   = 7 * 24 * time.Hour
+	azureCertWarnInterval = 24 * time.Hour
 )
 
 // defaultAzureLoginHost is the public-cloud Entra ID authority host. The driver's
@@ -275,6 +288,24 @@ type AzureDriver struct {
 	// Like loginHost it is fixed when the driver is built — a config change rebuilds
 	// the driver — so it is read without a lock.
 	keyVaultEndpoint string
+
+	// cert is the source's certificate credential, set when auth_method=certificate
+	// and nil otherwise. Like loginHost it is fixed when the driver is built and
+	// never written after: a certificate source does not rotate, and an operator
+	// rolling it over updates the config, which rebuilds the driver. So it is read
+	// without a lock, and is always the certificate of the config being served.
+	cert *azureCertAuth
+
+	// certWarnNext is when the next certificate-expiry check may log, in unix nanos,
+	// so the warning costs one atomic load on the paths that check it.
+	certWarnNext atomic.Int64
+}
+
+// azureCertAuth is a certificate source's credential: the certificate, parsed once,
+// and the private key that signs its client assertions.
+type azureCertAuth struct {
+	cert *clientCertificate
+	key  *rsa.PrivateKey
 }
 
 // graphPermsEntry is one cached Graph-permission probe result.
@@ -360,19 +391,30 @@ func (f *AzureDriverFactory) Type() string {
 func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 	if err := credential.ValidateSchema(config,
 		credential.StringField("auth_method").
-			OneOf(azureAuthMethodStatic, azureAuthMethodOIDCFederation).
-			Describe("How the source authenticates: static (client secret) or oidc_federation (Workload Identity Federation, keyless)").
+			OneOf(azureAuthMethodStatic, azureAuthMethodOIDCFederation, azureAuthMethodCertificate).
+			Describe("How the source authenticates: static (client secret), oidc_federation (Workload Identity Federation, keyless) or certificate (a certificate registered on the app)").
 			Example("static"),
 
 		credential.StringField("tenant_id").
 			Custom(validateTenantID).
-			Describe("Azure AD tenant ID (UUID; required for auth_method=static)").
+			Describe("Azure AD tenant ID (UUID; required for auth_method=static and certificate)").
 			Example("00000000-0000-0000-0000-000000000000"),
 
 		credential.StringField("client_id").
 			Custom(func(v string) error { return credential.ValidateUUID("client_id", v) }).
-			Describe("Azure AD application (client) ID (UUID; required for auth_method=static)").
+			Describe("Azure AD application (client) ID (UUID; required for auth_method=static and certificate)").
 			Example("11111111-1111-1111-1111-111111111111"),
+
+		// certificate and private_key are parsed by parseAzureCertAuth below, once and
+		// only for auth_method=certificate: a leftover under another method is refused
+		// as such rather than for whatever is wrong with it.
+		credential.StringField("certificate").
+			Describe("PEM certificate registered on the app, a single leaf with an RSA key of at least 2048 bits (required for auth_method=certificate; public, shown on read)").
+			Example("-----BEGIN CERTIFICATE----- ..."),
+
+		credential.StringField("private_key").
+			Describe("PEM RSA private key of the certificate (PKCS#1 or PKCS#8; required for auth_method=certificate; masked on read)").
+			Example("-----BEGIN PRIVATE KEY----- ..."),
 
 		credential.StringField("client_secret").
 			Describe("Azure AD application client secret (required for auth_method=static)").
@@ -413,8 +455,26 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 		return err
 	}
 
-	// Cross-field rules per auth_method.
-	switch credential.GetString(config, "auth_method", azureAuthMethodStatic) {
+	// An azure source authenticates with what it holds; it does not fetch its
+	// credential through another spec.
+	for _, key := range []string{credential.ConfigSecretSpec, credential.ConfigSecretCacheTTL} {
+		if credential.GetString(config, key, "") != "" {
+			return fmt.Errorf("%s is not supported on an azure source", key)
+		}
+	}
+
+	// Cross-field rules per auth_method. Each method refuses the others' credentials,
+	// so a misconfiguration cannot silently mix modes — and the driver never has to
+	// choose between two credentials it holds.
+	authMethod := credential.GetString(config, "auth_method", azureAuthMethodStatic)
+	if authMethod != azureAuthMethodCertificate {
+		for _, key := range []string{"certificate", "private_key"} {
+			if credential.GetString(config, key, "") != "" {
+				return fmt.Errorf("%s is only valid for auth_method=%s", key, azureAuthMethodCertificate)
+			}
+		}
+	}
+	switch authMethod {
 	case azureAuthMethodStatic:
 		if credential.GetString(config, "tenant_id", "") == "" ||
 			credential.GetString(config, "client_id", "") == "" ||
@@ -433,8 +493,46 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 		if credential.GetString(config, "client_secret", "") != "" || credential.GetString(config, "secret_id", "") != "" {
 			return fmt.Errorf("client_secret/secret_id must not be set for auth_method=oidc_federation")
 		}
+	case azureAuthMethodCertificate:
+		if credential.GetString(config, "tenant_id", "") == "" || credential.GetString(config, "client_id", "") == "" {
+			return fmt.Errorf("tenant_id and client_id are required for auth_method=certificate")
+		}
+		if credential.GetString(config, "client_secret", "") != "" || credential.GetString(config, "secret_id", "") != "" {
+			return fmt.Errorf("client_secret/secret_id must not be set for auth_method=certificate; the certificate is the app's credential")
+		}
+		if credential.GetString(config, "audience", "") != "" {
+			return fmt.Errorf("audience is only valid for auth_method=oidc_federation")
+		}
+		if _, err := parseAzureCertAuth(config, time.Now()); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// parseAzureCertAuth reads a certificate source's credential: the certificate, valid
+// now, and the private key that matches it. A key that does not match would have
+// every assertion refused as signed by an unregistered key, so it is refused here,
+// naming the certificate.
+func parseAzureCertAuth(config credential.Config, now time.Time) (*azureCertAuth, error) {
+	certPEM := credential.GetString(config, "certificate", "")
+	keyPEM := credential.GetString(config, "private_key", "")
+	if certPEM == "" || keyPEM == "" {
+		return nil, fmt.Errorf("certificate and private_key are required for auth_method=%s", azureAuthMethodCertificate)
+	}
+	// parseClientCertificate's messages already name the certificate.
+	cert, err := parseClientCertificate(certPEM, now)
+	if err != nil {
+		return nil, err
+	}
+	key, err := parseRSAPrivateKey(keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("private_key: %w", err)
+	}
+	if err := cert.matchesPublicKey(&key.PublicKey); err != nil {
+		return nil, fmt.Errorf("private_key: %w", err)
+	}
+	return &azureCertAuth{cert: cert, key: key}, nil
 }
 
 // validateNonNegativeDuration rejects a negative duration. The type check has
@@ -455,6 +553,14 @@ func validateNonNegativeDuration(v string) error {
 // which neither override redirects: it would rotate a secret in one place while the
 // source authenticates somewhere else.
 func (f *AzureDriverFactory) ValidateRotationConfig(config credential.Config) error {
+	// Warden does not roll a certificate. Its key never leaves Warden — only
+	// five-minute assertions travel — so it is rolled over by hand, without downtime.
+	if credential.GetString(config, "auth_method", azureAuthMethodStatic) == azureAuthMethodCertificate {
+		return fmt.Errorf("rotation_period cannot be set on an auth_method=certificate source " +
+			"(a static source converted to certificate keeps its period unless the same update sets rotation_period=0): " +
+			"roll the certificate over by registering the new one on the app next to the old, " +
+			"updating the source's certificate and private_key, then removing the old one from the app")
+	}
 	if credential.GetString(config, "login_endpoint", "") == "" &&
 		credential.GetString(config, "key_vault_endpoint", "") == "" {
 		return nil
@@ -466,12 +572,14 @@ func (f *AzureDriverFactory) ValidateRotationConfig(config credential.Config) er
 
 // SensitiveConfigFields returns the list of config keys that should be masked in output
 func (f *AzureDriverFactory) SensitiveConfigFields() []string {
-	return []string{"client_secret", "ca_data"}
+	// certificate is public, and left readable so its thumbprint can be compared with
+	// the one registered on the app.
+	return []string{"client_secret", "private_key", "ca_data"}
 }
 
 // StoredSecrets reports the secret config keys this source holds.
 func (f *AzureDriverFactory) StoredSecrets(config credential.Config) []string {
-	return config.Present("client_secret")
+	return config.Present("client_secret", "private_key")
 }
 
 // InferCredentialType infers the credential type from the spec's mint_method.
@@ -521,10 +629,22 @@ func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedL
 	}
 	driver.httpClient = httpClient
 
-	// A keyless federation source holds no client_secret to verify — the caller-scoped
-	// assertion arrives only at mint time. Skip the eager source-token probe.
-	if credential.GetString(config, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+	switch credential.GetString(config, "auth_method", azureAuthMethodStatic) {
+	case azureAuthMethodOIDCFederation:
+		// A keyless federation source holds no client_secret to verify — the
+		// caller-scoped assertion arrives only at mint time. Skip the eager
+		// source-token probe.
 		return driver, nil
+	case azureAuthMethodCertificate:
+		// Parsed once, here, so no request parses PEM; an expired certificate fails
+		// the build, and with it every mint, naming the certificate.
+		cert, err := parseAzureCertAuth(config, driver.clock())
+		if err != nil {
+			driver.httpClient.CloseIdleConnections()
+			return nil, fmt.Errorf("azure: %w", err)
+		}
+		driver.cert = cert
+		driver.warnCertExpiry(driver.clock())
 	}
 
 	// Validate source credentials by acquiring a token
@@ -579,7 +699,7 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 // than being sent literally.
 func (d *AzureDriver) mintViaSecretRead(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if credential.GetString(spec.Config, "client_id", "") != "" || credential.GetString(spec.Config, "tenant_id", "") != "" {
-		return nil, nil, 0, "", fmt.Errorf("azure: 'client_id'/'tenant_id' apply to mint_method=secret_read only over auth_method=oidc_federation; a static source reads as itself")
+		return nil, nil, 0, "", fmt.Errorf("azure: 'client_id'/'tenant_id' apply to mint_method=secret_read only over auth_method=oidc_federation; a static or certificate source reads as itself")
 	}
 
 	token, err := d.getSourceToken(ctx, keyVaultResource)
@@ -780,6 +900,11 @@ func (d *AzureDriver) Cleanup(ctx context.Context) error {
 
 // SupportsRotation returns true if this driver can rotate its source credentials
 func (d *AzureDriver) SupportsRotation() bool {
+	// A certificate is rolled over by hand (ValidateRotationConfig refuses a period),
+	// and PrepareRotation would add a client secret to an app that has none.
+	if d.cert != nil {
+		return false
+	}
 	return d.hasGraphPermissions()
 }
 
@@ -1085,11 +1210,7 @@ func (d *AzureDriver) postTokenRequest(ctx context.Context, tenantID string, dat
 		return "", 0, err
 	}
 
-	host := d.loginHost
-	if host == "" {
-		host = defaultAzureLoginHost
-	}
-	tokenURL := fmt.Sprintf("%s/%s/oauth2/v2.0/token", host, tenantID)
+	tokenURL := d.entraTokenURL(tenantID)
 
 	respBody, err := d.doAzureRequest(ctx, azureAPIRequest{
 		method:      "POST",
@@ -1149,7 +1270,17 @@ func (d *AzureDriver) getSourceToken(ctx context.Context, resourceURI string) (s
 		gen := d.tokenCache.GetGeneration()
 		ch := d.tokenGroup.DoChan(fmt.Sprintf("%d|%s", gen, resourceURI), func() (interface{}, error) {
 			tenantID, clientID, clientSecret := d.sourceCreds()
-			token, expiresIn, err := d.acquireToken(context.WithoutCancel(ctx), tenantID, clientID, clientSecret, resourceURI)
+			fetchCtx := context.WithoutCancel(ctx)
+			var token string
+			var expiresIn int
+			var err error
+			// d.cert is set only when the driver was built for auth_method=certificate,
+			// and validation refuses a source holding both a certificate and a secret.
+			if d.cert != nil {
+				token, expiresIn, err = d.acquireTokenWithCertificate(fetchCtx, tenantID, clientID, resourceURI)
+			} else {
+				token, expiresIn, err = d.acquireToken(fetchCtx, tenantID, clientID, clientSecret, resourceURI)
+			}
 			if err != nil {
 				return nil, err
 			}

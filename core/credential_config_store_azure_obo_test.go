@@ -131,6 +131,40 @@ func TestCredentialConfigStore_ValidateSpec_AzureOnBehalfOf(t *testing.T) {
 	assert.Contains(t, err.Error(), "token_exchange")
 }
 
+// A certificate source authenticates on_behalf_of as a static one does — with its own
+// credential, for its own app — so it takes the static shape and refuses the rest.
+func TestCredentialConfigStore_ValidateSpec_AzureOnBehalfOf_Certificate(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	// No certificate or private_key: this store has no driver registry, so the
+	// source's own config is not validated, and the spec rules read auth_method only.
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "azure-cert", Type: credential.SourceTypeAzure,
+		Config: credential.NewConfig(map[string]string{
+			"auth_method": "certificate",
+			"tenant_id":   oboTestTenant,
+			"client_id":   oboTestClient,
+		}),
+	}))
+	create := func(name string, cfg credential.Config) error {
+		return store.CreateSpec(ctx, &credential.CredSpec{
+			Name: name, Type: credential.TypeAzureBearerToken, Source: "azure-cert", Config: cfg,
+		})
+	}
+
+	require.NoError(t, create("obo-cert", oboSpecConfig(map[string]string{credential.ConfigActorTokenSource: ""})))
+
+	err := create("obo-cert-actor", oboSpecConfig(nil))
+	require.Error(t, err)
+	assertBadRequest(t, err)
+	assert.Contains(t, err.Error(), "remove actor_token_source")
+
+	err = create("obo-cert-other-app", oboSpecConfig(map[string]string{
+		credential.ConfigActorTokenSource: "", "client_id": "33333333-3333-3333-3333-333333333333",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "'client_id' must match")
+}
+
 // Switching a source between keyless and static changes what authenticates a bound
 // on_behalf_of spec's app, so the edit is refused until the spec is updated.
 func TestCredentialConfigStore_UpdateSource_StrandsAzureOnBehalfOf(t *testing.T) {

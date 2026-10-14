@@ -225,9 +225,25 @@ func TestKeylessEnforcement_SpecCreateOnKeyedSource(t *testing.T) {
 		"config": map[string]interface{}{"mint_method": "vault_token", "token_role": "r"},
 	})
 	requireKeylessRefusal(t, resp)
-	assert.Contains(t, resp.Err.Error(), `source "legacy": secret_id`)
+	assert.Contains(t, resp.Err.Error(), `would use the secret its source "legacy" stores (secret_id)`)
 	_, err := backend.core.credConfigStore.GetSpec(ctx, "tok")
 	assert.ErrorIs(t, err, ErrSpecNotFound)
+
+	// Under warn the spec is created, and the warning points at the source — where
+	// the secret has to move — not at spec-level fixes that cannot remove it.
+	backend.core.keylessEnforcement = KeylessEnforcementWarn
+	resp = specWrite(t, backend, ctx, logical.CreateOperation, map[string]interface{}{
+		"name":   "tok",
+		"type":   "vault_token",
+		"source": "legacy",
+		"config": map[string]interface{}{"mint_method": "vault_token", "token_role": "r"},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%+v", resp.Data)
+	w := keylessWarnings(resp)
+	require.Len(t, w, 1)
+	assert.Contains(t, w[0], `credential spec "tok" would use the secret its source "legacy" stores (secret_id)`)
+	assert.Contains(t, w[0], "Make the source keyless")
+	assert.NotContains(t, w[0], "subject_token_source")
 }
 
 func TestKeylessEnforcement_SpecUpdate(t *testing.T) {
