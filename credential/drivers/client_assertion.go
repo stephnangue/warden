@@ -218,6 +218,12 @@ func signClientAssertionLocal(key *rsa.PrivateKey, kid string, claims map[string
 // KMS is unreachable" carries no sentinel at all: a refetch cannot mend a network, and
 // evicting a perfectly good capability would turn a blip into a stampede.
 func signClientAssertionWithCapability(ctx context.Context, signers *remotesign.CapabilitySigners, c *remotesign.Capability, claims map[string]interface{}) (string, error) {
+	return signWithCapability(ctx, signers, c, kidHeader(c.Kid), claims)
+}
+
+// signWithCapability signs claims under header with the key a capability names, with
+// the error mapping signClientAssertionWithCapability documents.
+func signWithCapability(ctx context.Context, signers *remotesign.CapabilitySigners, c *remotesign.Capability, header map[string]string, claims map[string]interface{}) (string, error) {
 	// Cheaper than discovering the same thing from a refused signature, and it keeps a
 	// spent capability distinguishable from a broken one.
 	if !c.ExpiresAt.IsZero() && time.Now().Add(kmsCapabilitySkew).After(c.ExpiresAt) {
@@ -225,11 +231,61 @@ func signClientAssertionWithCapability(ctx context.Context, signers *remotesign.
 			c.ExpiresAt.Format(time.RFC3339), credential.ErrChainedSecretRejected)
 	}
 
-	assertion, err := signers.SignJWS(ctx, c, kidHeader(c.Kid), claims)
+	assertion, err := signers.SignJWS(ctx, c, header, claims)
 	if err != nil {
 		return "", capabilityError(err)
 	}
 	return assertion, nil
+}
+
+// Client assertions signed with an X.509 certificate's key, the form Entra ID calls a
+// certificate credential: the header names the certificate by its SHA-256 thumbprint
+// (x5t#S256) and nothing else, the algorithm is PS256, and nbf is set. The pieces
+// live here, beside the other client-assertion code, so any driver authenticating to
+// a server that identifies its key by certificate builds the same bytes.
+
+// certAssertionAlg is the JWS alg of a certificate client assertion. Entra ID asks for
+// PS256, and only that is sent.
+const certAssertionAlg = "PS256"
+
+// certAssertionHeader is the JWS header of a certificate client assertion beyond alg
+// and typ. No kid: Entra documents x5t#S256 alone as the way it finds the key.
+func certAssertionHeader(x5tS256 string) map[string]string {
+	return map[string]string{"x5t#S256": x5tS256}
+}
+
+// certClientAssertionClaims is clientAssertionClaims with nbf, which Entra lists among
+// a certificate assertion's claims. The shared function is left as it is so drivers
+// already sending assertions keep putting the same bytes on the wire.
+func certClientAssertionClaims(clientID, aud string) (map[string]interface{}, error) {
+	claims, err := clientAssertionClaims(clientID, aud)
+	if err != nil {
+		return nil, err
+	}
+	claims["nbf"] = claims["iat"]
+	return claims, nil
+}
+
+// signCertClientAssertionLocal signs a certificate client assertion with the
+// certificate's private key held in this process.
+func signCertClientAssertionLocal(key *rsa.PrivateKey, x5tS256 string, claims map[string]interface{}) (string, error) {
+	assertion, err := signRSAJWT(key, certAssertionAlg, certAssertionHeader(x5tS256), claims)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign client assertion: %w", err)
+	}
+	return assertion, nil
+}
+
+// signCertClientAssertionWithCapability signs a certificate client assertion with a
+// key held in a KMS. The capability decides the algorithm, so it must be PS256: a
+// capability for any other alg is a misconfigured signer spec, refused before the
+// store is asked to sign.
+func signCertClientAssertionWithCapability(ctx context.Context, signers *remotesign.CapabilitySigners, c *remotesign.Capability, x5tS256 string, claims map[string]interface{}) (string, error) {
+	if c.Ref.Alg != certAssertionAlg {
+		return "", fmt.Errorf("the signing capability is for %s, but a certificate client assertion is signed %s (set signing_alg=%s on the signer spec)",
+			c.Ref.Alg, certAssertionAlg, certAssertionAlg)
+	}
+	return signWithCapability(ctx, signers, c, certAssertionHeader(x5tS256), claims)
 }
 
 // kidHeader is the JWS header carrying kid, or an empty one when there is no kid.

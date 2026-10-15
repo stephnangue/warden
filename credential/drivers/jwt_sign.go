@@ -20,10 +20,16 @@ import (
 // crypto.Hash, is PKCS#1 v1.5 — the same bytes this produced when it did the work
 // inline. There is no context to bind, because signing with a local key makes no call.
 func signRS256JWT(key *rsa.PrivateKey, header map[string]string, claims map[string]interface{}) (string, error) {
+	return signRSAJWT(key, "RS256", header, claims)
+}
+
+// signRSAJWT signs as signRS256JWT does, with any RSA JWS alg: RS* for PKCS#1 v1.5,
+// PS* for RSASSA-PSS (which Entra ID asks of a certificate's client assertion).
+func signRSAJWT(key *rsa.PrivateKey, alg string, header map[string]string, claims map[string]interface{}) (string, error) {
 	if key == nil {
 		return "", fmt.Errorf("private key not configured")
 	}
-	return remotesign.SignCompactJWS(context.Background(), key, "RS256", header, claims)
+	return remotesign.SignCompactJWS(context.Background(), key, alg, header, claims)
 }
 
 // newJTI returns a random token identifier for a client assertion.

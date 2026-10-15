@@ -142,7 +142,17 @@ func (f *fakeTransit) handler() http.Handler {
 				if body["hash_algorithm"] == "sha2-384" {
 					h = crypto.SHA384
 				}
-				sig, err = rsa.SignPKCS1v15(rand.Reader, key, h, digest)
+				// Like transit: PSS is the default, and its salt defaults to "auto" —
+				// the longest the key allows — unless salt_length says otherwise.
+				if sa, _ := body["signature_algorithm"].(string); sa == "pkcs1v15" {
+					sig, err = rsa.SignPKCS1v15(rand.Reader, key, h, digest)
+				} else {
+					salt := rsa.PSSSaltLengthAuto
+					if body["salt_length"] == "hash" {
+						salt = rsa.PSSSaltLengthEqualsHash
+					}
+					sig, err = rsa.SignPSS(rand.Reader, key, h, digest, &rsa.PSSOptions{SaltLength: salt, Hash: h})
+				}
 			case *ecdsa.PrivateKey:
 				sig, err = ecdsa.SignASN1(rand.Reader, key, digest)
 			}
@@ -318,7 +328,7 @@ func TestSigner_NilBackend_And_Context(t *testing.T) {
 }
 
 func TestTransit_Sign_AllAlgs(t *testing.T) {
-	for _, alg := range []string{"RS256", "RS384", "ES256", "ES384"} {
+	for _, alg := range []string{"RS256", "RS384", "PS256", "ES256", "ES384"} {
 		t.Run(alg, func(t *testing.T) {
 			f := newFakeTransit(t)
 			b := newTestBackend(t, f)
@@ -327,17 +337,25 @@ func TestTransit_Sign_AllAlgs(t *testing.T) {
 			info, err := b.EnsureKey(ctx, alg)
 			require.NoError(t, err)
 
-			h := algParamsByAlg[alg].hash
+			p := algParamsByAlg[alg]
+			h := p.hash
 			hh := h.New()
 			hh.Write([]byte("payload for " + alg))
 			digest := hh.Sum(nil)
 
-			sig, err := b.Sign(ctx, info.Ref, digest, h)
+			sig, err := b.Sign(ctx, info.Ref, digest, signerOpts(p))
 			require.NoError(t, err)
 			assert.Equal(t, true, f.lastSign["prehashed"], "prehashed must be set for all algs")
 
 			switch pub := info.Public.(type) {
 			case *rsa.PublicKey:
+				if p.pss {
+					// Strict: a fixed salt length, never Auto, so a maximum-salt
+					// signature cannot pass here and fail at a real verifier.
+					require.NoError(t, rsa.VerifyPSS(pub, h, digest, sig,
+						&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: h}))
+					break
+				}
 				require.NoError(t, rsa.VerifyPKCS1v15(pub, h, digest, sig))
 			case *ecdsa.PublicKey:
 				var parsed struct{ R, S *big.Int }
@@ -359,10 +377,13 @@ func TestTransit_Sign_Rejects(t *testing.T) {
 	require.NoError(t, err)
 	d := sha256.Sum256([]byte("x"))
 
-	// RSA-PSS is not supported.
+	// Padding must match the alg: PSS options for an RS* key are refused before any
+	// round trip, rather than signed in a padding the alg's verifiers reject.
+	f.lastSign = nil
 	_, err = b.Sign(ctx, info.Ref, d[:], &rsa.PSSOptions{Hash: crypto.SHA256})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "PSS")
+	assert.Nil(t, f.lastSign)
 
 	// Wrong hash for the alg (SHA-384 digest for an RS256 key) must fail fast,
 	// before any KMS round-trip, so it cannot yield an unverifiable signature.
@@ -534,6 +555,65 @@ func TestTransit_Sign_SendsVersionAsNumber(t *testing.T) {
 	assert.Equal(t, float64(1), f.lastSign["key_version"])
 }
 
+// TestTransit_Sign_PS256: transit is asked for PSS with a hash-length salt — never its
+// "auto" default, the longest salt the key allows — and options that disagree with
+// the alg are refused before any round trip.
+func TestTransit_Sign_PS256(t *testing.T) {
+	f := newFakeTransit(t)
+	b := newTestBackend(t, f)
+	ctx := context.Background()
+	info, err := b.EnsureKey(ctx, "PS256")
+	require.NoError(t, err)
+	pub := info.Public.(*rsa.PublicKey)
+	d := sha256.Sum256([]byte("ps256"))
+
+	sig, err := b.Sign(ctx, info.Ref, d[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256})
+	require.NoError(t, err)
+	assert.Equal(t, "pss", f.lastSign["signature_algorithm"])
+	assert.Equal(t, "hash", f.lastSign["salt_length"])
+	require.NoError(t, rsa.VerifyPSS(pub, crypto.SHA256, d[:], sig,
+		&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256}))
+
+	// An explicit length equal to the hash is the same request.
+	_, err = b.Sign(ctx, info.Ref, d[:], &rsa.PSSOptions{SaltLength: crypto.SHA256.Size(), Hash: crypto.SHA256})
+	require.NoError(t, err)
+
+	f.lastSign = nil
+	for name, opts := range map[string]crypto.SignerOpts{
+		"plain hash": crypto.SHA256,
+		"auto salt":  &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto, Hash: crypto.SHA256},
+		"short salt": &rsa.PSSOptions{SaltLength: 16, Hash: crypto.SHA256},
+	} {
+		_, err := b.Sign(ctx, info.Ref, d[:], opts)
+		require.Error(t, err, name)
+	}
+	assert.Nil(t, f.lastSign, "refused options must not reach transit")
+}
+
+// TestSignCompactJWS_PS256: a PS256 JWS from a local key verifies under the strict JWS
+// salt length, and extra header parameters such as x5t#S256 are carried as given.
+func TestSignCompactJWS_PS256(t *testing.T) {
+	key := genKey(t, "rsa-2048").(*rsa.PrivateKey)
+	jws, err := SignCompactJWS(context.Background(), key, "PS256",
+		map[string]string{"x5t#S256": "thumb"}, map[string]interface{}{"sub": "s"})
+	require.NoError(t, err)
+
+	parts := strings.Split(jws, ".")
+	require.Len(t, parts, 3)
+	hdrJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var hdr map[string]string
+	require.NoError(t, json.Unmarshal(hdrJSON, &hdr))
+	assert.Equal(t, "PS256", hdr["alg"])
+	assert.Equal(t, "thumb", hdr["x5t#S256"])
+
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	require.NoError(t, err)
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	require.NoError(t, rsa.VerifyPSS(&key.PublicKey, crypto.SHA256, digest[:], sig,
+		&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256}))
+}
+
 // TestTransitAlgs_MatchNeutralTable: every alg the neutral table offers must be one
 // transit can create and sign, and transit must not offer one the rest of the package
 // cannot hash or encode.
@@ -543,6 +623,14 @@ func TestTransitAlgs_MatchNeutralTable(t *testing.T) {
 		ta, ok := transitAlgs[alg]
 		require.True(t, ok, "transit has no entry for %s", alg)
 		assert.Equal(t, p.isRSA, strings.HasPrefix(ta.keyType, "rsa-"), alg)
+		switch {
+		case p.pss:
+			assert.Equal(t, "pss", ta.sigAlg, alg)
+		case p.isRSA:
+			assert.Equal(t, "pkcs1v15", ta.sigAlg, alg)
+		default:
+			assert.Empty(t, ta.sigAlg, alg)
+		}
 	}
 }
 

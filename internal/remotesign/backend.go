@@ -56,7 +56,8 @@ type SigningBackend interface {
 	// PublicKey fetches one specific version's public key.
 	PublicKey(ctx context.Context, ref KeyRef) (crypto.PublicKey, error)
 	// Sign signs an already-hashed digest with the exact version in ref, honoring
-	// the crypto.Signer contract: RSA -> PKCS#1 v1.5 raw bytes; ECDSA -> ASN.1 DER.
+	// the crypto.Signer contract: RSA -> PKCS#1 v1.5 raw bytes, or RSASSA-PSS when
+	// opts is *rsa.PSSOptions; ECDSA -> ASN.1 DER.
 	Sign(ctx context.Context, ref KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error)
 	// Close releases resources (e.g. stops token renewal).
 	Close()
@@ -84,12 +85,14 @@ type Backend interface {
 type algParams struct {
 	hash  crypto.Hash    // the digest the caller must have used
 	isRSA bool           //
+	pss   bool           // RSASSA-PSS rather than PKCS#1 v1.5; RSA only
 	curve elliptic.Curve // nil for RSA; the curve whose width an ES* signature is padded to
 }
 
 var algParamsByAlg = map[string]algParams{
 	"RS256": {hash: crypto.SHA256, isRSA: true},
 	"RS384": {hash: crypto.SHA384, isRSA: true},
+	"PS256": {hash: crypto.SHA256, isRSA: true, pss: true},
 	"ES256": {hash: crypto.SHA256, isRSA: false, curve: elliptic.P256()},
 	"ES384": {hash: crypto.SHA384, isRSA: false, curve: elliptic.P384()},
 }

@@ -177,7 +177,7 @@ func TestDecodeCapability_Refusals(t *testing.T) {
 		{"missing alg", map[string]string{"signing_alg": ""}, "signing_alg", ErrCapabilityIncomplete},
 		{"zero version", map[string]string{"transit_key_version": "0"}, "unusable key version", ErrCapabilityIncomplete},
 		{"latest version", map[string]string{"transit_key_version": "latest"}, "unusable key version", ErrCapabilityIncomplete},
-		{"unknown alg", map[string]string{"signing_alg": "PS256"}, "PS256", ErrCapabilityIncomplete},
+		{"unknown alg", map[string]string{"signing_alg": "PS512"}, "PS512", ErrCapabilityIncomplete},
 		{"unknown backend", map[string]string{"kms_backend": "cloudkms"}, "cloudkms", ErrCapabilityUnsupported},
 	}
 	for _, tc := range cases {
