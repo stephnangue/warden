@@ -15,6 +15,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper/httputil"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -38,6 +39,10 @@ const (
 	oboMaxClaimsChallenge = 4 << 10
 	maxEntraErrorCodes    = 8
 )
+
+// errAzureOBONeedsUser refuses an on_behalf_of mint reached without the exchange path,
+// which alone carries the user's token.
+var errAzureOBONeedsUser = errors.New("azure: mint_method=on_behalf_of needs the user's Entra access token; set subject_token_source=user_identity")
 
 // AzureOnBehalfOf reports whether a spec mints on-behalf-of tokens. It is the one
 // shape in which an azure source may take subject_token_source=user_identity and
@@ -92,6 +97,21 @@ func AzureOnBehalfOfSpecError(specCfg, sourceCfg credential.Config) error {
 	return nil
 }
 
+// AzureKMSCertificateSpecError refuses a spec a certificate source whose key is held
+// in a KMS cannot serve. Such a source signs only with a capability each mint fetches,
+// and serves secret_read and on_behalf_of; a bearer_token spec authenticates with its
+// own client secret, which must rotate, and a chained source rotates nothing. It is
+// applied when the spec is written and again when the source changes, since a source
+// switched to a KMS key would strand the spec. Pure: reads the configs only.
+func AzureKMSCertificateSpecError(specType string, specCfg, sourceCfg credential.Config) error {
+	if !azureCertKeyInKMS(sourceCfg) || specType != credential.TypeAzureBearerToken || AzureOnBehalfOf(specType, specCfg) {
+		return nil
+	}
+	return fmt.Errorf("an azure source signing with a KMS-held certificate key (%s %q) serves mint_method=secret_read and on_behalf_of; "+
+		"a bearer_token spec needs its own rotating client secret, which a chained source cannot rotate: put it on a static or certificate source with a local key",
+		credential.ConfigSecretSpec, sourceCfg.Get(credential.ConfigSecretSpec))
+}
+
 // oboAuth is how the app authenticates an OBO request: exactly one of secret or
 // assertion is set. kind says which credential it is, so a refusal is explained in
 // terms of the credential that was refused.
@@ -117,6 +137,12 @@ const (
 // Nothing per user is kept here: the credential manager caches the result under a
 // key that carries the user token, and bounds it by the user token's lifetime.
 func (d *AzureDriver) mintOnBehalfOf(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return d.mintOnBehalfOfWith(ctx, spec, inputs, nil)
+}
+
+// mintOnBehalfOfWith is mintOnBehalfOf with kms, the signing capability a chained mint
+// fetched for a certificate source whose key is held in a KMS; nil otherwise.
+func (d *AzureDriver) mintOnBehalfOfWith(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, kms *remotesign.Capability) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("azure: mint_method=on_behalf_of exchanges the user's Entra access token (subject_token_source=user_identity), and the request carried none: %w", credential.ErrUserRequired)
 	}
@@ -124,7 +150,7 @@ func (d *AzureDriver) mintOnBehalfOf(ctx context.Context, spec *credential.CredS
 	// One snapshot: a rotation landing mid-mint must not pair a client id with a
 	// secret from another generation.
 	srcCfg := d.sourceConfig()
-	clientID, auth, err := d.oboClientAuth(ctx, srcCfg, spec, inputs)
+	clientID, auth, err := d.oboClientAuth(ctx, srcCfg, spec, inputs, kms)
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
@@ -183,8 +209,9 @@ func (d *AzureDriver) mintOnBehalfOf(ctx context.Context, spec *credential.CredS
 // It returns the client id along with the credential because the app is not
 // always the spec's: a later Entra Agent ID mode authenticates as an agent
 // identity with a blueprint token, which this resolver is the place to fetch.
-// Today it reads only the source snapshot it is given.
-func (d *AzureDriver) oboClientAuth(_ context.Context, srcCfg credential.Config, spec *credential.CredSpec, inputs *credential.ExchangeInputs) (string, oboAuth, error) {
+// Today it reads the source snapshot it is given, and kms — the signing capability a
+// chained mint fetched — when the source's certificate key is held in a KMS.
+func (d *AzureDriver) oboClientAuth(ctx context.Context, srcCfg credential.Config, spec *credential.CredSpec, inputs *credential.ExchangeInputs, kms *remotesign.Capability) (string, oboAuth, error) {
 	srcTenant, srcClient, srcSecret := azureCreds(srcCfg)
 	clientID := credential.GetString(spec.Config, "client_id", srcClient)
 	if clientID == "" {
@@ -206,7 +233,7 @@ func (d *AzureDriver) oboClientAuth(_ context.Context, srcCfg credential.Config,
 		if err := ownAppOBOError(spec, inputs, clientID, srcClient, srcTenant, "certificate"); err != nil {
 			return "", oboAuth{}, err
 		}
-		assertion, err := d.certClientAssertion(srcTenant, clientID)
+		assertion, err := d.certClientAssertion(ctx, srcTenant, clientID, kms)
 		if err != nil {
 			return "", oboAuth{}, err
 		}

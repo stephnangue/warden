@@ -2,6 +2,7 @@ package remotesign
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"fmt"
 	"net/http"
@@ -146,6 +147,17 @@ func DecodeCapability(data map[string]string) (*Capability, error) {
 	return c, nil
 }
 
+// KeyID names the exact key version a capability signs with, the store it lives in
+// included, and nothing else — not the credential: two capabilities with the same
+// KeyID sign with the same key, so a consumer may remember what it learned about one.
+func (c *Capability) KeyID() string {
+	store := ""
+	if s, ok := c.coords.(interface{ storeID() string }); ok {
+		store = s.storeID()
+	}
+	return c.Backend + "\x00" + store + "\x00" + c.Ref.KeyName + "\x00" + c.Ref.Version
+}
+
 // ReservedCapabilityKeys is every payload key a backend's capability is built from,
 // shared and backend-specific. A producer that lets an operator add arbitrary keys to
 // a payload must refuse these: a passthrough named like a coordinate would replace it.
@@ -199,15 +211,7 @@ func NewCapabilitySigners(log *logger.GatedLogger, opts CapabilityOptions) *Capa
 // help, and exposes the store's status through SignError either way. An unreachable
 // store wraps no sentinel: a new capability cannot mend a network.
 func (s *CapabilitySigners) SignJWS(ctx context.Context, c *Capability, header map[string]string, claims map[string]interface{}) (string, error) {
-	if c == nil {
-		return "", errors.New("remotesign: no signing capability")
-	}
-	pool, ok := s.pools[c.Backend]
-	codec := capabilityCodecs[c.Backend]
-	if !ok || codec == nil {
-		return "", fmt.Errorf("%w %q", ErrCapabilityUnsupported, c.Backend)
-	}
-	backend, err := pool.open(c.coords)
+	backend, codec, err := s.open(c)
 	if err != nil {
 		return "", err
 	}
@@ -221,6 +225,54 @@ func (s *CapabilitySigners) SignJWS(ctx context.Context, c *Capability, header m
 		return "", codec.classify(err)
 	}
 	return jws, nil
+}
+
+// PublicKey fetches the public half of the exact key version a capability names, with
+// the capability's own credential, so a consumer can check the key against what it was
+// told to expect — a certificate, say — before signing anything with it.
+//
+// The key is judged as one an operator provisioned, as the producer judged it: any RSA
+// size for an RSA alg, the exact curve for an EC one, and never exportable. Errors are
+// mapped as SignJWS maps them.
+func (s *CapabilitySigners) PublicKey(ctx context.Context, c *Capability) (crypto.PublicKey, error) {
+	backend, codec, err := s.open(c)
+	if err != nil {
+		return nil, err
+	}
+	defer backend.Close()
+
+	var pub crypto.PublicKey
+	if r, ok := backend.(interface {
+		NamedKeyInfo(ctx context.Context, name, alg, version string) (KeyInfo, error)
+	}); ok {
+		var info KeyInfo
+		info, err = r.NamedKeyInfo(ctx, c.Ref.KeyName, c.Ref.Alg, c.Ref.Version)
+		pub = info.Public
+	} else {
+		pub, err = backend.PublicKey(ctx, c.Ref)
+	}
+	if err != nil {
+		return nil, codec.classify(err)
+	}
+	return pub, nil
+}
+
+// open returns a backend reached with the capability's own credential, and the codec
+// its errors are classified by. The caller closes the backend.
+func (s *CapabilitySigners) open(c *Capability) (SigningBackend, capabilityCodec, error) {
+	if c == nil {
+		return nil, nil, errors.New("remotesign: no signing capability")
+	}
+	pool, ok := s.pools[c.Backend]
+	codec := capabilityCodecs[c.Backend]
+	if !ok || codec == nil {
+		return nil, nil, fmt.Errorf("%w %q", ErrCapabilityUnsupported, c.Backend)
+	}
+	backend, err := pool.open(c.coords)
+	if err != nil {
+		return nil, nil, err
+	}
+	return backend, codec, nil
 }
 
 // Close drops every pool's idle connections. Signing may continue afterwards; the

@@ -20,6 +20,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper/httputil"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -299,14 +300,35 @@ type AzureDriver struct {
 	// certWarnNext is when the next certificate-expiry check may log, in unix nanos,
 	// so the warning costs one atomic load on the paths that check it.
 	certWarnNext atomic.Int64
+
+	// capSigners signs with fetched signing capabilities when the certificate's key
+	// is held in a KMS; nil otherwise. Capabilities are threaded by parameter, never
+	// stored here, so concurrent mints holding different ones cannot cross.
+	capSigners *remotesign.CapabilitySigners
+
+	// kmsKeysChecked remembers the KMS key versions already found to match the
+	// certificate, so each is read once rather than on every mint. A key version's
+	// public half never changes. Keyed by the capability's KeyID (store, key and
+	// version); it is emptied when it grows past maxKMSKeysChecked (a templated
+	// signer can name one key per caller).
+	kmsKeysChecked     sync.Map
+	kmsKeysCheckedSize atomic.Int32
 }
 
+// maxKMSKeysChecked bounds kmsKeysChecked.
+const maxKMSKeysChecked = 1024
+
 // azureCertAuth is a certificate source's credential: the certificate, parsed once,
-// and the private key that signs its client assertions.
+// and the private key that signs its client assertions — nil when the key is held in
+// a KMS, which each mint reaches with a signing capability fetched through the
+// source's secret_spec.
 type azureCertAuth struct {
 	cert *clientCertificate
 	key  *rsa.PrivateKey
 }
+
+// kmsKey reports whether the certificate's key is held in a KMS.
+func (a *azureCertAuth) kmsKey() bool { return a.key == nil }
 
 // graphPermsEntry is one cached Graph-permission probe result.
 type graphPermsEntry struct {
@@ -455,18 +477,26 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 		return err
 	}
 
-	// An azure source authenticates with what it holds; it does not fetch its
-	// credential through another spec.
-	for _, key := range []string{credential.ConfigSecretSpec, credential.ConfigSecretCacheTTL} {
-		if credential.GetString(config, key, "") != "" {
-			return fmt.Errorf("%s is not supported on an azure source", key)
-		}
+	// Only a certificate source chains, and only its signing key: secret_spec names
+	// the spec that mints a capability to sign with a key held in a KMS. Nothing else
+	// an azure source holds comes from another spec.
+	authMethod := credential.GetString(config, "auth_method", azureAuthMethodStatic)
+	chained := credential.GetString(config, credential.ConfigSecretSpec, "") != ""
+	if chained && authMethod != azureAuthMethodCertificate {
+		return fmt.Errorf("%s is only valid for auth_method=%s, where it names the spec that mints a signing capability for the certificate's key",
+			credential.ConfigSecretSpec, azureAuthMethodCertificate)
+	}
+	if !chained && credential.GetString(config, credential.ConfigSecretCacheTTL, "") != "" {
+		return fmt.Errorf("%s applies only with %s", credential.ConfigSecretCacheTTL, credential.ConfigSecretSpec)
+	}
+	// The capability payload is read by its own field names.
+	if credential.GetString(config, credential.ConfigSecretField, "") != "" {
+		return fmt.Errorf("%s is not supported on an azure source; a signing capability is read by its own field names", credential.ConfigSecretField)
 	}
 
 	// Cross-field rules per auth_method. Each method refuses the others' credentials,
 	// so a misconfiguration cannot silently mix modes — and the driver never has to
 	// choose between two credentials it holds.
-	authMethod := credential.GetString(config, "auth_method", azureAuthMethodStatic)
 	if authMethod != azureAuthMethodCertificate {
 		for _, key := range []string{"certificate", "private_key"} {
 			if credential.GetString(config, key, "") != "" {
@@ -510,20 +540,37 @@ func (f *AzureDriverFactory) ValidateConfig(config credential.Config) error {
 	return nil
 }
 
+// azureCertKeyInKMS reports whether a certificate source's key is held in a KMS — its
+// secret_spec names the signer — rather than stored in the source config.
+func azureCertKeyInKMS(config credential.Config) bool {
+	return credential.GetString(config, credential.ConfigSecretSpec, "") != ""
+}
+
 // parseAzureCertAuth reads a certificate source's credential: the certificate, valid
-// now, and the private key that matches it. A key that does not match would have
-// every assertion refused as signed by an unregistered key, so it is refused here,
-// naming the certificate.
+// now, and either the private key that matches it or — when the key is held in a KMS
+// and its secret_spec names the signer — no key at all. A key that does not match
+// would have every assertion refused as signed by an unregistered key, so it is
+// refused here, naming the certificate; a KMS key is checked against the
+// certificate when its first capability arrives.
 func parseAzureCertAuth(config credential.Config, now time.Time) (*azureCertAuth, error) {
 	certPEM := credential.GetString(config, "certificate", "")
 	keyPEM := credential.GetString(config, "private_key", "")
-	if certPEM == "" || keyPEM == "" {
-		return nil, fmt.Errorf("certificate and private_key are required for auth_method=%s", azureAuthMethodCertificate)
+	kms := azureCertKeyInKMS(config)
+	switch {
+	case certPEM == "":
+		return nil, fmt.Errorf("certificate is required for auth_method=%s", azureAuthMethodCertificate)
+	case kms && keyPEM != "":
+		return nil, fmt.Errorf("private_key and %s are exclusive: the key is either stored here or held in a KMS the secret_spec signs with", credential.ConfigSecretSpec)
+	case !kms && keyPEM == "":
+		return nil, fmt.Errorf("auth_method=%s needs the certificate's private_key, or a %s naming a signer for a key held in a KMS", azureAuthMethodCertificate, credential.ConfigSecretSpec)
 	}
 	// parseClientCertificate's messages already name the certificate.
 	cert, err := parseClientCertificate(certPEM, now)
 	if err != nil {
 		return nil, err
+	}
+	if kms {
+		return &azureCertAuth{cert: cert}, nil
 	}
 	key, err := parseRSAPrivateKey(keyPEM)
 	if err != nil {
@@ -645,6 +692,14 @@ func (f *AzureDriverFactory) Create(config credential.Config, log *logger.GatedL
 		}
 		driver.cert = cert
 		driver.warnCertExpiry(driver.clock())
+		if cert.kmsKey() {
+			// The key is reached with a capability that arrives with each mint, so
+			// there is nothing to probe with now: the first mint verifies the source.
+			// The source's TLS settings describe Entra, not the signing store, so they
+			// are not handed to the signers.
+			driver.capSigners = remotesign.NewCapabilitySigners(driver.logger, remotesign.CapabilityOptions{})
+			return driver, nil
+		}
 	}
 
 	// Validate source credentials by acquiring a token
@@ -665,7 +720,7 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	// On-behalf-of acts for a user, whose token arrives only through the exchange
 	// path; without it there is no one to act for.
 	if credential.GetString(spec.Config, "mint_method", "") == azureMintMethodOnBehalfOf {
-		return nil, nil, 0, "", fmt.Errorf("azure: mint_method=on_behalf_of needs the user's Entra access token; set subject_token_source=user_identity")
+		return nil, nil, 0, "", errAzureOBONeedsUser
 	}
 
 	// A keyless source mints only through the exchange path, which carries the
@@ -698,11 +753,17 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 // spec sets no subject_token_source — so a templated secret_name fails closed rather
 // than being sent literally.
 func (d *AzureDriver) mintViaSecretRead(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return d.mintViaSecretReadWith(ctx, spec, nil)
+}
+
+// mintViaSecretReadWith is mintViaSecretRead with the signing capability a mint
+// fetched for a certificate source whose key is held in a KMS.
+func (d *AzureDriver) mintViaSecretReadWith(ctx context.Context, spec *credential.CredSpec, kms *remotesign.Capability) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if credential.GetString(spec.Config, "client_id", "") != "" || credential.GetString(spec.Config, "tenant_id", "") != "" {
 		return nil, nil, 0, "", fmt.Errorf("azure: 'client_id'/'tenant_id' apply to mint_method=secret_read only over auth_method=oidc_federation; a static or certificate source reads as itself")
 	}
 
-	token, err := d.getSourceToken(ctx, keyVaultResource)
+	token, err := d.getSourceTokenWith(ctx, keyVaultResource, kms)
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("failed to acquire Key Vault token: %w", err)
 	}
@@ -890,6 +951,9 @@ func (d *AzureDriver) Type() string {
 func (d *AzureDriver) Cleanup(ctx context.Context) error {
 	if d.httpClient != nil {
 		d.httpClient.CloseIdleConnections()
+	}
+	if d.capSigners != nil {
+		d.capSigners.Close()
 	}
 	return nil
 }
@@ -1259,6 +1323,18 @@ func (d *AzureDriver) postTokenRequest(ctx context.Context, tenantID string, dat
 // fetch runs again against the new credentials — bounded, so back-to-back rotations
 // cannot loop a caller forever.
 func (d *AzureDriver) getSourceToken(ctx context.Context, resourceURI string) (string, error) {
+	return d.getSourceTokenWith(ctx, resourceURI, nil)
+}
+
+// getSourceTokenWith is getSourceToken for a certificate source whose key is held in
+// a KMS: kms is the signing capability the calling mint fetched.
+//
+// The cache stays keyed by resource alone, since every capability signs for the same
+// app. Concurrent misses still share one request, signed with the capability of the
+// caller that started it; the others' capabilities go unused for this token, which is
+// the app's, not theirs. If that capability is spent, every caller sharing the request
+// sees the refusal and refetches its own once.
+func (d *AzureDriver) getSourceTokenWith(ctx context.Context, resourceURI string, kms *remotesign.Capability) (string, error) {
 	for attempt := 0; attempt < azureSourceTokenAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -1277,7 +1353,7 @@ func (d *AzureDriver) getSourceToken(ctx context.Context, resourceURI string) (s
 			// d.cert is set only when the driver was built for auth_method=certificate,
 			// and validation refuses a source holding both a certificate and a secret.
 			if d.cert != nil {
-				token, expiresIn, err = d.acquireTokenWithCertificate(fetchCtx, tenantID, clientID, resourceURI)
+				token, expiresIn, err = d.acquireTokenWithCertificate(fetchCtx, tenantID, clientID, resourceURI, kms)
 			} else {
 				token, expiresIn, err = d.acquireToken(fetchCtx, tenantID, clientID, clientSecret, resourceURI)
 			}
@@ -1323,6 +1399,11 @@ func (d *AzureDriver) hasGraphPermissions() bool {
 	// A keyless federation source has no client_secret, so the source-token probe
 	// below would be a doomed round-trip. It also has nothing to rotate.
 	if credential.GetString(d.sourceConfig(), "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
+		return false
+	}
+	// Nor can a certificate source whose key is held in a KMS: it signs only with a
+	// capability a mint brings, and a rotation runs without one.
+	if d.cert != nil && d.cert.kmsKey() {
 		return false
 	}
 

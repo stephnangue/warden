@@ -1374,6 +1374,16 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 		return logical.ErrBadRequest("min_ttl cannot be greater than max_ttl")
 	}
 
+	// An azure source that signs with a KMS-held certificate key serves secret_read
+	// and on_behalf_of only. Refused here, ahead of the type and rotation rules that
+	// would otherwise answer a bearer_token spec with a demand for rotation_period it
+	// can never meet.
+	if source.Type == credential.SourceTypeAzure {
+		if err := drivers.AzureKMSCertificateSpecError(spec.Type, spec.Config, source.Config); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
+	}
+
 	// Validate credential type exists
 	var credType credential.Type
 	if s.core.credentialTypeRegistry != nil {
@@ -1623,6 +1633,10 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 				// own service-account calls, and every spec on it mints a fresh token
 				// rather than serving a stored one.
 				return logical.ErrBadRequestf("for a grafana source, set secret_spec on the source (the chained token authenticates the source's own service-account calls), not on the spec")
+			case credential.SourceTypeAzure:
+				// The chained signing capability authenticates the source's own app
+				// with its certificate: a source concern, like client auth above.
+				return logical.ErrBadRequestf("for an azure source, set secret_spec on the source (the chained signing capability authenticates the source's app with its certificate), not on the spec")
 			}
 		}
 		// An oauth2 source that chains its client credential resolves the pair per mint,
@@ -1684,9 +1698,12 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 		// so its own subject/actor exchange config would be dead — reject that confusing
 		// combination. The token_exchange driver is the exception: it is itself an
 		// exchange spec whose *client secret* is chained (ChainedExchangeMinter), so it
-		// legitimately sets both. (Driver-free type gate; the ChainedExchangeMinter
-		// capability is asserted in the test-mint block and at mint time.)
-		if credential.SpecRequestsExchange(spec.Config) && source.Type != credential.SourceTypeTokenExchange {
+		// legitimately sets both. So is an azure on_behalf_of spec over a source whose
+		// certificate key is chained: it exchanges the user's token, and the chained
+		// signing capability authenticates the app. (Driver-free type gate; the
+		// ChainedExchangeMinter capability is asserted in the test-mint block and at
+		// mint time.)
+		if credential.SpecRequestsExchange(spec.Config) && source.Type != credential.SourceTypeTokenExchange && !azureOBO {
 			return logical.ErrBadRequestf("a chained spec (secret_spec set) must not also set its own subject_token_source/actor_token_source; the caller identity is carried by the referenced secret_spec %q", chainedRef)
 		}
 		// Conversely, a token_exchange spec whose client secret is chained still needs a
@@ -2052,6 +2069,12 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(namespaceID st
 		if source.Type == credential.SourceTypeAzure && drivers.AzureOnBehalfOf(spec.Type, spec.Config) {
 			if err := drivers.AzureOnBehalfOfSpecError(spec.Config, source.Config); err != nil {
 				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
+			}
+		}
+		// Moving a certificate source's key into a KMS strands a bearer_token spec.
+		if source.Type == credential.SourceTypeAzure {
+			if err := drivers.AzureKMSCertificateSpecError(spec.Type, spec.Config, source.Config); err != nil {
+				return logical.ErrBadRequestf("spec %q: %s; move or delete the spec first", spec.Name, err.Error())
 			}
 		}
 
