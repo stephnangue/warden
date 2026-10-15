@@ -89,8 +89,8 @@ func (c *Core) logKeylessWarnings(kind, name string, warnings []string) {
 }
 
 // specKeylessSecrets returns what a spec write would leave stored: the spec's own
-// secrets, the local-source rule, and — when withSource is set — the secrets its
-// source holds, each prefixed with the source name.
+// secrets with the local-source rule, and — when withSource is set — the secrets
+// its source holds, with the source's name.
 //
 // withSource is set on create only. A new spec on a keyed source widens the use
 // of that source's secret; an edit to an existing spec does not, and the
@@ -98,40 +98,68 @@ func (c *Core) logKeylessWarnings(kind, name string, warnings []string) {
 //
 // A missing source is not an error here: the store refuses the write with its
 // own message, and the spec's own secrets are still reported.
-func (b *SystemBackend) specKeylessSecrets(ctx context.Context, spec *credential.CredSpec, withSource bool) ([]string, error) {
-	secrets := b.core.specStoredSecrets(spec.Type, spec.Config)
+func (b *SystemBackend) specKeylessSecrets(ctx context.Context, spec *credential.CredSpec, withSource bool) (own []string, sourceName string, sourceSecrets []string, err error) {
+	own = b.core.specStoredSecrets(spec.Type, spec.Config)
 
 	source, err := b.core.credConfigStore.GetSource(ctx, spec.Source)
 	if err != nil {
 		if errors.Is(err, ErrSourceNotFound) {
-			return secrets, nil
+			return own, "", nil, nil
 		}
-		return nil, err
+		return nil, "", nil, err
 	}
 
 	if source.Type == credential.SourceTypeLocal {
-		secrets = append(secrets, localSourceSecret)
+		own = append(own, localSourceSecret)
 	}
 	if withSource {
-		for _, s := range b.core.sourceStoredSecrets(source.Type, source.Config) {
-			secrets = append(secrets, fmt.Sprintf("source %q: %s", source.Name, s))
-		}
+		sourceSecrets = b.core.sourceStoredSecrets(source.Type, source.Config)
 	}
-	return secrets, nil
+	return own, source.Name, sourceSecrets, nil
 }
 
-// checkSpecKeyless runs checkKeyless for a spec write, returning the warnings to
-// report on success or the error response to return instead.
+// checkSpecKeyless runs the keyless check for a spec write, returning the warnings
+// to report on success or the error response to return instead.
+//
+// A spec that holds nothing itself but would use its source's secret is told about
+// the source, since that is where the secret has to go: the spec-level ways out —
+// chaining the spec's own secret, exchanging the caller's identity — do not remove
+// a secret the source authenticates with.
 func (b *SystemBackend) checkSpecKeyless(ctx context.Context, spec *credential.CredSpec, withSource bool) ([]string, *logical.Response) {
-	secrets, err := b.specKeylessSecrets(ctx, spec, withSource)
+	own, sourceName, sourceSecrets, err := b.specKeylessSecrets(ctx, spec, withSource)
 	if err != nil {
 		return nil, logical.ErrorResponse(err)
 	}
-	warnings, err := b.core.checkKeyless(keylessKindSpec, spec.Name, secrets)
+	var warnings []string
+	if len(own) == 0 && len(sourceSecrets) > 0 {
+		warnings, err = b.core.checkKeylessSourceUse(spec.Name, sourceName, sourceSecrets)
+	} else {
+		secrets := own
+		for _, s := range sourceSecrets {
+			secrets = append(secrets, fmt.Sprintf("source %q: %s", sourceName, s))
+		}
+		warnings, err = b.core.checkKeyless(keylessKindSpec, spec.Name, secrets)
+	}
 	if err != nil {
 		return nil, logical.ErrorResponse(err)
 	}
 	return warnings, nil
+}
+
+// checkKeylessSourceUse is checkKeyless for a spec whose only stored secret is its
+// source's: the message names the source and the source-level ways out.
+func (c *Core) checkKeylessSourceUse(specName, sourceName string, secrets []string) (warnings []string, err error) {
+	if c.keylessEnforcement == KeylessEnforcementOff {
+		return nil, nil
+	}
+	held := strings.Join(secrets, ", ")
+	hint := "Make the source keyless: auth_method=oidc_federation (federation), or keep its credential outside Warden with secret_spec on the source (credential chaining; for an azure certificate source, a KMS-held key)."
+	if c.keylessEnforcement == KeylessEnforcementEnforce {
+		return nil, logical.ErrBadRequestf("keyless_enforcement_level=enforce refuses %s %q: it would use the secret its source %q stores (%s). %s",
+			keylessKindSpec, specName, sourceName, held, hint)
+	}
+	return []string{fmt.Sprintf("%s %q would use the secret its source %q stores (%s); keyless_enforcement_level=enforce would refuse this write. %s",
+		keylessKindSpec, specName, sourceName, held, hint)}, nil
 }
 
 // appendWarnings adds warnings to a response's data["warnings"], keeping any

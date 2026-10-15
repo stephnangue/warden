@@ -318,15 +318,24 @@ func (f *VaultDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 
 func (f *AzureDriverFactory) PlanKeyless(current credential.Config, inputs map[string]string) (*credential.KeylessSourcePlan, error) {
 	delta := map[string]string{"auth_method": azureAuthMethodOIDCFederation}
-	clearPresent(delta, current, "client_secret", "secret_id")
+	clearPresent(delta, current, "client_secret", "secret_id", "certificate", "private_key")
 	withInputs(delta, inputs)
 
 	plan := &credential.KeylessSourcePlan{Delta: delta}
+	app := current.Get("client_id")
 	if id := current.Get("secret_id"); id != "" {
-		app := current.Get("client_id")
 		plan.Leftovers = append(plan.Leftovers, credential.Leftover{
 			Kind: "client secret", ID: id,
 			WhereToDelete: fmt.Sprintf("az ad app credential delete --id %s --key-id %s", app, id),
+		})
+	}
+	// Warden holds no key id for a certificate, so it is named by the thumbprint
+	// Entra lists it under (customKeyIdentifier).
+	if thumb := certificateSHA1Thumbprint(current.Get("certificate")); thumb != "" {
+		plan.Leftovers = append(plan.Leftovers, credential.Leftover{
+			Kind: "certificate credential", ID: thumb,
+			WhereToDelete: fmt.Sprintf("find its key id with az ad app credential list --id %s --cert "+
+				"(customKeyIdentifier %s), then az ad app credential delete --id %s --key-id <key id> --cert", app, thumb, app),
 		})
 	}
 	return plan, nil

@@ -378,3 +378,27 @@ func TestKeylessPlan_TokenExchangePublicClient(t *testing.T) {
 
 	assert.Empty(t, f.KeylessPrerequisites(current, nil, testTrustEnv))
 }
+
+// A certificate source goes keyless like a static one: the certificate and its key are
+// cleared, and the certificate registered on the app is named by its thumbprint so the
+// operator can remove it — never by anything from the private key.
+func TestKeylessPlan_AzureCertificateSource(t *testing.T) {
+	c := validTestClientCert(t)
+	factory := &AzureDriverFactory{}
+	current := credential.NewConfig(certSourceConfig(c, ""))
+	require.Equal(t, []string{"private_key"}, factory.StoredSecrets(current))
+
+	plan, err := factory.PlanKeyless(current, nil)
+	require.NoError(t, err)
+	keyless := current.WithAll(plan.Delta)
+	assert.NoError(t, factory.ValidateConfig(keyless))
+	assert.Nil(t, factory.StoredSecrets(keyless))
+	assert.Empty(t, keyless.Get("certificate"))
+
+	require.Len(t, plan.Leftovers, 1)
+	l := plan.Leftovers[0]
+	assert.Equal(t, "certificate credential", l.Kind)
+	assert.Equal(t, certificateSHA1Thumbprint(c.certPEM), l.ID)
+	assert.Contains(t, l.WhereToDelete, "--cert")
+	assert.NotContains(t, l.ID+l.WhereToDelete, "PRIVATE KEY")
+}

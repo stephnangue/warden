@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -81,6 +82,49 @@ func parseClientCertificate(pemData string, now time.Time) (*clientCertificate, 
 		x5tS256: base64.RawURLEncoding.EncodeToString(s256[:]),
 		sha1Hex: strings.ToUpper(hex.EncodeToString(s1[:])),
 	}, nil
+}
+
+// DescribeCertificate summarises a PEM certificate for display: who it names, when it
+// is valid, how many days remain and the thumbprints the server lists it under. It
+// returns nil when pemData is not a certificate. It does not judge validity — an
+// expired certificate is described, with negative days remaining, since that is what
+// an operator reading the source needs to see.
+func DescribeCertificate(pemData string, now time.Time) map[string]any {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil
+	}
+	s256 := sha256.Sum256(leaf.Raw)
+	s1 := sha1.Sum(leaf.Raw)
+	return map[string]any{
+		"subject":    leaf.Subject.String(),
+		"not_before": leaf.NotBefore.UTC().Format(time.RFC3339),
+		"not_after":  leaf.NotAfter.UTC().Format(time.RFC3339),
+		// Floored, so an expired certificate reads negative from its first hour on,
+		// and 0 means valid for less than a day.
+		"days_remaining":  int(math.Floor(leaf.NotAfter.Sub(now).Hours() / 24)),
+		"x5t_s256":        base64.RawURLEncoding.EncodeToString(s256[:]),
+		"thumbprint_sha1": strings.ToUpper(hex.EncodeToString(s1[:])),
+	}
+}
+
+// certificateSHA1Thumbprint is the upper-case hex SHA-1 thumbprint of a PEM
+// certificate, or "" when it does not parse. Unlike parseClientCertificate it does not
+// care whether the certificate is still valid: it names one, it does not trust it.
+func certificateSHA1Thumbprint(pemData string) string {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return ""
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return ""
+	}
+	sum := sha1.Sum(block.Bytes)
+	return strings.ToUpper(hex.EncodeToString(sum[:]))
 }
 
 // matchesPublicKey reports whether pub is the certificate's key. A mismatch means

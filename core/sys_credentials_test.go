@@ -2,7 +2,15 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -111,6 +119,78 @@ func TestSystemBackend_HandleCredentialSourceRead(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "test-source", resp.Data["name"])
+}
+
+// A source holding a certificate shows its expiry and thumbprints on read, while
+// its private key stays masked.
+func TestSystemBackend_HandleCredentialSourceRead_CertificateInfo(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	notAfter := time.Now().Add(10 * 24 * time.Hour).Truncate(time.Second)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(7), Subject: pkix.Name{CommonName: "warden-entra"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: notAfter}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+
+	// The source's connection test reaches this, never the real Entra ID.
+	entra := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"t","expires_in":3600}`))
+	}))
+	defer entra.Close()
+
+	require.NoError(t, backend.core.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "entra-cert", Type: credential.SourceTypeAzure,
+		Config: credential.NewConfig(map[string]string{
+			"auth_method":    "certificate",
+			"tenant_id":      "00000000-0000-0000-0000-000000000001",
+			"client_id":      "11111111-1111-1111-1111-111111111111",
+			"certificate":    certPEM,
+			"private_key":    keyPEM,
+			"login_endpoint": entra.URL,
+		}),
+	}))
+
+	schema := backend.pathCredentials()[0].Fields
+	raw := map[string]interface{}{"name": "entra-cert"}
+	resp, err := backend.handleCredentialSourceRead(ctx,
+		createTestRequest(logical.ReadOperation, "cred/sources/entra-cert", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	info, ok := resp.Data["certificate_info"].(map[string]any)
+	require.True(t, ok, "certificate_info is shown: %+v", resp.Data)
+	assert.Equal(t, "CN=warden-entra", info["subject"])
+	assert.Equal(t, notAfter.UTC().Format(time.RFC3339), info["not_after"])
+	assert.Equal(t, 9, info["days_remaining"])
+	s256 := sha256.Sum256(der)
+	assert.Equal(t, base64.RawURLEncoding.EncodeToString(s256[:]), info["x5t_s256"])
+	assert.Len(t, info["thumbprint_sha1"], 40)
+
+	cfg := resp.Data["config"].(map[string]string)
+	assert.Equal(t, certPEM, cfg["certificate"], "the certificate is public")
+	assert.NotContains(t, cfg["private_key"], "PRIVATE KEY", "the private key is masked")
+	assert.NotContains(t, info, "private_key")
+	assert.Equal(t, []string{"private_key"}, resp.Data["stored_secrets"], "a local key is a stored secret")
+
+	// So keyless enforcement refuses a certificate source as it does a static one.
+	backend.core.keylessEnforcement = KeylessEnforcementEnforce
+	createRaw := map[string]interface{}{
+		"name": "entra-cert-2", "type": "azure",
+		"config": map[string]interface{}{
+			"auth_method": "certificate", "tenant_id": "00000000-0000-0000-0000-000000000001",
+			"client_id": "11111111-1111-1111-1111-111111111111", "certificate": certPEM,
+			"private_key": keyPEM, "login_endpoint": entra.URL,
+		},
+	}
+	createResp, err := backend.handleCredentialSourceCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/sources/entra-cert-2", createRaw), createFieldData(schema, createRaw))
+	require.NoError(t, err)
+	assert.NotEqual(t, http.StatusCreated, createResp.StatusCode, "enforce refuses a stored private key")
 }
 
 func TestSystemBackend_HandleCredentialSourceRead_NotFound(t *testing.T) {

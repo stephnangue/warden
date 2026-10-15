@@ -24,7 +24,8 @@ import (
 // client_id — goes in the grant's assertion field. The app authenticates itself
 // separately: over a keyless source with the Warden assertion core minted for the
 // actor slot (checked by Entra against a federated identity credential on the
-// app), over a static source with the source's client secret. The user's token is
+// app), over a static source with the source's client secret, over a certificate
+// source with an assertion signed by the certificate's key. The user's token is
 // never the client credential: it only ever lands in assertion.
 const (
 	azureMintMethodOnBehalfOf = "on_behalf_of"
@@ -70,13 +71,13 @@ func AzureOnBehalfOfSpecError(specCfg, sourceCfg credential.Config) error {
 		}
 	} else {
 		if actor != "" {
-			return fmt.Errorf("a static azure source authenticates on_behalf_of with its client_secret: remove %s",
+			return fmt.Errorf("a static or certificate azure source authenticates on_behalf_of with its own credential (client secret or certificate): remove %s",
 				credential.ConfigActorTokenSource)
 		}
-		// A static secret belongs to the source's app, in the source's tenant.
+		// A secret or certificate belongs to the source's app, in the source's tenant.
 		for _, key := range []string{"client_id", "tenant_id"} {
 			if s, v := sourceCfg.Get(key), specCfg.Get(key); s != "" && v != "" && s != v {
-				return fmt.Errorf("on_behalf_of over a static source authenticates as the source's app: spec '%s' must match the source's", key)
+				return fmt.Errorf("on_behalf_of over a static or certificate source authenticates as the source's app: spec '%s' must match the source's", key)
 			}
 		}
 	}
@@ -92,11 +93,23 @@ func AzureOnBehalfOfSpecError(specCfg, sourceCfg credential.Config) error {
 }
 
 // oboAuth is how the app authenticates an OBO request: exactly one of secret or
-// assertion is set.
+// assertion is set. kind says which credential it is, so a refusal is explained in
+// terms of the credential that was refused.
 type oboAuth struct {
+	kind      oboAuthKind
 	secret    string
 	assertion string
+	x5tS256   string // the certificate that signed assertion, for oboAuthCertificate
 }
+
+// oboAuthKind is the credential an OBO request authenticates the app with.
+type oboAuthKind int
+
+const (
+	oboAuthSecret      oboAuthKind = iota // a static source's client secret
+	oboAuthFederated                      // a Warden assertion checked against a federated credential
+	oboAuthCertificate                    // an assertion signed with the source's certificate
+)
 
 // mintOnBehalfOf exchanges the user's Entra token for a delegated token to the
 // spec's resource (Microsoft Graph unless resource_uri says otherwise).
@@ -132,9 +145,9 @@ func (d *AzureDriver) mintOnBehalfOf(ctx context.Context, spec *credential.CredS
 		form.Set("client_secret", auth.secret)
 	}
 
-	tok, err := d.postOBOTokenRequest(ctx, tenantID, form)
+	tok, err := d.postEntraTokenRequest(ctx, tenantID, form, oboOperation)
 	if err != nil {
-		err = classifyEntraOBOError(err, tenantID, clientID, scope, auth.assertion != "")
+		err = classifyEntraOBOError(err, tenantID, clientID, scope, auth)
 		// The client re-authenticates at the same authority this request went to,
 		// whatever cloud login_endpoint names.
 		var uce *credential.UserChallengeError
@@ -187,25 +200,43 @@ func (d *AzureDriver) oboClientAuth(_ context.Context, srcCfg credential.Config,
 		if inputs.ActorToken == inputs.SubjectToken {
 			return "", oboAuth{}, fmt.Errorf("azure: on_behalf_of refuses a client assertion identical to the user's token")
 		}
-		return clientID, oboAuth{assertion: inputs.ActorToken}, nil
+		return clientID, oboAuth{kind: oboAuthFederated, assertion: inputs.ActorToken}, nil
+	case azureAuthMethodCertificate:
+		// Like a static secret, the certificate is registered on the source's own app.
+		if err := ownAppOBOError(spec, inputs, clientID, srcClient, srcTenant, "certificate"); err != nil {
+			return "", oboAuth{}, err
+		}
+		assertion, err := d.certClientAssertion(srcTenant, clientID)
+		if err != nil {
+			return "", oboAuth{}, err
+		}
+		return clientID, oboAuth{kind: oboAuthCertificate, assertion: assertion, x5tS256: d.cert.cert.x5tS256}, nil
 	default:
-		// A static source's secret belongs to the source's own app, so the spec
-		// cannot name another one, and a source that switched from keyless to
-		// static must not carry on sending an assertion it now ignores.
-		if inputs.ActorToken != "" {
-			return "", oboAuth{}, fmt.Errorf("azure: a static source authenticates on_behalf_of with its client secret; remove actor_token_source from the spec")
-		}
-		if clientID != srcClient {
-			return "", oboAuth{}, fmt.Errorf("azure: on_behalf_of over a static source must use the source's own app; spec 'client_id' differs from the source's")
-		}
-		if t := credential.GetString(spec.Config, "tenant_id", ""); t != "" && t != srcTenant {
-			return "", oboAuth{}, fmt.Errorf("azure: on_behalf_of over a static source must use the source's tenant; spec 'tenant_id' differs from the source's")
+		if err := ownAppOBOError(spec, inputs, clientID, srcClient, srcTenant, "client secret"); err != nil {
+			return "", oboAuth{}, err
 		}
 		if srcSecret == "" {
 			return "", oboAuth{}, fmt.Errorf("azure: the static source has no client_secret to authenticate on_behalf_of")
 		}
-		return clientID, oboAuth{secret: srcSecret}, nil
+		return clientID, oboAuth{kind: oboAuthSecret, secret: srcSecret}, nil
 	}
+}
+
+// ownAppOBOError checks an OBO request over a source whose credential — a client
+// secret or a certificate — belongs to the source's own app: the spec cannot name
+// another app or tenant, and a source that switched from keyless must not carry on
+// sending a Warden assertion it now ignores.
+func ownAppOBOError(spec *credential.CredSpec, inputs *credential.ExchangeInputs, clientID, srcClient, srcTenant, credName string) error {
+	if inputs.ActorToken != "" {
+		return fmt.Errorf("azure: this source authenticates on_behalf_of with its %s; remove actor_token_source from the spec", credName)
+	}
+	if clientID != srcClient {
+		return fmt.Errorf("azure: on_behalf_of over a non-federated source must use the source's own app; spec 'client_id' differs from the source's")
+	}
+	if t := credential.GetString(spec.Config, "tenant_id", ""); t != "" && t != srcTenant {
+		return fmt.Errorf("azure: on_behalf_of over a non-federated source must use the source's tenant; spec 'tenant_id' differs from the source's")
+	}
+	return nil
 }
 
 // azureOBOTokenMetadata names the parties of a delegated token. subject is the
@@ -267,6 +298,7 @@ type entraErrorResponse struct {
 
 // entraTokenError is an Entra refusal, reduced to fields that are safe to log.
 type entraTokenError struct {
+	operation     string // the request refused, e.g. acquireOnBehalfOf
 	status        int
 	code          string
 	codes         []int
@@ -278,7 +310,7 @@ type entraTokenError struct {
 
 func (e *entraTokenError) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: Entra ID answered %d", oboOperation, e.status)
+	fmt.Fprintf(&b, "%s: Entra ID answered %d", e.operation, e.status)
 	if e.code != "" {
 		b.WriteString(" " + e.code)
 	}
@@ -350,27 +382,28 @@ func (d *AzureDriver) loginBase() string {
 	return defaultAzureLoginHost
 }
 
-// postOBOTokenRequest POSTs an OBO token request to the Entra token endpoint for
+// postEntraTokenRequest POSTs a token request to the Entra token endpoint for
 // tenantID. Unlike postTokenRequest it reads 400 and 401 bodies, so a refusal is
 // classified by its AADSTS codes, and it never embeds a response body in an error.
 // One attempt: a refused grant will not succeed on retry, and a throttled or
-// failing endpoint is reported as such for the caller to retry.
-func (d *AzureDriver) postOBOTokenRequest(ctx context.Context, tenantID string, form url.Values) (*entraTokenResponse, error) {
+// failing endpoint is reported as such for the caller to retry. operation names
+// the request in its errors.
+func (d *AzureDriver) postEntraTokenRequest(ctx context.Context, tenantID string, form url.Values, operation string) (*entraTokenResponse, error) {
 	if err := validateTenantID(tenantID); err != nil {
 		return nil, err
 	}
-	tokenURL := fmt.Sprintf("%s/%s/oauth2/v2.0/token", d.loginBase(), tenantID)
+	tokenURL := d.entraTokenURL(tenantID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader([]byte(form.Encode())))
 	if err != nil {
-		return nil, fmt.Errorf("%s: failed to create request: %w", oboOperation, err)
+		return nil, fmt.Errorf("%s: failed to create request: %w", operation, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s: request failed: %w", oboOperation, err)
+		return nil, fmt.Errorf("%s: request failed: %w", operation, err)
 	}
 	body, bodyErr := readLimitedBody(resp.Body)
 	resp.Body.Close()
@@ -378,21 +411,21 @@ func (d *AzureDriver) postOBOTokenRequest(ctx context.Context, tenantID string, 
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if bodyErr != nil {
-			return nil, fmt.Errorf("%s: failed to read token response: %w", oboOperation, bodyErr)
+			return nil, fmt.Errorf("%s: failed to read token response: %w", operation, bodyErr)
 		}
 		var tok entraTokenResponse
 		if err := json.Unmarshal(body, &tok); err != nil {
-			return nil, fmt.Errorf("%s: failed to decode token response", oboOperation)
+			return nil, fmt.Errorf("%s: failed to decode token response", operation)
 		}
 		if tok.AccessToken == "" {
-			return nil, fmt.Errorf("%s: token response carried no access_token", oboOperation)
+			return nil, fmt.Errorf("%s: token response carried no access_token", operation)
 		}
 		if tok.ExpiresIn <= 0 {
-			return nil, fmt.Errorf("%s: token response carried no positive expires_in (got %d)", oboOperation, tok.ExpiresIn)
+			return nil, fmt.Errorf("%s: token response carried no positive expires_in (got %d)", operation, tok.ExpiresIn)
 		}
 		return &tok, nil
 	case http.StatusBadRequest, http.StatusUnauthorized:
-		ete := &entraTokenError{status: resp.StatusCode}
+		ete := &entraTokenError{operation: operation, status: resp.StatusCode}
 		var eb entraErrorResponse
 		if bodyErr == nil && json.Unmarshal(body, &eb) == nil {
 			ete.code = entraSafe(entraWordRe, eb.Error)
@@ -407,7 +440,7 @@ func (d *AzureDriver) postOBOTokenRequest(ctx context.Context, tenantID string, 
 		return nil, ete
 	default:
 		return nil, &httputil.StatusError{Status: resp.StatusCode,
-			Err: fmt.Errorf("%s: token endpoint answered status %d", oboOperation, resp.StatusCode)}
+			Err: fmt.Errorf("%s: token endpoint answered status %d", operation, resp.StatusCode)}
 	}
 }
 
@@ -422,10 +455,11 @@ func (d *AzureDriver) postOBOTokenRequest(ctx context.Context, tenantID string, 
 //     it under invalid_client: then it is the client assertion that failed (a
 //     Warden-side clock or lifetime problem), and telling the user to sign in again
 //     would only loop;
-//   - missing consent (65001), a refused federated credential (70021,
-//     700211–700213) or secret (7000215, 7000222): the operator must act, so the
-//     message says what to fix.
-func classifyEntraOBOError(err error, tenantID, clientID, scope string, federated bool) error {
+//   - missing consent (65001), a refused certificate (700027), federated credential
+//     (70021, 700211–700213) or secret (7000215, 7000222): the operator must act, so
+//     the message says what to fix. A bare invalid_client is blamed on the credential
+//     the request actually carried.
+func classifyEntraOBOError(err error, tenantID, clientID, scope string, auth oboAuth) error {
 	var ete *entraTokenError
 	if !errors.As(err, &ete) {
 		return fmt.Errorf("azure: on-behalf-of token request failed: %w", err)
@@ -442,7 +476,9 @@ func classifyEntraOBOError(err error, tenantID, clientID, scope string, federate
 		return &credential.UserChallengeError{Code: credential.UserChallengeInvalidToken, TenantID: tenantID, Cause: ete}
 	case ete.hasCode(65001) || ete.suberror == "consent_required":
 		return fmt.Errorf("azure: admin consent is missing; grant admin consent to app %s for %s: %w", clientID, scope, ete)
-	case ete.hasCode(70021, 700211, 700212, 700213) || (federated && ete.code == "invalid_client"):
+	case auth.kind == oboAuthCertificate && (ete.hasCode(700027) || ete.code == "invalid_client"):
+		return certRefusedError(clientID, auth.x5tS256, ete)
+	case ete.hasCode(70021, 700211, 700212, 700213) || (auth.kind == oboAuthFederated && ete.code == "invalid_client"):
 		return fmt.Errorf("azure: Entra ID refused Warden's federated credential for app %s; check the federated identity credential's issuer, subject and audience (a new one can take minutes to propagate): %w", clientID, ete)
 	case ete.hasCode(7000215, 7000222) || ete.code == "invalid_client":
 		return fmt.Errorf("azure: Entra ID refused the client secret of app %s (wrong or expired): %w", clientID, ete)

@@ -269,8 +269,9 @@ func (c *Core) PlanKeylessSpec(ctx context.Context, name string, in KeylessPlanI
 	case spec.Type == credential.TypeAzureBearerToken:
 		what := "holds an Azure client secret"
 		if drivers.AzureOnBehalfOf(spec.Type, spec.Config) {
-			// An on_behalf_of spec holds no secret; it authenticates with its source's.
-			what = "authenticates with its source's Azure client secret"
+			// An on_behalf_of spec holds no secret; it authenticates with its source's
+			// credential, a client secret or a certificate.
+			what = "authenticates with its source's Azure credential"
 		}
 		plan.Blockers = append(plan.Blockers, fmt.Sprintf(
 			"spec %q %s, which goes keyless by federating its source: plan source %q instead",

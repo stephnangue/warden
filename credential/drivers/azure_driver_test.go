@@ -54,8 +54,10 @@ func TestAzureDriverFactory_SensitiveConfigFields(t *testing.T) {
 	factory := &AzureDriverFactory{}
 	fields := factory.SensitiveConfigFields()
 	assert.Contains(t, fields, "client_secret")
+	assert.Contains(t, fields, "private_key")
 	assert.Contains(t, fields, "ca_data")
-	assert.Len(t, fields, 2)
+	assert.NotContains(t, fields, "certificate", "the certificate is public and shown on read")
+	assert.Len(t, fields, 3)
 }
 
 func TestAzureDriverFactory_ValidateConfig(t *testing.T) {

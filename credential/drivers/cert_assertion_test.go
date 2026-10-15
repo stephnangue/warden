@@ -109,6 +109,8 @@ func verifyCertAssertion(t *testing.T, assertion string, leaf *x509.Certificate)
 	require.NoError(t, err)
 	var claims map[string]interface{}
 	require.NoError(t, json.Unmarshal(claimsJSON, &claims))
+	nbf, _ := claims["nbf"].(float64)
+	assert.LessOrEqual(t, nbf, float64(time.Now().Unix()), "nbf is not in the future")
 	return claims
 }
 
@@ -130,6 +132,24 @@ func TestParseClientCertificate(t *testing.T) {
 
 	assert.False(t, parsed.expiresWithin(now, 30*24*time.Hour))
 	assert.True(t, parsed.expiresWithin(now, 400*24*time.Hour))
+}
+
+func TestDescribeCertificate(t *testing.T) {
+	now := time.Now()
+	c := newTestClientCert(t, now.Add(-time.Hour), now.Add(36*time.Hour))
+	info := DescribeCertificate(c.certPEM, now)
+	require.NotNil(t, info)
+	assert.Equal(t, "CN=warden-test", info["subject"])
+	assert.Equal(t, 1, info["days_remaining"])
+	assert.Equal(t, x5tS256Of(c.leaf), info["x5t_s256"])
+	assert.Equal(t, certificateSHA1Thumbprint(c.certPEM), info["thumbprint_sha1"])
+
+	// An expired certificate is described, reading negative from its first hour on.
+	expired := newTestClientCert(t, now.Add(-48*time.Hour), now.Add(-time.Hour))
+	assert.Equal(t, -1, DescribeCertificate(expired.certPEM, now)["days_remaining"])
+
+	assert.Nil(t, DescribeCertificate("", now))
+	assert.Nil(t, DescribeCertificate(c.keyPEM, now))
 }
 
 func TestParseClientCertificate_Refusals(t *testing.T) {
