@@ -24,8 +24,9 @@ const maxJSONDepth = 32
 //
 // Method is the verbatim string from the body — callers lowercase
 // before matching. Name is method-derived: tools/call → params.name,
-// resources/read → params.uri, prompts/get → params.name. It is empty
-// for other methods. Arguments is the parsed params.arguments map for
+// resources/read, resources/subscribe, resources/directory/read and
+// skills/get → params.uri, prompts/get → params.name. It is empty for
+// other methods. Arguments is the parsed params.arguments map for
 // tools/call only (raw bytes per argument key so callers can do their
 // own type discrimination); nil for any other method.
 //
@@ -108,7 +109,8 @@ func (e *ParseError) Error() string {
 //   - Unknown top-level keys outside {jsonrpc, method, params, id}.
 //   - Nesting deeper than maxJSONDepth inside params.
 //   - method-specific shape mismatches: tools/call without params.name
-//     or with non-object params.arguments, resources/read without
+//     or with non-object params.arguments, resources/read,
+//     resources/subscribe, resources/directory/read or skills/get without
 //     params.uri, prompts/get without params.name,
 //     subscriptions/listen with a non-array or over-long
 //     params.notifications.resourceSubscriptions.
@@ -438,7 +440,7 @@ func extractMethodShape(req *JSONRPCRequest, top map[string]json.RawMessage, isO
 	switch strings.ToLower(req.Method) {
 	case "tools/call":
 		return extractToolsCall(req, top, isObject)
-	case "resources/read", "resources/subscribe":
+	case "resources/read", "resources/subscribe", "resources/directory/read", "skills/get":
 		return extractByParamKey(req, top, isObject, "uri")
 	case "prompts/get":
 		return extractByParamKey(req, top, isObject, "name")
@@ -594,8 +596,9 @@ func extractToolsCall(req *JSONRPCRequest, top map[string]json.RawMessage, isObj
 }
 
 // extractByParamKey extracts Name from the named top-level params key
-// (required, non-empty string). Used for resources/read (key = "uri")
-// and prompts/get (key = "name").
+// (required, non-empty string). Used for the URI-bearing methods —
+// resources/read, resources/subscribe, resources/directory/read and
+// skills/get (key = "uri") — and for prompts/get (key = "name").
 func extractByParamKey(req *JSONRPCRequest, top map[string]json.RawMessage, isObject bool, key string) *ParseError {
 	if len(req.RawParams) == 0 {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: req.Method + " missing params"}

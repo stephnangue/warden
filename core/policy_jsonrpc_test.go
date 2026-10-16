@@ -115,6 +115,14 @@ func TestParseJSONRPCStrict_Adversarial(t *testing.T) {
 		{"resources/read uri is array", `{"jsonrpc":"2.0","method":"resources/read","params":{"uri":["x"]}}`, ErrKindMalformedParams},
 		{"resources/read uri empty", `{"jsonrpc":"2.0","method":"resources/read","params":{"uri":""}}`, ErrKindMalformedParams},
 
+		// The Skills extension's URI-bearing methods answer to the resources
+		// family, so they carry the same shape requirement.
+		{"skills/get missing params", `{"jsonrpc":"2.0","method":"skills/get"}`, ErrKindMalformedParams},
+		{"skills/get missing params.uri", `{"jsonrpc":"2.0","method":"skills/get","params":{}}`, ErrKindMalformedParams},
+		{"skills/get uri is number", `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":1}}`, ErrKindMalformedParams},
+		{"resources/directory/read missing params.uri", `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"cursor":"x"}}`, ErrKindMalformedParams},
+		{"resources/directory/read uri is array", `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":["x"]}}`, ErrKindMalformedParams},
+
 		// prompts/get shape.
 		{"prompts/get missing params", `{"jsonrpc":"2.0","method":"prompts/get"}`, ErrKindMalformedParams},
 		{"prompts/get missing params.name", `{"jsonrpc":"2.0","method":"prompts/get","params":{}}`, ErrKindMalformedParams},
@@ -735,5 +743,28 @@ func TestParseJSONRPCStrict_ResourcesSubscribe(t *testing.T) {
 
 	if _, err := ParseJSONRPCStrict([]byte(`{"jsonrpc":"2.0","method":"resources/subscribe","params":{},"id":1}`)); err == nil {
 		t.Errorf("a subscribe with no uri must fail closed")
+	}
+}
+
+// skills/get and resources/directory/read name what they describe by URI, and
+// that URI must reach the descriptor for the resources family to gate it.
+// Without it, an allowed method would describe any skill or list any
+// directory.
+func TestParseJSONRPCStrict_SkillsURIMethods(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		{`{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/SKILL.md"},"id":1}`, "skill://pdf-processing/SKILL.md"},
+		{`{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing/templates","cursor":"c1"},"id":1}`, "skill://pdf-processing/templates"},
+	}
+	for _, tc := range cases {
+		reqs, err := ParseJSONRPCStrict([]byte(tc.body))
+		if err != nil {
+			t.Fatalf("expected no error for %s, got %v", tc.body, err)
+		}
+		if reqs[0].Name != tc.want {
+			t.Errorf("Name = %q, want %q", reqs[0].Name, tc.want)
+		}
 	}
 }

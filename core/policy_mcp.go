@@ -110,6 +110,24 @@ const mcpMethodSubscriptionsListen = "subscriptions/listen"
 // spelling would leave the leak reachable one method name over.
 const mcpMethodResourcesSubscribe = "resources/subscribe"
 
+// The Skills extension (SEP-2640) builds skills on the resources primitive:
+// every file of a skill is a resource, and a skill is addressed by the URI of
+// its SKILL.md. So both of its URI-bearing methods answer to the resources
+// family rather than to a family of their own. One grant covers fetching a
+// skill's entry and reading its files, and a skill the caller may not read
+// cannot be described one method name over.
+//
+//   - skills/get names a skill by params.uri and returns its entry: the
+//     frontmatter plus the URI, digest and size of every file. It is gated
+//     exactly as a read of that SKILL.md URI would be.
+//   - resources/directory/read names a directory by params.uri and lists its
+//     direct children. Enumerating a subtree is what resources/list filtering
+//     hides, so the directory URI is gated as a read would be.
+const (
+	mcpMethodSkillsGet              = "skills/get"
+	mcpMethodResourcesDirectoryRead = "resources/directory/read"
+)
+
 // ErrMCPPolicyDenied carries the MCPDecision that produced a deny so
 // the HTTP response layer can render the OAuth-shaped 403 body and the
 // WWW-Authenticate header. Unwraps to sdklogical.ErrPermissionDenied
@@ -205,7 +223,7 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 	switch method {
 	case mcpMethodToolsCall:
 		return set.DeniedTools, set.AllowedTools
-	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet:
 		return set.DeniedResources, set.AllowedResources
 	case mcpMethodPromptsGet:
 		return set.DeniedPrompts, set.AllowedPrompts
@@ -585,13 +603,15 @@ func isLifecycleMethod(method string) bool {
 }
 
 // isNameBearingMethod reports whether method carries a name gated by an
-// allowed_/denied_ family list (tools/call → tool name, resources/read →
-// uri, prompts/get → name). Under deny-by-default the name gate runs for
-// these methods whether or not the operator configured a family list, so
-// this predicate — not "is a list present" — drives the gate.
+// allowed_/denied_ family list (tools/call → tool name; resources/read,
+// resources/subscribe, resources/directory/read and skills/get → uri;
+// prompts/get → name). Under deny-by-default the name gate runs for these
+// methods whether or not the operator configured a family list, so this
+// predicate — not "is a list present" — drives the gate.
 func isNameBearingMethod(method string) bool {
 	switch method {
-	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodPromptsGet:
+	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodResourcesSubscribe,
+		mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet, mcpMethodPromptsGet:
 		return true
 	}
 	return false
@@ -772,7 +792,7 @@ func mcpDenyRuleTypeForName(method string) string {
 	switch method {
 	case mcpMethodToolsCall:
 		return mcpRuleTypeDeniedTools
-	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet:
 		return mcpRuleTypeDeniedResources
 	case mcpMethodPromptsGet:
 		return mcpRuleTypeDeniedPrompts
@@ -786,7 +806,7 @@ func mcpAllowRuleTypeForName(method string) string {
 	switch method {
 	case mcpMethodToolsCall:
 		return mcpRuleTypeAllowedTools
-	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet:
 		return mcpRuleTypeAllowedResources
 	case mcpMethodPromptsGet:
 		return mcpRuleTypeAllowedPrompts

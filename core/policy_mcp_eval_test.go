@@ -1533,6 +1533,165 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
 }
 
+// The Skills extension builds skills on resources, so skills/get and
+// resources/directory/read answer to the grant that governs reading the URI
+// they name. A skill or directory outside the grant is refused, not described.
+func TestMCPEval_SkillsURIMethods_AnswerToResourcesFamily(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/get", "resources/directory/read"] }
+  resources {
+    allowed = ["skill://pdf-processing/*"]
+    denied  = ["skill://pdf-processing/secret/*"]
+  }
+}
+`)
+
+	cases := []struct {
+		name     string
+		body     string
+		allowed  bool
+		ruleType string
+	}{
+		{
+			name:    "skills/get inside the grant",
+			body:    `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/SKILL.md"},"id":1}`,
+			allowed: true,
+		},
+		{
+			name:     "skills/get outside the grant",
+			body:     `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://git-workflow/SKILL.md"},"id":1}`,
+			ruleType: mcpRuleTypeAllowedResources,
+		},
+		{
+			name:     "skills/get under a denied prefix",
+			body:     `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/secret/SKILL.md"},"id":1}`,
+			ruleType: mcpRuleTypeDeniedResources,
+		},
+		{
+			// Matching is case-folded, so a case variant cannot step around a
+			// denied prefix. The upstream applies its own case rules to what
+			// Warden forwards.
+			name:     "skills/get case variant of a denied prefix",
+			body:     `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/SECRET/SKILL.md"},"id":1}`,
+			ruleType: mcpRuleTypeDeniedResources,
+		},
+		{
+			name:    "directory read inside the grant",
+			body:    `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing/templates"},"id":1}`,
+			allowed: true,
+		},
+		{
+			name:     "directory read outside the grant",
+			body:     `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://git-workflow"},"id":1}`,
+			ruleType: mcpRuleTypeAllowedResources,
+		},
+		{
+			// SEP-2640 writes a skill's root directory with no trailing slash,
+			// so "skill://pdf-processing/*" does not cover it. Browsing the
+			// root needs the literal granted too; widening to
+			// "skill://pdf-processing*" would also admit pdf-processing-evil.
+			name:     "directory read of the skill root is not covered by /*",
+			body:     `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing"},"id":1}`,
+			ruleType: mcpRuleTypeAllowedResources,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", tc.body), nil, false)
+			require.NotNil(t, res.MCPDecision)
+			if tc.allowed {
+				assert.True(t, res.Allowed)
+				// The allow is stamped by the resources gate, not by a
+				// method-only path.
+				assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+				return
+			}
+			assert.False(t, res.Allowed)
+			assert.Equal(t, tc.ruleType, res.MCPDecision.RuleType)
+		})
+	}
+}
+
+// Granting the skill root alongside its subtree is how an operator lets a
+// caller browse the skill directory itself.
+func TestMCPEval_DirectoryRead_SkillRootNeedsTheLiteral(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/directory/read"] }
+  resources { allowed = ["skill://pdf-processing", "skill://pdf-processing/*"] }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing"},"id":1}`)
+	assert.True(t, cbp.AllowOperation(testContext(), req, nil, false).Allowed)
+}
+
+// Deny-by-default holds for the new members of the family: a contract that
+// allows the methods but carries no resources block refuses every skill.
+// This is the behaviour change for contracts written before skills/get was
+// name-bearing.
+func TestMCPEval_SkillsGet_NoResourcesBlockDenies(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+}
+`)
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/SKILL.md"},"id":1}`,
+		`{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing"},"id":1}`,
+	} {
+		res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", body), nil, false)
+		assert.False(t, res.Allowed, body)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+	}
+}
+
+// Cross-set OR applies to skills as to any name-bearing call: one contract
+// granting the skill is enough, whatever another contract says.
+func TestMCPEval_SkillsGet_CrossSetOR(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/get"] }
+  resources { allowed = ["skill://git-workflow/*"] }
+}
+
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/get"] }
+  resources { allowed = ["skill://pdf-processing/*"] }
+}
+`)
+	skillsGet := func(uri string) *logical.Request {
+		return newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"`+uri+`"},"id":1}`)
+	}
+
+	// Each set grants one skill; both are reachable, so neither stanza
+	// shadows the other.
+	assert.True(t, cbp.AllowOperation(testContext(), skillsGet("skill://git-workflow/SKILL.md"), nil, false).Allowed)
+	assert.True(t, cbp.AllowOperation(testContext(), skillsGet("skill://pdf-processing/SKILL.md"), nil, false).Allowed)
+
+	res := cbp.AllowOperation(testContext(), skillsGet("skill://other/SKILL.md"), nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+}
+
 // A resources/list response is pruned by what a read would allow, not by what
 // a subscribe would — adding subscribe to the list-method map would prune
 // listings by the wrong gate.

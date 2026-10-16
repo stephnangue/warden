@@ -12,7 +12,8 @@ import (
 
 // MCP transport headers. From 2026-07-28 a client sends the protocol
 // revision on every request, plus a duplicate of the method it is calling and
-// — for the name-bearing methods — the name it is calling it on.
+// — for tools/call, resources/read and prompts/get — the name it is calling it
+// on.
 const (
 	mcpProtocolVersionHeader = "MCP-Protocol-Version"
 	mcpMethodHeader          = "Mcp-Method"
@@ -108,14 +109,18 @@ func validateMCPHeaders(req *logical.Request, desc *logical.MCPRequestDescriptor
 		return mcpHeaderDeny(headerMismatchMethod)
 	}
 
-	if requiresNameHeader(strings.ToLower(call.Method)) {
-		if rawHeaderName == "" {
-			if modern {
-				return mcpHeaderDeny(headerMismatchName)
-			}
-		} else if !headerNameMatches(rawHeaderName, call.Name) {
+	// Presence and match answer to different sets. The header is REQUIRED
+	// only where the transport declares it, but once sent it is held to the
+	// name Warden gated on every name-bearing method — skills/get and
+	// resources/subscribe included. A downstream routing on the header would
+	// otherwise act on a URI no contract was asked about.
+	lmethod := strings.ToLower(call.Method)
+	if rawHeaderName == "" {
+		if modern && requiresNameHeader(lmethod) {
 			return mcpHeaderDeny(headerMismatchName)
 		}
+	} else if isNameBearingMethod(lmethod) && !headerNameMatches(rawHeaderName, call.Name) {
+		return mcpHeaderDeny(headerMismatchName)
 	}
 
 	// The body may declare its own revision in params._meta, and when it does
@@ -161,12 +166,14 @@ func mcpHeaderDeny(reason string) *logical.MCPDecision {
 //
 // Deliberately NOT isNameBearingMethod. That one answers the policy layer's
 // question — which methods carry a name a contract gates — and includes
-// resources/subscribe, whose URI answers to the same grant a read does. The
-// transport header set is a different set of three. Conflating them would
-// demand a header no client sends (the go-sdk's Subscribe sends Mcp-Method
-// and no Mcp-Name), refusing every modern resources/subscribe as a mismatch.
-// What policy gates and what the transport declares are separate questions
-// that merely overlap.
+// resources/subscribe, resources/directory/read and skills/get, whose URIs
+// answer to the same grant a read does. The transport header set is a
+// different set of three. Conflating them would demand a header no client
+// sends (the go-sdk's Subscribe sends Mcp-Method and no Mcp-Name, and the
+// Skills extension defines no header at all), refusing every modern call to
+// those methods as a mismatch. What policy gates and what the transport
+// declares are separate questions that merely overlap — which is why a header
+// that IS sent is matched against the wider, policy-side set.
 func requiresNameHeader(method string) bool {
 	switch method {
 	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodPromptsGet:
