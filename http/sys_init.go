@@ -27,7 +27,7 @@ type InitRequest struct {
 	// The key must be base64-encoded from its original binary representation.
 	RootTokenPGPKey string `json:"root_token_pgp_key,omitempty"`
 
-	// StoredShares specifies the number of shares that should be encrypted by the HSM
+	// StoredShares specifies the number of shares that should be encrypted by the seal
 	// and stored for auto-unsealing. Currently must be the same as SecretShares.
 	// Only supported when using Auto Unseal.
 	StoredShares int `json:"stored_shares,omitempty"`

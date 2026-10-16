@@ -416,6 +416,30 @@ service_registration "consul" {
 	}
 }
 
+// TestDecodeConfig_PKCS11SealAttributesPruned verifies that a leftover
+// pkcs11 seal stanza still parses, but its HSM attributes — the PIN among
+// them — are dropped with a warning rather than kept on the seal.
+func TestDecodeConfig_PKCS11SealAttributesPruned(t *testing.T) {
+	w := &collectingWarner{}
+	cfg, err := decodeConfig("warden.hcl", []byte(`
+seal "pkcs11" {
+  lib   = "/usr/lib/softhsm/libsofthsm2.so"
+  slot  = "0"
+  pin   = "1234"
+  key_label = "warden"
+}
+`), w)
+	require.NoError(t, err)
+	require.Len(t, cfg.Seals, 1)
+	assert.Equal(t, "pkcs11", cfg.Seals[0].Type)
+	assert.Equal(t, map[string]string{"type": "pkcs11"}, cfg.Seals[0].Config())
+
+	joined := strings.Join(w.msgs, "\n")
+	for _, attr := range []string{"lib", "slot", "pin", "key_label"} {
+		assert.Contains(t, joined, `unknown attribute "`+attr+`"`)
+	}
+}
+
 func TestLoadConfigDir_KeylessEnforcementLevel(t *testing.T) {
 	base := `
 storage "postgres" {

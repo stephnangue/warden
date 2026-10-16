@@ -75,6 +75,11 @@ func configureWrapper(configKMS *config.KMS, infoKeys *[]string, info *map[strin
 	case statickms.Type:
 		wrapper, kmsInfo, err = GetStaticKMSFunc(configKMS, opts...)
 
+	case "pkcs11":
+		// Never supported. An HSM-held key is reachable through the transit
+		// seal, against a Transit key backed by an HSM external key.
+		return nil, fmt.Errorf(`seal type "pkcs11" is not supported; use seal "transit" against a Transit key backed by an HSM external key`)
+
 	default:
 		return nil, fmt.Errorf("unknown KMS type %q", configKMS.Type)
 	}
