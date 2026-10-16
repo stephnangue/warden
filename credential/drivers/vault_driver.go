@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/hashicorp/vault/api"
 	"github.com/openbao/openbao/sdk/v2/helper/consts"
 	"github.com/stephnangue/warden/credential"
@@ -19,7 +20,8 @@ import (
 // authenticates to the upstream Vault/OpenBao. approle holds a long-lived secret_id
 // (rotatable); oidc_federation holds no secret and authenticates per request by
 // exchanging a caller-presented Warden identity assertion at Vault's JWT auth method.
-// An empty auth_method means a pre-set/environment token.
+// An empty auth_method means the server environment's token; writes refuse it, so
+// only a source stored before auth_method became required can still have one.
 const (
 	vaultAuthMethodApprole        = "approle"
 	vaultAuthMethodOIDCFederation = "oidc_federation"
@@ -61,26 +63,14 @@ func (f *VaultDriverFactory) Type() string {
 }
 
 // Create instantiates a new VaultDriver
-func (f *VaultDriverFactory) Create(config credential.Config, logger *logger.GatedLogger) (credential.SourceDriver, error) {
-	// Parse config values
-	vaultAddress := credential.GetString(config, "vault_address", "")
-	vaultNamespace := credential.GetString(config, "vault_namespace", "")
+func (f *VaultDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	authMethod := credential.GetString(config, "auth_method", "")
 
-	apiCfg := api.DefaultConfig()
-	apiCfg.Address = vaultAddress
-
-	apiClient, err := api.NewClient(apiCfg)
+	apiClient, err := newVaultAPIClient(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Vault client: %w", err)
+		return nil, err
 	}
 
-	// Set namespace if provided
-	if vaultNamespace != "" {
-		apiClient.SetNamespace(vaultNamespace)
-	}
-
-	// Authenticate if auth_method is provided
 	credSource := &credential.CredSource{
 		Type:   credential.SourceTypeVault,
 		Config: config,
@@ -96,8 +86,14 @@ func (f *VaultDriverFactory) Create(config credential.Config, logger *logger.Gat
 	driver := &VaultDriver{
 		vault:      apiClient,
 		credSource: credSource,
-		logger:     logger.WithSubsystem(credential.SourceTypeVault),
+		logger:     log.WithSubsystem(credential.SourceTypeVault),
 		httpClient: httpClient,
+	}
+
+	if authMethod == "" {
+		driver.logger.Warn("vault source has no auth_method and logs in with the server environment's VAULT_TOKEN; "+
+			"set auth_method, which any edit of this source now requires",
+			logger.String("vault_address", credential.GetString(config, "vault_address", "")))
 	}
 
 	// Perform initial authentication
@@ -129,89 +125,171 @@ func (f *VaultDriverFactory) Create(config credential.Config, logger *logger.Gat
 	return driver, nil
 }
 
+// vaultAPITimeout bounds each request the source's Vault client makes, as the
+// library's own default does.
+const vaultAPITimeout = 60 * time.Second
+
+// newVaultAPIClient builds the source's Vault client from the source config alone.
+//
+// It never starts from api.DefaultConfig, which reads the server process's
+// VAULT_* environment: VAULT_SKIP_VERIFY and VAULT_CACERT would set this
+// source's TLS trust, VAULT_AGENT_ADDR would send its requests elsewhere, and
+// ConfigureTLS cannot undo either, since it only ever adds settings. api.NewClient
+// still reads VAULT_TOKEN, VAULT_NAMESPACE and VAULT_HEADERS whatever Config it is
+// given, so those are cleared after it returns, and the wrapping lookup is pinned
+// so VAULT_WRAP_TTL cannot wrap a response the driver then fails to read.
+//
+// A source with no auth_method is the exception: it has no credential of its
+// own and logs in with the environment's VAULT_TOKEN, so it keeps the
+// environment-derived client. Writes refuse to create such a source, and refuse
+// to edit one until it sets auth_method; a stored one keeps minting meanwhile.
+func newVaultAPIClient(config credential.Config) (*api.Client, error) {
+	address := credential.GetString(config, "vault_address", "")
+	namespace := credential.GetString(config, "vault_namespace", "")
+
+	if credential.GetString(config, "auth_method", "") == "" {
+		apiCfg := api.DefaultConfig()
+		apiCfg.Address = address
+		client, err := api.NewClient(apiCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Vault client: %w", err)
+		}
+		pinNoResponseWrapping(client)
+		if namespace != "" {
+			client.SetNamespace(namespace)
+		}
+		return client, nil
+	}
+
+	httpClient, err := BuildHTTPClient(config, vaultAPITimeout)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	// The library handles redirects itself — one hop, never https to http — and
+	// expects net/http not to follow them first, as api.DefaultConfig arranges.
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	client, err := api.NewClient(&api.Config{
+		Address:    address,
+		HttpClient: httpClient,
+		Timeout:    vaultAPITimeout,
+		MaxRetries: 2,
+		Backoff:    retryablehttp.RateLimitLinearJitterBackoff,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Vault client: %w", err)
+	}
+	client.ClearToken()
+	client.ClearNamespace()
+	client.SetHeaders(http.Header{api.RequestHeaderName: []string{"true"}})
+	pinNoResponseWrapping(client)
+	if namespace != "" {
+		client.SetNamespace(namespace)
+	}
+	return client, nil
+}
+
+// pinNoResponseWrapping stops VAULT_WRAP_TTL from wrapping this client's
+// responses: with no lookup of its own, the library consults that variable on
+// every request, and a wrapped response hides the secret the driver reads. A
+// clone does not inherit the lookup, so each clone is pinned again.
+func pinNoResponseWrapping(client *api.Client) {
+	client.SetWrappingLookupFunc(func(string, string) string { return "" })
+}
+
 // ValidateConfig validates Vault driver configuration using declarative schema
 func (f *VaultDriverFactory) ValidateConfig(config credential.Config) error {
-	// Validate vault_address with custom URL validation
+	// auth_method is required: without one the source would log in with the
+	// server environment's VAULT_TOKEN, sending Warden's own token to whatever
+	// vault_address the source's author chose. Only a source stored before this
+	// rule can still lack one (see newVaultAPIClient).
 	if err := credential.ValidateSchema(config,
 		credential.StringField("vault_address").
 			Required().
 			Custom(validateVaultAddress).
 			Describe("Vault server address").
 			Example("https://vault.example.com"),
+
+		credential.StringField("auth_method").
+			Required().
+			OneOf(vaultAuthMethodApprole, vaultAuthMethodOIDCFederation).
+			Describe("Authentication method: 'approle' (secret_id) or 'oidc_federation' (keyless JWT auth)").
+			Example(vaultAuthMethodOIDCFederation),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example(""),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification, and allow an http:// vault_address (development only)").
+			Example("false"),
 	); err != nil {
 		return err
 	}
+	if !credential.GetBool(config, "tls_skip_verify", false) &&
+		strings.HasPrefix(strings.ToLower(credential.GetString(config, "vault_address", "")), "http://") {
+		return fmt.Errorf("vault_address must use https:// (set tls_skip_verify=true for a development server over http://)")
+	}
 
-	// Validate auth_method if provided
 	authMethod := credential.GetString(config, "auth_method", "")
-	if authMethod != "" {
+	switch authMethod {
+	case vaultAuthMethodApprole:
+		// AppRole requires the login + rotation fields.
 		if err := credential.ValidateSchema(config,
-			credential.StringField("auth_method").
-				OneOf(vaultAuthMethodApprole, vaultAuthMethodOIDCFederation).
-				Describe("Authentication method: 'approle' (secret_id) or 'oidc_federation' (keyless JWT auth)").
-				Example(vaultAuthMethodApprole),
+			credential.StringField("role_id").
+				Required().
+				Describe("AppRole role ID").
+				Example("role-id-uuid"),
+
+			credential.StringField("secret_id").
+				Required().
+				Describe("AppRole secret ID").
+				Example("secret-id-uuid"),
+
+			credential.StringField("approle_mount").
+				Required().
+				Describe("AppRole auth mount path").
+				Example("approle"),
+
+			credential.StringField("role_name").
+				Required().
+				Describe("AppRole role name for rotation").
+				Example("warden-source-role"),
 		); err != nil {
 			return err
 		}
-
-		switch authMethod {
-		case vaultAuthMethodApprole:
-			// AppRole requires the login + rotation fields.
-			if err := credential.ValidateSchema(config,
-				credential.StringField("role_id").
-					Required().
-					Describe("AppRole role ID").
-					Example("role-id-uuid"),
-
-				credential.StringField("secret_id").
-					Required().
-					Describe("AppRole secret ID").
-					Example("secret-id-uuid"),
-
-				credential.StringField("approle_mount").
-					Required().
-					Describe("AppRole auth mount path").
-					Example("approle"),
-
-				credential.StringField("role_name").
-					Required().
-					Describe("AppRole role name for rotation").
-					Example("warden-source-role"),
-			); err != nil {
-				return err
+		// Reject keyless-federation config on an approle source so a
+		// misconfiguration cannot silently mix modes.
+		for _, k := range []string{"jwt_role", "jwt_mount", "audience"} {
+			if config.Get(k) != "" {
+				return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, vaultAuthMethodOIDCFederation)
 			}
-			// Reject keyless-federation config on an approle source so a
-			// misconfiguration cannot silently mix modes.
-			for _, k := range []string{"jwt_role", "jwt_mount", "audience"} {
-				if config.Get(k) != "" {
-					return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, vaultAuthMethodOIDCFederation)
-				}
-			}
+		}
 
-		case vaultAuthMethodOIDCFederation:
-			// Keyless: the source holds no secret and authenticates per request by
-			// exchanging a Warden identity assertion at Vault's JWT auth method.
-			if err := credential.ValidateSchema(config,
-				credential.StringField("jwt_role").
-					Required().
-					Describe("Vault JWT-auth role name the assertion logs in as").
-					Example("warden-agents"),
+	case vaultAuthMethodOIDCFederation:
+		// Keyless: the source holds no secret and authenticates per request by
+		// exchanging a Warden identity assertion at Vault's JWT auth method.
+		if err := credential.ValidateSchema(config,
+			credential.StringField("jwt_role").
+				Required().
+				Describe("Vault JWT-auth role name the assertion logs in as").
+				Example("warden-agents"),
 
-				credential.StringField("jwt_mount").
-					Describe("Vault JWT/OIDC auth mount path (default 'jwt')").
-					Example("jwt"),
+			credential.StringField("jwt_mount").
+				Describe("Vault JWT/OIDC auth mount path (default 'jwt')").
+				Example("jwt"),
 
-				credential.StringField("audience").
-					Describe("Assertion audience; must equal the Vault role's bound_audiences").
-					Example("https://vault.example.com/warden"),
-			); err != nil {
-				return err
-			}
-			// Reject approle/token secrets on a keyless source (symmetric guard).
-			for _, k := range []string{"role_id", "secret_id", "secret_id_accessor", "approle_mount", "role_name", "token"} {
-				if config.Get(k) != "" {
-					return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, vaultAuthMethodOIDCFederation)
-				}
+			credential.StringField("audience").
+				Describe("Assertion audience; must equal the Vault role's bound_audiences").
+				Example("https://vault.example.com/warden"),
+		); err != nil {
+			return err
+		}
+		// Reject approle/token secrets on a keyless source (symmetric guard).
+		for _, k := range []string{"role_id", "secret_id", "secret_id_accessor", "approle_mount", "role_name", "token"} {
+			if config.Get(k) != "" {
+				return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, vaultAuthMethodOIDCFederation)
 			}
 		}
 	}
@@ -572,6 +650,7 @@ func (d *VaultDriver) loginViaJWT(ctx context.Context, spec *credential.CredSpec
 		return nil, nil, fmt.Errorf("vault: failed to clone client for JWT login: %w", err)
 	}
 	client.SetToken("")
+	pinNoResponseWrapping(client)
 
 	jwtRole := d.effectiveJWTRole(spec)
 	if jwtRole == "" {

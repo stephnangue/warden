@@ -653,7 +653,7 @@ warden_api PUT "vault/config" \
 # 9c. Create credential source (AppRole auth to Vault dev server)
 echo "  Creating credential source 'vault-e2e'..."
 warden_api POST "sys/cred/sources/vault-e2e" \
-  "{\"type\":\"hvault\",\"rotation_period\":300,\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"approle\",\"role_id\":\"$VAULT_APPROLE_ROLE_ID\",\"secret_id\":\"$VAULT_APPROLE_SECRET_ID\",\"approle_mount\":\"e2e_approle\",\"role_name\":\"warden-e2e-role\"}}"
+  "{\"type\":\"hvault\",\"rotation_period\":300,\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"auth_method\":\"approle\",\"role_id\":\"$VAULT_APPROLE_ROLE_ID\",\"secret_id\":\"$VAULT_APPROLE_SECRET_ID\",\"approle_mount\":\"e2e_approle\",\"role_name\":\"warden-e2e-role\"}}"
 
 # 9c-bis. Keyless federation source, for credential chaining.
 #
@@ -661,7 +661,7 @@ warden_api POST "sys/cred/sources/vault-e2e" \
 # session to rotate, and the driver rejects the AppRole fields outright.
 echo "  Creating credential source 'vault-fed-e2e' (OIDC federation)..."
 warden_api POST "sys/cred/sources/vault-fed-e2e" \
-  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-fed\",\"jwt_mount\":\"jwt\"}}"
+  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-fed\",\"jwt_mount\":\"jwt\"}}"
 
 # 9d. Create credential spec (mint Vault tokens via token role)
 echo "  Creating credential spec 'vault-token-reader'..."
@@ -773,7 +773,7 @@ vault_api POST "auth/jwt-warden/role/warden-e2e-warden-fed" \
 # spec need not repeat assertion_audience: the driver derives it from here.
 echo "  Creating credential source 'vault-warden-fed-e2e' (Warden-identity federation)..."
 warden_api POST "sys/cred/sources/vault-warden-fed-e2e" \
-  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-warden-fed\",\"jwt_mount\":\"jwt-warden\",\"audience\":\"https://vault.e2e.warden\"}}"
+  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-warden-fed\",\"jwt_mount\":\"jwt-warden\",\"audience\":\"https://vault.e2e.warden\"}}"
 
 # Step 10: Verify Vault integration
 echo ""

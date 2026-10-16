@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,24 +60,8 @@ func readSpecForTest(t *testing.T, backend *SystemBackend, ctx context.Context, 
 func TestStoredSecrets_SourceReadAndList(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	createSourceForTest(t, backend, ctx, map[string]interface{}{
-		"name":            "keyed",
-		"type":            "hvault",
-		"rotation_period": 86400,
-		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
-			"secret_id":     "real-secret-id",
-		},
-	})
-	createSourceForTest(t, backend, ctx, map[string]interface{}{
-		"name": "keyless",
-		"type": "hvault",
-		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
-			"auth_method":   "oidc_federation",
-			"jwt_role":      "agents",
-		},
-	})
+	createSourceForTest(t, backend, ctx, keyedHvaultSource("keyed"))
+	createSourceForTest(t, backend, ctx, keylessHvaultSource("keyless"))
 
 	keyed := readSourceForTest(t, backend, ctx, "keyed")
 	assert.Equal(t, []string{"secret_id"}, keyed["stored_secrets"])
@@ -139,19 +125,15 @@ func TestStoredSecrets_SpecReadAndList(t *testing.T) {
 func TestStoredSecrets_ClearedSecretReadsBackEmpty(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	createSourceForTest(t, backend, ctx, map[string]interface{}{
-		"name":            "vault-src",
-		"type":            "hvault",
-		"rotation_period": 86400,
-		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
-			"secret_id":     "real-secret-id",
-		},
-	})
+	// token is masked like secret_id but optional beside approle, so it can be
+	// cleared on its own.
+	keyed := keyedHvaultSource("vault-src")
+	keyed["config"].(map[string]interface{})["token"] = "real-token"
+	createSourceForTest(t, backend, ctx, keyed)
 
 	updateRaw := map[string]interface{}{
 		"name":   "vault-src",
-		"config": map[string]interface{}{"secret_id": ""},
+		"config": map[string]interface{}{"token": ""},
 	}
 	resp, err := backend.handleCredentialSourceUpdate(ctx,
 		createTestRequest(logical.UpdateOperation, "cred/sources/vault-src", updateRaw),
@@ -160,8 +142,42 @@ func TestStoredSecrets_ClearedSecretReadsBackEmpty(t *testing.T) {
 	require.Equalf(t, http.StatusOK, resp.StatusCode, "update: %+v", resp.Data)
 
 	data := readSourceForTest(t, backend, ctx, "vault-src")
-	assert.Equal(t, "", data["config"].(map[string]string)["secret_id"])
-	// No auth_method and no stored secret: the source falls back to the token in
-	// the server's environment, which is still reported.
+	assert.Equal(t, "", data["config"].(map[string]string)["token"])
+	assert.Equal(t, maskValue, data["config"].(map[string]string)["secret_id"])
+	assert.Equal(t, []string{"secret_id"}, data["stored_secrets"])
+}
+
+// A source stored before auth_method became required has no credential of its
+// own and logs in with the server environment's token. It still loads and reads
+// back, the environment token is reported as the secret it holds, and an edit is
+// refused until it sets auth_method — which is what stops an edit from pointing
+// that token at a new vault_address.
+func TestStoredSecrets_LegacyEnvTokenSource(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	ns, err := namespace.FromContext(ctx)
+	require.NoError(t, err)
+	require.NoError(t, backend.core.credConfigStore.persistSource(ns.UUID, &credential.CredSource{
+		Name:   "legacy",
+		Type:   "hvault",
+		Config: credential.NewConfig(map[string]string{"vault_address": "https://vault.example.com"}),
+	}))
+
+	data := readSourceForTest(t, backend, ctx, "legacy")
 	assert.Equal(t, []string{"vault token from the server environment"}, data["stored_secrets"])
+
+	updateRaw := map[string]interface{}{
+		"name":   "legacy",
+		"config": map[string]interface{}{"vault_address": "https://elsewhere.example.com"},
+	}
+	resp, err := backend.handleCredentialSourceUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/sources/legacy", updateRaw),
+		createFieldData(backend.pathCredentials()[0].Fields, updateRaw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "%+v", resp.Data)
+	assert.Contains(t, resp.Err.Error(), "auth_method")
+
+	stored, err := backend.core.credConfigStore.GetSource(ctx, "legacy")
+	require.NoError(t, err)
+	assert.Equal(t, "https://vault.example.com", stored.Config.Get("vault_address"), "the refused edit changed nothing")
 }

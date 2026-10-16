@@ -69,11 +69,12 @@ var vaultEnv = h.ProviderEnv{
 	CredType:   "vault_token",
 	SourceType: "hvault",
 	SourceConfig: map[string]string{
-		"vault_address": vaultAddr,
-		"auth_method":   "approle",
-		"role_id":       vaultRoleID,
-		"secret_id":     vaultSecretID,
-		"approle_mount": vaultApproleMount,
+		"vault_address":   vaultAddr,
+		"tls_skip_verify": "true",
+		"auth_method":     "approle",
+		"role_id":         vaultRoleID,
+		"secret_id":       vaultSecretID,
+		"approle_mount":   vaultApproleMount,
 		// Required for the source to be rotatable at all, and the store refuses an
 		// approle source that is not.
 		"role_name": vaultApproleRole,
@@ -483,7 +484,7 @@ func setupVaultRotationEnv(t *testing.T) {
 
 	mustWrite("sys/cred/sources/"+vaultRotSource, `{
 		"type":"hvault","rotation_period":15,
-		"config":{"vault_address":"`+vaultAddr+`","auth_method":"approle",
+		"config":{"vault_address":"`+vaultAddr+`","tls_skip_verify":true,"auth_method":"approle",
 			"role_id":"`+vaultRotRoleID+`","secret_id":"`+vaultRotSecretID+`",
 			"approle_mount":"`+vaultApproleMount+`","role_name":"`+vaultRotApproleRole+`"}}`,
 		"create the rotating source")

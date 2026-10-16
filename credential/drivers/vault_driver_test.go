@@ -2,9 +2,13 @@ package drivers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,16 +42,50 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		errMsg  string
 	}{
 		{
-			name: "valid minimal config (no auth)",
+			// Without one the client would log in with the server environment's
+			// VAULT_TOKEN, sent to whatever vault_address this config names.
+			name: "auth_method is required",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
+			}),
+			wantErr: true,
+			errMsg:  "auth_method",
+		},
+		{
+			name: "http vault_address is refused without tls_skip_verify",
 			config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
+				"auth_method":   "oidc_federation",
+				"jwt_role":      "warden-agents",
+			}),
+			wantErr: true,
+			errMsg:  "https://",
+		},
+		{
+			name: "http vault_address is accepted with tls_skip_verify",
+			config: credential.NewConfig(map[string]string{
+				"vault_address":   "http://127.0.0.1:8200",
+				"tls_skip_verify": "true",
+				"auth_method":     "oidc_federation",
+				"jwt_role":        "warden-agents",
 			}),
 			wantErr: false,
 		},
 		{
+			name: "ca_data must be base64 PEM",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
+				"auth_method":   "oidc_federation",
+				"jwt_role":      "warden-agents",
+				"ca_data":       "not base64!",
+			}),
+			wantErr: true,
+			errMsg:  "ca_data",
+		},
+		{
 			name: "valid config with approle auth",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
@@ -59,8 +97,10 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "valid config with namespace",
 			config: credential.NewConfig(map[string]string{
-				"vault_address":   "http://127.0.0.1:8200",
+				"vault_address":   "https://127.0.0.1:8200",
 				"vault_namespace": "admin/team",
+				"auth_method":     "oidc_federation",
+				"jwt_role":        "warden-agents",
 			}),
 			wantErr: false,
 		},
@@ -73,7 +113,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "unsupported auth_method",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "userpass",
 			}),
 			wantErr: true,
@@ -82,7 +122,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "approle missing role_id",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"secret_id":     "test-secret-id",
 				"approle_mount": "warden_approle",
@@ -94,7 +134,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "approle missing secret_id",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"approle_mount": "warden_approle",
@@ -106,7 +146,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "approle missing approle_mount",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
@@ -118,7 +158,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "approle missing role_name",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
@@ -130,7 +170,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "valid oidc_federation config",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "oidc_federation",
 				"jwt_role":      "warden-agents",
 				"jwt_mount":     "jwt",
@@ -141,7 +181,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "oidc_federation missing jwt_role",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "oidc_federation",
 			}),
 			wantErr: true,
@@ -150,7 +190,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "oidc_federation rejects approle secret_id",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "oidc_federation",
 				"jwt_role":      "warden-agents",
 				"secret_id":     "leftover",
@@ -161,7 +201,7 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 		{
 			name: "approle rejects federation jwt_role",
 			config: credential.NewConfig(map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
@@ -1373,4 +1413,129 @@ func TestVaultDriver_StaticKVSecret_Version(t *testing.T) {
 		assert.Contains(t, err.Error(), "version 42")
 		assert.Contains(t, err.Error(), "deleted")
 	})
+}
+
+// vaultEnvRecorder is a Vault stand-in that records the headers of the last request
+// and answers a JWT login and any read.
+type vaultEnvRecorder struct {
+	mu   sync.Mutex
+	last http.Header
+}
+
+func (v *vaultEnvRecorder) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v.mu.Lock()
+		v.last = r.Header.Clone()
+		v.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/login") {
+			_, _ = w.Write([]byte(`{"auth":{"client_token":"s.login","accessor":"acc","lease_duration":60}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+	})
+}
+
+func (v *vaultEnvRecorder) lastHeader() http.Header {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.last
+}
+
+// setVaultEnvironment fills every VAULT_* variable that could steer, widen or
+// authenticate a client built from the process environment.
+func setVaultEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("VAULT_TOKEN", "hvs.server-token")
+	t.Setenv("VAULT_NAMESPACE", "tenant-from-the-environment")
+	t.Setenv("VAULT_HEADERS", `{"X-Leak":"from-the-environment"}`)
+	t.Setenv("VAULT_AGENT_ADDR", "http://127.0.0.1:1")
+	t.Setenv("VAULT_WRAP_TTL", "5m")
+	t.Setenv("VAULT_SKIP_VERIFY", "true")
+}
+
+func caDataFor(srv *httptest.Server) string {
+	return base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}))
+}
+
+// A source's Vault client is built from the source's config alone. The server
+// process's VAULT_* environment would otherwise send the server's own token, and its
+// headers and namespace, to the vault_address the source's author chose, steer the
+// request to an agent address, wrap the response, and switch TLS verification off.
+func TestNewVaultAPIClient_IgnoresTheServerEnvironment(t *testing.T) {
+	setVaultEnvironment(t)
+	rec := &vaultEnvRecorder{}
+	srv := httptest.NewTLSServer(rec.handler())
+	t.Cleanup(srv.Close)
+
+	federated := func(extra map[string]string) credential.Config {
+		m := map[string]string{
+			"vault_address": srv.URL,
+			"auth_method":   vaultAuthMethodOIDCFederation,
+			"jwt_role":      "agents",
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return credential.NewConfig(m)
+	}
+
+	t.Run("VAULT_SKIP_VERIFY does not switch verification off", func(t *testing.T) {
+		client, err := newVaultAPIClient(federated(nil))
+		require.NoError(t, err)
+		_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "certificate")
+	})
+
+	t.Run("ca_data is honoured and nothing from the environment is sent", func(t *testing.T) {
+		client, err := newVaultAPIClient(federated(map[string]string{"ca_data": caDataFor(srv)}))
+		require.NoError(t, err)
+		_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+		require.NoError(t, err, "the request must reach vault_address, not VAULT_AGENT_ADDR")
+
+		got := rec.lastHeader()
+		assert.Empty(t, got.Get("X-Vault-Token"), "the server's VAULT_TOKEN left the process")
+		assert.Empty(t, got.Get("X-Vault-Namespace"))
+		assert.Empty(t, got.Get("X-Leak"))
+		assert.Empty(t, got.Get("X-Vault-Wrap-TTL"))
+		assert.Equal(t, "true", got.Get(api.RequestHeaderName))
+	})
+
+	t.Run("vault_namespace still applies", func(t *testing.T) {
+		client, err := newVaultAPIClient(federated(map[string]string{"ca_data": caDataFor(srv), "vault_namespace": "team"}))
+		require.NoError(t, err)
+		_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+		require.NoError(t, err)
+		assert.Equal(t, "team", rec.lastHeader().Get("X-Vault-Namespace"))
+	})
+
+	t.Run("the per-request JWT login clone stays isolated", func(t *testing.T) {
+		raw, err := (&VaultDriverFactory{}).Create(federated(map[string]string{"ca_data": caDataFor(srv)}), testGatedLogger())
+		require.NoError(t, err)
+		d := raw.(*VaultDriver)
+		_, _, err = d.loginViaJWT(context.Background(), &credential.CredSpec{Config: credential.NewConfig(nil)}, "assertion")
+		require.NoError(t, err)
+
+		got := rec.lastHeader()
+		assert.Empty(t, got.Get("X-Vault-Token"))
+		assert.Empty(t, got.Get("X-Vault-Wrap-TTL"), "a clone does not inherit the pinned wrapping lookup")
+		assert.Empty(t, got.Get("X-Leak"))
+	})
+}
+
+// A source stored before auth_method became required has no credential but the
+// environment's token, so it keeps the environment-derived client and keeps minting.
+// Writes refuse such a source, so no new one can point that token anywhere.
+func TestNewVaultAPIClient_LegacySourceKeepsTheEnvironmentToken(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "hvs.server-token")
+	rec := &vaultEnvRecorder{}
+	srv := httptest.NewServer(rec.handler())
+	t.Cleanup(srv.Close)
+
+	client, err := newVaultAPIClient(credential.NewConfig(map[string]string{"vault_address": srv.URL}))
+	require.NoError(t, err)
+	_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+	require.NoError(t, err)
+	assert.Equal(t, "hvs.server-token", rec.lastHeader().Get("X-Vault-Token"))
 }
