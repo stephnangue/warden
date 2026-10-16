@@ -113,6 +113,17 @@ type KMS struct {
 	Purpose  []string `hcl:"purpose,optional"`
 	Disabled string   `hcl:"disabled,optional"`
 
+	// Keys read by more than one seal type. Each HCL key must be declared on
+	// exactly one field: the decoder maps a key to a single field, so a
+	// second declaration silently steals the value from the first.
+	KeyName   string `hcl:"key_name,optional"`   // transit, azurekeyvault
+	KeyID     string `hcl:"key_id,optional"`     // ocikms
+	KmsKeyID  string `hcl:"kms_key_id,optional"` // awskms, kmip, alicloudkms
+	Region    string `hcl:"region,optional"`     // awskms, gcpkms, alicloudkms
+	Endpoint  string `hcl:"endpoint,optional"`   // awskms, kmip
+	AccessKey string `hcl:"access_key,optional"` // awskms, alicloudkms
+	SecretKey string `hcl:"secret_key,optional"` // awskms, alicloudkms
+
 	// config for static seal
 	CurrentKeyID  string `hcl:"current_key_id,optional"`
 	CurrentKey    string `hcl:"current_key,optional"`
@@ -122,11 +133,12 @@ type KMS struct {
 	// config for transit seal
 	Address        string `hcl:"address,optional"`
 	Token          string `hcl:"token,optional"`
-	KeyName        string `hcl:"key_name,optional"`
 	MountPath      string `hcl:"mount_path,optional"`
 	Namespace      string `hcl:"namespace,optional"`
 	DisableRenewal string `hcl:"disable_renewal,optional"`
+	KeyIDPrefix    string `hcl:"key_id_prefix,optional"`
 	TlsCaCert      string `hcl:"tls_ca_cert,optional"`
+	TlsCaPath      string `hcl:"tls_ca_path,optional"`
 	TlsClientCert  string `hcl:"tls_client_cert,optional"`
 	TlsClientKey   string `hcl:"tls_client_key,optional"`
 	TlsServerName  string `hcl:"tls_server_name,optional"`
@@ -136,11 +148,8 @@ type KMS struct {
 	CryptoEndpoint     string `hcl:"crypto_endpoint,optional"`
 	ManagementEndpoint string `hcl:"management_endpoint,optional"`
 	AuthTypeApiKey     bool   `hcl:"auth_type_api_key,optional"`
-	OciKeyID           string `hcl:"key_id,optional"`
 
 	// config for kmip seal
-	KmsKeyId    string `hcl:"kms_key_id,optional"`
-	Endpoint    string `hcl:"endpoint,optional"`
 	ClientCert  string `hcl:"client_cert,optional"`
 	ClientKey   string `hcl:"client_key,optional"`
 	CaCert      string `hcl:"ca_cert,optional"`
@@ -152,7 +161,6 @@ type KMS struct {
 	// config for gcpkms seal
 	Credentials string `hcl:"credentials,optional"`
 	Project     string `hcl:"project,optional"`
-	Region      string `hcl:"region,optional"`
 	KeyRing     string `hcl:"key_ring,optional"`
 	CryptoKey   string `hcl:"crypto_key,optional"`
 
@@ -162,16 +170,13 @@ type KMS struct {
 	ClientSecret string `hcl:"client_secret,optional"`
 	Env          string `hcl:"environment,optional"`
 	VaultName    string `hcl:"vault_name,optional"`
-	AzureKeyName string `hcl:"key_name,optional"`
-	Resource     int    `hcl:"resource,optional"`
+	Resource     string `hcl:"resource,optional"` // DNS suffix of the vault endpoint, e.g. vault.azure.net
 
 	// config for awskms seal
-	AwsRegion    string `hcl:"region,optional"`
-	AccessKey    string `hcl:"access_key,optional"`
 	SessionToken string `hcl:"session_token,optional"`
-	SecretKey    string `hcl:"secret_key,optional"`
-	KmsKeyID     string `hcl:"kms_key_id,optional"`
-	AWSEndpoint  string `hcl:"endpoint,optional"`
+
+	// config for alicloudkms seal
+	Domain string `hcl:"domain,optional"`
 }
 
 // Config returns the KMS configuration as a map
@@ -191,6 +196,29 @@ func (k *KMS) Config() map[string]string {
 	// Add disabled flag if present
 	if k.Disabled != "" {
 		config["disabled"] = k.Disabled
+	}
+
+	// Keys shared across seal types, under the names the wrappers read
+	if k.KeyName != "" {
+		config["key_name"] = k.KeyName
+	}
+	if k.KeyID != "" {
+		config["key_id"] = k.KeyID
+	}
+	if k.KmsKeyID != "" {
+		config["kms_key_id"] = k.KmsKeyID
+	}
+	if k.Region != "" {
+		config["region"] = k.Region
+	}
+	if k.Endpoint != "" {
+		config["endpoint"] = k.Endpoint
+	}
+	if k.AccessKey != "" {
+		config["access_key"] = k.AccessKey
+	}
+	if k.SecretKey != "" {
+		config["secret_key"] = k.SecretKey
 	}
 
 	// Static seal config
@@ -214,9 +242,6 @@ func (k *KMS) Config() map[string]string {
 	if k.Token != "" {
 		config["token"] = k.Token
 	}
-	if k.KeyName != "" {
-		config["key_name"] = k.KeyName
-	}
 	if k.MountPath != "" {
 		config["mount_path"] = k.MountPath
 	}
@@ -226,8 +251,14 @@ func (k *KMS) Config() map[string]string {
 	if k.DisableRenewal != "" {
 		config["disable_renewal"] = k.DisableRenewal
 	}
+	if k.KeyIDPrefix != "" {
+		config["key_id_prefix"] = k.KeyIDPrefix
+	}
 	if k.TlsCaCert != "" {
 		config["tls_ca_cert"] = k.TlsCaCert
+	}
+	if k.TlsCaPath != "" {
+		config["tls_ca_path"] = k.TlsCaPath
 	}
 	if k.TlsClientCert != "" {
 		config["tls_client_cert"] = k.TlsClientCert
@@ -252,17 +283,8 @@ func (k *KMS) Config() map[string]string {
 	if k.AuthTypeApiKey {
 		config["auth_type_api_key"] = "true"
 	}
-	if k.OciKeyID != "" {
-		config["oci_key_id"] = k.OciKeyID
-	}
 
 	// KMIP seal config
-	if k.KmsKeyId != "" {
-		config["kms_key_id"] = k.KmsKeyId
-	}
-	if k.Endpoint != "" {
-		config["endpoint"] = k.Endpoint
-	}
 	if k.ClientCert != "" {
 		config["client_cert"] = k.ClientCert
 	}
@@ -292,9 +314,6 @@ func (k *KMS) Config() map[string]string {
 	if k.Project != "" {
 		config["project"] = k.Project
 	}
-	if k.Region != "" {
-		config["region"] = k.Region
-	}
 	if k.KeyRing != "" {
 		config["key_ring"] = k.KeyRing
 	}
@@ -318,31 +337,18 @@ func (k *KMS) Config() map[string]string {
 	if k.VaultName != "" {
 		config["vault_name"] = k.VaultName
 	}
-	if k.AzureKeyName != "" {
-		config["azure_key_name"] = k.AzureKeyName
-	}
-	if k.Resource != 0 {
-		config["resource"] = fmt.Sprintf("%d", k.Resource)
+	if k.Resource != "" {
+		config["resource"] = k.Resource
 	}
 
 	// AWS KMS seal config
-	if k.AwsRegion != "" {
-		config["aws_region"] = k.AwsRegion
-	}
-	if k.AccessKey != "" {
-		config["access_key"] = k.AccessKey
-	}
 	if k.SessionToken != "" {
 		config["session_token"] = k.SessionToken
 	}
-	if k.SecretKey != "" {
-		config["secret_key"] = k.SecretKey
-	}
-	if k.KmsKeyID != "" {
-		config["kms_key_id"] = k.KmsKeyID
-	}
-	if k.AWSEndpoint != "" {
-		config["aws_endpoint"] = k.AWSEndpoint
+
+	// AliCloud KMS seal config
+	if k.Domain != "" {
+		config["domain"] = k.Domain
 	}
 
 	return config

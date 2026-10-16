@@ -627,14 +627,14 @@ func TestKMS_Config(t *testing.T) {
 	t.Run("aws kms seal", func(t *testing.T) {
 		k := &KMS{
 			Type:      "awskms",
-			AwsRegion: "us-east-1",
+			Region:    "us-east-1",
 			AccessKey: "AKIA...",
 			SecretKey: "secret",
 			KmsKeyID:  "arn:aws:kms:us-east-1:111:key/abc",
 		}
 		got := k.Config()
 		assert.Equal(t, "awskms", got["type"])
-		assert.Equal(t, "us-east-1", got["aws_region"])
+		assert.Equal(t, "us-east-1", got["region"])
 		assert.Equal(t, "AKIA...", got["access_key"])
 		assert.Equal(t, "arn:aws:kms:us-east-1:111:key/abc", got["kms_key_id"])
 	})
