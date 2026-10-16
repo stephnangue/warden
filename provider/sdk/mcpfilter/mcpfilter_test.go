@@ -2,6 +2,7 @@ package mcpfilter
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -477,5 +478,211 @@ func TestFilterSSE_ForcesCacheScopePrivate(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "event: message") {
 		t.Error("non-data lines must survive the rewrite")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Skills extension (SEP-2640)
+// ---------------------------------------------------------------------------
+
+// skillsListBody is a skills/list page: a multi-file skill, a single-file
+// skill, and a dynamically generated one, plus the pagination and caching
+// attributes a 2026-07-28 server sends.
+const skillsListBody = `{"jsonrpc":"2.0","id":1,"result":{"skills":[` +
+	`{"uri":"skill://pdf-processing/SKILL.md","frontmatter":{"name":"pdf-processing","description":"a"},"resources":[` +
+	`{"uri":"skill://pdf-processing/SKILL.md","digest":"sha256:aa","size":10},` +
+	`{"uri":"skill://pdf-processing/scripts/extract.py","digest":"sha256:bb","size":20}]},` +
+	`{"uri":"skill://git-workflow/SKILL.md","frontmatter":{"name":"git-workflow","description":"b"},"resources":[` +
+	`{"uri":"skill://git-workflow/SKILL.md","digest":"sha256:cc","size":30}]},` +
+	`{"uri":"skill://report/SKILL.md","frontmatter":{"name":"report","description":"c"},"resources":"dynamic"}` +
+	`],"nextCursor":"page-2","ttlMs":60000,"cacheScope":"public"}}`
+
+// skillEntries returns the filtered skills keyed by uri, each as raw JSON.
+func skillEntries(t *testing.T, body []byte) (map[string]json.RawMessage, map[string]json.RawMessage) {
+	t.Helper()
+	var env struct {
+		Result map[string]json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal filtered body: %v\nbody: %s", err, body)
+	}
+	var skills []json.RawMessage
+	if err := json.Unmarshal(env.Result["skills"], &skills); err != nil {
+		t.Fatalf("unmarshal skills: %v", err)
+	}
+	out := make(map[string]json.RawMessage, len(skills))
+	for _, s := range skills {
+		var e struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(s, &e); err != nil {
+			t.Fatalf("unmarshal entry: %v", err)
+		}
+		out[e.URI] = s
+	}
+	return out, env.Result
+}
+
+// jsonEqual reports whether two JSON documents decode to the same value.
+func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
+	t.Helper()
+	var va, vb any
+	if err := json.Unmarshal(a, &va); err != nil {
+		t.Fatalf("unmarshal %s: %v", a, err)
+	}
+	if err := json.Unmarshal(b, &vb); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+	return reflect.DeepEqual(va, vb)
+}
+
+// A skills/list entry is kept or dropped whole, by its SKILL.md uri. The
+// nested resources array of a kept entry must come back with the same
+// content: SEP-2640 requires it complete, and a host verifying a trimmed one
+// would reject the skill.
+func TestFilterJSON_SkillsList_DropsWholeEntries(t *testing.T) {
+	out, changed, err := FilterListResponse("skills/list", "application/json", []byte(skillsListBody),
+		allowOnly("skill://pdf-processing/SKILL.md", "skill://report/SKILL.md"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+	entries, result := skillEntries(t, out)
+	if len(entries) != 2 {
+		t.Fatalf("kept %d entries, want 2: %s", len(entries), out)
+	}
+	if _, ok := entries["skill://git-workflow/SKILL.md"]; ok {
+		t.Fatalf("denied skill leaked: %s", out)
+	}
+
+	// The kept entries are unchanged in content. Compared as decoded JSON:
+	// re-encoding compacts whitespace and HTML-escapes, which no host check
+	// observes.
+	var orig struct {
+		Result struct {
+			Skills []json.RawMessage `json:"skills"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(skillsListBody), &orig); err != nil {
+		t.Fatal(err)
+	}
+	if !jsonEqual(t, entries["skill://pdf-processing/SKILL.md"], orig.Result.Skills[0]) {
+		t.Errorf("multi-file entry changed:\n got %s\nwant %s", entries["skill://pdf-processing/SKILL.md"], orig.Result.Skills[0])
+	}
+	if !jsonEqual(t, entries["skill://report/SKILL.md"], orig.Result.Skills[2]) {
+		t.Errorf("dynamic entry changed:\n got %s\nwant %s", entries["skill://report/SKILL.md"], orig.Result.Skills[2])
+	}
+
+	if got := string(result["nextCursor"]); got != `"page-2"` {
+		t.Errorf("nextCursor = %s, want \"page-2\"", got)
+	}
+	if got := string(result["ttlMs"]); got != `60000` {
+		t.Errorf("ttlMs = %s, want 60000", got)
+	}
+	if got := string(result["cacheScope"]); got != `"private"` {
+		t.Errorf("cacheScope = %s, want \"private\"", got)
+	}
+}
+
+// An entry whose uri cannot be read cannot be proven allowed.
+func TestFilterJSON_SkillsList_DropsEntryWithoutURI(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"skills":[` +
+		`{"frontmatter":{"name":"x"},"resources":"dynamic"},` +
+		`{"uri":42,"resources":"dynamic"},` +
+		`{"uri":"skill://ok/SKILL.md","resources":"dynamic"}]}}`)
+
+	out, _, err := FilterListResponse("skills/list", "application/json", body, func(string) bool { return true })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	entries, _ := skillEntries(t, out)
+	if len(entries) != 1 {
+		t.Fatalf("kept %d entries, want only the one with a readable uri: %s", len(entries), out)
+	}
+}
+
+// A skills value that is not an array cannot be verified; null and absent
+// carry nothing to leak and pass through.
+func TestFilterJSON_SkillsList_Shapes(t *testing.T) {
+	for _, bad := range []string{
+		`{"jsonrpc":"2.0","id":1,"result":{"skills":"dynamic"}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"skills":{"uri":"skill://x/SKILL.md"}}}`,
+	} {
+		if _, _, err := FilterListResponse("skills/list", "application/json", []byte(bad), allowOnly()); err == nil {
+			t.Errorf("expected a fail-closed error for %s", bad)
+		}
+	}
+
+	for _, ok := range []string{
+		`{"jsonrpc":"2.0","id":1,"result":{"skills":null}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{}}`,
+	} {
+		out, changed, err := FilterListResponse("skills/list", "application/json", []byte(ok), allowOnly())
+		if err != nil {
+			t.Errorf("unexpected error for %s: %v", ok, err)
+		}
+		if changed || string(out) != ok {
+			t.Errorf("expected %s to pass through unchanged, got %s", ok, out)
+		}
+	}
+
+	// An absent skills array still had its scope narrowed: the result
+	// described a per-principal answer.
+	out, changed, err := FilterListResponse("skills/list", "application/json",
+		[]byte(`{"jsonrpc":"2.0","id":1,"result":{"cacheScope":"public"}}`), allowOnly())
+	if err != nil || !changed || !strings.Contains(string(out), `"cacheScope":"private"`) {
+		t.Errorf("cacheScope not narrowed: changed=%v err=%v out=%s", changed, err, out)
+	}
+}
+
+func TestFilterSSE_SkillsList(t *testing.T) {
+	body := []byte("event: message\n" +
+		"data: " + skillsListBody + "\n\n")
+
+	out, changed, err := FilterListResponse("skills/list", "text/event-stream", body,
+		allowOnly("skill://pdf-processing/SKILL.md"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+	s := string(out)
+	if strings.Contains(s, "git-workflow") || strings.Contains(s, "skill://report/") {
+		t.Fatalf("denied skill leaked in SSE: %s", s)
+	}
+	if !strings.Contains(s, "skill://pdf-processing/scripts/extract.py") {
+		t.Fatalf("kept entry lost its resources: %s", s)
+	}
+}
+
+// A directory read returns a page of Resource objects; children, including
+// sub-directories, are filtered by uri as resources/list items are.
+func TestFilterJSON_DirectoryRead_FiltersChildrenByURI(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"resources":[` +
+		`{"uri":"skill://pdf-processing/templates/invoice.md","name":"invoice.md"},` +
+		`{"uri":"skill://pdf-processing/templates/internal.md","name":"internal.md"},` +
+		`{"uri":"skill://pdf-processing/templates/regional","name":"regional","mimeType":"inode/directory"}` +
+		`],"nextCursor":"c2"}}`)
+
+	out, changed, err := FilterListResponse("resources/directory/read", "application/json", body,
+		denyPrefix("skill://pdf-processing/templates/internal"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+	s := string(out)
+	if strings.Contains(s, "internal.md") {
+		t.Fatalf("denied child leaked: %s", s)
+	}
+	if !strings.Contains(s, "templates/regional") || !strings.Contains(s, "invoice.md") {
+		t.Fatalf("allowed child missing: %s", s)
+	}
+	if !strings.Contains(s, `"nextCursor":"c2"`) {
+		t.Fatalf("nextCursor lost: %s", s)
 	}
 }

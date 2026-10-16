@@ -16,7 +16,8 @@ package logical
 // knowledge and the filter can't drift from the call-time gate.
 type MCPListFilter struct {
 	// ListMethod is the list method whose response this filters:
-	// "tools/list", "resources/list", or "prompts/list".
+	// "tools/list", "resources/list", "prompts/list", "skills/list", or
+	// "resources/directory/read".
 	ListMethod string
 
 	// Keep reports whether the named item stays in the filtered response.

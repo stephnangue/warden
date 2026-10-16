@@ -372,6 +372,35 @@ func TestHandleGateway_FiltersToolsList(t *testing.T) {
 	assert.NotContains(t, out, "delete_x", "denied tool must be pruned from the mcp_aws tools/list response")
 }
 
+// The Skills extension's listing goes through the same filter; a denied skill
+// is dropped whole and a kept one keeps its resources.
+func TestHandleGateway_FiltersSkillsList(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"skills":[` +
+			`{"uri":"skill://ok/SKILL.md","frontmatter":{"name":"ok","description":"a"},"resources":[{"uri":"skill://ok/SKILL.md","digest":"sha256:aa","size":1}]},` +
+			`{"uri":"skill://secret/SKILL.md","frontmatter":{"name":"secret","description":"b"},"resources":"dynamic"}]}}`))
+	}))
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+
+	req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"skills/list"}`, stsCredential())
+	req.MCPListFilter = &logical.MCPListFilter{
+		ListMethod: "skills/list",
+		Keep:       func(uri string) bool { return uri == "skill://ok/SKILL.md" },
+	}
+
+	b.handleGateway(context.Background(), req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	out := rec.Body.String()
+	assert.Contains(t, out, `"digest":"sha256:aa"`)
+	assert.NotContains(t, out, "skill://secret/", "denied skill must be pruned from the mcp_aws skills/list response")
+}
+
 // --- shape-aware deadline ---
 
 // mcp_aws implements MCPPolicyEnforced directly rather than going through

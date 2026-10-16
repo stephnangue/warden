@@ -1,8 +1,8 @@
 // Package mcpfilter rewrites MCP JSON-RPC list responses so that only the
-// items a policy allows remain. It handles the three name-bearing list
-// methods — tools/list, resources/list, prompts/list — for both the
-// application/json and text/event-stream (SSE) shapes that MCP Streamable
-// HTTP returns.
+// items a policy allows remain. It handles the name-bearing list methods —
+// tools/list, resources/list, prompts/list, and the Skills extension's
+// skills/list and resources/directory/read — for both the application/json
+// and text/event-stream (SSE) shapes that MCP Streamable HTTP returns.
 //
 // The package is pure mechanics: it holds no policy state and takes a
 // keep-predicate supplied by the caller. Policy semantics (which names are
@@ -24,17 +24,27 @@ import (
 // listFamily binds a list method to the result array key it returns and the
 // per-item field that carries the name matched by the call-time policy gate.
 // The name fields mirror the strict parser's call-side extraction:
-// tools/call → params.name, resources/read → params.uri, prompts/get →
-// params.name, so a list item is filtered by the same field the gate reads.
+// tools/call → params.name, resources/read and skills/get → params.uri,
+// prompts/get → params.name, so a list item is filtered by the same field the
+// gate reads.
 type listFamily struct {
 	arrayKey  string
 	nameField string
 }
 
+// A skills/list entry is kept or dropped whole, by its SKILL.md uri. Its
+// nested resources array is never edited: SEP-2640 requires it to list every
+// file of the skill, and a host verifying a trimmed set would treat the skill
+// as tampered with. A kept entry is unchanged in content; re-encoding the
+// envelope compacts whitespace and HTML-escapes <, > and &, which no host
+// check observes (digests cover file bytes, frontmatter is compared by field). A resources/directory/read result is a page of ordinary
+// Resource objects, filtered by uri exactly as resources/list is.
 var listFamilies = map[string]listFamily{
-	"tools/list":     {arrayKey: "tools", nameField: "name"},
-	"resources/list": {arrayKey: "resources", nameField: "uri"},
-	"prompts/list":   {arrayKey: "prompts", nameField: "name"},
+	"tools/list":               {arrayKey: "tools", nameField: "name"},
+	"resources/list":           {arrayKey: "resources", nameField: "uri"},
+	"prompts/list":             {arrayKey: "prompts", nameField: "name"},
+	"skills/list":              {arrayKey: "skills", nameField: "uri"},
+	"resources/directory/read": {arrayKey: "resources", nameField: "uri"},
 }
 
 // cacheScope is the result field by which a server tells intermediaries
@@ -60,9 +70,10 @@ const (
 //     original) on an error, because an unparseable body cannot be proven
 //     free of denied items.
 //
-// listMethod must be one of tools/list, resources/list, prompts/list — the
-// only methods for which the core policy layer attaches a filter. An unknown
-// method is treated as a fail-closed error.
+// listMethod must be one of tools/list, resources/list, prompts/list,
+// skills/list or resources/directory/read — the only methods for which the
+// core policy layer attaches a filter. An unknown method is treated as a
+// fail-closed error.
 func FilterListResponse(listMethod, contentType string, body []byte, keep func(name string) bool) (out []byte, changed bool, err error) {
 	fam, ok := listFamilies[strings.ToLower(listMethod)]
 	if !ok {
