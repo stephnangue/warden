@@ -265,6 +265,35 @@ func TestDefaultProfile_AgentActChain(t *testing.T) {
 	assert.NoError(t, p.CheckIdentities(delegationRequest().Identity, &user))
 }
 
+// A disclosed user is rendered as the top-level sub, so a user principal shaped like
+// an agent subject would read as that agent to a verifier binding "wid:<ns>:" — of
+// any namespace. The prefix belongs to agents; the user is refused, the agent is not.
+func TestDefaultProfile_ReservedUserPrincipal(t *testing.T) {
+	p := DefaultProfile{}
+	for _, principal := range []string{"wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7", "wid:root:x:y", "wid:"} {
+		t.Run(principal, func(t *testing.T) {
+			req := delegationRequest()
+			req.User.PrincipalID = principal
+			assert.ErrorIs(t, p.CheckIdentities(req.Identity, req.User), credential.ErrReservedPrincipal)
+			_, err := p.Claims(req)
+			assert.ErrorIs(t, err, credential.ErrReservedPrincipal, "Claims re-runs the check")
+		})
+	}
+
+	// Case-sensitive like the verifier bindings: "WID:" matches no "wid:" glob.
+	req := delegationRequest()
+	req.User.PrincipalID = "WID:root:x:y"
+	assert.NoError(t, p.CheckIdentities(req.Identity, req.User))
+
+	// The agent's own principal may carry the prefix: it is wrapped in the
+	// composite, so it can never be mistaken for another agent's subject.
+	agent := fixedRequest()
+	agent.Identity.PrincipalID = "wid:spiffe-like"
+	claims, err := p.Claims(agent)
+	require.NoError(t, err)
+	assert.Equal(t, agent.Identity.WardenSubject(), claims["sub"])
+}
+
 // TestDefaultProfile_Claims_Pure pins the purity contract the issuer relies on:
 // Claims can run concurrently for one spec (the chained path's fetchUncached branch
 // mints per request with no coalescing), so a shared map or a mutated input would be

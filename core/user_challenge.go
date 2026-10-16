@@ -176,6 +176,9 @@ func exchangeInputError(err error) error {
 	if errors.Is(err, credential.ErrUserRequired) {
 		return logical.WrapWithCode(http.StatusUnauthorized, err)
 	}
+	if errors.Is(err, credential.ErrReservedPrincipal) {
+		return logical.WrapWithCode(http.StatusForbidden, err)
+	}
 	return logical.ErrBadRequestf("token exchange input resolution failed: %s", err.Error())
 }
 

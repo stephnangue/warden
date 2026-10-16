@@ -561,6 +561,16 @@ curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -d '{"client_id":"uprof_e2e-anthropic-user","client_name":"E2E Anthropic Profiled User","client_secret":"anthropic-user-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] uprof_e2e-anthropic-user" || echo "  [SKIP] uprof_e2e-anthropic-user (already exists?)"
 
+# A user whose subject is shaped like a Warden agent subject, for the reserved
+# prefix row. A client_credentials token's sub is its client_id, and the user
+# auth role binds no claim, so this is the token a user who controls their own
+# IdP subject would present: Warden must refuse it rather than let it stand in
+# for the agent it names.
+curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"wid:root:e2e:impersonated-agent","client_name":"E2E Agent-Shaped User","client_secret":"agent-shaped-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  >/dev/null 2>&1 && echo "  [OK] wid:root:e2e:impersonated-agent" || echo "  [SKIP] wid:root:e2e:impersonated-agent (already exists?)"
+
 # Verify JWT issuance works
 echo "  Verifying JWT issuance..."
 JWT_RESPONSE=$(curl -s -X POST "$HYDRA_PUBLIC/oauth2/token" \

@@ -61,7 +61,9 @@ func agentIdentityNote(specs []credential.PlannedSpec) []credential.Prerequisite
 // warden_identity subject on the default profile with assertion_user_claims set.
 // Their sub is the user's raw id — not tenant-qualified like the agent's composite —
 // so the verifier must bind warden_namespace beside it; bind says how, for this
-// verifier.
+// verifier. A rule that ORs the agent pattern with the namespace binding stays a
+// tenant boundary because no user sub can match the agent pattern: core refuses a
+// user principal that begins with credential.WardenSubjectPrefix.
 func delegationNote(specs []credential.PlannedSpec, env credential.TrustEnv, bind string) []credential.Prerequisite {
 	var names []string
 	for _, s := range specs {

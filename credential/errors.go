@@ -74,6 +74,16 @@ var (
 	// able to, retry, and succeed. A malformed spec is a different failure.
 	ErrUserRequired = errors.New("a user principal is required but none was presented")
 
+	// ErrReservedPrincipal is returned (wrapped) when a user principal begins with
+	// WardenSubjectPrefix. That prefix names agents: a delegation assertion carries
+	// the user's raw principal as its sub, and a verifier that binds agents by a
+	// "wid:<namespace>:" sub prefix would read such a user as an agent — of any
+	// namespace, since the prefix does not depend on where the user logged in.
+	// Like ErrUserRequired it is a sentinel so core attaches the status: 403, since
+	// the identity was verified and is refused, and presenting it again cannot
+	// succeed.
+	ErrReservedPrincipal = errors.New("the user principal uses the reserved agent subject prefix " + WardenSubjectPrefix)
+
 	// ErrChainedSecretRejected is returned (wrapped) by a chained-secret consuming
 	// driver when the downstream rejects the fetched secret — e.g. an OAuth
 	// invalid_client, or a 401 from a resource. It signals the manager that a

@@ -13,6 +13,7 @@ package credential
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -151,6 +152,18 @@ type AssertionActor struct {
 	Issuer string
 }
 
+// WardenSubjectPrefix begins every agent subject WardenSubject builds. It is
+// reserved: a user principal carrying it is refused (ErrReservedPrincipal), so a
+// verifier binding agents by a "wid:<namespace>:" sub prefix never matches a user.
+const WardenSubjectPrefix = "wid:"
+
+// HasReservedSubjectPrefix reports whether principal begins with
+// WardenSubjectPrefix. The match is case-sensitive, like the verifier bindings it
+// protects: "WID:" cannot satisfy a "wid:" glob or startsWith.
+func HasReservedSubjectPrefix(principal string) bool {
+	return strings.HasPrefix(principal, WardenSubjectPrefix)
+}
+
 // WardenSubject builds the globally-unique subject of a minted assertion:
 // "wid:{namespaceID}:{mountAccessor}:{principalID}". namespaceID and the mount
 // accessor are Warden-generated and delimiter-free; the possibly-delimiter-bearing
@@ -158,7 +171,7 @@ type AssertionActor struct {
 // unambiguous and an operator can bind a role to a mount with a `sub` StringLike
 // prefix "wid:{nsID}:{accessor}:*".
 func (id AssertionIdentity) WardenSubject() string {
-	return fmt.Sprintf("wid:%s:%s:%s", id.NamespaceID, id.MountAccessor, id.PrincipalID)
+	return fmt.Sprintf("%s%s:%s:%s", WardenSubjectPrefix, id.NamespaceID, id.MountAccessor, id.PrincipalID)
 }
 
 // AssertionRequest carries everything a profile renders into claims. It is a struct
