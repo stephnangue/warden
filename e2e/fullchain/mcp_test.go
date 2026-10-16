@@ -96,6 +96,25 @@ var mcpUnrestrictedSmallCapEnv = h.ProviderEnv{
 	ExtraConfig:    map[string]any{"max_body_size": mcpBodyCapBytes},
 }
 
+// mcpSkillsEnv governs the Skills extension. It needs a mount of its own:
+// mcpEnv's contract allows only tools/*, so a skills call through it would be
+// refused by the method gate, and a refusal row there would pass for the wrong
+// reason. Here the methods are open and the resources family alone decides.
+var mcpSkillsEnv = h.ProviderEnv{
+	Mount:      "fc-mcp-skills",
+	Type:       "mcp",
+	URLKey:     "mcp_url",
+	CredType:   "api_key",
+	CredConfig: map[string]string{"api_key": mcpAPIKey},
+	MCPPolicyRules: `  methods { allowed = ["skills/list", "skills/get", "resources/read", "resources/directory/read"] }
+  resources { allowed = ["` + mcpAllowedSkill + `", "` + mcpAllowedSkill + `/*"] }`,
+}
+
+const (
+	mcpAllowedSkill = "skill://fc-allowed-skill"
+	mcpDeniedSkill  = "skill://fc-denied-skill"
+)
+
 func mcpToolCall(tool string) string {
 	return mcpToolCallID(tool, 1)
 }

@@ -356,3 +356,161 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
 	assert.Nil(t, req.MCPListFilter, "a denied listing never reaches the filter")
 }
+
+// A skills/list entry survives iff a skills/get for its SKILL.md uri would
+// pass: the resources family governs skills.
+func TestListFilter_SkillsList_MatchesBySkillURI(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/list", "skills/get"] }
+  resources {
+    allowed = ["skill://pdf-processing/*"]
+    denied  = ["skill://pdf-processing/internal/*"]
+  }
+}
+`)
+	keep := filterKeeps(t, cbp, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"skills/list","id":1}`, "skills/list")
+
+	assert.True(t, keep("skill://pdf-processing/SKILL.md"))
+	assert.False(t, keep("skill://git-workflow/SKILL.md"))
+	assert.False(t, keep("skill://pdf-processing/internal/SKILL.md"))
+}
+
+// Visible == fetchable: with skills/get refused, no skill survives the listing.
+func TestListFilter_SkillsListAllowedButNotSkillsGet_EmptyList(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/list", "resources/read"] }
+  resources { allowed = ["skill://*"] }
+}
+`)
+	keep := filterKeeps(t, cbp, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"skills/list","id":1}`, "skills/list")
+
+	assert.False(t, keep("skill://pdf-processing/SKILL.md"), "skills/get not allowed → nothing is fetchable")
+}
+
+// The directory URI is gated on the way in; its children are pruned by the
+// read gate on the way back.
+func TestListFilter_DirectoryRead_PrunesChildren(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/directory/read", "resources/read"] }
+  resources {
+    allowed = ["skill://pdf-processing/*"]
+    denied  = ["skill://pdf-processing/templates/internal*"]
+  }
+}
+`)
+	keep := filterKeeps(t, cbp, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing/templates"},"id":1}`,
+		"resources/directory/read")
+
+	assert.True(t, keep("skill://pdf-processing/templates/invoice.md"))
+	assert.True(t, keep("skill://pdf-processing/templates/regional"))
+	assert.False(t, keep("skill://pdf-processing/templates/internal.md"))
+}
+
+// Children are kept by the read gate, so a browse-only contract lists an
+// empty directory, as tools/list without tools/call lists no tools.
+func TestListFilter_DirectoryReadAllowedButNotResourcesRead_EmptyList(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/directory/read"] }
+  resources { allowed = ["skill://pdf-processing/*"] }
+}
+`)
+	keep := filterKeeps(t, cbp, "mcp/gateway/",
+		`{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing/templates"},"id":1}`,
+		"resources/directory/read")
+
+	assert.False(t, keep("skill://pdf-processing/templates/invoice.md"))
+}
+
+// An unrestricted resources grant keeps every skill, so no filter is attached
+// and the listing streams — the same fast path tools/list has.
+func TestListFilter_WildcardResourcesSkipsSkillsFilter(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+  resources { allowed = ["*"] }
+}
+`)
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","method":"skills/list","id":1}`,
+		`{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf"},"id":1}`,
+	} {
+		req := newMCPRequest(t, "mcp/gateway/", body)
+		res := cbp.AllowOperation(testContext(), req, nil, false)
+		require.True(t, res.Allowed, body)
+		assert.Nil(t, req.MCPListFilter, "a keep-everything filter must not be attached: %s", body)
+	}
+
+	// Any deny makes the filter necessary again.
+	denying := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+  resources {
+    allowed = ["*"]
+    denied  = ["skill://internal*"]
+  }
+}
+`)
+	for _, tc := range []struct{ body, method string }{
+		{`{"jsonrpc":"2.0","method":"skills/list","id":1}`, "skills/list"},
+		{`{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf"},"id":1}`, "resources/directory/read"},
+	} {
+		keep := filterKeeps(t, denying, "mcp/gateway/", tc.body, tc.method)
+		assert.False(t, keep("skill://internal-tools/SKILL.md"))
+		assert.True(t, keep("skill://pdf/SKILL.md"))
+	}
+}
+
+// A batched list response can't be pruned per element, so a batch carrying
+// either new list method fails closed like tools/list does.
+func TestListFilter_BatchWithSkillsListFailsClosed(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+  resources { allowed = ["skill://pdf-processing/*"] }
+}
+`)
+	for _, body := range []string{
+		`[{"jsonrpc":"2.0","method":"ping","id":1},{"jsonrpc":"2.0","method":"skills/list","id":2}]`,
+		`[{"jsonrpc":"2.0","method":"ping","id":1},{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing/templates"},"id":2}]`,
+	} {
+		res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", body), nil, false)
+		assert.False(t, res.Allowed, body)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeBatchListUnfilterable, res.MCPDecision.RuleType)
+	}
+}

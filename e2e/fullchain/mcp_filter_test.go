@@ -340,3 +340,100 @@ func TestMCPFilter_UnrestrictedContractDoesNotBufferLargeListings(t *testing.T) 
 		t.Errorf("the caller received no tools from a listing the contract permits in full")
 	}
 }
+
+// mcpSkillsListBody is a skills/list page offering the skill the policy grants
+// and one it does not. Each entry is complete, as SEP-2640 requires.
+func mcpSkillsListBody() string {
+	entry := func(root, name string) string {
+		return fmt.Sprintf(`{"uri":%q,"frontmatter":{"name":%q,"description":"d"},`+
+			`"resources":[{"uri":%q,"digest":"sha256:00","size":1}]}`,
+			root+"/SKILL.md", name, root+"/SKILL.md")
+	}
+	return `{"jsonrpc":"2.0","id":1,"result":{"skills":[` +
+		entry(mcpAllowedSkill, "fc-allowed-skill") + `,` +
+		entry(mcpDeniedSkill, "fc-denied-skill") + `]}}`
+}
+
+// skillURIs pulls the advertised skill URIs out of a skills/list body.
+func skillURIs(t *testing.T, body []byte) []string {
+	t.Helper()
+	var env struct {
+		Result struct {
+			Skills []struct {
+				URI string `json:"uri"`
+			} `json:"skills"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("parsing the skills/list response %q: %v", body, err)
+	}
+	uris := make([]string, 0, len(env.Result.Skills))
+	for _, s := range env.Result.Skills {
+		uris = append(uris, s.URI)
+	}
+	return uris
+}
+
+// TestMCPFilter_DeniedSkillIsRemovedFromTheListing is the Skills-extension
+// twin of the tools row: an upstream advertising two skills, a contract
+// granting one, and a caller who receives only that one. Skills answer to the
+// resources family, so it is allowed_resources that decides, by the skill's
+// SKILL.md URI.
+//
+// These rows send no MCP-Protocol-Version, so they run in the legacy era; the
+// transport-header checks are covered in-process.
+func TestMCPFilter_DeniedSkillIsRemovedFromTheListing(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpSkillsListBody(), "application/json"))
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpSkillsEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpSkillsEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"skills/list"}`,
+	})
+
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", status, body)
+	}
+
+	want := mcpAllowedSkill + "/SKILL.md"
+	if got := skillURIs(t, body); len(got) != 1 || got[0] != want {
+		t.Errorf("advertised skills: got %v, want only %q — the denied skill was listed to a "+
+			"caller who cannot fetch it", got, want)
+	}
+
+	assertUpstreamServed(t)
+	if offered := skillURIs(t, []byte(mcpSkillsListBody())); len(offered) != 2 {
+		t.Fatalf("the fixture advertised %v; it must offer both skills for this row to mean "+
+			"anything", offered)
+	}
+}
+
+// TestMCPFilter_SkillsGetOutsideGrantIsRefused covers the request side. skills/get
+// names its skill by URI, so a skill outside the grant is refused before the
+// upstream is asked to describe it. The description is what shows the resources
+// gate fired: the method is open on this mount, so a method refusal is ruled out.
+func TestMCPFilter_SkillsGetOutsideGrantIsRefused(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(`{"jsonrpc":"2.0","id":1,"result":{}}`, "application/json"))
+
+	denied := mcpDeniedSkill + "/SKILL.md"
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpSkillsEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpSkillsEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"skills/get","params":{"uri":"` + denied + `"}}`,
+	})
+
+	if status != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 (body: %s)", status, body)
+	}
+	// The decision carries the name lowercased, as the gate compared it.
+	if want := "Resource '" + strings.ToLower(denied) + "' not allowed."; !strings.Contains(string(body), want) {
+		t.Errorf("body: got %s, want %q — the refusal must come from the resources gate", body, want)
+	}
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream served %d requests, want 0 — the denial must precede the proxy", n)
+	}
+}

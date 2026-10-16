@@ -150,11 +150,12 @@ type Request struct {
 	// deep-copy field via MCPRequestDescriptor.Clone.
 	MCPDescriptor *MCPRequestDescriptor `json:"-"`
 
-	// MCPListFilter is set by the policy layer when an allowed MCP
-	// list request (tools/list, resources/list, prompts/list) should
-	// have its response filtered to the items the caller may actually
-	// use. Nil for every other request; a gateway that sees nil streams
-	// the response through verbatim. See MCPListFilter.
+	// MCPListFilter is set by the policy layer when an allowed MCP list
+	// request (tools/list, resources/list, prompts/list, skills/list,
+	// resources/directory/read) should have its response filtered to the
+	// items the caller may actually use. Nil for every other request; a
+	// gateway that sees nil streams the response through verbatim. See
+	// MCPListFilter.
 	MCPListFilter *MCPListFilter `json:"-"`
 }
 

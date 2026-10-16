@@ -113,9 +113,10 @@ const mcpMethodResourcesSubscribe = "resources/subscribe"
 // The Skills extension (SEP-2640) builds skills on the resources primitive:
 // every file of a skill is a resource, and a skill is addressed by the URI of
 // its SKILL.md. So both of its URI-bearing methods answer to the resources
-// family rather than to a family of their own. One grant covers fetching a
-// skill's entry and reading its files, and a skill the caller may not read
-// cannot be described one method name over.
+// family rather than to a family of their own. One grant covers listing a
+// skill, fetching its entry and reading its files, and a skill the caller may
+// not read cannot be described or enumerated one method name over (the
+// listing side is mcpListMethodToCall).
 //
 //   - skills/get names a skill by params.uri and returns its entry: the
 //     frontmatter plus the URI, digest and size of every file. It is gated
@@ -241,10 +242,22 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 // absent as a target: a listed resource survives filtering iff a read of it
 // would pass, and checking a subscribe instead would prune listings by the
 // wrong gate.
+//
+// The Skills extension adds two:
+//   - a skills/list entry survives iff a skills/get for its SKILL.md uri
+//     would pass;
+//   - a resources/directory/read child survives iff a read of it would pass.
+//     The method is also name-bearing, so the directory URI itself was
+//     already gated before the filter is attached. Children are kept by the
+//     read gate, so a contract allowing directory reads but not
+//     resources/read lists an empty directory, as tools/list without
+//     tools/call lists no tools.
 var mcpListMethodToCall = map[string]string{
-	"tools/list":     mcpMethodToolsCall,
-	"resources/list": mcpMethodResourcesRead,
-	"prompts/list":   mcpMethodPromptsGet,
+	"tools/list":               mcpMethodToolsCall,
+	"resources/list":           mcpMethodResourcesRead,
+	"prompts/list":             mcpMethodPromptsGet,
+	"skills/list":              mcpMethodSkillsGet,
+	"resources/directory/read": mcpMethodResourcesRead,
 }
 
 // mcpListItemAllowed reports whether a name-bearing call (callMethod) for the
