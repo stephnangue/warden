@@ -35,7 +35,9 @@ const (
 	// recoveryKeyPath is the path to the recovery key
 	recoveryKeyPath = "core/recovery-key"
 
-	// StoredBarrierKeysPath is the path used for storing HSM-encrypted unseal keys
+	// StoredBarrierKeysPath is the path used for storing unseal keys encrypted
+	// by an auto-unseal seal. The "hsm" segment is historical and persisted;
+	// do not rename it.
 	StoredBarrierKeysPath = "core/hsm/barrier-unseal-keys"
 )
 

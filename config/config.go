@@ -132,16 +132,6 @@ type KMS struct {
 	TlsServerName  string `hcl:"tls_server_name,optional"`
 	TlsSkipVerify  string `hcl:"tls_skip_verify,optional"`
 
-	// config for pkcs11 seal
-	Lib                       string `hcl:"lib,optional"`
-	Slot                      string `hcl:"slot,optional"`
-	TokenLabel                string `hcl:"token_label,optional"`
-	Pin                       string `hcl:"pin,optional"`
-	KeyLabel                  string `hcl:"key_label,optional"`
-	KeyID                     string `hcl:"key_id,optional"`
-	Mechanism                 string `hcl:"mechanism,optional"`
-	DisableSoftwareEncryption bool   `hcl:"disable_software_encryption,optional"`
-
 	// config for ocikms seal
 	CryptoEndpoint     string `hcl:"crypto_endpoint,optional"`
 	ManagementEndpoint string `hcl:"management_endpoint,optional"`
@@ -250,32 +240,6 @@ func (k *KMS) Config() map[string]string {
 	}
 	if k.TlsSkipVerify != "" {
 		config["tls_skip_verify"] = k.TlsSkipVerify
-	}
-
-	// PKCS11 seal config
-	if k.Lib != "" {
-		config["lib"] = k.Lib
-	}
-	if k.Slot != "" {
-		config["slot"] = k.Slot
-	}
-	if k.TokenLabel != "" {
-		config["token_label"] = k.TokenLabel
-	}
-	if k.Pin != "" {
-		config["pin"] = k.Pin
-	}
-	if k.KeyLabel != "" {
-		config["key_label"] = k.KeyLabel
-	}
-	if k.KeyID != "" {
-		config["key_id"] = k.KeyID
-	}
-	if k.Mechanism != "" {
-		config["mechanism"] = k.Mechanism
-	}
-	if k.DisableSoftwareEncryption {
-		config["disable_software_encryption"] = "true"
 	}
 
 	// OCI KMS seal config

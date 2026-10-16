@@ -34,7 +34,7 @@ type InitRequest struct {
 	// This must be less than or equal to SecretShares.
 	SecretThreshold int `json:"secret_threshold,omitempty"`
 
-	// StoredShares specifies the number of shares that should be encrypted by the HSM and stored for auto-unsealing.
+	// StoredShares specifies the number of shares that should be encrypted by the seal and stored for auto-unsealing.
 	// Currently must be the same as SecretShares. Only supported when using Auto Unseal.
 	StoredShares int `json:"stored_shares,omitempty"`
 
