@@ -96,7 +96,8 @@ type MCPDecision struct {
 
 	// Name is the lowercased name-bearing field from the JSON-RPC
 	// body — params.name for tools/call and prompts/get, params.uri
-	// for resources/read. Empty for methods without a name
+	// for resources/read, resources/subscribe, resources/directory/read
+	// and skills/get. Empty for methods without a name
 	// (tools/list, initialize, notifications) and for any deny
 	// produced before the name gate ran.
 	Name string `json:"name,omitempty"`

@@ -282,6 +282,58 @@ func TestValidateMCPHeaders(t *testing.T) {
 			},
 		},
 		{
+			// Not required, but once sent it is held to the URI Warden gated:
+			// a downstream routing on it would otherwise act on a URI no
+			// contract was asked about.
+			name: "resources/subscribe with a disagreeing name header",
+			body: `{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"repo://a"}}`,
+			headers: map[string]string{
+				mcpProtocolVersionHeader: "2026-07-28",
+				mcpMethodHeader:          "resources/subscribe",
+				mcpNameHeader:            "repo://b",
+			},
+			wantDeny: true,
+		},
+		{
+			// The Skills extension defines no name header, so a modern
+			// skills/get without one is ordinary.
+			name: "modern skills/get needs no name header",
+			body: `{"jsonrpc":"2.0","id":1,"method":"skills/get","params":{"uri":"skill://pdf/SKILL.md"}}`,
+			headers: map[string]string{
+				mcpProtocolVersionHeader: "2026-07-28",
+				mcpMethodHeader:          "skills/get",
+			},
+		},
+		{
+			name: "skills/get with a matching name header",
+			body: `{"jsonrpc":"2.0","id":1,"method":"skills/get","params":{"uri":"skill://pdf/SKILL.md"}}`,
+			headers: map[string]string{
+				mcpProtocolVersionHeader: "2026-07-28",
+				mcpMethodHeader:          "skills/get",
+				mcpNameHeader:            "skill://pdf/SKILL.md",
+			},
+		},
+		{
+			name: "skills/get with a disagreeing name header",
+			body: `{"jsonrpc":"2.0","id":1,"method":"skills/get","params":{"uri":"skill://pdf/SKILL.md"}}`,
+			headers: map[string]string{
+				mcpProtocolVersionHeader: "2026-07-28",
+				mcpMethodHeader:          "skills/get",
+				mcpNameHeader:            "skill://secret/SKILL.md",
+			},
+			wantDeny: true,
+		},
+		{
+			// The match is security, not compatibility, so it does not wait
+			// for the header era.
+			name: "legacy directory read with a disagreeing name header",
+			body: `{"jsonrpc":"2.0","id":1,"method":"resources/directory/read","params":{"uri":"skill://pdf"}}`,
+			headers: map[string]string{
+				mcpNameHeader: "skill://secret",
+			},
+			wantDeny: true,
+		},
+		{
 			// A body declaring the modern revision while the transport
 			// declares none is a modern request wearing legacy clothes,
 			// which is how a client would buy itself the era split's
