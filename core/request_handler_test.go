@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1066,6 +1068,56 @@ func TestLoginCreateToken(t *testing.T) {
 		assert.True(t, result.StatusCode == http.StatusForbidden || result.StatusCode == http.StatusInternalServerError,
 			"expected Forbidden or InternalServerError, got %d", result.StatusCode)
 	})
+}
+
+// failingTokenType is a token type whose Generate always fails, to reach the error
+// path of LoginCreateToken.
+type failingTokenType struct{}
+
+func (failingTokenType) Metadata() TokenTypeMetadata {
+	return TokenTypeMetadata{Name: "failing_token", IDPrefix: "fail_", Description: "always fails"}
+}
+func (failingTokenType) Generate(context.Context, *AuthData, *TokenEntry) (map[string]string, error) {
+	return nil, errors.New("token storage unavailable")
+}
+func (failingTokenType) ValidateValue(string) bool { return false }
+func (failingTokenType) ComputeID(v string) string { return "fail_" + v }
+func (failingTokenType) LookupKey() string         { return "token" }
+
+// A login whose token cannot be generated is logged for the operator, but never
+// with the login credential itself — the caller's JWT, kept in the auth data as
+// TokenValue — nor the login claims it carries in Metadata.
+func TestLoginCreateToken_FailureLogsNoCredential(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	require.NoError(t, core.tokenStore.RegisterTokenType(failingTokenType{}))
+
+	var buf bytes.Buffer
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+	core.logger = log
+
+	const loginJWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZ2VudC0xIn0.login-credential-signature"
+	resp := &logical.Response{Auth: &logical.Auth{
+		TokenType:   "failing_token",
+		ClientToken: loginJWT,
+		PrincipalID: "agent-1",
+		RoleName:    "orders-reader",
+		Policies:    []string{"default"},
+		TokenTTL:    time.Hour,
+		Metadata:    map[string]string{"email": "alice@example.com"},
+	}}
+	result, err := core.LoginCreateToken(ctx, nil, resp)
+	require.Error(t, err)
+	assert.Equal(t, http.StatusInternalServerError, result.StatusCode)
+
+	out := buf.String()
+	require.Contains(t, out, "Failed to generate token", "the failure must still be logged")
+	assert.Contains(t, out, "token storage unavailable", "the cause is what an operator needs")
+	assert.Contains(t, out, "agent-1")
+	assert.Contains(t, out, "orders-reader")
+	assert.NotContains(t, out, loginJWT)
+	assert.NotContains(t, out, "login-credential-signature")
+	assert.NotContains(t, out, "alice@example.com", "login claims stay out of the log")
 }
 
 // TestHandleLoginRequest tests the handleLoginRequest function
