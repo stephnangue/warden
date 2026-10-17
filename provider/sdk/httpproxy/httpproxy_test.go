@@ -1220,10 +1220,13 @@ func TestPrepareHeaders(t *testing.T) {
 		req.Header.Set("X-Warden-Subject-Token", "eyJ.subject")
 		req.Header.Set("X-Warden-Actor-Token", "eyJ.actor")
 		req.Header.Set("X-Warden-User-Token", "user-credential")
+		req.Header.Set("X-Warden-Namespace", "team-payments")
 		req.Header.Set("X-Custom-Remove", "should-go")
 		req.Header.Set("X-Keep", "keep-me")
 
 		pb.prepareHeaders(req, map[string]string{"Authorization": "Bearer real-key"}, Dispatch{})
+		// The namespace selector names a tenant the upstream has no use for.
+		assert.Empty(t, req.Header.Get("X-Warden-Namespace"))
 
 		assert.Equal(t, "Bearer real-key", req.Header.Get("Authorization"))
 		assert.Empty(t, req.Header.Get("X-Warden-Token"))
@@ -1281,6 +1284,31 @@ func TestPrepareHeaders(t *testing.T) {
 		assert.Empty(t, req.Header.Get("X-Real-Ip"))
 		assert.Empty(t, req.Header.Get("Forwarded"))
 	})
+}
+
+// A header family whose names the client chooses is stripped by prefix, whatever
+// the case it arrives in; a name that only shares the stem is kept.
+func TestPrepareHeaders_RemovesHeaderPrefixes(t *testing.T) {
+	spec := testSpec()
+	spec.ExtraHeaderPrefixesToRemove = []string{"Impersonate-Extra-"}
+	pb := setupBackend(t, spec).(*proxyBackend)
+
+	req, _ := http.NewRequest("GET", "https://api.test.com/api/v1/pods", nil)
+	req.Header.Set("Impersonate-Extra-Scopes", "admin")
+	req.Header.Add("Impersonate-Extra-Scopes", "root")
+	req.Header.Set("Impersonate-Extra-Reason", "x")
+	// Not canonicalised, as a header set by key would be.
+	req.Header["impersonate-extra-acme.com/project"] = []string{"y"}
+	req.Header.Set("Impersonate-Extras", "keep-me")
+	req.Header.Set("X-Keep", "keep-me")
+
+	pb.prepareHeaders(req, nil, Dispatch{})
+
+	for name := range req.Header {
+		assert.NotContains(t, strings.ToLower(name), "impersonate-extra-", "header %q reached the upstream", name)
+	}
+	assert.Equal(t, "keep-me", req.Header.Get("Impersonate-Extras"))
+	assert.Equal(t, "keep-me", req.Header.Get("X-Keep"))
 }
 
 func TestPrepareHeaders_DynamicHeaders(t *testing.T) {

@@ -141,6 +141,19 @@ func TestPrepareHeaders(t *testing.T) {
 		assert.Equal(t, "keep-me", req.Header.Get("X-Custom"))
 	})
 
+	t.Run("removes the Warden routing selectors", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "https://example.com", nil)
+		for _, h := range []string{"X-Warden-Namespace", "X-Warden-Role", "X-Warden-Provider"} {
+			req.Header.Set(h, "selector")
+		}
+
+		b.prepareHeaders(req, "new-azure-token")
+
+		for _, h := range []string{"X-Warden-Namespace", "X-Warden-Role", "X-Warden-Provider"} {
+			assert.Empty(t, req.Header.Get(h), "%s reached the upstream", h)
+		}
+	})
+
 	t.Run("no bearer token injection when empty", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "https://example.com", nil)
 		req.Header.Set("Authorization", "Bearer old-token")

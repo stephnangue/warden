@@ -16,6 +16,20 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
+// wardenHeadersToStrip are the Warden headers removed before re-signing: each
+// carries a caller credential, or a routing selector (role, provider,
+// namespace), that has no meaning to AWS and must not reach it.
+var wardenHeadersToStrip = []string{
+	"X-Warden-Token",
+	"X-Warden-Agent-Token",
+	"X-Warden-User-Token",
+	"X-Warden-Subject-Token",
+	"X-Warden-Actor-Token",
+	"X-Warden-Role",
+	"X-Warden-Provider",
+	"X-Warden-Namespace",
+}
+
 func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
 	if b.Timeout() > 0 {
@@ -119,20 +133,13 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// The real AWS session token (if any) will be added by resignRequest when
 	// the minted credentials include a SessionToken.
 	//
-	// The X-Warden-* headers are stripped for the same reason: each carries a
-	// caller credential that has no meaning to AWS and must not reach it. AWS
-	// keeps its own list rather than sharing the httpproxy one because its
-	// requests are SigV4-signed — the strip has to happen here, after the
+	// The X-Warden-* headers (wardenHeadersToStrip) are stripped for the same
+	// reason. AWS keeps its own list rather than sharing the httpproxy one
+	// because its requests are SigV4-signed — the strip has to happen here, after the
 	// inbound signature has been verified against the original header set and
 	// before resignRequest computes a new signature over the modified one.
 	req.HTTPRequest.Header.Del("X-Amz-Security-Token")
-	for _, h := range []string{
-		"X-Warden-Token",
-		"X-Warden-Agent-Token",
-		"X-Warden-User-Token",
-		"X-Warden-Subject-Token",
-		"X-Warden-Actor-Token",
-	} {
+	for _, h := range wardenHeadersToStrip {
 		req.HTTPRequest.Header.Del(h)
 	}
 

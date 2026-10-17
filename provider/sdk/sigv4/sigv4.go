@@ -158,6 +158,10 @@ func NormalizeRequest(log *logger.GatedLogger, r *http.Request, bodyBytes []byte
 		}
 	}
 
+	// Read before Connection itself is removed below: the headers it names are
+	// hop-by-hop too (RFC 9110 §7.6.1).
+	connectionHeaders := r.Header.Get("Connection")
+
 	// Remove hop-by-hop headers (RFC 2616 Section 13.5.1)
 	removedHeaders := []string{}
 	for _, h := range []string{
@@ -182,7 +186,7 @@ func NormalizeRequest(log *logger.GatedLogger, r *http.Request, bodyBytes []byte
 	}
 
 	// Remove headers listed in Connection header
-	if connectionHeaders := r.Header.Get("Connection"); connectionHeaders != "" {
+	if connectionHeaders != "" {
 		for _, connHeader := range strings.Split(connectionHeaders, ",") {
 			trimmed := strings.TrimSpace(connHeader)
 			if trimmed != "" {

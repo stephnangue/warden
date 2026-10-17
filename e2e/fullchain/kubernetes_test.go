@@ -389,3 +389,37 @@ func verifyAssertion(t *testing.T, token string) map[string]any {
 	t.Helper()
 	return h.VerifyAssertion(t, leaderPort, token)
 }
+
+// TestKubernetes_ImpersonationHeadersNeverReachTheAPIServer: an agent that could
+// forward Impersonate-* would act past the service account Warden minted for it
+// whenever that account holds the impersonate verb. The gateway hop must arrive
+// with none of the family, the client-named extra attributes included.
+func TestKubernetes_ImpersonationHeadersNeverReachTheAPIServer(t *testing.T) {
+	ensureEnv(t)
+	serveTokenRequest(t)
+	upstream.Reset()
+
+	status, body, _ := h.ChainRequest(t, leaderPort, kubernetesEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Role:         kubernetesEnv.CertRole(),
+		Headers: map[string]string{
+			"Impersonate-User":         "system:admin",
+			"Impersonate-Group":        "system:masters",
+			"Impersonate-Uid":          "06f6ce97-e2c5-4ab8-7ba5-7654dd08d52b",
+			"Impersonate-Extra-Scopes": "cluster-admin",
+		},
+	})
+	if status != 200 {
+		t.Fatalf("status: got %d, want 200 (body: %s)", status, body)
+	}
+
+	_, gateway := splitHops(t)
+	if len(gateway) != 1 {
+		t.Fatalf("expected exactly one gateway hop, got %d", len(gateway))
+	}
+	for name := range gateway[0].Header {
+		if strings.HasPrefix(strings.ToLower(name), "impersonate-") {
+			t.Errorf("%s reached the API server", name)
+		}
+	}
+}

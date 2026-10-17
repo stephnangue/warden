@@ -314,6 +314,22 @@ func TestPrepareHeaders(t *testing.T) {
 	}
 }
 
+// The Warden routing selectors name a tenant, role or mount the upstream has no
+// use for, so none of them leaves Warden.
+func TestPrepareHeaders_RemovesWardenRoutingSelectors(t *testing.T) {
+	b := &vaultBackend{}
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	for _, h := range []string{"X-Warden-Namespace", "X-Warden-Role", "X-Warden-Provider"} {
+		req.Header.Set(h, "selector")
+	}
+
+	b.prepareHeaders(req, "test-token")
+
+	for _, h := range []string{"X-Warden-Namespace", "X-Warden-Role", "X-Warden-Provider"} {
+		assert.Empty(t, req.Header.Get(h), "%s reached the upstream", h)
+	}
+}
+
 func TestPrepareHeaders_ConnectionListedHeaders(t *testing.T) {
 	b := &vaultBackend{}
 	req := httptest.NewRequest(http.MethodPost, "/test", nil)

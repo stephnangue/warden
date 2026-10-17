@@ -23,7 +23,7 @@ func TestStripInboundCredentials_RemovesEveryWardenChannel(t *testing.T) {
 	h := http.Header{}
 	for _, name := range []string{
 		"Authorization",
-		"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider",
+		"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider", "X-Warden-Namespace",
 		"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token",
 	} {
 		h.Set(name, "sensitive")
