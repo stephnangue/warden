@@ -516,7 +516,7 @@ func (c *Core) trustEnv(ctx context.Context, keyless credential.Config) (env *cr
 	return &credential.TrustEnv{
 		IssuerURL:      issuerURL,
 		JWKSURL:        issuerOrigin(issuerURL) + "/oidc/jwks",
-		SubjectPrefix:  "wid:" + nsID + ":",
+		SubjectPrefix:  credential.WardenSubjectPrefix + nsID + ":",
 		NamespaceClaim: credential.NamespaceClaim(nsPath),
 	}, federated
 }

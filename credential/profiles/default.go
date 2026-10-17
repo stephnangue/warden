@@ -111,10 +111,18 @@ func (DefaultProfile) ValidateSpec(config credential.Config) error { return nil 
 // act chain.
 var errAgentActChain = errors.New("the agent token carries an RFC 8693 act chain; a delegation token would name the agent as the current actor and misstate who acts")
 
-// CheckIdentities refuses a delegation whose agent is itself being acted for. A nil
-// user — no user disclosed — is always accepted.
+// CheckIdentities refuses a delegation whose agent is itself being acted for, and
+// one whose user principal carries the reserved agent subject prefix: rendered as
+// the top-level sub, it would read as an agent to a verifier binding agents by
+// prefix. A nil user — no user disclosed — is always accepted.
 func (DefaultProfile) CheckIdentities(agent credential.AssertionIdentity, user *credential.AssertionIdentity) error {
-	if user != nil && len(agent.Actors) > 0 {
+	if user == nil {
+		return nil
+	}
+	if credential.HasReservedSubjectPrefix(user.PrincipalID) {
+		return credential.ErrReservedPrincipal
+	}
+	if len(agent.Actors) > 0 {
 		return errAgentActChain
 	}
 	return nil

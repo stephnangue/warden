@@ -1913,6 +1913,12 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 		if userTE == nil {
 			return nil, fmt.Errorf("spec %q sets assertion_user_claims: %w", specName, credential.ErrUserRequired)
 		}
+		// The raw principal becomes the assertion's sub once disclosed, and feeds
+		// {{user.sub}} either way. Refused before both, so no slot, source or cache
+		// path can let a user present an agent's subject.
+		if credential.HasReservedSubjectPrefix(userTE.PrincipalID) {
+			return nil, fmt.Errorf("spec %q: %w", specName, credential.ErrReservedPrincipal)
+		}
 		// "sub" names the user's identity principal, not a metadata key — exclude it
 		// from the metadata projection so an operator can list it (to template
 		// {{user.sub}}) without needing a metadata key literally named "sub".

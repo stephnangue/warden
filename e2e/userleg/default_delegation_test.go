@@ -200,6 +200,30 @@ func TestDefaultProfile_VaultBindsAgentOnly(t *testing.T) {
 	}
 }
 
+// TestDefaultProfile_AgentShapedUserIsRefused: a user whose subject is shaped like an
+// agent's composite would, rendered as the delegation token's sub, satisfy any
+// verifier that binds agents by the "wid:<namespace>:" prefix. The prefix is
+// reserved, so the request is refused with 403 before anything is minted.
+func TestDefaultProfile_AgentShapedUserIsRefused(t *testing.T) {
+	setupDelegation(t)
+
+	userJWT := h.GetJWT(t, "wid:root:e2e:impersonated-agent", "agent-shaped-secret")
+	if sub := h.JWTSubject(t, userJWT); sub != "wid:root:e2e:impersonated-agent" {
+		t.Fatalf("Hydra issued sub %q; the row needs the agent-shaped subject", sub)
+	}
+
+	status, body := lookupSelf(t, map[string]string{
+		"X-Warden-Agent-Token": h.GetDefaultJWT(t),
+		"Authorization":        "Bearer " + userJWT,
+	})
+	if status != http.StatusForbidden {
+		t.Fatalf("an agent-shaped user must be refused with 403, got %d: %s", status, body)
+	}
+	if !strings.Contains(string(body), "reserved agent subject prefix") {
+		t.Fatalf("refused for the wrong reason: %s", body)
+	}
+}
+
 // TestDefaultProfile_DelegationSpecWithoutUserIsRefused: a spec that discloses a user
 // fails closed when the request carries none — as a 401, so the client knows to
 // authenticate a user and retry — rather than minting some other shape.

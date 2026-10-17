@@ -3910,6 +3910,17 @@ func TestResolveExchangeInputs_DefaultRefusesActedAgentBeforeCache(t *testing.T)
 		assert.Contains(t, err.Error(), `"default"`)
 	})
 
+	t.Run("user principal with the reserved agent prefix is refused before any cache key exists", func(t *testing.T) {
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{
+			PrincipalID: "wid:root:auth_jwt_1:victim", NamespaceID: "ns1", MountAccessor: "auth_oidc_2",
+		}}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agent(nil))
+		assert.ErrorIs(t, err, credential.ErrReservedPrincipal)
+		assert.Nil(t, inputs, "no inputs means no fingerprint, so no cache lookup can happen")
+		assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(exchangeInputError(err)))
+	})
+
 	t.Run("no user principal fails closed", func(t *testing.T) {
 		_, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque-session", nil), agent(nil))
 		assert.ErrorIs(t, err, credential.ErrUserRequired)
