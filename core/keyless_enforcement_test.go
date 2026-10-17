@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -58,16 +59,44 @@ func TestCheckKeyless(t *testing.T) {
 	assert.Contains(t, err.Error(), "subject_token_source", "a spec refusal points at the spec-level ways out")
 }
 
+// fakeApproleVault serves the two calls an approle source makes when it is
+// created — the login and the read of its own role — so a keyed source passes the
+// connection test without a Vault. One server serves the whole package and lives
+// as long as the test binary.
+var fakeApproleVault = sync.OnceValue(func() string {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/login"):
+			_, _ = w.Write([]byte(`{"auth":{"client_token":"s.fake","accessor":"fake-accessor","lease_duration":3600,"renewable":true}}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":{"token_ttl":3600}}`))
+		}
+	}))
+	return srv.URL
+})
+
 // keyedHvaultSource is an hvault source that stores a secret_id.
 func keyedHvaultSource(name string) map[string]interface{} {
 	return map[string]interface{}{
 		"name":            name,
 		"type":            "hvault",
 		"rotation_period": 86400,
-		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
-			"secret_id":     "real-secret-id",
-		},
+		"config":          keyedHvaultConfig(),
+	}
+}
+
+// keyedHvaultConfig is the config of keyedHvaultSource: approle, against
+// fakeApproleVault.
+func keyedHvaultConfig() map[string]interface{} {
+	return map[string]interface{}{
+		"vault_address":   fakeApproleVault(),
+		"tls_skip_verify": true,
+		"auth_method":     "approle",
+		"role_id":         "test-role-id",
+		"secret_id":       "real-secret-id",
+		"approle_mount":   "approle",
+		"role_name":       "warden-source-role",
 	}
 }
 
@@ -77,9 +106,10 @@ func keylessHvaultSource(name string) map[string]interface{} {
 		"name": name,
 		"type": "hvault",
 		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
-			"auth_method":   "oidc_federation",
-			"jwt_role":      "agents",
+			"vault_address":   "http://localhost:8200",
+			"tls_skip_verify": true,
+			"auth_method":     "oidc_federation",
+			"jwt_role":        "agents",
 		},
 	}
 }
@@ -185,7 +215,7 @@ func TestKeylessEnforcement_SourceUpdate(t *testing.T) {
 	}))
 	stored, err := backend.core.credConfigStore.GetSource(ctx, "legacy")
 	require.NoError(t, err)
-	assert.Equal(t, "http://localhost:8200", stored.Config.Get("vault_address"))
+	assert.Equal(t, fakeApproleVault(), stored.Config.Get("vault_address"))
 
 	// Resending the read-back mask keeps the secret, so it is refused too.
 	requireKeylessRefusal(t, sourceWrite(t, backend, ctx, logical.UpdateOperation, map[string]interface{}{
@@ -198,9 +228,12 @@ func TestKeylessEnforcement_SourceUpdate(t *testing.T) {
 		"name":            "legacy",
 		"rotation_period": 0,
 		"config": map[string]interface{}{
-			"auth_method": "oidc_federation",
-			"jwt_role":    "agents",
-			"secret_id":   "",
+			"auth_method":   "oidc_federation",
+			"jwt_role":      "agents",
+			"role_id":       "",
+			"secret_id":     "",
+			"approle_mount": "",
+			"role_name":     "",
 		},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%+v", resp.Data)

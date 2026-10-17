@@ -29,11 +29,13 @@ func createHVaultSource(t *testing.T, backend *SystemBackend, ctx context.Contex
 	t.Helper()
 	sourceSchema := backend.pathCredentials()[0].Fields
 	sourceRaw := map[string]interface{}{
-		"name":            name,
-		"type":            "hvault",
-		"rotation_period": 86400, // 24 hours
+		"name": name,
+		"type": "hvault",
 		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
+			"vault_address":   "http://localhost:8200",
+			"tls_skip_verify": true,
+			"auth_method":     "oidc_federation",
+			"jwt_role":        "warden",
 		},
 	}
 	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/"+name, sourceRaw)
@@ -830,10 +832,7 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 		"name":            "vault-src",
 		"type":            "hvault",
 		"rotation_period": 86400,
-		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
-			"secret_id":     "real-secret-id",
-		},
+		"config":          keyedHvaultConfig(),
 	}
 	_, err := backend.handleCredentialSourceCreate(ctx,
 		createTestRequest(logical.CreateOperation, "cred/sources/vault-src", sourceRaw),
@@ -853,7 +852,7 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 	for k, v := range readConfig {
 		resend[k] = v
 	}
-	resend["vault_address"] = "http://localhost:8300"
+	resend["role_name"] = "renamed-role"
 
 	updateRaw := map[string]interface{}{"name": "vault-src", "config": resend}
 	_, err = backend.handleCredentialSourceUpdate(ctx,
@@ -864,7 +863,7 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 	stored, err := backend.core.credConfigStore.GetSource(ctx, "vault-src")
 	require.NoError(t, err)
 	assert.Equal(t, "real-secret-id", stored.Config.Get("secret_id"), "resending the mask destroyed the stored secret")
-	assert.Equal(t, "http://localhost:8300", stored.Config.Get("vault_address"))
+	assert.Equal(t, "renamed-role", stored.Config.Get("role_name"))
 }
 
 func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-const vaultSourceBody = `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+const vaultSourceBody = `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 
 func cleanupSource(t *testing.T, port int, name string) {
 	h.APIRequest(t, "DELETE", "sys/cred/sources/"+name, port, "")
@@ -51,7 +51,7 @@ func TestRotationPeriodBelowMinimum(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	cleanupSource(t, port, "e2e-rot-invalid")
 
-	body := `{"type":"hvault","rotation_period":5,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	body := `{"type":"hvault","rotation_period":5,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	status, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-invalid", port, body)
 	if status != 400 {
 		t.Fatalf("expected 400 for rotation_period below minimum, got %d", status)
@@ -100,7 +100,7 @@ func TestUpdateRotationPeriod(t *testing.T) {
 	// Delete and recreate with updated rotation_period
 	cleanupSource(t, port, "e2e-rot-update")
 
-	updatedBody := `{"type":"hvault","rotation_period":600,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	updatedBody := `{"type":"hvault","rotation_period":600,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	recreateStatus, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-update", port, updatedBody)
 	if recreateStatus != 200 && recreateStatus != 201 && recreateStatus != 204 {
 		t.Fatalf("expected 200, 201, or 204 on recreate, got %d", recreateStatus)
@@ -132,7 +132,7 @@ func TestRotationMaxAttemptsFailedState(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	cleanupSource(t, port, "e2e-rot-fail")
 
-	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:9999","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:9999","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	status, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-fail", port, body)
 	if status != 400 {
 		t.Fatalf("expected 400 for unreachable vault, got %d", status)
@@ -178,7 +178,7 @@ func TestActivationDelayConfig(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	cleanupSource(t, port, "e2e-rot-actdelay")
 
-	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role","activation_delay":"10m"}}`
+	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role","activation_delay":"10m"}}`
 	status, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-actdelay", port, body)
 	if status != 200 && status != 201 && status != 204 {
 		t.Fatalf("expected 200, 201, or 204 on create with activation_delay, got %d", status)
@@ -273,7 +273,7 @@ func TestRotationPeriodUpdateOnExistingSource(t *testing.T) {
 	// Delete and recreate with a longer rotation_period
 	cleanupSource(t, port, "e2e-rot-upd2")
 
-	updatedBody := `{"type":"hvault","rotation_period":900,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	updatedBody := `{"type":"hvault","rotation_period":900,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	recreateStatus, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-upd2", port, updatedBody)
 	if recreateStatus != 200 && recreateStatus != 201 && recreateStatus != 204 {
 		t.Fatalf("expected 200, 201, or 204 on recreate, got %d", recreateStatus)

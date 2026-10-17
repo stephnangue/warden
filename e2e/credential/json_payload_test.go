@@ -33,12 +33,13 @@ func TestJSON_CreateCredSourceWithJSONFile(t *testing.T) {
 		"type":            "hvault",
 		"rotation_period": 300,
 		"config": map[string]any{
-			"vault_address": "http://127.0.0.1:8200",
-			"auth_method":   "approle",
-			"role_id":       "e2e-approle-role-id-1234",
-			"secret_id":     "e2e-approle-secret-id-5678",
-			"approle_mount": "e2e_approle",
-			"role_name":     "warden-e2e-role",
+			"vault_address":   "http://127.0.0.1:8200",
+			"tls_skip_verify": true,
+			"auth_method":     "approle",
+			"role_id":         "e2e-approle-role-id-1234",
+			"secret_id":       "e2e-approle-secret-id-5678",
+			"approle_mount":   "e2e_approle",
+			"role_name":       "warden-e2e-role",
 		},
 	}
 	bytes, err := json.Marshal(payload)
@@ -163,7 +164,7 @@ func TestJSON_UpdateCredSourceWithJSON(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
 	const name = "e2e-json-update-source"
-	create := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	create := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	status, body := h.APIRequest(t, "POST", "sys/cred/sources/"+name, port, create)
 	if status != 200 && status != 201 {
 		t.Fatalf("setup: create source failed (%d): %s", status, string(body))
@@ -176,7 +177,7 @@ func TestJSON_UpdateCredSourceWithJSON(t *testing.T) {
 	out, stderr, err := h.WardenCLISplitWithPort(t, port, map[string]string{
 		"WARDEN_TOKEN": h.RootToken(t),
 	}, "cred", "source", "update", name,
-		"--json", `{"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role","tls_skip_verify":true}}`,
+		"--json", `{"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role","tls_skip_verify":true}}`,
 		"-o", "json")
 	if err != nil {
 		t.Fatalf("update --json failed: %v\nOutput:\n%s%s", err, stderr, out)

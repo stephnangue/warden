@@ -543,7 +543,7 @@ func setupCachedCapabilityChain(t *testing.T, stsURL, vaultProxyURL, secretCache
 	// capability costs is counted. The narrow role is still pinned on the spec.
 	mustWrite("POST", "sys/cred/sources/"+kmsProxiedVaultSource, fmt.Sprintf(`{
 		"type":"hvault","config":{
-			"vault_address":%q,"auth_method":"oidc_federation",
+			"vault_address":%q,"tls_skip_verify":true,"auth_method":"oidc_federation",
 			"jwt_role":"warden-e2e-warden-fed","jwt_mount":"jwt-warden",
 			"audience":"https://vault.e2e.warden"}}`, vaultProxyURL),
 		"create the proxied federation source")

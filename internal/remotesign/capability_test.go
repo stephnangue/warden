@@ -32,6 +32,7 @@ type capSignServer struct {
 
 	mu     sync.Mutex
 	tokens map[string]int // X-Vault-Token -> sign calls
+	last   http.Header    // headers of the latest sign call
 }
 
 func newCapSignServer(t *testing.T) *capSignServer {
@@ -48,6 +49,7 @@ func newCapSignServer(t *testing.T) *capSignServer {
 		}
 		s.mu.Lock()
 		s.tokens[r.Header.Get("X-Vault-Token")]++
+		s.last = r.Header.Clone()
 		s.mu.Unlock()
 		if st := s.status.Load(); st != 0 {
 			w.WriteHeader(int(st))
@@ -222,6 +224,36 @@ func TestCapabilitySigners_SignsWithTheCapabilityToken(t *testing.T) {
 
 	_, err = signers.SignJWS(context.Background(), &Capability{Backend: "cloudkms"}, nil, nil)
 	assert.ErrorIs(t, err, ErrCapabilityUnsupported)
+}
+
+// A signing request carries only what the capability names. The server process's
+// VAULT_HEADERS and VAULT_NAMESPACE would otherwise reach the store on every
+// signature, and VAULT_WRAP_TTL would wrap the response so it carried no signature.
+// VAULT_AGENT_ADDR would send the capability's token somewhere it never named.
+func TestCapabilitySigners_IgnoresTheVaultEnvironment(t *testing.T) {
+	t.Setenv("VAULT_HEADERS", `{"X-Leak":"from-the-environment"}`)
+	t.Setenv("VAULT_NAMESPACE", "tenant-from-the-environment")
+	t.Setenv("VAULT_WRAP_TTL", "5m")
+	t.Setenv("VAULT_AGENT_ADDR", "http://127.0.0.1:1")
+	t.Setenv("VAULT_TOKEN", "hvs.from-the-environment")
+
+	srv := newCapSignServer(t)
+	signers := NewCapabilitySigners(nil, CapabilityOptions{})
+	defer signers.Close()
+
+	c, err := DecodeCapability(transitCapabilityPayload(srv.url, nil))
+	require.NoError(t, err)
+	jws, err := signers.SignJWS(context.Background(), c, map[string]string{"kid": c.Kid}, map[string]interface{}{"iss": "x"})
+	require.NoError(t, err)
+	verifyRS256(t, &srv.key.PublicKey, jws)
+
+	srv.mu.Lock()
+	got := srv.last
+	srv.mu.Unlock()
+	assert.Equal(t, "hvs.capability", got.Get("X-Vault-Token"))
+	assert.Empty(t, got.Get("X-Leak"), "VAULT_HEADERS reached the store")
+	assert.Empty(t, got.Get("X-Vault-Namespace"), "VAULT_NAMESPACE scoped the signature")
+	assert.Empty(t, got.Get("X-Vault-Wrap-TTL"), "VAULT_WRAP_TTL wrapped the response")
 }
 
 // TestCapabilitySigners_PublicKey reads the exact version a capability names, with the

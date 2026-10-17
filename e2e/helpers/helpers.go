@@ -460,7 +460,7 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 
 	// Credential source
 	NSAPIRequest(t, "POST", "sys/cred/sources/vault-e2e", ns, port,
-		`{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`)
+		`{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`)
 
 	// Credential spec
 	NSAPIRequest(t, "POST", "sys/cred/specs/vault-token-reader", ns, port,

@@ -161,6 +161,7 @@ func (p *transitPool) open(coords any) (SigningBackend, error) {
 		return nil, fmt.Errorf("remotesign: cannot prepare a signing client: %w", err)
 	}
 	client.SetToken(c.token)
+	pinNoResponseWrapping(client)
 	// Timeout 0 inherits the caller's deadline: the capability serves this signature.
 	return NewTransitClientBackend(client, c.mount, 0, p.log)
 }
@@ -178,6 +179,10 @@ func (p *transitPool) base(c transitCoords) (*api.Client, error) {
 	// would send the token somewhere the payload never named; a namespace would scope
 	// the signing call to a tenant the capability was not minted for. Both are cleared
 	// unconditionally — the payload is the only authority here.
+	//
+	// TLS trust is the exception, and deliberately so: the payload names no CA and
+	// no consumer lends a transport, so the environment's VAULT_CACERT is the only
+	// way a store behind a private CA is reachable at all.
 	cfg.AgentAddress = ""
 	if p.transport != nil {
 		// Only the transport is taken from the consumer. Redirect handling stays the
@@ -190,7 +195,11 @@ func (p *transitPool) base(c transitCoords) (*api.Client, error) {
 		return nil, fmt.Errorf("remotesign: cannot reach the signing backend at %q: %w", c.address, err)
 	}
 	built.SetToken("")
+	// NewClient adds VAULT_HEADERS to every request whatever Config it is given;
+	// only the request marker the library always sets is kept.
+	built.SetHeaders(http.Header{api.RequestHeaderName: []string{"true"}})
 	built.SetNamespace(c.namespace)
+	pinNoResponseWrapping(built)
 	// A loser of a first-use race drops its client unused; it opened no connections.
 	v, _ := p.clients.LoadOrStore(key, &pooledTransitClient{client: built, http: cfg.HttpClient})
 	return v.(*pooledTransitClient).client, nil
@@ -203,4 +212,12 @@ func (p *transitPool) closeIdle() {
 		v.(*pooledTransitClient).http.CloseIdleConnections()
 		return true
 	})
+}
+
+// pinNoResponseWrapping stops VAULT_WRAP_TTL from wrapping a signing response: with
+// no lookup of its own, the library consults that variable on every request, and a
+// wrapped response carries no signature. A clone does not inherit the lookup, so
+// each clone is pinned again.
+func pinNoResponseWrapping(client *api.Client) {
+	client.SetWrappingLookupFunc(func(string, string) string { return "" })
 }

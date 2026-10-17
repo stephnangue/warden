@@ -11,7 +11,7 @@ import (
 
 // keyedApproleSource is an hvault AppRole source body: it stores a secret_id.
 const keyedApproleSource = `{"type":"hvault","rotation_period":300,"config":{
-	"vault_address":"http://127.0.0.1:8200","auth_method":"approle",
+	"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle",
 	"role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678",
 	"approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 
