@@ -786,8 +786,21 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 	tokenValue, err := c.tokenStore.GenerateToken(ctx, auth.TokenType, &authData)
 
 	if err != nil {
-		// error when creating token
-		c.logger.Error("Failed to generate token", logger.String("token_type", auth.TokenType), logger.Any("auth_data", authData))
+		// Named fields only: authData carries the login credential itself in
+		// TokenValue (the caller's JWT, or a certificate fingerprint) and the
+		// login claims in Metadata, neither of which belongs in a log.
+		fields := []logger.TypedField{
+			logger.Err(err),
+			logger.String("token_type", auth.TokenType),
+			logger.String("role_name", authData.RoleName),
+			logger.String("principal_id", authData.PrincipalID),
+			logger.String("mount_accessor", authData.MountAccessor),
+			logger.String("credential_spec", authData.CredentialSpec),
+		}
+		if ns, nsErr := namespace.FromContext(ctx); nsErr == nil {
+			fields = append(fields, logger.String("namespace", ns.Path))
+		}
+		c.logger.Error("Failed to generate token", fields...)
 		return logical.ErrorResponse(logical.ErrInternal("failed to generate token")), ErrInternalError
 	}
 
