@@ -99,6 +99,11 @@ type ProviderSpec struct {
 	// ExtraHeadersToRemove are provider-specific headers to strip beyond the base set.
 	ExtraHeadersToRemove []string
 
+	// ExtraHeaderPrefixesToRemove strips every header whose name begins with one
+	// of these prefixes, compared case-insensitively — for a header family whose
+	// names the client chooses, such as Kubernetes' Impersonate-Extra-<key>.
+	ExtraHeaderPrefixesToRemove []string
+
 	// DefaultHeaders are static headers always set on proxied requests (e.g., tfe's "Content-Type").
 	DefaultHeaders map[string]string
 

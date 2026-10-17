@@ -266,27 +266,7 @@ func resolveAcceptDefault(specDefault string, dispatch Dispatch) string {
 // The dispatch carries per-request overrides for Accept defaulting and dynamic-header
 // injection; zero values mean "use the spec defaults."
 func (b *proxyBackend) prepareHeaders(r *http.Request, credHeaders map[string]string, dispatch Dispatch) {
-	// Read Connection header before removing it
-	conn := r.Header.Get("Connection")
-
-	// Remove base headers
-	for _, h := range BaseHeadersToRemove {
-		r.Header.Del(h)
-	}
-
-	// Remove provider-specific extra headers
-	for _, h := range b.spec.ExtraHeadersToRemove {
-		r.Header.Del(h)
-	}
-
-	// Handle Connection header's listed headers
-	if conn != "" {
-		for _, h := range strings.Split(conn, ",") {
-			if h = strings.TrimSpace(h); h != "" {
-				r.Header.Del(h)
-			}
-		}
-	}
+	b.spec.StripInboundHeaders(r.Header)
 
 	// Inject credential headers
 	for k, v := range credHeaders {

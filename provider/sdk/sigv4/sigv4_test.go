@@ -397,6 +397,20 @@ func TestNormalizeRequest(t *testing.T) {
 		assert.Equal(t, "preserved", r.Header.Get("X-Custom"))
 	})
 
+	t.Run("strips the headers Connection names", func(t *testing.T) {
+		r, _ := http.NewRequest("GET", "/", nil)
+		r.Header.Set("Connection", "X-Hop, X-Other-Hop")
+		r.Header.Set("X-Hop", "hop-only")
+		r.Header.Set("X-Other-Hop", "hop-only")
+		r.Header.Set("X-Custom", "preserved")
+
+		NormalizeRequest(log, r, []byte{})
+
+		assert.Empty(t, r.Header.Get("X-Hop"))
+		assert.Empty(t, r.Header.Get("X-Other-Hop"))
+		assert.Equal(t, "preserved", r.Header.Get("X-Custom"))
+	})
+
 	t.Run("strips proxy headers", func(t *testing.T) {
 		r, _ := http.NewRequest("GET", "/", nil)
 		r.Header.Set("X-Forwarded-For", "1.2.3.4")

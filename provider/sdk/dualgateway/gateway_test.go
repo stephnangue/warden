@@ -174,6 +174,38 @@ func TestHandleAPIRequest_InboundAuthorizationIsNotForwarded(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// The headers a request's Connection header names are hop-by-hop, so they stop at
+// this hop with Connection itself.
+func TestHandleAPIRequest_ConnectionListedHeadersAreNotForwarded(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.Header.Get("X-Hop"), "a Connection-listed header reached the upstream")
+		assert.Equal(t, "keep-me", r.Header.Get("X-Keep"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/test", nil)
+	httpReq.Header.Set("Connection", "X-Hop")
+	httpReq.Header.Set("X-Hop", "hop-only")
+	httpReq.Header.Set("X-Keep", "keep-me")
+
+	req := &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "injected-secret"},
+		},
+	}
+
+	b.handleAPIRequest(context.Background(), req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 // --- StripAuthorization: true (bearer auth replaces Authorization) ---
 
 func TestHandleAPIRequest_StripAuthorization_True(t *testing.T) {

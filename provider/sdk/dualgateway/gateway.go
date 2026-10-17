@@ -27,7 +27,7 @@ import (
 // untouched, which is how a caller's Warden token reached the vendor.
 var wardenCredentialHeaders = []string{
 	"Authorization",
-	"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider",
+	"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider", "X-Warden-Namespace",
 	"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token",
 }
 
@@ -180,6 +180,13 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 	}
 
 	stripInboundCredentials(outReq.Header)
+	// The headers Connection names are hop-by-hop too (RFC 9110 §7.6.1), so they
+	// go with it; read it before it is removed.
+	for _, h := range strings.Split(outReq.Header.Get("Connection"), ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			outReq.Header.Del(h)
+		}
+	}
 	for _, h := range hopByHopHeaders {
 		outReq.Header.Del(h)
 	}

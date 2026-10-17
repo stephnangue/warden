@@ -28,6 +28,7 @@ var headersToRemove = []string{
 	"X-Warden-User-Token",
 	"X-Warden-Role",
 	"X-Warden-Provider",
+	"X-Warden-Namespace",
 	"X-Warden-Subject-Token",
 	"X-Warden-Actor-Token",
 	// Hop-by-hop headers

@@ -86,6 +86,10 @@ var Spec = &httpproxy.ProviderSpec{
 	HelpText:           elasticBackendHelp,
 	ExtractCredentials: elasticCredentialExtractor,
 	ExtractToken:       extractTokens,
+	// es-security-runas-user makes Elasticsearch run the request as another user
+	// when the minted key's role grants run_as, which would let an agent act past
+	// the key Warden minted for it.
+	ExtraHeadersToRemove: []string{"es-security-runas-user"},
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["elastic_url"].(string)
 		if !ok || addr == "" {
