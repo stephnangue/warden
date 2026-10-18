@@ -16,9 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
@@ -262,10 +261,10 @@ type AzureDriver struct {
 
 	// tokenCache holds the source's own tokens, keyed by resource URI. Its generation
 	// is bumped when rotation installs new credentials, so a token minted by the
-	// retired ones is never served. tokenGroup coalesces concurrent misses for the
+	// retired ones is never served. tokenFlight coalesces concurrent misses for the
 	// same resource and generation into one request to Entra.
-	tokenCache *TokenCache
-	tokenGroup singleflight.Group
+	tokenCache  *TokenCache
+	tokenFlight flight.Group[sourceTokenResult]
 
 	// graphPerms caches the Graph-permission probe, stamped with the token-cache
 	// generation it was taken under so a rotation invalidates it without touching
@@ -1344,39 +1343,34 @@ func (d *AzureDriver) getSourceTokenWith(ctx context.Context, resourceURI string
 		}
 
 		gen := d.tokenCache.GetGeneration()
-		ch := d.tokenGroup.DoChan(fmt.Sprintf("%d|%s", gen, resourceURI), func() (interface{}, error) {
+		// The fetch runs detached from the request that started it and is bounded by
+		// the group's default timeout; each caller waits on its own ctx.
+		r, err := d.tokenFlight.Do(ctx, fmt.Sprintf("%d|%s", gen, resourceURI), func(ctx context.Context) (sourceTokenResult, error) {
 			tenantID, clientID, clientSecret := d.sourceCreds()
-			fetchCtx := context.WithoutCancel(ctx)
 			var token string
 			var expiresIn int
 			var err error
 			// d.cert is set only when the driver was built for auth_method=certificate,
 			// and validation refuses a source holding both a certificate and a secret.
 			if d.cert != nil {
-				token, expiresIn, err = d.acquireTokenWithCertificate(fetchCtx, tenantID, clientID, resourceURI, kms)
+				token, expiresIn, err = d.acquireTokenWithCertificate(ctx, tenantID, clientID, resourceURI, kms)
 			} else {
-				token, expiresIn, err = d.acquireToken(fetchCtx, tenantID, clientID, clientSecret, resourceURI)
+				token, expiresIn, err = d.acquireToken(ctx, tenantID, clientID, clientSecret, resourceURI)
 			}
 			if err != nil {
-				return nil, err
+				return sourceTokenResult{}, err
 			}
 			expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
 			stored := d.tokenCache.SetIfGeneration(resourceURI, token, expiresAt, gen)
 			return sourceTokenResult{token: token, stored: stored}, nil
 		})
-
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case res := <-ch:
-			if res.Err != nil {
-				return "", res.Err
-			}
-			if r := res.Val.(sourceTokenResult); r.stored {
-				return r.token, nil
-			}
-			// Minted by credentials a rotation retired mid-flight; fetch again.
+		if err != nil {
+			return "", err
 		}
+		if r.stored {
+			return r.token, nil
+		}
+		// Minted by credentials a rotation retired mid-flight; fetch again.
 	}
 	return "", fmt.Errorf("azure: source credentials were rotated %d times while acquiring a token for %s",
 		azureSourceTokenAttempts, resourceURI)

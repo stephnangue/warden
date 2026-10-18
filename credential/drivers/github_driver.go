@@ -20,9 +20,9 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/types"
+	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
-	"golang.org/x/sync/singleflight"
 )
 
 // githubMaxResponseBodySize limits response body reads to prevent OOM
@@ -103,10 +103,10 @@ type GitHubDriver struct {
 
 	// App installation token cache, keyed by appTokenCacheKey over the inputs each
 	// token was minted from. appTokenMu guards the map only and is never held across
-	// I/O; appTokenGroup coalesces concurrent misses for the same inputs.
-	appTokens     map[string]*appTokenCache
-	appTokenMu    sync.Mutex
-	appTokenGroup singleflight.Group
+	// I/O; appTokenFlight coalesces concurrent misses for the same inputs.
+	appTokens      map[string]*appTokenCache
+	appTokenMu     sync.Mutex
+	appTokenFlight flight.Group[*appTokenCache]
 }
 
 // GitHubDriverFactory creates GitHubDriver instances
@@ -306,7 +306,9 @@ func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *crede
 	if chained {
 		flightKey = cacheKey + "|chained"
 	}
-	ch := d.appTokenGroup.DoChan(flightKey, func() (interface{}, error) {
+	// The mint runs detached from the request that started it and is bounded by the
+	// group's default timeout; each caller waits on its own ctx.
+	entry, err := d.appTokenFlight.Do(ctx, flightKey, func(ctx context.Context) (*appTokenCache, error) {
 		// A mint that finished just before this one started has already stored
 		// the token this caller missed.
 		if cached, ok := d.cachedAppToken(cacheKey); ok {
@@ -326,7 +328,7 @@ func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *crede
 			return nil, fmt.Errorf("failed to parse private key: %w", err)
 		}
 
-		token, expiresAt, err := d.mintInstallationToken(context.WithoutCancel(ctx), key, appID, installationID, scope, chained)
+		token, expiresAt, err := d.mintInstallationToken(ctx, key, appID, installationID, scope, chained)
 		if err != nil {
 			return nil, fmt.Errorf("failed to mint installation token: %w", err)
 		}
@@ -343,17 +345,10 @@ func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *crede
 		}
 		return entry, nil
 	})
-
-	select {
-	case <-ctx.Done():
-		return nil, nil, 0, "", ctx.Err()
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, nil, 0, "", res.Err
-		}
-		entry := res.Val.(*appTokenCache)
-		return appTokenRawData(entry), nil, time.Until(entry.expiresAt), "", nil
+	if err != nil {
+		return nil, nil, 0, "", err
 	}
+	return appTokenRawData(entry), nil, time.Until(entry.expiresAt), "", nil
 }
 
 // appTokenRefreshBuffer is how long before expiry a cached installation token stops
