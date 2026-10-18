@@ -1315,6 +1315,143 @@ func TestManager_IssueCredential_LazySubject_SingleflightCoalesces(t *testing.T)
 	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load(), "N concurrent misses must exchange once")
 }
 
+// blockingSubjectInputs resolves its subject only once release is closed, and fails
+// as a real resolver would if the context it was given is done by then.
+func blockingSubjectInputs(entered chan<- struct{}, release <-chan struct{}, mints *atomic.Int32) *ExchangeInputs {
+	return &ExchangeInputs{
+		SubjectTokenType:     TokenTypeJWT,
+		SubjectCacheIdentity: "id-shared",
+		ResolveSubjectToken: func(ctx context.Context) (string, error) {
+			mints.Add(1)
+			entered <- struct{}{}
+			<-release
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return "assertion-shared", nil
+		},
+	}
+}
+
+// within waits for ch, failing the test instead of hanging when a caller that
+// should have returned is still stuck.
+func within[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// releaser closes release once, from the test or its cleanup, so a goroutine left
+// blocked by a failing assertion is freed rather than leaked into later tests.
+func releaser(t *testing.T) (chan struct{}, func()) {
+	release := make(chan struct{})
+	var once sync.Once
+	closeRelease := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
+	return release, closeRelease
+}
+
+// Coalesced callers share one mint, so the caller that happened to start it must
+// not decide the outcome for the rest: its client going away fails only itself.
+// The mint completes, the waiting caller gets the credential, and it is cached.
+func TestManager_IssueCredential_LeaderCancellationDoesNotFailFollowers(t *testing.T) {
+	manager, _ := createExchangeTestManager(t)
+	defer manager.Stop()
+	ctx := createNamespaceContext()
+
+	var mints atomic.Int32
+	entered := make(chan struct{}, 2)
+	release, closeRelease := releaser(t)
+
+	leaderCtx, cancelLeader := context.WithCancel(ctx)
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, leaderCtx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		leaderErr <- err
+	}()
+	within(t, entered, "the leader to start the mint")
+
+	follower := make(chan *Credential, 1)
+	go func() {
+		cred, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		assert.NoError(t, err)
+		follower <- cred
+	}()
+	time.Sleep(50 * time.Millisecond) // let the follower join the flight
+
+	cancelLeader()
+	assert.ErrorIs(t, within(t, leaderErr, "the cancelled leader to return"), context.Canceled,
+		"the leader stops waiting when its own context ends")
+	closeRelease()
+
+	cred := within(t, follower, "the follower's credential")
+	require.NotNil(t, cred, "the follower must get the credential the shared mint produced")
+	assert.EqualValues(t, 1, mints.Load(), "one mint served both")
+
+	again, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+	require.NoError(t, err)
+	assert.Equal(t, cred.CredentialID, again.CredentialID, "the shared mint's credential was cached")
+}
+
+// A mint runs detached from every request waiting on it, so it is the manager
+// stopping — at seal or step-down — that has to end it.
+func TestManager_IssueCredential_StopEndsAMintInFlight(t *testing.T) {
+	manager, _ := createExchangeTestManager(t)
+	ctx := createNamespaceContext()
+
+	var mints atomic.Int32
+	entered := make(chan struct{}, 1)
+	release, closeRelease := releaser(t)
+	result := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		result <- err
+	}()
+	within(t, entered, "the mint to start")
+
+	manager.Stop()
+	closeRelease()
+	assert.ErrorIs(t, within(t, result, "the stopped mint to end"), context.Canceled)
+}
+
+// A caller that gives up stops waiting at once, and the mint it joined carries on
+// for the caller that started it.
+func TestManager_IssueCredential_FollowerCancellationReturnsPromptly(t *testing.T) {
+	manager, _ := createExchangeTestManager(t)
+	defer manager.Stop()
+	ctx := createNamespaceContext()
+
+	var mints atomic.Int32
+	entered := make(chan struct{}, 2)
+	release, closeRelease := releaser(t)
+
+	leader := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		leader <- err
+	}()
+	within(t, entered, "the leader to start the mint")
+
+	followerCtx, cancelFollower := context.WithCancel(ctx)
+	cancelFollower()
+	followerErr := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, followerCtx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		followerErr <- err
+	}()
+	assert.ErrorIs(t, within(t, followerErr, "the cancelled follower to return"), context.Canceled)
+
+	closeRelease()
+	require.NoError(t, within(t, leader, "the leader's mint"))
+	assert.EqualValues(t, 1, mints.Load())
+}
+
 // A failure inside the lazy mint must surface as an error, must NOT invoke the
 // driver, and must NOT be cached — the next request retries cleanly.
 func TestManager_IssueCredential_LazySubject_ResolveErrorNotCached(t *testing.T) {

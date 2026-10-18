@@ -30,13 +30,13 @@ import (
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/credential/types"
+	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/internal/locking"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	phy "github.com/stephnangue/warden/physical"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -413,9 +413,10 @@ type Core struct {
 	// systemBackend is the backend which is used to manage internal operations
 	systemBackend *SystemBackend
 
-	// transparentAuthGroup ensures only one implicit auth per JWT to prevent
-	// duplicate token creation when concurrent requests arrive with the same JWT
-	transparentAuthGroup singleflight.Group
+	// transparentAuthFlight ensures only one implicit auth per credential and role,
+	// preventing duplicate token creation when concurrent requests arrive with the
+	// same one. Built by newTransparentAuthFlight.
+	transparentAuthFlight *flight.Group[*TokenEntry]
 
 	// clusterConfig holds tunable HA cluster parameters (timeouts, intervals).
 	clusterConfig ClusterConfig
@@ -614,6 +615,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 	if conf.ClusterAddr != "" {
 		c.clusterAddr.Store(conf.ClusterAddr)
 	}
+	c.transparentAuthFlight = newTransparentAuthFlight(c)
 
 	c.standby.Store(true)
 	c.standbyStopCh.Store(make(chan struct{}, 1))

@@ -28,6 +28,7 @@ import (
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/helper"
+	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
@@ -2524,7 +2525,9 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	}
 
 	var singleflightKey string
-	var lookupFunc func() (*TokenEntry, error)
+	// lookupFunc takes its ctx rather than closing over the request's: inside the
+	// singleflight it runs on the login's detached context.
+	var lookupFunc func(ctx context.Context) (*TokenEntry, error)
 	var loginData map[string]any
 	var credKey string // fingerprint or JWT — used for post-login lookup with resolved role
 
@@ -2556,7 +2559,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		// e.g. a secondary user token on Authorization — would otherwise leave that
 		// bearer, not the cert-minted token ID, in ClientToken).
 		clearClientToken = true
-		lookupFunc = func() (*TokenEntry, error) {
+		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
 			return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
 		}
 
@@ -2572,7 +2575,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		singleflightKey = hex.EncodeToString(sfHash[:])
 		loginData = map[string]any{"jwt": clientToken, "role": authRole}
 		credKey = clientToken
-		lookupFunc = func() (*TokenEntry, error) {
+		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
 			return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
 		}
 
@@ -2593,7 +2596,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 			singleflightKey = hex.EncodeToString(sfHash[:])
 			loginData = map[string]any{"jwt": clientToken, "role": authRole}
 			credKey = clientToken
-			lookupFunc = func() (*TokenEntry, error) {
+			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
 				return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
 			}
 		} else if explicitCred {
@@ -2611,7 +2614,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 			// caller to clear a stray non-SVID bearer so the cert-minted token ID
 			// becomes ClientToken (this function performs no request mutation).
 			clearClientToken = true
-			lookupFunc = func() (*TokenEntry, error) {
+			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
 				return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
 			}
 		} else {
@@ -2628,7 +2631,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	// the token TTL (default 1h) bounds the exposure window. Explicit login requests
 	// always perform full revocation checks. To reduce exposure for revoked certs,
 	// configure a shorter token_ttl on cert roles.
-	te, err = lookupFunc()
+	te, err = lookupFunc(ctx)
 	if err == nil && te != nil {
 		return te, clearClientToken, nil
 	}
@@ -2639,10 +2642,14 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		return nil, false, err
 	}
 
-	// Step 2: Token not found — perform implicit auth with singleflight
-	result, err, shared := c.transparentAuthGroup.Do(singleflightKey, func() (interface{}, error) {
+	// Step 2: Token not found — perform the implicit auth, once for every request
+	// presenting this credential and role. transparentAuthFlight runs it detached
+	// from the request that started it, so that request's client going away does
+	// not fail the others; the context keeps its values, the client IP set above
+	// among them. Each caller waits on its own ctx.
+	te, err = c.transparentAuthFlight.Do(ctx, singleflightKey, func(ctx context.Context) (*TokenEntry, error) {
 		// Double-check: another goroutine may have just created the token
-		checkTE, lookupErr := lookupFunc()
+		checkTE, lookupErr := lookupFunc(ctx)
 		if lookupErr == nil && checkTE != nil {
 			return checkTE, nil
 		}
@@ -2689,16 +2696,32 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 
 		return newTE, nil
 	})
-
 	if err != nil {
-		c.transparentAuthGroup.Forget(singleflightKey)
 		return nil, false, err
 	}
-
-	te = result.(*TokenEntry)
-	_ = shared
-
 	return te, clearClientToken, nil
+}
+
+// transparentLoginTimeout bounds an implicit login, which runs detached from the
+// requests waiting on it. It covers fetching the IdP's keys (OIDC discovery and
+// JWKS) on a cold cache.
+const transparentLoginTimeout = 30 * time.Second
+
+// transparentLoginMaxDetached caps the implicit logins running detached at once.
+// Their key is the credential presented, chosen before anyone has checked it, so
+// without a cap every request sent with a fresh bearer and dropped would leave a
+// login running for up to transparentLoginTimeout. Past the cap a login runs on
+// the context of the request that started it, as before logins were detached. A
+// node has far fewer distinct credentials logging in at once than this.
+const transparentLoginMaxDetached = 256
+
+// newTransparentAuthFlight builds the group implicit logins are coalesced through.
+// A login still in flight ends with the node's active term, as the requests it
+// serves do, instead of running on past a seal or a step-down.
+func newTransparentAuthFlight(c *Core) *flight.Group[*TokenEntry] {
+	return flight.New[*TokenEntry]("implicit login", transparentLoginTimeout, c.logger,
+		flight.WithLifetime(func() context.Context { return c.activeContext }),
+		flight.WithMaxDetached(transparentLoginMaxDetached))
 }
 
 // isSPIFFEJWTSVID reports whether token is a JWT whose unverified subject is a
