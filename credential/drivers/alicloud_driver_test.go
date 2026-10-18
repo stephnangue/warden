@@ -1169,6 +1169,11 @@ type ramServer struct {
 	deactivated   []string
 	deleted       []string
 	actionSeq     []string // action names in the order received, for ordering assertions
+
+	// createAnswer, when set, answers the n-th CreateAccessKey (from 1) itself and
+	// reports true; on false the key is created as usual.
+	createAnswer func(w http.ResponseWriter, n int) bool
+	createCalls  int
 }
 
 // writeEntityNotExist replies as RAM does for an access key that is not there:
@@ -1206,6 +1211,10 @@ func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"AccessKeys": list})
 	case "CreateAccessKey":
+		s.createCalls++
+		if s.createAnswer != nil && s.createAnswer(w, s.createCalls) {
+			return
+		}
 		s.nextIDCounter++
 		newID := fmt.Sprintf("LTAI-rotated-%d", s.nextIDCounter)
 		s.keys[newID] = "Active"
@@ -1301,6 +1310,68 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 	require.NotEqual(t, -1, updateIdx, "UpdateAccessKey must have been called")
 	require.NotEqual(t, -1, deleteIdx, "DeleteAccessKey must have been called")
 	assert.Less(t, updateIdx, deleteIdx, "UpdateAccessKey(Inactive) must precede DeleteAccessKey")
+}
+
+// A create may have succeeded before a 5xx or an InternalError came back, and a
+// retry would create a second key; only throttling, which created nothing, is
+// retried.
+func TestAlicloudDriver_Rotation_CreateRetriesOnlyThrottling(t *testing.T) {
+	envelope := func(code string) func(http.ResponseWriter, int) bool {
+		return func(w http.ResponseWriter, n int) bool {
+			if n > 1 {
+				return false
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"Code": code, "Message": code, "RequestId": "req"})
+			return true
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		answer  func(http.ResponseWriter, int) bool
+		calls   int
+		success bool
+		unknown bool // the error says a key may exist
+	}{
+		{"502 after a possible create", func(w http.ResponseWriter, _ int) bool {
+			w.WriteHeader(http.StatusBadGateway)
+			return true
+		}, 1, false, true},
+		{"InternalError envelope", envelope("InternalError"), 1, false, true},
+		{"ServiceUnavailable envelope", envelope("ServiceUnavailable"), 1, false, true},
+		{"a refusal creates nothing", envelope("NoPermission"), 1, false, false},
+		{"Throttling envelope", envelope("Throttling.User"), 2, true, false},
+		{"429", func(w http.ResponseWriter, n int) bool {
+			if n > 1 {
+				return false
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+			return true
+		}, 2, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ram := &ramServer{
+				user:         "warden-management",
+				keys:         map[string]string{"LTAI-old": "Active"},
+				createAnswer: tc.answer,
+			}
+			srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+			defer srv.Close()
+
+			_, _, _, err := newRotationDriver(t, srv.URL, "LTAI-old").PrepareRotation(context.Background())
+			assert.Equal(t, tc.calls, ram.createCalls, "CreateAccessKey attempts")
+			if tc.success {
+				require.NoError(t, err)
+				assert.Len(t, ram.created, 1)
+				return
+			}
+			require.Error(t, err)
+			if tc.unknown {
+				assert.Contains(t, err.Error(), `may still have been created for user "warden-management"`)
+			} else {
+				assert.NotContains(t, err.Error(), "may still have been created")
+			}
+		})
+	}
 }
 
 // newRotationDriver builds a driver pointed at a ramServer, holding keyID as its

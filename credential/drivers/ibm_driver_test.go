@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1223,18 +1224,47 @@ func TestIBMDriver_VerifySpec_ChainedSourceNeedsNoAPIKey(t *testing.T) {
 
 // Creating an API key is not idempotent, and an IBM key carries no expiry, so a
 // retried create leaves a fully privileged credential live on the tenant with
-// nothing tracking it. Narrowing the retryable statuses is not enough — the retry
-// helper retries transport errors before it consults that list — so the create
-// must not retry at all.
-func TestIBMCreateRetryConfig_DoesNotRetryAtAll(t *testing.T) {
-	cfg := ibmCreateRetryConfig()
-	assert.Equal(t, 1, cfg.MaxAttempts, "a committed-but-unacknowledged create must not be repeated")
-	assert.Empty(t, cfg.RetryableStatuses)
+// nothing tracking it. The create retries only what cannot have created a key.
+func TestIBMCreateRetryConfig_RetriesOnlyWhatCreatedNothing(t *testing.T) {
+	assert.Equal(t, httputil.RetryCreate, ibmCreateRetryConfig().Policy,
+		"a committed-but-unacknowledged create must not be repeated")
 
-	// The shared config still carries the 5xx wildcard and multiple attempts, which
-	// is correct for the idempotent calls that use it — this pins that they differ.
+	// The shared config keeps the 5xx wildcard and the replay of transport errors,
+	// which is correct for the idempotent calls that use it — this pins that they differ.
+	assert.Equal(t, httputil.RetryIdempotent, defaultIBMRetryConfig().Policy)
 	assert.Contains(t, defaultIBMRetryConfig().RetryableStatuses, 500)
-	assert.Greater(t, defaultIBMRetryConfig().MaxAttempts, 1)
+}
+
+// A rate-limited create was never processed, so it is retried and succeeds.
+func TestIBMDriver_CreateAPIKey_RetriesARateLimit(t *testing.T) {
+	var creates int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/apikeys" {
+			if atomic.AddInt32(&creates, 1) == 1 {
+				http.Error(w, "slow down", http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "ApiKey-new", "apikey": "secret"})
+			return
+		}
+		http.Error(w, "unexpected", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	_, id, err := d.createAPIKey(context.TODO(), "iam-token", ibmRotationDescriptionPrefix+"ApiKey-old")
+	d.authMu.Unlock()
+
+	require.NoError(t, err)
+	assert.Equal(t, "ApiKey-new", id)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&creates))
 }
 
 // A 502 answered after IBM committed the key must produce one key, not two: the

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1918,6 +1919,34 @@ func TestAWSDriver_PrepareRotation_MalformedCreateKeyResponse(t *testing.T) {
 	_, _, _, err = awsDrv.PrepareRotation(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no SecretAccessKey")
+}
+
+// A 5xx can follow a key IAM already created, and the SDK's retryer would replay
+// it into a second key nothing tracks. CreateAccessKey is sent once.
+func TestAWSDriver_PrepareRotation_CreateKeyIsNotRetried(t *testing.T) {
+	stsSrv := newConcurrentSTSStub(t)
+	var creates atomic.Int32
+	iamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml")
+		if r.Form.Get("Action") == "ListAccessKeys" {
+			_, _ = w.Write([]byte(`<ListAccessKeysResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListAccessKeysResult><IsTruncated>false</IsTruncated><AccessKeyMetadata>
+    <member><UserName>w</UserName><AccessKeyId>AKIAOLDEXAMPLEKEY000</AccessKeyId><Status>Active</Status></member>
+  </AccessKeyMetadata></ListAccessKeysResult>
+</ListAccessKeysResponse>`))
+			return
+		}
+		creates.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`<ErrorResponse><Error><Type>Receiver</Type><Code>ServiceFailure</Code><Message>try again</Message></Error></ErrorResponse>`))
+	}))
+	defer iamSrv.Close()
+
+	_, _, _, err := rotationDriver(t, stsSrv.srv.URL, iamSrv.URL, "AKIAOLDEXAMPLEKEY000").PrepareRotation(context.TODO())
+	require.Error(t, err)
+	assert.EqualValues(t, 1, creates.Load(), "CreateAccessKey was replayed")
+	assert.Contains(t, err.Error(), "one may still have been created", "a 5xx can follow a created key")
 }
 
 // =============================================================================

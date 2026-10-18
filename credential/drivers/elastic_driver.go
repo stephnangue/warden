@@ -1003,23 +1003,19 @@ func defaultElasticRetryConfig() httputil.HTTPRetryConfig {
 }
 
 // elasticCreateRetryConfig is used for the rotation's key creation, which is not
-// idempotent and must not be retried.
+// idempotent.
 //
-// ExecuteWithRetry retries a transport error before it ever consults
-// RetryableStatuses, and a connection reset or a timeout reading the response —
-// the likeliest way to lose an acknowledgement for a request that arrived — is
-// exactly that. Retrying produced up to three live keys of which Warden learned
-// one, and a rotation key carries no expiration, so each was permanent.
-//
-// Failing a rate-limited create is the better trade: the manager retries the
-// whole cycle on its own schedule, and a deferred rotation costs less than a key
-// nobody can find. The per-spec mint keeps the retries, because the key it
-// strands carries an expiration and dies on its own.
+// A connection reset or a timeout reading the response — the likeliest way to lose
+// an acknowledgement for a request that arrived — or a 5xx can follow a key
+// Elasticsearch already created. Retrying those produced up to three live keys of
+// which Warden learned one, and a rotation key carries no expiration, so each was
+// permanent. RetryCreate retries only a 429 and a request that never left, neither
+// of which created anything. The per-spec mint keeps the wider retries, because
+// the key it strands carries an expiration and dies on its own.
 func elasticCreateRetryConfig() httputil.HTTPRetryConfig {
-	return httputil.HTTPRetryConfig{
-		MaxAttempts: 1,
-		MaxBodySize: elasticMaxResponseBodySize,
-	}
+	cfg := defaultElasticRetryConfig()
+	cfg.Policy = httputil.RetryCreate
+	return cfg
 }
 
 // decodeElasticAPIKeyID extracts the API key ID from a pre-encoded API key.

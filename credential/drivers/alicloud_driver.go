@@ -703,14 +703,31 @@ func (d *AlicloudDriver) callSignedJSON(
 	params url.Values,
 	mgmtID, mgmtSecret, securityToken string,
 ) ([]byte, error) {
-	return d.callJSON(ctx, method, endpoint, params, nil, func(req *http.Request) error {
-		// Re-sign every attempt so x-acs-date and x-acs-signature-nonce advance,
-		// staying inside ACS3's 15-minute skew window.
+	return d.callJSON(ctx, method, endpoint, params, nil, acs3Signer(mgmtID, mgmtSecret, securityToken), httputil.RetryIdempotent)
+}
+
+// callSignedCreateJSON is callSignedJSON for a call that creates something
+// durable. It retries only a throttled request: after a 5xx, or an InternalError
+// or ServiceUnavailable envelope, the object may exist with only its answer lost,
+// and a retry would create a second one.
+func (d *AlicloudDriver) callSignedCreateJSON(
+	ctx context.Context,
+	method, endpoint string,
+	params url.Values,
+	mgmtID, mgmtSecret, securityToken string,
+) ([]byte, error) {
+	return d.callJSON(ctx, method, endpoint, params, nil, acs3Signer(mgmtID, mgmtSecret, securityToken), httputil.RetryCreate)
+}
+
+// acs3Signer signs each attempt afresh, so x-acs-date and x-acs-signature-nonce
+// advance and stay inside ACS3's 15-minute skew window.
+func acs3Signer(mgmtID, mgmtSecret, securityToken string) func(*http.Request) error {
+	return func(req *http.Request) error {
 		if err := signACS3(req, mgmtID, mgmtSecret, securityToken, nil); err != nil {
 			return fmt.Errorf("sign request: %w", err)
 		}
 		return nil
-	})
+	}
 }
 
 // callAnonymousJSON sends an unsigned RPC call, carrying its parameters in a
@@ -730,17 +747,18 @@ func (d *AlicloudDriver) callAnonymousJSON(
 	endpoint string,
 	query, body url.Values,
 ) ([]byte, error) {
-	return d.callJSON(ctx, http.MethodPost, endpoint, query, body, nil)
+	return d.callJSON(ctx, http.MethodPost, endpoint, query, body, nil, httputil.RetryIdempotent)
 }
 
 // callJSON owns the retry loop, backoff, and envelope classification shared by
 // the signed and anonymous paths. sign is nil for an anonymous call; body is nil
-// for a query-only one.
+// for a query-only one. Under httputil.RetryCreate only throttling is retried.
 func (d *AlicloudDriver) callJSON(
 	ctx context.Context,
 	method, endpoint string,
 	query, body url.Values,
 	sign func(*http.Request) error,
+	policy httputil.RetryPolicy,
 ) ([]byte, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -824,8 +842,10 @@ func (d *AlicloudDriver) callJSON(
 		respBody, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retry)
 		if err != nil {
 			// Transport error or non-OK HTTP status. Retry on transient HTTP
-			// codes (429 and 5xx); surface anything else immediately.
-			if status == http.StatusTooManyRequests || (status >= 500 && status < 600) {
+			// codes (429 and 5xx, only 429 for a create); surface anything else
+			// immediately.
+			if status == http.StatusTooManyRequests ||
+				(policy != httputil.RetryCreate && status >= 500 && status < 600) {
 				lastErr = err
 				continue
 			}
@@ -833,7 +853,11 @@ func (d *AlicloudDriver) callJSON(
 		}
 
 		if env, isErr := parseAlicloudEnvelope(respBody); isErr {
-			if alicloudTransientCodes[env.Code] {
+			retryable := alicloudTransientCodes[env.Code]
+			if policy == httputil.RetryCreate {
+				retryable = strings.HasPrefix(env.Code, "Throttling")
+			}
+			if retryable {
 				lastErr = alicloudErrorFromEnvelope(env)
 				continue
 			}
@@ -1074,8 +1098,16 @@ func (d *AlicloudDriver) PrepareRotation(ctx context.Context) (map[string]string
 	createParams.Set("Format", "JSON")
 	createParams.Set("UserName", userName)
 
-	createBody, err := d.callSignedJSON(ctx, http.MethodPost, ramEndpoint, createParams, mgmtID, mgmtSecret, "")
+	createBody, err := d.callSignedCreateJSON(ctx, http.MethodPost, ramEndpoint, createParams, mgmtID, mgmtSecret, "")
 	if err != nil {
+		// A RAM user holds at most two access keys, so a key created behind a lost
+		// answer blocks the next rotation outright: say where to find it.
+		var apiErr *alicloudAPIError
+		if httputil.OutcomeUnknown(err) ||
+			(errors.As(err, &apiErr) && (apiErr.Code == "InternalError" || apiErr.Code == "ServiceUnavailable")) {
+			return nil, nil, 0, fmt.Errorf("RAM CreateAccessKey failed; a key may still have been created for user %q, "+
+				"so list its access keys and delete any not in use: %w", userName, err)
+		}
 		return nil, nil, 0, fmt.Errorf("RAM CreateAccessKey failed: %w", err)
 	}
 	var createResp struct {

@@ -1115,20 +1115,13 @@ func isIBMNotFound(err error) bool {
 //
 // Creating an API key is not idempotent, and an IBM API key carries no expiry, so
 // a request IBM committed but did not acknowledge leaves a fully privileged key
-// alive forever with nothing tracking it. Narrowing RetryableStatuses is not
-// enough: ExecuteWithRetry retries a transport error before it ever looks at that
-// list (helper/httputil/retry.go), and a connection reset or a timeout reading the
-// response is the likeliest way to lose an acknowledgement for a request that
-// arrived. MaxAttempts=1 is the only setting that makes the create happen once.
-//
-// The cost is that a genuine 429 now fails the rotation instead of backing off.
-// That is the right trade: the manager retries the whole cycle on its own
-// schedule, and a rotation deferred to the next attempt is cheaper than a key
-// nobody can find.
+// alive forever with nothing tracking it. A connection reset or a timeout reading
+// the response — the likeliest way to lose an acknowledgement for a request that
+// arrived — or a 5xx can follow a committed create, so RetryCreate retries only a
+// 429 and a request that never left, neither of which created a key.
 func ibmCreateRetryConfig() httputil.HTTPRetryConfig {
 	cfg := defaultIBMRetryConfig()
-	cfg.MaxAttempts = 1
-	cfg.RetryableStatuses = nil
+	cfg.Policy = httputil.RetryCreate
 	return cfg
 }
 

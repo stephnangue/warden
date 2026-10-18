@@ -226,17 +226,17 @@ func scalewayRetryConfig() httputil.HTTPRetryConfig {
 	}
 }
 
-// scalewayCreateRetryConfig retries rate limiting only.
+// scalewayCreateRetryConfig retries only what cannot have created a key: a 429,
+// and a request that never left.
 //
-// Creating an API key is not idempotent, and the retry helper treats 500 in the
-// list as "every 5xx". A proxy answering 502 after Scaleway already committed the
-// key turns one request into two live keys, and only one of them is ever returned
-// to us: for a mint the orphan self-expires, but a rotation key carries no expiry
-// and would outlive everything. 429 stays because a rate-limited request was
-// never processed.
+// Creating an API key is not idempotent. A proxy answering 502 after Scaleway
+// already committed the key, or a connection dropped after the request was
+// written, turns one request into two live keys, and only one of them is ever
+// returned to us: for a mint the orphan self-expires, but a rotation key carries
+// no expiry and would outlive everything.
 func scalewayCreateRetryConfig() httputil.HTTPRetryConfig {
 	cfg := scalewayRetryConfig()
-	cfg.RetryableStatuses = []int{http.StatusTooManyRequests}
+	cfg.Policy = httputil.RetryCreate
 	return cfg
 }
 

@@ -1408,10 +1408,22 @@ func (d *AWSDriver) PrepareRotation(ctx context.Context) (map[string]string, map
 		return nil, nil, 0, err
 	}
 
-	// Create new access key
-	result, err := iamClient.CreateAccessKey(ctx, &iam.CreateAccessKeyInput{})
+	// Create new access key. One attempt only: the SDK's retryer replays after a
+	// connection reset, a timeout or a 5xx, any of which can follow a key IAM
+	// already created, and a replay would mint a second key nothing tracks.
+	result, err := iamClient.CreateAccessKey(ctx, &iam.CreateAccessKeyInput{}, func(o *iam.Options) {
+		o.RetryMaxAttempts = 1
+	})
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("failed to create new IAM access key: %w", err)
+		// An IAM user holds at most two access keys, so a key created behind a lost
+		// answer or a 5xx blocks the next rotation outright: say where to find it. A
+		// response below 500 is a refusal, and nothing was created.
+		var answered interface{ HTTPStatusCode() int }
+		if errors.As(err, &answered) && answered.HTTPStatusCode() < 500 {
+			return nil, nil, 0, fmt.Errorf("failed to create new IAM access key: %w", err)
+		}
+		return nil, nil, 0, fmt.Errorf("failed to create new IAM access key; one may still have been created, "+
+			"so list the IAM user's access keys and delete any not in use: %w", err)
 	}
 
 	if err := validNewIAMAccessKey(result.AccessKey); err != nil {

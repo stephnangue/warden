@@ -388,10 +388,11 @@ func (d *GrafanaDriver) mintToken(ctx context.Context, adminToken string, spec *
 		return nil, nil, 0, "", fmt.Errorf("failed to marshal token request: %w", err)
 	}
 
-	// Not retried: creating a token is not idempotent, and Grafana refuses a
-	// duplicate name on the same account. A retry after a lost response would draw
-	// that refusal and report a failed mint while the token the first attempt
-	// created stands — unknown to Warden, and unrevokable until it expires.
+	// Retried only when nothing can have been created (grafanaCreateRetryConfig):
+	// creating a token is not idempotent, and Grafana refuses a duplicate name on
+	// the same account. A retry after a lost response would draw that refusal and
+	// report a failed mint while the token the first attempt created stands —
+	// unknown to Warden, and unrevokable until it expires.
 	path := fmt.Sprintf("/api/serviceaccounts/%s/tokens", url.PathEscape(saID))
 	respBody, status, err := d.doGrafanaRequestWith(ctx, adminToken, http.MethodPost, path, body, grafanaCreateRetryConfig)
 	if err != nil {
@@ -584,9 +585,14 @@ var defaultGrafanaRetryConfig = httputil.HTTPRetryConfig{
 // grafanaCreateRetryConfig is used for creating a token, which is not idempotent:
 // Grafana refuses a duplicate name on the same account, so a retry after a lost
 // response cannot succeed and only hides the token the first attempt created.
+// RetryCreate retries only a 429 and a request that never left, neither of which
+// created a token.
 var grafanaCreateRetryConfig = httputil.HTTPRetryConfig{
-	MaxAttempts: 1,
-	MaxBodySize: grafanaMaxResponseBodySize,
+	Policy:        httputil.RetryCreate,
+	MaxAttempts:   grafanaMaxRetryAttempts,
+	MaxBodySize:   grafanaMaxResponseBodySize,
+	BaseBackoff:   1 * time.Second,
+	JitterPercent: 20,
 }
 
 // doGrafanaRequest executes an authenticated HTTP request to the Grafana API with
