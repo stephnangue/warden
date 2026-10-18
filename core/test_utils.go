@@ -549,6 +549,7 @@ func createTestCore(t *testing.T) *Core {
 		stateLock:     &locking.SyncRWMutex{},
 		rawConfig:     new(atomic.Value),
 	}
+	core.transparentAuthFlight = newTransparentAuthFlight(core)
 
 	// Initialize namespace store
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)

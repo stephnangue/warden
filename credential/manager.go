@@ -14,10 +14,10 @@ import (
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/google/uuid"
+	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
-	"golang.org/x/sync/singleflight"
 )
 
 // DefaultIssuanceTimeout is the default timeout for credential issuance operations
@@ -36,7 +36,7 @@ const DefaultIssuanceTimeout = 30 * time.Second
 //
 // The manager is global (one per Warden process) and uses namespace-aware cache keys so
 // credentials from different namespaces never collide. Concurrent requests for the same
-// cache key are coalesced via singleflight to avoid redundant minting calls.
+// cache key are coalesced (helper/flight) to avoid redundant minting calls.
 //
 // Architecture: The Manager delegates to focused components for better testability:
 //   - SpecResolver: Handles spec lookup from config store
@@ -54,7 +54,17 @@ type Manager struct {
 	// per-token/session lifetime. Fetched secrets are held in memory only, never
 	// persisted.
 	secretCache *ristretto.Cache[string, chainedSecret]
-	group       singleflight.Group
+
+	// issueFlight coalesces concurrent mints for one credential cache key, and
+	// secretFlight concurrent fetches of one chained secret. Both run the shared
+	// work detached from the request that started it, bounded by issuanceTimeout
+	// and ended by stopCtx.
+	issueFlight  *flight.Group[*Credential]
+	secretFlight *flight.Group[chainedSecret]
+
+	// stopCtx ends when the manager stops, and with it any mint still in flight.
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
 
 	// Focused components (extracted from Manager for better testability)
 	specResolver      *SpecResolver
@@ -177,6 +187,8 @@ func NewManager(
 		typeRegistry:      typeRegistry,
 		issuanceTimeout:   DefaultIssuanceTimeout,
 	}
+	m.stopCtx, m.stopCancel = context.WithCancel(context.Background())
+	m.buildFlights()
 
 	// Create Ristretto cache
 	cache, err := ristretto.NewCache(&ristretto.Config[string, *Credential]{
@@ -222,7 +234,7 @@ func NewManager(
 //     are folded into the cache key so distinct exchange inputs cannot share a
 //     cached credential. When inputs.ResolveSubjectToken and/or
 //     inputs.ResolveActorToken is set, that token is materialized only on a cache
-//     miss (inside the singleflight), so a cache hit incurs no mint cost; the two
+//     miss (inside the coalesced mint), so a cache hit incurs no mint cost; the two
 //     resolve independently (an eager user_identity subject can pair with a lazy actor).
 //
 // Returns the issued credential or an error
@@ -271,8 +283,11 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 		return cred, nil
 	}
 
-	// Use singleflight to ensure only one creation per cacheKey
-	v, err, _ := m.group.Do(cacheKey, func() (interface{}, error) {
+	// One mint per cacheKey: every caller coalesced onto the key shares its outcome.
+	// issueFlight runs it detached from the request that started it, bounded by the
+	// issuance timeout and ended when the manager stops, so the first caller giving
+	// up does not fail the others; each caller waits on its own ctx.
+	return m.issueFlight.Do(ctx, cacheKey, func(ctx context.Context) (*Credential, error) {
 		// Double-check cache in case another goroutine just added it
 		if cred, found := m.cache.Get(cacheKey); found && !cred.IsExpired() {
 			return cred, nil
@@ -280,10 +295,12 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 
 		// Materialize a lazily-resolved subject token (e.g. a Warden-minted
 		// identity assertion) only now — after both cache checks have confirmed a
-		// real miss — so cache hits never pay for the mint. singleflight coalesces
-		// concurrent requests for this cacheKey, so a burst of N simultaneous
-		// misses runs this once and the other N-1 share the resulting credential;
-		// each request has its own inputs, so mutating SubjectToken here is race-free.
+		// real miss — so cache hits never pay for the mint. Concurrent requests for
+		// this cacheKey are coalesced, so a burst of N simultaneous misses runs this
+		// once and the other N-1 share the resulting credential. inputs belongs to
+		// the request that started the mint, and nothing reads its SubjectToken or
+		// ActorToken but this function and the mint it runs, so writing them here is
+		// race-free even after that request has stopped waiting.
 		if inputs != nil && inputs.ResolveSubjectToken != nil && inputs.SubjectToken == "" {
 			tok, rerr := inputs.ResolveSubjectToken(ctx)
 			if rerr != nil {
@@ -357,7 +374,7 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 		m.cache.Wait()
 
 		// Register with expiration manager for timer-based TTL enforcement
-		// This is done INSIDE singleflight, so it only happens when a NEW credential is issued
+		// This is done INSIDE the coalesced mint, so it only happens when a NEW credential is issued
 		if m.expirationRegistrar != nil && cred.Revocable {
 			if regErr := m.expirationRegistrar.RegisterCredential(
 				ctx,               // Context with namespace
@@ -380,14 +397,6 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 
 		return cred, nil
 	})
-
-	if err != nil {
-		// Don't cache errors - allow next request to retry
-		m.group.Forget(cacheKey)
-		return nil, err
-	}
-
-	return v.(*Credential), nil
 }
 
 // issueCredential performs the actual credential issuance from the source. It runs
@@ -769,13 +778,19 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 	// Miss: coalesce concurrent fetches for this key. A followed (non-leader) request
 	// receives the leader's freshly fetched value, so fromCache stays false for the
 	// whole group — the value is fresh this round, not a pre-existing cached entry.
-	v, ferr, _ := m.group.Do(key, func() (interface{}, error) {
+	//
+	// The key spans an agent's sessions, so the caller that starts the fetch and
+	// those that join it can be different requests with different deadlines;
+	// secretFlight runs it detached from all of them. Called from inside a mint,
+	// the fetch can outlive that mint by up to the issuance timeout, and still
+	// populates the cache for the next one.
+	fetched, ferr := m.secretFlight.Do(ctx, key, func(ctx context.Context) (chainedSecret, error) {
 		if cs, ok := m.secretCache.Get(key); ok && cs.live() { // another goroutine populated it
 			return cs, nil
 		}
 		credB, e := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
 		if e != nil {
-			return nil, e
+			return chainedSecret{}, e
 		}
 		cs := newChainedSecret(credB)
 		// A referenced credential carrying its own lifetime bounds the entry. Holding it
@@ -793,9 +808,8 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 	if ferr != nil {
 		return chainedSecret{}, false, key, ferr
 	}
-	cs = v.(chainedSecret)
-	cs.Data = copyStringMap(cs.Data)
-	return cs, false, key, nil
+	fetched.Data = copyStringMap(fetched.Data)
+	return fetched, false, key, nil
 }
 
 // fetchUncached performs the referenced fetch without consulting or populating the
@@ -856,14 +870,14 @@ func sourceModifiersApply(spec *CredSpec, src *CredSource) bool {
 		spec.Config.Get(ConfigSecretSpec) == src.Config.Get(ConfigSecretSpec)
 }
 
-// invalidateChainedSecret evicts a cached secret and forgets any in-flight singleflight
-// entry for its key, so an immediate retry re-fetches rather than joining a stale fetch.
+// invalidateChainedSecret evicts a cached secret and any in-flight fetch for its key,
+// so an immediate retry re-fetches rather than joining a stale fetch.
 func (m *Manager) invalidateChainedSecret(key string) {
 	if key == "" {
 		return
 	}
 	m.secretCache.Del(key)
-	m.group.Forget(key)
+	m.secretFlight.Evict(key)
 }
 
 // chainedSecretCacheKey scopes a cached secret to (namespace, secret_spec, what that
@@ -1319,13 +1333,24 @@ func (m *Manager) SetIssuanceTimeout(timeout time.Duration) {
 		timeout = DefaultIssuanceTimeout
 	}
 	m.issuanceTimeout = timeout
+	m.buildFlights()
+}
+
+// buildFlights builds the coalescing groups from issuanceTimeout. It is
+// configuration, like SetIssuanceTimeout: done before the manager serves requests,
+// never while mints are in flight.
+func (m *Manager) buildFlights() {
+	lifetime := flight.WithLifetime(func() context.Context { return m.stopCtx })
+	m.issueFlight = flight.New[*Credential]("credential mint", m.issuanceTimeout, m.log, lifetime)
+	m.secretFlight = flight.New[chainedSecret]("chained secret fetch", m.issuanceTimeout, m.log, lifetime)
 }
 
 // Stop gracefully shuts down the manager
 func (m *Manager) Stop() {
 	// First, so a mint still in flight cannot build a driver after the registry's
-	// instances are closed.
+	// instances are closed, and the mint itself ends rather than running on.
 	m.driverCoordinator.Stop()
+	m.stopCancel()
 	m.cache.Close()
 	if m.secretCache != nil {
 		m.secretCache.Close()
