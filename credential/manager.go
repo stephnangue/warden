@@ -1323,6 +1323,9 @@ func (m *Manager) SetIssuanceTimeout(timeout time.Duration) {
 
 // Stop gracefully shuts down the manager
 func (m *Manager) Stop() {
+	// First, so a mint still in flight cannot build a driver after the registry's
+	// instances are closed.
+	m.driverCoordinator.Stop()
 	m.cache.Close()
 	if m.secretCache != nil {
 		m.secretCache.Close()

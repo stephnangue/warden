@@ -111,9 +111,8 @@ func (d *reentrantDriver) Cleanup(context.Context) error {
 }
 
 // CloseAll runs each driver's Cleanup after releasing the registry lock, so a
-// slow cleanup at step-down cannot hold the registry. (CloseDriver and
-// CloseAllForNamespace still clean up under the lock; no driver's Cleanup
-// calls back into the registry today.)
+// slow cleanup at step-down cannot hold the registry. CloseDriver and
+// CloseAllForNamespace do the same.
 func TestDriverRegistry_CloseAllCleansUpOutsideTheLock(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	registry := NewDriverRegistry(log)
