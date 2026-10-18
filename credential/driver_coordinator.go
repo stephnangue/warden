@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -27,7 +28,17 @@ type DriverCoordinator struct {
 	driverRegistry *DriverRegistry
 	configStore    ConfigStoreAccessor
 	logger         *logger.GatedLogger
+
+	// stopped is set when the manager that owns this coordinator stops. The
+	// registry outlives the manager, and a build still running when the node stops
+	// being active must not install a driver the next promotion would serve.
+	stopped atomic.Bool
 }
+
+// Stop makes every later attempt to build a driver fail. The manager calls it
+// before the registry's instances are closed, which is what lets a build refused
+// by that close tell that it must not be retried.
+func (c *DriverCoordinator) Stop() { c.stopped.Store(true) }
 
 // NewDriverCoordinator creates a new DriverCoordinator instance
 func NewDriverCoordinator(
@@ -77,6 +88,12 @@ func (c *DriverCoordinator) GetOrCreateDriver(ctx context.Context, sourceName st
 		if err != nil {
 			return nil, err
 		}
+		// Checked after the generation is read: a stop that lands later is caught
+		// at install by the epoch CloseAll bumps, and one that landed earlier is
+		// seen here, since the manager stops before the registry is closed.
+		if c.stopped.Load() {
+			return nil, ErrCredentialManagerStopped
+		}
 
 		credSource, err := c.configStore.GetSource(ctx, sourceName)
 		if err != nil {
@@ -85,6 +102,10 @@ func (c *DriverCoordinator) GetOrCreateDriver(ctx context.Context, sourceName st
 
 		driver, created, err := c.driverRegistry.CreateDriver(ctx, sourceName, credSource, generation)
 		if errors.Is(err, ErrDriverConfigChanged) {
+			// Nobody is waiting for the retry any more.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			continue
 		}
 		if err != nil {

@@ -47,6 +47,11 @@ var (
 	// The caller re-reads the source and tries again; it is not surfaced to users.
 	ErrDriverConfigChanged = errors.New("source config changed while building driver")
 
+	// ErrCredentialManagerStopped is returned when a driver is requested from a
+	// credential manager that has stopped, as it does when the node stops being
+	// active.
+	ErrCredentialManagerStopped = errors.New("credential manager stopped")
+
 	// ErrCredentialNotFound is returned when a credential is not found in storage
 	ErrCredentialNotFound = errors.New("credential not found")
 

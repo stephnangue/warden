@@ -97,9 +97,15 @@ func (f *VaultDriverFactory) Create(config credential.Config, log *logger.GatedL
 			logger.String("vault_address", credential.GetString(config, "vault_address", "")))
 	}
 
+	// The login and the role check share one deadline. Each request is otherwise
+	// bounded only by the client's per-request timeout, retried, so an upstream that
+	// accepts connections and never answers held the source's first mint for minutes.
+	probeCtx, cancel := context.WithTimeout(context.Background(), vaultCreateProbeTimeout)
+	defer cancel()
+
 	// Perform initial authentication
 	if authMethod != "" {
-		if err := driver.authenticate(context.Background()); err != nil {
+		if err := driver.authenticate(probeCtx); err != nil {
 			_ = driver.Cleanup(context.Background())
 			return nil, fmt.Errorf("Vault authentication failed: %w", err)
 		}
@@ -111,7 +117,7 @@ func (f *VaultDriverFactory) Create(config credential.Config, log *logger.GatedL
 		approleMount := credential.GetString(config, "approle_mount", "")
 		if roleName != "" && approleMount != "" {
 			rolePath := fmt.Sprintf("auth/%s/role/%s", approleMount, roleName)
-			secret, err := apiClient.Logical().ReadWithContext(context.Background(), rolePath)
+			secret, err := apiClient.Logical().ReadWithContext(probeCtx, rolePath)
 			if err != nil {
 				_ = driver.Cleanup(context.Background())
 				return nil, fmt.Errorf("failed to verify AppRole role '%s': %w", roleName, err)
@@ -129,6 +135,10 @@ func (f *VaultDriverFactory) Create(config credential.Config, log *logger.GatedL
 // vaultAPITimeout bounds each request the source's Vault client makes, as the
 // library's own default does.
 const vaultAPITimeout = 60 * time.Second
+
+// vaultCreateProbeTimeout bounds the login and role check a source runs when its
+// driver is built. A var so tests can shorten it.
+var vaultCreateProbeTimeout = 30 * time.Second
 
 // newVaultAPIClient builds the source's Vault client from the source config alone.
 //

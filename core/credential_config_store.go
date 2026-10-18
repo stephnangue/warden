@@ -2254,10 +2254,11 @@ func (c *Core) teardownCredentialManager() error {
 	// a node that becomes active again rebuilds every driver from storage
 	// instead of minting with config another node has since replaced.
 	//
-	// No new mint can start here: this runs in preSeal, after the active
-	// context was cancelled and expiration and rotation stopped. A mint already
-	// in flight keeps the driver it holds and finishes or fails on its own; a
-	// closed instance stays usable to it.
+	// No driver can be built from here on: the manager stopped above, and its
+	// coordinator refuses every later build, while a build already running is
+	// refused at install by the epoch CloseAll bumps. A mint already in flight
+	// keeps the driver it holds and finishes or fails on its own; a closed
+	// instance stays usable to it.
 	if c.credentialDriverRegistry != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), driverCloseTimeout)
 		defer cancel()
