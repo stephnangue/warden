@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -1302,11 +1303,27 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 		return nil, nil, 0, fmt.Errorf("role_name is required for AppRole rotation")
 	}
 
-	// Generate new secret_id (old one still valid - no disruption)
-	generatePath := fmt.Sprintf("auth/%s/role/%s/secret-id", approleMount, roleName)
-	secret, err := d.vault.Logical().WriteWithContext(ctx, generatePath, nil)
+	// Generate new secret_id (old one still valid - no disruption). Sent once: the
+	// client retries a 5xx or a lost answer, either of which can follow a secret_id
+	// already generated, and a replay would leave a second one that nothing tracks.
+	// A clone, so the shared client keeps its retries for everything else.
+	once, err := d.vault.CloneWithHeaders()
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("failed to generate new secret_id: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to prepare the secret_id request: %w", err)
+	}
+	once.SetToken(d.vault.Token())
+	once.SetMaxRetries(0)
+	pinNoResponseWrapping(once)
+
+	generatePath := fmt.Sprintf("auth/%s/role/%s/secret-id", approleMount, roleName)
+	secret, err := once.Logical().WriteWithContext(ctx, generatePath, nil)
+	if err != nil {
+		var refused *api.ResponseError
+		if errors.As(err, &refused) && refused.StatusCode < 500 {
+			return nil, nil, 0, fmt.Errorf("failed to generate new secret_id: %w", err)
+		}
+		return nil, nil, 0, fmt.Errorf("failed to generate new secret_id; one may still have been generated on role %q, "+
+			"so list its secret_id accessors and destroy any not in use: %w", roleName, err)
 	}
 
 	if secret == nil || secret.Data == nil {

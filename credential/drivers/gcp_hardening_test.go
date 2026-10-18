@@ -438,6 +438,8 @@ type rotationServer struct {
 
 	newKeyUsable atomic.Bool
 	created      atomic.Int32
+	createStatus atomic.Int32 // non-zero: answer every create with this status
+
 	deleted      atomic.Value // string: the last key id deleted
 	deleteIssuer atomic.Value // string: client_email of the key that authorized the delete
 	newKeyJSON   string
@@ -470,6 +472,10 @@ func newRotationServer(t *testing.T, newKeyEmail string) *rotationServer {
 		switch r.Method {
 		case http.MethodPost:
 			s.created.Add(1)
+			if st := s.createStatus.Load(); st != 0 {
+				w.WriteHeader(int(st))
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"privateKeyData": base64.StdEncoding.EncodeToString([]byte(s.newKeyJSON)),
@@ -528,6 +534,29 @@ func TestGCPDriver_PrepareRotation(t *testing.T) {
 		assert.EqualValues(t, 1, srv.created.Load())
 		assert.Equal(t, "new-key-id", srv.deleted.Load(),
 			"the unusable key must be reclaimed, or repeated failures exhaust the ten-key quota")
+	})
+
+	// A 5xx can follow a key GCP already created. Retried, it would create a second
+	// key nothing tracks: it never expires and holds one of the account's ten slots.
+	t.Run("a 5xx on create is not retried, and the error names where to look", func(t *testing.T) {
+		srv := newRotationServer(t, newEmail)
+		srv.createStatus.Store(http.StatusServiceUnavailable)
+
+		d := newStaticGCPDriver(t, srv.URL, newTestGCPSAKeyWithID(t, srv.URL+"/token", oldEmail, "old-key-id"))
+		_, _, _, err := d.PrepareRotation(context.TODO())
+		require.Error(t, err)
+		assert.EqualValues(t, 1, srv.created.Load(), "the create was replayed")
+		assert.Contains(t, err.Error(), "may still have been created on "+oldEmail)
+	})
+
+	t.Run("a refused create says nothing was created", func(t *testing.T) {
+		srv := newRotationServer(t, newEmail)
+		srv.createStatus.Store(http.StatusForbidden)
+
+		d := newStaticGCPDriver(t, srv.URL, newTestGCPSAKeyWithID(t, srv.URL+"/token", oldEmail, "old-key-id"))
+		_, _, _, err := d.PrepareRotation(context.TODO())
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "may still have been created")
 	})
 
 	t.Run("a key that becomes usable after a delay is kept", func(t *testing.T) {

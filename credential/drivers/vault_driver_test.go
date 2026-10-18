@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -759,6 +760,43 @@ func TestVaultDriver_PrepareRotation_MissingRoleName(t *testing.T) {
 	_, _, _, err := driver.PrepareRotation(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "role_name is required")
+}
+
+// A 5xx can follow a secret_id already generated, and the client's own retries
+// would replay it into a second one that nothing tracks. It is sent once, and the
+// error names the role whose accessors to check.
+func TestVaultDriver_PrepareRotation_SecretIDGenerationIsNotRetried(t *testing.T) {
+	var generations atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/login"):
+			_, _ = w.Write([]byte(`{"auth":{"client_token":"s.source","accessor":"acc","lease_duration":3600}}`))
+		case strings.HasSuffix(r.URL.Path, "/secret-id"):
+			generations.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"errors":["upstream connect error"]}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":{"token_ttl":3600}}`))
+		}
+	}))
+	defer srv.Close()
+
+	raw, err := (&VaultDriverFactory{}).Create(credential.NewConfig(map[string]string{
+		"vault_address":   srv.URL,
+		"tls_skip_verify": "true",
+		"auth_method":     "approle",
+		"role_id":         "role-id",
+		"secret_id":       "secret-id",
+		"approle_mount":   "approle",
+		"role_name":       "warden-source-role",
+	}), testGatedLogger())
+	require.NoError(t, err)
+
+	_, _, _, err = raw.(*VaultDriver).PrepareRotation(context.TODO())
+	require.Error(t, err)
+	assert.EqualValues(t, 1, generations.Load(), "the secret_id generation was replayed")
+	assert.Contains(t, err.Error(), `may still have been generated on role "warden-source-role"`)
 }
 
 func TestVaultDriver_CleanupRotation_EmptyAccessor(t *testing.T) {

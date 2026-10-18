@@ -1427,6 +1427,8 @@ type gcpAPIRequest struct {
 	bearerToken string
 	okStatuses  []int
 	operation   string
+	// retryPolicy is RetryIdempotent unless the request creates something durable.
+	retryPolicy httputil.RetryPolicy
 }
 
 // doGCPRequest executes an HTTP request to a GCP API endpoint
@@ -1441,12 +1443,13 @@ func (d *GCPDriver) doGCPRequest(ctx context.Context, apiReq gcpAPIRequest) ([]b
 	}
 
 	// GCP answers 429 on quota (service-account key creation is capped per project
-	// per minute) and 5xx under load on both STS and IAM Credentials. Every call this
-	// driver makes through here is safe to re-issue: the token mints are idempotent in
-	// effect, and a re-issued key creation is recovered by the rollback in
-	// PrepareRotation. Retrying none of them, as this did, turned one transient answer
-	// into a failed mint or a half-finished rotation.
+	// per minute) and 5xx under load on both STS and IAM Credentials. The token mints
+	// are idempotent in effect, so they retry both. A key creation is not: a 5xx or a
+	// lost answer may follow a key that was created, and a retry would create a
+	// second one that nothing tracks — it never expires and holds one of the
+	// account's ten key slots — so it retries only what cannot have created one.
 	retryConfig := httputil.HTTPRetryConfig{
+		Policy:            apiReq.retryPolicy,
 		MaxAttempts:       gcpAPIMaxAttempts,
 		MaxBodySize:       gcpMaxResponseBodySize,
 		RetryableStatuses: []int{429, 500, 502, 503, 504},
@@ -1493,8 +1496,16 @@ func (d *GCPDriver) createServiceAccountKey(ctx context.Context, iamToken, saEma
 		bearerToken: iamToken,
 		okStatuses:  []int{http.StatusOK},
 		operation:   "createServiceAccountKey",
+		retryPolicy: httputil.RetryCreate,
 	})
 	if err != nil {
+		if httputil.OutcomeUnknown(err) {
+			// The answer was lost or a 5xx, so a key may exist that this rotation
+			// never saw. It is not retried and cannot be found here — a service
+			// account key carries no label to recognise it by — so say where to look.
+			return "", fmt.Errorf("failed to create SA key; a key may still have been created on %s, "+
+				"so list its keys and delete any not in use: %w", saEmail, err)
+		}
 		return "", fmt.Errorf("failed to create SA key: %w", err)
 	}
 

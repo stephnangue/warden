@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -659,6 +660,43 @@ func TestScalewayDriver_PrepareRotation(t *testing.T) {
 
 	// Verify activation delay
 	assert.Equal(t, DefaultScalewayActivationDelay, activateAfter)
+}
+
+// A connection dropped after the create was written may follow a key Scaleway
+// already committed. Retried, it would leave a second rotation key, which carries
+// no expiry; the create is sent once.
+func TestScalewayDriver_PrepareRotation_LostCreateAnswerIsNotRetried(t *testing.T) {
+	var creates atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/iam/v1alpha1/api-keys/SCWOLDMGMTKEY":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"access_key": "SCWOLDMGMTKEY", "application_id": "app-mgmt-123"})
+		case r.Method == http.MethodGet && r.URL.Path == "/iam/v1alpha1/api-keys":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"api_keys": []interface{}{}, "total_count": 0})
+		case r.Method == http.MethodPost && r.URL.Path == "/iam/v1alpha1/api-keys":
+			creates.Add(1)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			require.NoError(t, err)
+			_ = conn.Close()
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	driver, err := (&ScalewayDriverFactory{}).Create(credential.NewConfig(map[string]string{
+		"scaleway_url":          server.URL,
+		"management_secret_key": "old-mgmt-secret",
+		"management_access_key": "SCWOLDMGMTKEY",
+		"tls_skip_verify":       "true",
+	}), createScalewayTestLogger())
+	require.NoError(t, err)
+
+	_, _, _, err = driver.(*ScalewayDriver).PrepareRotation(context.Background())
+	require.Error(t, err)
+	assert.EqualValues(t, 1, creates.Load(), "the create was replayed")
 }
 
 func TestScalewayDriver_PrepareRotation_MissingFields(t *testing.T) {
