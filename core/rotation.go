@@ -963,6 +963,9 @@ func (m *RotationManager) activateSourceInline(ctx context.Context, entry *Rotat
 	if err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{
 		SkipConnectionTest: true,
 		ExpectedConfigHash: baseHash,
+		// Only the source's own authenticator changes; credentials already minted
+		// with the old one stay valid.
+		PreservesMintedOutput: true,
 	}); err != nil {
 		// Someone else wrote the config since the prepare. Nothing will
 		// activate the credential just created, so discard it while this
@@ -1057,8 +1060,9 @@ func (m *RotationManager) activateSource(entry *RotationEntry) error {
 	case baseHash == "" || storedHash == baseHash:
 		updated := sourceWithConfig(source, newConfig)
 		err := m.core.credConfigStore.UpdateSource(ctx, updated, UpdateSourceOptions{
-			SkipConnectionTest: true,
-			ExpectedConfigHash: storedHash,
+			SkipConnectionTest:    true,
+			ExpectedConfigHash:    storedHash,
+			PreservesMintedOutput: true, // see activateSourceInline
 		})
 		if errors.Is(err, ErrConfigChanged) {
 			m.discardStaged(ctx, entry, driver, newConfig)

@@ -787,7 +787,7 @@ func TestAnthropic_OneMountServesKeyAndBearer(t *testing.T) {
 //
 // One certificate and one user JWT throughout: a credential is keyed on the agent and
 // user tokens together, so re-fetching either would mint afresh and make every request
-// look like a re-mint. See TestFullChain_LiveSessionKeepsItsCredential.
+// look like a re-mint. See TestFullChain_LiveSessionTakesUpTheEditedSpec.
 func TestAnthropic_WIFSessionReusesItsTokenThenRemintsEarly(t *testing.T) {
 	ensureEnv(t)
 	ensureAnthropicOAuth(t)

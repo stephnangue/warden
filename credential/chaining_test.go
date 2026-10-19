@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1416,4 +1417,175 @@ func TestChaining_ResolvesEachSourceOnce(t *testing.T) {
 		"the consuming source must be resolved once for the request, not once per helper")
 	assert.LessOrEqual(t, env.store.sourceReadCount("secretsource"), 2,
 		"the referenced spec's source must be resolved once for the request")
+}
+
+// With the secret cache on, the referenced pair is read to key the entry, and the
+// fetch mints from that same pair rather than reading it again.
+func TestChaining_CachedFetchResolvesTheReferencedSourceOnce(t *testing.T) {
+	env := newChainingEnv(t)
+	defer env.manager.Stop()
+
+	env.store.AddSpec(&CredSpec{
+		Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}),
+	})
+
+	ctx := createNamespaceContext()
+	env.store.resetSourceReads()
+
+	_, err := env.manager.IssueCredential(ctx, chainCaller("tok"), "consumer", nil)
+	require.NoError(t, err)
+
+	// One to key the entry, plus the driver build's generation read.
+	assert.LessOrEqual(t, env.store.sourceReadCount("secretsource"), 2,
+		"the fetch must mint from the pair that keyed the entry, not resolve it again")
+}
+
+// secretCacheKeyFor is the chained-secret cache key a plain (non-exchange) consumer
+// of secret-spec uses for caller.
+func secretCacheKeyFor(t *testing.T, env *chainingEnv, caller Caller) string {
+	t.Helper()
+	ctx := createNamespaceContext()
+	specB, err := env.store.GetSpec(ctx, "secret-spec")
+	require.NoError(t, err)
+	srcB, err := env.store.GetSource(ctx, specB.Source)
+	require.NoError(t, err)
+	key := chainedSecretCacheKey("test-namespace-id", "secret-spec", chainedSpecFingerprint(specB, srcB), caller, nil)
+	require.NotEmpty(t, key)
+	return key
+}
+
+// Consumers of one secret share its entry but may each set their own
+// secret_cache_ttl. An entry older than a consumer's ttl is not served to it — not
+// at the hit, and not by the flight it then starts, which finds the same entry.
+// A consumer whose ttl it is within still gets it.
+func TestChaining_CachedSecretIsFreshPerConsumer(t *testing.T) {
+	env := newChainingEnv(t)
+	defer env.manager.Stop()
+	var fetches atomic.Int32
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"token": fmt.Sprintf("v%d", fetches.Add(1))}, nil, 0, "", nil
+	}
+	env.store.AddSpec(&CredSpec{Name: "patient", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"})})
+	env.store.AddSpec(&CredSpec{Name: "strict", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "5m"})})
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	_, err := env.manager.IssueCredential(ctx, caller, "patient", nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), fetches.Load())
+
+	// Age the entry ten minutes: inside patient's 30m, past strict's 5m.
+	key := secretCacheKeyFor(t, env, caller)
+	cs, ok := env.manager.secretCache.Get(key)
+	require.True(t, ok)
+	cs.IssuedAt = cs.IssuedAt.Add(-10 * time.Minute)
+	env.manager.secretCache.SetWithTTL(key, cs, 1, time.Hour)
+	env.manager.secretCache.Wait()
+
+	cred, err := env.manager.IssueCredential(ctx, caller, "strict", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), fetches.Load(), "an entry older than the consumer's ttl is fetched again")
+	assert.Equal(t, "consumer-token:v2", cred.Data["token"])
+
+	// patient's own credential is cached; a new session of it reads the entry, now v2.
+	cred, err = env.manager.IssueCredential(ctx, chainCaller("tokA-2"), "patient", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), fetches.Load(), "an entry within the consumer's ttl is served")
+	assert.Equal(t, "consumer-token:v2", cred.Data["token"])
+}
+
+// An invalidation refuses only the fetches of its own key that started before it,
+// and its marker is dropped once no fetch could still be running.
+func TestChaining_InvalidationIsPerKey(t *testing.T) {
+	env := newChainingEnv(t)
+	defer env.manager.Stop()
+	m := env.manager
+	cs := chainedSecret{Data: map[string]string{"token": "x"}, IssuedAt: time.Now()}
+	cached := func(key string) bool { _, ok := m.secretCache.Get(key); return ok }
+
+	startedAt := time.Now()
+	m.invalidateChainedSecret("stale")
+
+	m.storeChainedSecret("other", startedAt, cs, time.Hour)
+	assert.True(t, cached("other"), "another key's invalidation must not stop this one being cached")
+
+	m.storeChainedSecret("stale", startedAt, cs, time.Hour)
+	assert.False(t, cached("stale"), "a fetch that started before the invalidation must not be stored")
+
+	m.storeChainedSecret("stale", time.Now(), cs, time.Hour)
+	assert.True(t, cached("stale"), "a fetch that started after it is stored")
+
+	// A marker older than any fetch can run is dropped on the next invalidation.
+	m.secretMu.Lock()
+	m.secretInvalidated["ancient"] = time.Now().Add(-2 * m.issuanceTimeout)
+	m.secretMu.Unlock()
+	m.invalidateChainedSecret("stale")
+	m.secretMu.Lock()
+	_, kept := m.secretInvalidated["ancient"]
+	m.secretMu.Unlock()
+	assert.False(t, kept)
+}
+
+// A fetch evicted for a stale secret can still finish after the retry has stored
+// the fresh value. It must not overwrite it.
+func TestChaining_EvictedFetchDoesNotOverwriteTheRetry(t *testing.T) {
+	env := newChainingEnv(t)
+	defer env.manager.Stop()
+
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	openGate := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(openGate)
+
+	var fetches atomic.Int32
+	env.secretDriver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		if fetches.Add(1) == 1 {
+			close(arrived)
+			<-release
+			return map[string]interface{}{"token": "stale"}, nil, 0, "", nil
+		}
+		return map[string]interface{}{"token": "fresh"}, nil, 0, "", nil
+	}
+	cfg := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
+	for _, name := range []string{"first", "retry", "later"} {
+		env.store.AddSpec(&CredSpec{Name: name, Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(cfg)})
+	}
+
+	ctx := createNamespaceContext()
+	caller := chainCaller("tokA")
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := env.manager.IssueCredential(ctx, caller, "first", nil)
+		firstDone <- err
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the first fetch")
+	}
+
+	// The secret is found stale while the first fetch is still out: evict, and let a
+	// retry fetch and store the fresh value.
+	env.manager.invalidateChainedSecret(secretCacheKeyFor(t, env, caller))
+	cred, err := env.manager.IssueCredential(ctx, caller, "retry", nil)
+	require.NoError(t, err)
+	require.Equal(t, "consumer-token:fresh", cred.Data["token"])
+
+	// Now the evicted fetch finishes.
+	openGate()
+	select {
+	case err := <-firstDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the first issuance")
+	}
+
+	cred, err = env.manager.IssueCredential(ctx, caller, "later", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "consumer-token:fresh", cred.Data["token"], "the evicted fetch must not overwrite the retry's value")
+	assert.Equal(t, int32(2), fetches.Load())
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
@@ -71,6 +72,14 @@ type CredentialConfigStore struct {
 
 	// Rotation manager for periodic credential source rotation
 	rotationManager *RotationManager
+
+	// specRevisions maps "{ns-uuid}:{spec}" to a *atomic.Uint64 advanced on every
+	// committed write that can change what the spec mints (see bumpSpecRevision).
+	// The credential manager keys its cache by it, so an edit misses credentials
+	// minted under the old config. It is node-local, as that cache is, and entries
+	// are never removed: a spec deleted and created again under the same name must
+	// not return to a revision its old credentials are cached under.
+	specRevisions sync.Map
 
 	mu     sync.RWMutex
 	closed bool
@@ -170,6 +179,37 @@ func (s *CredentialConfigStore) Close() error {
 // buildSpecCacheKey creates a cache key for a spec
 func (s *CredentialConfigStore) buildSpecCacheKey(namespaceID, specName string) string {
 	return fmt.Sprintf("%s:spec:%s", namespaceID, specName)
+}
+
+// SpecRevision returns the revision of a spec in the namespace in ctx, zero for a
+// spec never written on this node. It takes no lock: it is read on every gateway
+// request, and must not queue behind writers, which hold s.mu across storage
+// round trips.
+func (s *CredentialConfigStore) SpecRevision(ctx context.Context, name string) uint64 {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return 0
+	}
+	if rev, ok := s.specRevisions.Load(specRevisionKey(ns.UUID, name)); ok {
+		return rev.(*atomic.Uint64).Load()
+	}
+	return 0
+}
+
+// bumpSpecRevision advances a spec's revision. Writers call it after the write is
+// durable and the spec cache holds the new value, so a request that reads the new
+// revision also reads the new config.
+func (s *CredentialConfigStore) bumpSpecRevision(namespaceID, name string) {
+	key := specRevisionKey(namespaceID, name)
+	rev, ok := s.specRevisions.Load(key)
+	if !ok {
+		rev, _ = s.specRevisions.LoadOrStore(key, new(atomic.Uint64))
+	}
+	rev.(*atomic.Uint64).Add(1)
+}
+
+func specRevisionKey(namespaceID, name string) string {
+	return namespaceID + ":" + name
 }
 
 // buildSourceCacheKey creates a cache key for a source
@@ -284,6 +324,50 @@ func (s *CredentialConfigStore) checkSourceReferencesLocked(namespaceID, sourceN
 		}
 	}
 	return refs, nil
+}
+
+// chainedConsumersLocked returns the specs that mint from any of the named specs
+// through credential chaining, reading storage directly. A write that changes what
+// a referenced spec yields changes what they mint too, so their revisions advance
+// with its.
+func (s *CredentialConfigStore) chainedConsumersLocked(namespaceID string, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	sources, err := s.loadAllSources(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+	specs, err := s.loadAllSpecs(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+	return chainedConsumers(specs, sources, names), nil
+}
+
+// chainedConsumers returns the names of the specs that mint from any of names: a
+// spec whose own secret_spec names one, or a spec setting no reference of its own
+// on a source whose secret_spec names one (a spec-level reference wins). Chaining
+// is one hop, so these are all of them.
+func chainedConsumers(specs []*credential.CredSpec, sources []*credential.CredSource, names []string) []string {
+	referenced := make(map[string]bool, len(names))
+	for _, name := range names {
+		referenced[name] = true
+	}
+	viaSource := make(map[string]bool)
+	for _, src := range sources {
+		if referenced[src.Config.Get(credential.ConfigSecretSpec)] {
+			viaSource[src.Name] = true
+		}
+	}
+	var consumers []string
+	for _, spec := range specs {
+		ref := spec.Config.Get(credential.ConfigSecretSpec)
+		if referenced[ref] || (ref == "" && viaSource[spec.Source]) {
+			consumers = append(consumers, spec.Name)
+		}
+	}
+	return consumers
 }
 
 // checkSpecReferencesLocked returns the sources and specs that name this spec as
@@ -545,13 +629,21 @@ type UpdateSpecOptions struct {
 	// earlier read passes that read's hash, so it cannot overwrite a change made
 	// since.
 	ExpectedConfigHash string
+
+	// PreservesMintedOutput declares that the write cannot change what the spec
+	// mints, so credentials already cached for it stay served. Without it the
+	// spec's revision advances and the next request mints again: a write left
+	// unclassified costs a mint, never a stale credential.
+	PreservesMintedOutput bool
 }
 
 // PersistRotatedSpec persists a spec without re-running verification, satisfying
 // credential.ConfigStoreAccessor for the refresh-token write-back. Verification
 // is skipped because re-minting would consume the just-rotated refresh token.
+// The write-back stores the refresh token the upstream just rotated; the access
+// token minted alongside it is still the one to serve.
 func (s *CredentialConfigStore) PersistRotatedSpec(ctx context.Context, spec *credential.CredSpec) error {
-	return s.UpdateSpec(ctx, spec, UpdateSpecOptions{SkipVerification: true})
+	return s.UpdateSpec(ctx, spec, UpdateSpecOptions{SkipVerification: true, PreservesMintedOutput: true})
 }
 
 // ReloadSpec evicts the node-local cache entry for a spec and re-reads it,
@@ -590,12 +682,11 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 	}
 
 	// Phase 1: validate, holding no lock.
-	var skipVerification bool
-	var expectedHash string
+	var opt UpdateSpecOptions
 	if len(opts) > 0 {
-		skipVerification = opts[0].SkipVerification
-		expectedHash = opts[0].ExpectedConfigHash
+		opt = opts[0]
 	}
+	skipVerification, expectedHash := opt.SkipVerification, opt.ExpectedConfigHash
 	if err := s.validateSpec(ctx, spec, skipVerification); err != nil {
 		return err
 	}
@@ -627,6 +718,17 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 		return ErrConfigChanged
 	}
 
+	// The specs that mint from this one change with it. Listed before the write, so
+	// a listing that fails refuses the update rather than leaving them on what the
+	// old config yielded.
+	var consumers []string
+	if !opt.PreservesMintedOutput {
+		if consumers, err = s.chainedConsumersLocked(ns.UUID, []string{spec.Name}); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to list the specs that mint from spec %q: %w", spec.Name, err)
+		}
+	}
+
 	if err := s.persistSpec(ns.UUID, spec); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("failed to persist spec: %w", err)
@@ -634,6 +736,12 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 
 	s.specsByID.Set(s.buildSpecCacheKey(ns.UUID, spec.Name), spec, 1)
 	s.specsByID.Wait()
+	if !opt.PreservesMintedOutput {
+		s.bumpSpecRevision(ns.UUID, spec.Name)
+		for _, consumer := range consumers {
+			s.bumpSpecRevision(ns.UUID, consumer)
+		}
+	}
 	s.mu.Unlock()
 
 	// Phase 3: rotation reconciliation, outside the lock.
@@ -734,6 +842,9 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 	}
 
 	s.specsByID.Del(s.buildSpecCacheKey(ns.UUID, name))
+	// A spec created again under this name starts past every credential cached
+	// for this one.
+	s.bumpSpecRevision(ns.UUID, name)
 	s.mu.Unlock()
 
 	// Unregister from rotation after the delete is durable: an unregister followed
@@ -929,6 +1040,13 @@ type UpdateSourceOptions struct {
 	// prepared against, and the operator update the hash of the config it read,
 	// so neither can overwrite a change the other made in between.
 	ExpectedConfigHash string
+
+	// PreservesMintedOutput declares that the write cannot change what the specs
+	// bound to the source mint — rotating the source's own authenticator, say,
+	// which credentials already minted do not depend on. Without it every bound
+	// spec's revision advances when the config changes, and their next requests
+	// mint again.
+	PreservesMintedOutput bool
 }
 
 // UpdateSource updates an existing source
@@ -949,12 +1067,11 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 
 	// Phase 1: validate, holding no lock. Unless the caller skips it, this opens a
 	// connection to the provider.
-	var skipConnectionTest bool
-	var expectedHash string
+	var opt UpdateSourceOptions
 	if len(opts) > 0 {
-		skipConnectionTest = opts[0].SkipConnectionTest
-		expectedHash = opts[0].ExpectedConfigHash
+		opt = opts[0]
 	}
+	skipConnectionTest, expectedHash := opt.SkipConnectionTest, opt.ExpectedConfigHash
 	if err := s.validateSource(ctx, source, skipConnectionTest); err != nil {
 		return err
 	}
@@ -999,7 +1116,16 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// the specs are untouched — they simply start minting without a field, and the
 	// provider takes its fallback branch. Reject rather than let a source edit
 	// silently narrow credentials bound to it.
-	if err := s.checkBoundSpecsStillCarriedLocked(ns.UUID, source); err != nil {
+	//
+	// The same list is what a config change re-keys below, so a listing that fails
+	// fails the update: going ahead would leave every bound spec serving
+	// credentials minted under the old config.
+	bound, err := s.checkSourceReferencesLocked(ns.UUID, source.Name)
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to list the specs bound to source %q: %w", source.Name, err)
+	}
+	if err := s.checkBoundSpecsStillCarriedLocked(source, bound); err != nil {
 		s.mu.Unlock()
 		return err
 	}
@@ -1016,6 +1142,20 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// began accepting a rotation period on its own.
 	driverInputsChanged := !existing.Config.Equal(source.Config)
 
+	// A config change re-keys the bound specs and the specs that mint from them.
+	var rekeyed []string
+	if driverInputsChanged && !opt.PreservesMintedOutput {
+		for _, spec := range bound {
+			rekeyed = append(rekeyed, spec.Name)
+		}
+		consumers, err := s.chainedConsumersLocked(ns.UUID, rekeyed)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to list the specs that mint from source %q: %w", source.Name, err)
+		}
+		rekeyed = append(rekeyed, consumers...)
+	}
+
 	if err := s.persistSource(ns.UUID, source); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("failed to persist source: %w", err)
@@ -1023,6 +1163,9 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 
 	s.sourcesByID.Set(s.buildSourceCacheKey(ns.UUID, source.Name), source, 1)
 	s.sourcesByID.Wait()
+	for _, name := range rekeyed {
+		s.bumpSpecRevision(ns.UUID, name)
+	}
 	s.mu.Unlock()
 
 	// Phase 3: outside the lock.
@@ -1266,6 +1409,7 @@ func (s *CredentialConfigStore) ClearNamespace(ctx context.Context) error {
 
 		cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
 		s.specsByID.Del(cacheKey)
+		s.bumpSpecRevision(ns.UUID, spec.Name)
 	}
 
 	// Delete all sources (no reference check needed since specs are already deleted)
@@ -2035,25 +2179,17 @@ func oauth2SpecClientAuthError(specCfg, sourceCfg credential.Config) error {
 // Widening is always fine; only a name that disappears can strand anything.
 //
 // Takes no lock and fills no cache: it runs inside UpdateSource's critical
-// section, where the referenced specs must not be able to change underneath it.
+// section, where the bound specs, read there, must not be able to change
+// underneath it.
 //
 // It also re-applies oauth2SpecClientAuthError, since a changed client_auth strands a
 // spec as surely as a narrowed credential_fields does.
-func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(namespaceID string, source *credential.CredSource) error {
+func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(source *credential.CredSource, bound []*credential.CredSpec) error {
 	if s.core == nil {
 		return nil
 	}
 
-	refs, err := s.checkSourceReferencesLocked(namespaceID, source.Name)
-	if err != nil {
-		// A listing failure must not block an unrelated source edit; the
-		// spec-level guard still covers every future write.
-		s.logger.Warn("could not check specs bound to this source for uncarried fields",
-			logger.String("source_name", source.Name), logger.Err(err))
-		return nil
-	}
-
-	for _, spec := range refs {
+	for _, spec := range bound {
 		// A changed client_auth changes which half of a spec's client credential is
 		// sent. A spec still holding the other half would keep reporting a stored
 		// secret while every mint failed for want of the one it lacks. Needs no type

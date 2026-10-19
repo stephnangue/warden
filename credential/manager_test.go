@@ -46,6 +46,23 @@ type mockConfigStore struct {
 	// sourceReads counts GetSource calls per name, so a test can assert an issuance
 	// resolves each source exactly once.
 	sourceReads map[string]int
+
+	// revisions is what SpecRevision answers, per spec (name → *atomic.Uint64);
+	// bumpRevision advances one. Lock-free like the real store's, so a benchmark
+	// of the hit path does not measure this mock's mutex.
+	revisions sync.Map
+}
+
+func (m *mockConfigStore) SpecRevision(_ context.Context, name string) uint64 {
+	if rev, ok := m.revisions.Load(name); ok {
+		return rev.(*atomic.Uint64).Load()
+	}
+	return 0
+}
+
+func (m *mockConfigStore) bumpRevision(name string) {
+	rev, _ := m.revisions.LoadOrStore(name, new(atomic.Uint64))
+	rev.(*atomic.Uint64).Add(1)
 }
 
 func newMockConfigStore() *mockConfigStore {
@@ -312,7 +329,7 @@ func (t *mockCredentialType) FieldSchemas() map[string]*CredentialFieldSchema {
 // Test Helpers
 // ============================================================================
 
-func createTestManager(t *testing.T) (*Manager, *mockConfigStore, *mockSourceDriverFactory) {
+func createTestManager(t testing.TB) (*Manager, *mockConfigStore, *mockSourceDriverFactory) {
 	t.Helper()
 
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
@@ -469,6 +486,33 @@ func TestManager_IssueCredential_ExpiredNotServed(t *testing.T) {
 	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "expired credential must be re-minted, not served stale")
+}
+
+// A write to the spec or its source advances the spec's revision, and the next
+// request misses the credential minted under the old config. An unchanged
+// revision keeps serving the cached one.
+func TestManager_IssueCredential_SpecRevisionKeysTheCache(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	_, err := issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	_, err = issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.mintCalls.Load(), "an unchanged revision is a hit")
+
+	configStore.bumpRevision("test-spec")
+	_, err = issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "a new revision mints again")
+
+	_, err = issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "and is cached in turn")
 }
 
 // A static credential keeps LeaseTTL 0, so it never reads as expired; the spec's
