@@ -163,7 +163,7 @@ func newChainingEnv(t *testing.T) *chainingEnv {
 	secretFactory.driver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		return map[string]interface{}{"token": "THE-SECRET"}, nil, 0, "", nil
 	}
-	require.NoError(t, driverRegistry.RegisterFactory(secretFactory))
+	require.NoError(t, driverRegistry.RegisterFactory(exchangingSecretFactory{secretFactory}))
 
 	consumer := &mockChainedDriver{driverType: "consumersrc"}
 	require.NoError(t, driverRegistry.RegisterFactory(&mockChainedFactory{driver: consumer}))
@@ -191,16 +191,36 @@ func newChainingEnv(t *testing.T) *chainingEnv {
 	return &chainingEnv{manager: manager, store: store, secretDriver: secretFactory.driver, consumerDriver: consumer, exchangeDriver: exchange, exchangeConsumerDriver: exchangeConsumer}
 }
 
-// caller with a no-op ResolveInputs (the referenced secret-spec does not request
-// exchange in these tests, so nil inputs are correct).
+// chainInputs is what chainCaller resolves for the referenced spec: one agent,
+// whatever the session, as a referenced spec is always minted as the caller.
+func chainInputs() *ExchangeInputs {
+	return &ExchangeInputs{SubjectToken: "chain-agent-subject"}
+}
+
+// chainCaller is a session of the one agent chainInputs names.
 func chainCaller(tokenID string) Caller {
 	return Caller{
 		TokenID:  tokenID,
 		TokenTTL: time.Hour,
 		ResolveInputs: func(_ context.Context, _ string) (*ExchangeInputs, error) {
-			return nil, nil
+			return chainInputs(), nil
 		},
 	}
+}
+
+// exchangingSecretDriver lets the referenced spec take the caller's exchange
+// inputs, as a referenced spec's driver must; it mints through the wrapped mock,
+// which the tests program and count.
+type exchangingSecretDriver struct{ *mockSourceDriver }
+
+func (d exchangingSecretDriver) MintCredentialWithExchange(ctx context.Context, spec *CredSpec, _ *ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return d.MintCredential(ctx, spec)
+}
+
+type exchangingSecretFactory struct{ *mockSourceDriverFactory }
+
+func (f exchangingSecretFactory) Create(Config, *logger.GatedLogger) (SourceDriver, error) {
+	return exchangingSecretDriver{f.driver}, nil
 }
 
 func TestChaining_MaterialFlowsToConsumer(t *testing.T) {
@@ -455,7 +475,7 @@ func TestChaining_ExpiredCachedSecretIsRefetched(t *testing.T) {
 	require.NoError(t, err)
 	srcB, err := env.store.GetSource(ctx, "secretsource")
 	require.NoError(t, err)
-	key := chainedSecretCacheKey("test-namespace-id", "secret-spec", chainedSpecFingerprint(specB, srcB), caller, nil)
+	key := chainedSecretCacheKey("test-namespace-id", "secret-spec", chainedSpecFingerprint(specB, srcB), caller, chainInputs())
 	cs, ok := env.manager.secretCache.Get(key)
 	require.True(t, ok, "precondition: the secret is cached under the key the manager computes")
 	cs.ExpiresAt = time.Now().Add(-time.Second)
@@ -797,7 +817,7 @@ func exchangeChainCaller(agentToken, agentIdentity, userToken string, userClaims
 // TestChaining_CacheSharesAcrossConsumers: with secret_cache_ttl set, two consumer specs
 // referencing the same secret-spec under one caller fetch the secret only ONCE (shared
 // via the secret cache) — versus TestChaining_SecretNotCached's two fetches without a
-// TTL. Also exercises the nil-inputs ("noexchange") cache-key path without panicking.
+// TTL.
 func TestChaining_CacheSharesAcrossConsumers(t *testing.T) {
 	env := newChainingEnv(t)
 	ttl := map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"}
@@ -805,7 +825,7 @@ func TestChaining_CacheSharesAcrossConsumers(t *testing.T) {
 	env.store.AddSpec(&CredSpec{Name: "consumer2", Type: TypeVaultToken, Source: "consumersource", Config: NewConfig(ttl)})
 
 	ctx := createNamespaceContext()
-	caller := chainCaller("tokA") // nil inputs -> "noexchange" key segment
+	caller := chainCaller("tokA")
 
 	_, err := env.manager.IssueCredential(ctx, caller, "consumer1", nil)
 	require.NoError(t, err)
@@ -1450,7 +1470,7 @@ func secretCacheKeyFor(t *testing.T, env *chainingEnv, caller Caller) string {
 	require.NoError(t, err)
 	srcB, err := env.store.GetSource(ctx, specB.Source)
 	require.NoError(t, err)
-	key := chainedSecretCacheKey("test-namespace-id", "secret-spec", chainedSpecFingerprint(specB, srcB), caller, nil)
+	key := chainedSecretCacheKey("test-namespace-id", "secret-spec", chainedSpecFingerprint(specB, srcB), caller, chainInputs())
 	require.NotEmpty(t, key)
 	return key
 }
@@ -1495,6 +1515,29 @@ func TestChaining_CachedSecretIsFreshPerConsumer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), fetches.Load(), "an entry within the consumer's ttl is served")
 	assert.Equal(t, "consumer-token:v2", cred.Data["token"])
+}
+
+// A referenced spec resolving no exchange inputs is not minted as the caller —
+// config drift past the store's rules. Its secret would be fetched and cached with
+// no caller identity, so the chain fails before anything is minted.
+func TestChaining_NoCallerInputsFailsClosed(t *testing.T) {
+	env := newChainingEnv(t)
+	defer env.manager.Stop()
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "secret-spec", ConfigSecretCacheTTL: "30m"})})
+
+	caller := Caller{
+		TokenID:  "tok",
+		TokenTTL: time.Hour,
+		ResolveInputs: func(context.Context, string) (*ExchangeInputs, error) {
+			return nil, nil
+		},
+	}
+	_, err := env.manager.IssueCredential(createNamespaceContext(), caller, "consumer", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not minted as the caller")
+	assert.Equal(t, int32(0), env.secretDriver.mintCalls.Load(), "the secret is not fetched")
+	assert.Equal(t, int32(0), env.consumerDriver.mintFromCalls.Load(), "the consumer is not minted")
 }
 
 // An invalidation refuses only the fetches of its own key that started before it,
