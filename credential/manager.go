@@ -55,6 +55,16 @@ type Manager struct {
 	// persisted.
 	secretCache *ristretto.Cache[string, chainedSecret]
 
+	// secretInvalidated records when each chained-secret key was last invalidated,
+	// guarded by secretMu with the cache writes it orders. storeChainedSecret, the
+	// only writer of secretCache, refuses a value whose fetch started before its
+	// key's invalidation — so a fetch evicted for a stale secret cannot land after
+	// the retry's fresh one. A marker is dropped once older than any fetch can run
+	// (issuanceTimeout), so the map holds only recent invalidations, not the key
+	// space, and one key's invalidations never stop another key from being cached.
+	secretMu          sync.Mutex
+	secretInvalidated map[string]time.Time
+
 	// issueFlight coalesces concurrent mints for one credential cache key, and
 	// secretFlight concurrent fetches of one chained secret. Both run the shared
 	// work detached from the request that started it, bounded by issuanceTimeout
@@ -109,6 +119,11 @@ type ConfigStoreAccessor interface {
 	// ReloadSpec returns the spec read from storage, bypassing the node-local
 	// cache, so a refresh token another node rotated and persisted is seen.
 	ReloadSpec(ctx context.Context, name string) (*CredSpec, error)
+	// SpecRevision returns the spec's revision in the namespace in ctx: a counter
+	// the store advances on every write that can change what the spec mints. It
+	// keys the credential cache, so such a write takes effect on the next request.
+	// It is read on every request, so it must be cheap and take no store lock.
+	SpecRevision(ctx context.Context, name string) uint64
 }
 
 // ExpirationRegistrar defines the interface for registering credentials with an expiration manager.
@@ -137,9 +152,11 @@ type ExpirationRegistrar interface {
 type chainedSecret struct {
 	Data map[string]string
 	Type string
-	// IssuedAt and ExpiresAt bound when the referenced credential is valid; both are
-	// zero when it reported no lifetime. They travel with a cached entry so a hit
-	// knows how much lifetime is left, not how much there was when it was fetched.
+	// IssuedAt is when the referenced credential was issued, which is when it was
+	// fetched. ExpiresAt bounds when it is valid, zero when it reported no lifetime.
+	// They travel with a cached entry so a hit knows how much lifetime is left, not
+	// how much there was when it was fetched, and how old the entry is: consumers of
+	// one secret share an entry but may each set a different secret_cache_ttl.
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 }
@@ -153,15 +170,22 @@ func (cs chainedSecret) live() bool {
 	return cs.ExpiresAt.IsZero() || !ExpiresWithin(cs.IssuedAt, cs.ExpiresAt.Sub(cs.IssuedAt))
 }
 
+// fresh reports whether a cached secret may be served to a consumer whose
+// secret_cache_ttl is ttl: still live, and fetched no longer than ttl ago. The entry
+// itself lives for the TTL of whichever consumer fetched it, so a consumer with a
+// longer ttl than that one refetches sooner than it asked; that is accepted.
+func (cs chainedSecret) fresh(ttl time.Duration) bool {
+	return cs.live() && time.Since(cs.IssuedAt) < ttl
+}
+
 // newChainedSecret captures a fetched referenced credential for the consumer.
 func newChainedSecret(credB *Credential) chainedSecret {
-	cs := chainedSecret{Data: credB.Data, Type: credB.Type}
+	issued := credB.IssuedAt
+	if issued.IsZero() {
+		issued = time.Now()
+	}
+	cs := chainedSecret{Data: credB.Data, Type: credB.Type, IssuedAt: issued}
 	if credB.LeaseTTL > 0 {
-		issued := credB.IssuedAt
-		if issued.IsZero() {
-			issued = time.Now()
-		}
-		cs.IssuedAt = issued
 		cs.ExpiresAt = issued.Add(credB.LeaseTTL)
 	}
 	return cs
@@ -252,9 +276,12 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 		return nil, fmt.Errorf("failed to get namespace from context: %w", err)
 	}
 
-	// Build namespace-aware cache key: {namespace-uuid}:{tokenID}:{specName}
-	// Including specName allows access backends to mint different specs for the same token.
-	cacheKey := fmt.Sprintf("%s:%s:%s", ns.ID, caller.TokenID, specName)
+	// Build namespace-aware cache key: {namespace-uuid}:{tokenID}:{specName}:r{revision}
+	// Including specName allows access backends to mint different specs for the same
+	// token. The spec's revision makes an edit to the spec, or to its source, miss
+	// every credential minted under the old config; those entries age out on their
+	// own TTL.
+	cacheKey := fmt.Sprintf("%s:%s:%s:r%d", ns.ID, caller.TokenID, specName, m.configStore.SpecRevision(ctx, specName))
 
 	// When the request carries token-exchange inputs, fold their fingerprint into
 	// the key so two callers sharing one session token (e.g. an opaque service
@@ -392,7 +419,15 @@ func (m *Manager) issueCredential(ctx context.Context, caller Caller, specName s
 	if err != nil {
 		return nil, err
 	}
+	return m.issueBound(ctx, caller, bound, inputs)
+}
+
+// issueBound is issueCredential for a spec and source already resolved, so a caller
+// that read them to decide something — the chained-secret cache key — mints from the
+// very pair it decided on.
+func (m *Manager) issueBound(ctx context.Context, caller Caller, bound boundSpec, inputs *ExchangeInputs) (*Credential, error) {
 	spec := bound.spec
+	specName := spec.Name
 
 	// Credential chaining: when the spec (or its source) references another cred
 	// spec as its secret source, mint that referenced spec as the same caller and
@@ -654,10 +689,11 @@ func (m *Manager) buildSecretMaterial(bound boundSpec, data map[string]string, t
 
 // fetchChainedSecret mints the referenced secret-spec AS the caller and returns its
 // credential. The caller owns the one-hop depth guard and building inputsB (via
-// caller.ResolveInputs); this function materializes any lazily-minted subject/actor
-// tokens, mints via the non-caching internal path (so the fetched secret is never
-// cached), and enforces that the referenced credential holds no lease.
-func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretRef string, inputsB *ExchangeInputs) (*Credential, error) {
+// caller.ResolveInputs), and resolves boundB, the referenced spec and its source;
+// this function materializes any lazily-minted subject/actor tokens, mints via the
+// non-caching internal path (so the fetched secret is never cached), and enforces
+// that the referenced credential holds no lease.
+func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretRef string, boundB boundSpec, inputsB *ExchangeInputs) (*Credential, error) {
 	// Materialize any lazily-minted subject/actor tokens here: the referenced spec is
 	// minted via the non-caching internal path, which — unlike the caching wrapper —
 	// does not run ResolveSubjectToken/ResolveActorToken, so a warden_identity subject
@@ -680,7 +716,7 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 
 	// Mint the secret AS the caller via the non-caching path — never cached; it
 	// lives only for this mint and is discarded after material extraction by the caller.
-	credB, err := m.issueCredential(ctx, caller, secretRef, inputsB)
+	credB, err := m.issueBound(ctx, caller, boundB, inputsB)
 	if err != nil {
 		return nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
 	}
@@ -742,7 +778,8 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 		return m.fetchUncached(ctx, caller, secretRef, inputsB)
 	}
 
-	if hit, ok := m.secretCache.Get(key); ok && hit.live() {
+	missedAt := time.Now()
+	if hit, ok := m.secretCache.Get(key); ok && hit.fresh(ttl) {
 		hit.Data = copyStringMap(hit.Data)
 		return hit, true, key, nil
 	}
@@ -756,11 +793,17 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 	// secretFlight runs it detached from all of them. Called from inside a mint,
 	// the fetch can outlive that mint by up to the issuance timeout, and still
 	// populates the cache for the next one.
+	boundB := boundSpec{spec: specB, source: srcB}
 	fetched, ferr := m.secretFlight.Do(ctx, key, func(ctx context.Context) (chainedSecret, error) {
-		if cs, ok := m.secretCache.Get(key); ok && cs.live() { // another goroutine populated it
+		startedAt := time.Now()
+		// Another fetch may have stored the secret since this caller missed. Only an
+		// entry fetched after that moment is taken: it is fresh for every consumer that
+		// joins this flight, whatever its secret_cache_ttl, where an older one passed
+		// over at the miss would be handed to them all.
+		if cs, ok := m.secretCache.Get(key); ok && cs.live() && !cs.IssuedAt.Before(missedAt) {
 			return cs, nil
 		}
-		credB, e := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+		credB, e := m.fetchChainedSecret(ctx, caller, secretRef, boundB, inputsB)
 		if e != nil {
 			return chainedSecret{}, e
 		}
@@ -773,8 +816,7 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 		if credB.LeaseTTL > 0 && credB.LeaseTTL < entryTTL {
 			entryTTL = credB.LeaseTTL
 		}
-		m.secretCache.SetWithTTL(key, cs, 1, entryTTL)
-		m.secretCache.Wait() // Ristretto sets are async; shrink the window vs a concurrent Del.
+		m.storeChainedSecret(key, startedAt, cs, entryTTL)
 		return cs, nil
 	})
 	if ferr != nil {
@@ -788,7 +830,11 @@ func (m *Manager) resolveChainedSecretData(ctx context.Context, caller Caller, b
 // cache, for every path that declines to cache. It reports fromCache=false and an empty
 // key, so the caller neither retries on a rejection nor tries to invalidate.
 func (m *Manager) fetchUncached(ctx context.Context, caller Caller, secretRef string, inputsB *ExchangeInputs) (chainedSecret, bool, string, error) {
-	credB, err := m.fetchChainedSecret(ctx, caller, secretRef, inputsB)
+	boundB, err := m.resolveBound(ctx, secretRef)
+	if err != nil {
+		return chainedSecret{}, false, "", fmt.Errorf("secret_spec %q: %w", secretRef, err)
+	}
+	credB, err := m.fetchChainedSecret(ctx, caller, secretRef, boundB, inputsB)
 	if err != nil {
 		return chainedSecret{}, false, "", err
 	}
@@ -843,13 +889,44 @@ func sourceModifiersApply(spec *CredSpec, src *CredSource) bool {
 }
 
 // invalidateChainedSecret evicts a cached secret and any in-flight fetch for its key,
-// so an immediate retry re-fetches rather than joining a stale fetch.
+// so an immediate retry re-fetches rather than joining a stale fetch. The marker it
+// leaves keeps the evicted fetch, should it finish later, from storing what it got.
 func (m *Manager) invalidateChainedSecret(key string) {
 	if key == "" {
 		return
 	}
+	now := time.Now()
+	m.secretMu.Lock()
+	if m.secretInvalidated == nil {
+		m.secretInvalidated = make(map[string]time.Time)
+	}
+	// No fetch runs longer than issuanceTimeout, so an older marker can no longer
+	// refuse anything.
+	for k, at := range m.secretInvalidated {
+		if now.Sub(at) > m.issuanceTimeout {
+			delete(m.secretInvalidated, k)
+		}
+	}
+	m.secretInvalidated[key] = now
 	m.secretCache.Del(key)
+	m.secretMu.Unlock()
 	m.secretFlight.Evict(key)
+}
+
+// storeChainedSecret caches a fetched secret for ttl, unless its key was
+// invalidated after the fetch started at startedAt. It is the only writer of
+// secretCache.
+func (m *Manager) storeChainedSecret(key string, startedAt time.Time, cs chainedSecret, ttl time.Duration) {
+	m.secretMu.Lock()
+	invalidatedAt, marked := m.secretInvalidated[key]
+	stored := !marked || invalidatedAt.Before(startedAt)
+	if stored {
+		m.secretCache.SetWithTTL(key, cs, 1, ttl)
+	}
+	m.secretMu.Unlock()
+	if stored {
+		m.secretCache.Wait() // Ristretto sets are async; make the value visible before returning it.
+	}
 }
 
 // chainedSecretCacheKey scopes a cached secret to (namespace, secret_spec, what that

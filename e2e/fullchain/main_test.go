@@ -51,7 +51,7 @@ import (
 // the mount config is written.
 var allEnvs = []h.ProviderEnv{
 	openaiEnv, anthropicEnv, newrelicEnv, elasticEnv, githubEnv,
-	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, mcpEnv, mcpGitHubEnv,
+	splunkEnv, datadogEnv, restEnv, dynatraceEnv, dynatraceOAuthEnv, freshnessEnv, mcpEnv, mcpGitHubEnv,
 	mcpAWSEnv, mcpAWSWrongCredEnv, mcpNoContractEnv, mcpUnrestrictedSmallCapEnv, mcpSkillsEnv,
 	atlassianEnv, honeycombEnv, grafanaEnv,
 	prometheusEnv, prometheusBasicEnv,

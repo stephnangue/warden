@@ -54,6 +54,8 @@ func (s *chainStore) ReloadSpec(ctx context.Context, name string) (*credential.C
 	return s.GetSpec(ctx, name)
 }
 
+func (s *chainStore) SpecRevision(context.Context, string) uint64 { return 0 }
+
 func chainNamespaceContext() context.Context {
 	return namespace.ContextWithNamespace(context.Background(),
 		&namespace.Namespace{ID: "chain-ns", Path: "chain/"})
