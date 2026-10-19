@@ -427,7 +427,7 @@ func TestOAuth2Driver_MintCredential(t *testing.T) {
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "eyJ-test-access-token", rawData["api_key"])
-	assert.Equal(t, 3600*time.Second, ttl)
+	assert.Equal(t, 3600*time.Second-exchangedTokenBuffer, ttl, "the lease ends a buffer before the token does")
 	assert.Empty(t, leaseID)
 }
 
@@ -468,7 +468,7 @@ func TestOAuth2Driver_MintCredential_DefaultScope(t *testing.T) {
 	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "test-token", rawData["api_key"])
-	assert.Equal(t, 1800*time.Second, ttl)
+	assert.Equal(t, 1800*time.Second-exchangedTokenBuffer, ttl)
 }
 
 func TestOAuth2Driver_MintCredential_ExtraTokenParams(t *testing.T) {
@@ -547,7 +547,9 @@ func TestOAuth2Driver_MintCredential_NoExpiresIn(t *testing.T) {
 
 	_, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
-	assert.Equal(t, time.Duration(0), ttl)
+	// With no expires_in the token was cached for the whole session and served
+	// past its expiry. It now takes the short fallback, less the buffer.
+	assert.Equal(t, exchangedTokenTTL-exchangedTokenBuffer, ttl)
 }
 
 func TestOAuth2Driver_MintCredential_MissingCredentials(t *testing.T) {
@@ -1035,7 +1037,7 @@ func TestOAuth2Driver_MintFromRefreshToken_Rotating(t *testing.T) {
 	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "at-new", rawData["api_key"])
-	assert.Equal(t, 28800*time.Second, ttl)
+	assert.Equal(t, 28800*time.Second-exchangedTokenBuffer, ttl)
 	// Rotated token is surfaced under the reserved key for the minting layer.
 	assert.Equal(t, "rt-new", rawData[credential.RawRotatedRefreshTokenKey])
 	// The reset refresh-token window is surfaced too, as a future RFC3339 expiry.
@@ -1458,7 +1460,7 @@ func TestOAuth2Driver_MintFromSecret_ChainedClientCredential(t *testing.T) {
 	rawData, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("agent-client-id", "agent-client-secret"))
 	require.NoError(t, err)
 	assert.Equal(t, "pagerduty-access-token", rawData["api_key"])
-	assert.Equal(t, 3600*time.Second, ttl)
+	assert.Equal(t, 3600*time.Second-exchangedTokenBuffer, ttl)
 
 	// The pair travels together, and the rest of the source config still applies.
 	assert.Equal(t, "client_credentials", gotForm.Get("grant_type"))

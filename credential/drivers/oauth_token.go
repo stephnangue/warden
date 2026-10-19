@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"time"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper/httputil"
 )
 
@@ -80,6 +82,89 @@ func federatedLeaseTTL(lifetime, buffer, maxTTL time.Duration) time.Duration {
 		ttl = maxTTL
 	}
 	return ttl
+}
+
+// LeaseOpts says how a token's reported expires_in becomes the lease the
+// credential cache serves it under.
+type LeaseOpts struct {
+	// Fallback is the lifetime assumed when expires_in is missing or not
+	// positive: the shortest the upstream issues, so a guess only re-mints early.
+	Fallback time.Duration
+	// Max caps the lifetime before any arithmetic, so no expires_in overflows.
+	Max time.Duration
+	// Buffer is taken off the lifetime so the next request re-mints while the
+	// token is still good; the lease never drops below half the lifetime.
+	Buffer time.Duration
+	// MaxTTL is the spec's max_ttl, zero for none.
+	MaxTTL time.Duration
+}
+
+// LeaseFromExpiresIn is the only way a driver turns a token response's expires_in
+// into a lease. Built by hand, it has wrapped past the cap, served a token past
+// its expiry for want of a buffer, and cached a token with no expires_in for the
+// whole session. A test in this package fails on any other conversion.
+func LeaseFromExpiresIn(expiresIn int, o LeaseOpts) time.Duration {
+	return federatedLeaseTTL(federatedTokenLifetime(expiresIn, o.Fallback, o.Max), o.Buffer, o.MaxTTL)
+}
+
+// The lease an OAuth2 or token-exchange access token is served under. A token
+// response may omit expires_in (RFC 6749 §5.1 only recommends it); the source's
+// default_token_ttl then stands in for it, and is short by default because a
+// guess may only re-mint early.
+const (
+	defaultTokenTTLKey   = "default_token_ttl"
+	exchangedTokenTTL    = 5 * time.Minute
+	exchangedTokenMax    = 24 * time.Hour
+	exchangedTokenBuffer = time.Minute
+)
+
+// defaultTokenTTLField declares default_token_ttl on a source schema. It must be
+// positive: zero would treat a token with no expires_in as never expiring.
+func defaultTokenTTLField() *credential.FieldValidator {
+	return credential.DurationField(defaultTokenTTLKey).
+		Custom(func(v string) error {
+			if d, err := time.ParseDuration(v); err == nil && d <= 0 {
+				return fmt.Errorf("%s must be a positive duration", defaultTokenTTLKey)
+			}
+			return nil
+		}).
+		Describe("Lifetime assumed for an access token whose response carries no expires_in (default 5m)").
+		Example("5m")
+}
+
+// exchangedTokenLease is the lease for an access token an OAuth2 or token-exchange
+// source minted, from its response's expires_in.
+func exchangedTokenLease(expiresIn int, source credential.Config, spec *credential.CredSpec) time.Duration {
+	var maxTTL time.Duration
+	if spec != nil {
+		maxTTL = spec.MaxTTL
+	}
+	return LeaseFromExpiresIn(expiresIn, LeaseOpts{
+		Fallback: credential.GetDuration(source, defaultTokenTTLKey, exchangedTokenTTL),
+		Max:      exchangedTokenMax,
+		Buffer:   exchangedTokenBuffer,
+		MaxTTL:   maxTTL,
+	})
+}
+
+// MaxTokenLifetime caps a token lifetime reported through expires_in where the
+// caller has no tighter bound: no access token this module handles lives longer.
+const MaxTokenLifetime = 24 * time.Hour
+
+// clampExpiresIn narrows an int64 expires_in to the int the lifetime helpers take,
+// saturating rather than wrapping; the helpers' own cap then applies.
+func clampExpiresIn(expiresIn int64) int {
+	if expiresIn > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(expiresIn)
+}
+
+// ExpiryFromExpiresIn is when a token reported to live expiresIn seconds expires,
+// for a cache that stores an expiry rather than a lease. Missing or non-positive
+// takes fallback; anything past max is capped before the arithmetic.
+func ExpiryFromExpiresIn(expiresIn int, fallback, max time.Duration) time.Time {
+	return time.Now().Add(federatedTokenLifetime(expiresIn, fallback, max))
 }
 
 // postOAuthToken POSTs a token request to tokenURL and decodes the response. A

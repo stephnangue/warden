@@ -137,18 +137,20 @@ type ExpirationRegistrar interface {
 type chainedSecret struct {
 	Data map[string]string
 	Type string
-	// ExpiresAt is when the referenced credential stops being valid, zero when it
-	// reported no lifetime. It travels with a cached entry so a hit knows how much
-	// lifetime is left, not how much there was when it was fetched.
+	// IssuedAt and ExpiresAt bound when the referenced credential is valid; both are
+	// zero when it reported no lifetime. They travel with a cached entry so a hit
+	// knows how much lifetime is left, not how much there was when it was fetched.
+	IssuedAt  time.Time
 	ExpiresAt time.Time
 }
 
-// live reports whether the secret is still valid. The cache entry's own TTL runs from
-// when it was stored, a moment after ExpiresAt was computed, so an entry can briefly
-// outlive the secret; a hit on it is treated as a miss and fetched fresh rather than
-// handed to a consumer that would be refused for minting from an expired secret.
+// live reports whether the secret is still valid, with the same margin before its
+// end as a credential (ExpiresWithin). The cache entry's own TTL runs from when it
+// was stored, a moment after ExpiresAt was computed, so an entry can briefly outlive
+// the secret; a hit on it is treated as a miss and fetched fresh rather than handed
+// to a consumer that would be refused for minting from an expired secret.
 func (cs chainedSecret) live() bool {
-	return cs.ExpiresAt.IsZero() || time.Now().Before(cs.ExpiresAt)
+	return cs.ExpiresAt.IsZero() || !ExpiresWithin(cs.IssuedAt, cs.ExpiresAt.Sub(cs.IssuedAt))
 }
 
 // newChainedSecret captures a fetched referenced credential for the consumer.
@@ -159,6 +161,7 @@ func newChainedSecret(credB *Credential) chainedSecret {
 		if issued.IsZero() {
 			issued = time.Now()
 		}
+		cs.IssuedAt = issued
 		cs.ExpiresAt = issued.Add(credB.LeaseTTL)
 	}
 	return cs
@@ -348,24 +351,15 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 			sessionTTL = caller.User.TokenTTL
 		}
 
-		// Cache the credential. Bound a dynamic credential's entry by its remaining
-		// lifetime (capped by the session TTL) so an expired token is actively
-		// evicted rather than lingering; the IsExpired guard on the read path is the
-		// correctness backstop, this keeps memory from accumulating stale entries.
-		if cred.LeaseTTL > 0 {
-			ttl := cred.LeaseTTL
-			if sessionTTL > 0 && sessionTTL < ttl {
-				ttl = sessionTTL
-			}
+		// Cache the credential for the shortest of its lease, the session and the
+		// spec's max_ttl (MaxServe), so an entry is evicted at whichever ends first;
+		// the IsExpired guard on the read path is the correctness backstop for the
+		// lease. A static credential has no lease, but is still bound to the session,
+		// so it self-evicts at session end, and to max_ttl, so a rotated upstream
+		// secret is re-read at most that much later. An untimed set is left only when
+		// none applies (internal/non-request callers with no max_ttl).
+		if ttl := smallestPositive(cred.LeaseTTL, sessionTTL, cred.MaxServe); ttl > 0 {
 			m.cache.SetWithTTL(cacheKey, cred, 1, ttl)
-		} else if sessionTTL > 0 {
-			// A static credential (no lease) is still bound to this session: cap its
-			// entry by the session TTL so it self-evicts at session end rather than
-			// lingering until cache pressure. This also bounds a chained static
-			// credential's staleness — a rotated upstream secret is re-fetched at most
-			// one session later. Falls back to an untimed set only when no session TTL
-			// is known (internal/non-request callers).
-			m.cache.SetWithTTL(cacheKey, cred, 1, sessionTTL)
 		} else {
 			m.cache.Set(cacheKey, cred, 1)
 		}

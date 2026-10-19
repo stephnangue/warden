@@ -157,3 +157,50 @@ func TestFederatedLeaseTTL(t *testing.T) {
 		})
 	}
 }
+
+func TestLeaseFromExpiresIn(t *testing.T) {
+	opts := LeaseOpts{Fallback: 5 * time.Minute, Max: 24 * time.Hour, Buffer: time.Minute}
+	for _, tt := range []struct {
+		name      string
+		expiresIn int
+		maxTTL    time.Duration
+		want      time.Duration
+	}{
+		{name: "absent takes the fallback, less the buffer", expiresIn: 0, want: 4 * time.Minute},
+		{name: "in range, less the buffer", expiresIn: 3600, want: 59 * time.Minute},
+		{name: "short token keeps half its life", expiresIn: 60, want: 30 * time.Second},
+		{name: "overflowing value is capped, not wrapped", expiresIn: math.MaxInt, want: 24*time.Hour - time.Minute},
+		{name: "max_ttl caps the lease", expiresIn: 3600, maxTTL: 10 * time.Minute, want: 10 * time.Minute},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			o := opts
+			o.MaxTTL = tt.maxTTL
+			assert.Equal(t, tt.want, LeaseFromExpiresIn(tt.expiresIn, o))
+		})
+	}
+}
+
+func TestExpiryFromExpiresIn(t *testing.T) {
+	before := time.Now()
+	got := ExpiryFromExpiresIn(math.MaxInt, 0, time.Hour)
+	assert.WithinDuration(t, before.Add(time.Hour), got, 5*time.Second, "an outsized expires_in is capped, not wrapped")
+	assert.WithinDuration(t, before.Add(10*time.Minute), ExpiryFromExpiresIn(0, 10*time.Minute, time.Hour), 5*time.Second)
+	assert.Equal(t, math.MaxInt32, clampExpiresIn(math.MaxInt64))
+}
+
+// A source's default_token_ttl stands in for a missing expires_in, and must be
+// positive: zero would treat such a token as never expiring.
+func TestExchangedTokenLease_DefaultTokenTTL(t *testing.T) {
+	source := credential.NewConfig(map[string]string{defaultTokenTTLKey: "10m"})
+	assert.Equal(t, 9*time.Minute, exchangedTokenLease(0, source, nil))
+	assert.Equal(t, exchangedTokenTTL-exchangedTokenBuffer, exchangedTokenLease(0, credential.NewConfig(nil), nil))
+
+	spec := &credential.CredSpec{MaxTTL: 2 * time.Minute}
+	assert.Equal(t, 2*time.Minute, exchangedTokenLease(3600, credential.NewConfig(nil), spec))
+
+	for _, bad := range []string{"0s", "-1m"} {
+		err := credential.ValidateSchema(credential.NewConfig(map[string]string{defaultTokenTTLKey: bad}), defaultTokenTTLField())
+		assert.Error(t, err, "default_token_ttl=%s", bad)
+	}
+	assert.NoError(t, credential.ValidateSchema(credential.NewConfig(map[string]string{defaultTokenTTLKey: "90s"}), defaultTokenTTLField()))
+}

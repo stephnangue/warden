@@ -30,6 +30,13 @@ const defaultOVHAccessKeysChainTTL = 30 * time.Minute
 // costs only another mint.
 const ovhFallbackTokenTTL = 5 * time.Minute
 
+// ovhMaxTokenLifetime caps a reported expires_in before any arithmetic, so an
+// outsized one cannot overflow.
+const ovhMaxTokenLifetime = 24 * time.Hour
+
+// ovhTokenBuffer is how long before the token's own expiry its lease ends.
+const ovhTokenBuffer = time.Minute
+
 // ovhEndpoints maps a regional endpoint name to the OAuth2 token URL it stands
 // for. The regional API base URL used to live here too; nothing asks the OVH API
 // for anything any more, so the region now selects only where the grant is made.
@@ -462,8 +469,14 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context, chained *ovhChainedAut
 		return "", 0, fmt.Errorf("OVH OAuth2 response returned empty access_token")
 	}
 
-	tokenTTL := time.Duration(tokenResp.ExpiresIn) * time.Second
-	if tokenTTL <= 0 {
+	// The lease ends a buffer short of the token, so it is not served to lapse in
+	// flight. max_ttl is applied where every credential is parsed.
+	tokenTTL := LeaseFromExpiresIn(tokenResp.ExpiresIn, LeaseOpts{
+		Fallback: ovhFallbackTokenTTL,
+		Max:      ovhMaxTokenLifetime,
+		Buffer:   ovhTokenBuffer,
+	})
+	if tokenResp.ExpiresIn <= 0 {
 		// Nothing here knows how long the token is actually good for, and the
 		// credential is served from cache for the whole lease. Fall back to a span
 		// short enough that a wrong guess is corrected by a re-mint rather than by
@@ -471,7 +484,6 @@ func (d *OVHDriver) fetchOAuth2Token(ctx context.Context, chained *ovhChainedAut
 		d.logger.Warn("OAuth2 token response carried no usable expires_in; bounding the lease at the fallback lifetime",
 			logger.String("fallback", ovhFallbackTokenTTL.String()),
 		)
-		tokenTTL = ovhFallbackTokenTTL
 	}
 
 	return tokenResp.AccessToken, tokenTTL, nil

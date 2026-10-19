@@ -304,7 +304,9 @@ func (b *awsBackend) getCredentials(req *logical.Request) (awssdk.Credentials, e
 
 	switch req.Credential.Type {
 	case credential.TypeAWSAccessKeys:
-		if req.Credential.LeaseTTL == 0 {
+		// Long-term keys carry no session token; STS credentials always do. The
+		// lease cannot tell them apart: max_ttl gives a static key one too.
+		if req.Credential.Data["session_token"] == "" {
 			return awssdk.Credentials{
 				AccessKeyID:     req.Credential.Data["access_key_id"],
 				SecretAccessKey: req.Credential.Data["secret_access_key"],

@@ -592,6 +592,26 @@ func TestGetCredentials(t *testing.T) {
 		assert.True(t, creds.CanExpire)
 	})
 
+	// max_ttl gives a static key a lease too; it is still a long-term key.
+	t.Run("static credentials with a max_ttl lease", func(t *testing.T) {
+		req := &logical.Request{
+			Credential: &credential.Credential{
+				Type:     credential.TypeAWSAccessKeys,
+				LeaseTTL: 10 * time.Minute,
+				Data: map[string]string{
+					"access_key_id":     "AKIATEST",
+					"secret_access_key": "secret",
+					"cred_source":       "warden",
+				},
+			},
+		}
+		creds, err := b.getCredentials(req)
+		assert.NoError(t, err)
+		assert.Equal(t, "AKIATEST", creds.AccessKeyID)
+		assert.Empty(t, creds.SessionToken)
+		assert.False(t, creds.CanExpire, "a long-term key does not expire with the serving lease")
+	})
+
 	t.Run("unsupported type", func(t *testing.T) {
 		req := &logical.Request{
 			Credential: &credential.Credential{

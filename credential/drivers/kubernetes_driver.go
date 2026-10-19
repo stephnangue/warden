@@ -39,6 +39,10 @@ const (
 // names none.
 const defaultK8sTLSPort = "443"
 
+// k8sMinTokenLifetime is the shortest lifetime the TokenRequest API accepts
+// (expirationSeconds below 600 is refused as invalid).
+const k8sMinTokenLifetime = 10 * time.Minute
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*KubernetesDriver)(nil)
 var _ credential.SpecVerifier = (*KubernetesDriver)(nil)
@@ -139,7 +143,7 @@ func (f *KubernetesDriverFactory) ValidateConfig(config credential.Config) error
 				if err != nil {
 					return fmt.Errorf("invalid source_token_ttl: %w", err)
 				}
-				if d < 10*time.Minute {
+				if d < k8sMinTokenLifetime {
 					return fmt.Errorf("source_token_ttl must be at least 10m, got: %s", d)
 				}
 				if d > 48*time.Hour {
@@ -295,6 +299,13 @@ func (d *KubernetesDriver) mintServiceAccountToken(ctx context.Context, k8sURL, 
 	namespace := credential.GetString(spec.Config, "namespace", "")
 	audiencesStr := credential.GetString(spec.Config, "audiences", "")
 	ttl := credential.GetDuration(spec.Config, "ttl", 1*time.Hour)
+	// The API server takes the requested lifetime, so max_ttl shortens the token
+	// itself, not only how long it is served — down to the shortest lifetime the API
+	// server accepts. Below that, the token outlives max_ttl and the lease cap bounds
+	// how long Warden serves it.
+	if spec.MaxTTL > 0 && ttl > spec.MaxTTL {
+		ttl = max(spec.MaxTTL, k8sMinTokenLifetime)
+	}
 
 	if sa == "" {
 		return nil, nil, 0, "", fmt.Errorf("service_account is required in spec config")

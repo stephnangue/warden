@@ -88,7 +88,7 @@ func exchangeIBMAPIKeyForIAMTokenWithStatus(ctx context.Context, httpClient *htt
 	case tokenResp.Expiration > 0:
 		expiry = time.Unix(tokenResp.Expiration, 0)
 	case tokenResp.ExpiresIn > 0:
-		expiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+		expiry = ExpiryFromExpiresIn(clampExpiresIn(tokenResp.ExpiresIn), 0, MaxTokenLifetime)
 	default:
 		// Nothing here knows how long the token is actually good for, and the
 		// credential is served from cache for the whole lease. Fall back to a span

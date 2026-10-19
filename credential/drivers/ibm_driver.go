@@ -340,6 +340,9 @@ func (d *IBMDriver) mintIAMToken(ctx context.Context, spec *credential.CredSpec)
 	}
 
 	ttl := time.Until(expiry)
+	if ttl <= 0 {
+		return nil, nil, 0, "", fmt.Errorf("IBM IAM token already expired or has an invalid expiration time")
+	}
 	rawData := map[string]interface{}{
 		"access_token": token,
 	}
@@ -422,6 +425,9 @@ func (d *IBMDriver) mintIAMTokenFromSecret(ctx context.Context, spec *credential
 	}
 
 	ttl := time.Until(expiry)
+	if ttl <= 0 {
+		return nil, nil, 0, "", fmt.Errorf("IBM IAM token already expired or has an invalid expiration time")
+	}
 	if d.logger != nil {
 		d.logger.Debug("minted IBM IAM bearer token from fetched secret material",
 			logger.String("spec", spec.Name),
