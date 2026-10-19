@@ -1577,3 +1577,41 @@ func TestNewVaultAPIClient_LegacySourceKeepsTheEnvironmentToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hvs.server-token", rec.lastHeader().Get("X-Vault-Token"))
 }
+
+// Revoking the accessor of a token already expired or revoked answers 400 "token
+// not found"; that is the lease being gone. Any other refusal is a real failure.
+func TestIsTokenGone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		errs   []string
+		want   bool
+	}{
+		{"token not found", http.StatusBadRequest, []string{"token not found"}, true},
+		{"another bad request", http.StatusBadRequest, []string{"missing accessor"}, false},
+		{"permission denied", http.StatusForbidden, []string{"permission denied"}, false},
+		{"server error", http.StatusInternalServerError, []string{"token not found"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v1/auth/token/revoke-accessor", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"errors": tc.errs})
+			}))
+			t.Cleanup(srv.Close)
+
+			cfg := api.DefaultConfig()
+			cfg.Address = srv.URL
+			cfg.MaxRetries = 0
+			client, err := api.NewClient(cfg)
+			require.NoError(t, err)
+			client.SetToken("hvs.test")
+
+			err = client.Auth().Token().RevokeAccessorWithContext(context.Background(), "acc-123")
+			require.Error(t, err)
+			assert.Equal(t, tc.want, isTokenGone(err))
+		})
+	}
+	assert.False(t, isTokenGone(nil))
+}

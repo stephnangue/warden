@@ -462,8 +462,12 @@ func (d *ElasticDriver) Revoke(ctx context.Context, leaseID string) error {
 		return nil
 	}
 
-	if err := d.invalidateKeys(ctx, auth, []string{keyID}); err != nil {
+	invalidated, err := d.invalidateKeys(ctx, auth, []string{keyID})
+	if err != nil {
 		return fmt.Errorf("failed to invalidate Elasticsearch API key %s: %w", truncateID(keyID, 8), err)
+	}
+	if invalidated == 0 {
+		return fmt.Errorf("Elasticsearch API key %s: %w", truncateID(keyID, 8), credential.ErrLeaseGone)
 	}
 
 	if d.logger != nil {
@@ -659,7 +663,7 @@ func (d *ElasticDriver) CleanupRotation(ctx context.Context, cleanupConfig map[s
 	auth := d.authSnapshotLocked()
 	d.configMu.RUnlock()
 
-	if err := d.invalidateKeys(ctx, auth, []string{oldAPIKeyID}); err != nil {
+	if _, err := d.invalidateKeys(ctx, auth, []string{oldAPIKeyID}); err != nil {
 		return fmt.Errorf("failed to invalidate old API key: %w", err)
 	}
 
@@ -877,7 +881,7 @@ func (d *ElasticDriver) sweepRotationOrphans(ctx context.Context, auth elasticAu
 		return
 	}
 
-	if err := d.invalidateKeys(ctx, auth, orphans); err != nil {
+	if _, err := d.invalidateKeys(ctx, auth, orphans); err != nil {
 		d.warn("could not reclaim abandoned rotation keys; they remain live at the cluster",
 			logger.Int("count", len(orphans)), logger.Err(err))
 		return
@@ -915,24 +919,27 @@ type elasticInvalidateResponse struct {
 // tolerance matters more than it looks — cleanup failures are retried daily for
 // a week before being abandoned, so treating a key nobody can find as a failure
 // buys a week of retries for a request that can never succeed.
-func (d *ElasticDriver) invalidateKeys(ctx context.Context, auth elasticAuth, ids []string) error {
+//
+// invalidated counts the keys this call itself invalidated; the rest were gone
+// already.
+func (d *ElasticDriver) invalidateKeys(ctx context.Context, auth elasticAuth, ids []string) (invalidated int, err error) {
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	reqBody, err := json.Marshal(map[string]interface{}{"ids": ids})
 	if err != nil {
-		return fmt.Errorf("failed to marshal invalidate request: %w", err)
+		return 0, fmt.Errorf("failed to marshal invalidate request: %w", err)
 	}
 
 	respBody, _, err := d.doElasticRequestWith(ctx, auth, http.MethodDelete, "/_security/api_key", reqBody, defaultElasticRetryConfig())
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	var resp elasticInvalidateResponse
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return fmt.Errorf("failed to decode invalidate response: %w", err)
+		return 0, fmt.Errorf("failed to decode invalidate response: %w", err)
 	}
 
 	var refusals []string
@@ -943,7 +950,7 @@ func (d *ElasticDriver) invalidateKeys(ctx context.Context, auth elasticAuth, id
 		refusals = append(refusals, fmt.Sprintf("%s: %s", detail.Type, detail.Reason))
 	}
 	if len(refusals) > 0 {
-		return fmt.Errorf("the cluster refused %d of %d invalidations: %s",
+		return 0, fmt.Errorf("the cluster refused %d of %d invalidations: %s",
 			len(refusals), len(ids), strings.Join(refusals, "; "))
 	}
 
@@ -964,7 +971,7 @@ func (d *ElasticDriver) invalidateKeys(ctx context.Context, auth elasticAuth, id
 		}
 	}
 
-	return nil
+	return len(resp.Invalidated), nil
 }
 
 // doElasticRequestWith executes an HTTP request against the cluster with an

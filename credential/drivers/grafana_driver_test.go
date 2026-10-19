@@ -597,9 +597,9 @@ func TestGrafanaDriver_Revoke_EmptyLeaseID(t *testing.T) {
 	assert.NoError(t, driver.Revoke(context.Background(), ""))
 }
 
-// A token deleted out of band must not fail revocation: an error here sends the
-// expiration manager into backoff and then a daily retry, forever, for a request
-// that can never succeed.
+// A token deleted out of band is reported as ErrLeaseGone, which the manager
+// counts as revoked: a plain error would send the expiration manager into backoff
+// and then a daily retry, forever, for a request that can never succeed.
 func TestGrafanaDriver_Revoke_AlreadyGone(t *testing.T) {
 	var called atomic.Int32
 
@@ -611,8 +611,8 @@ func TestGrafanaDriver_Revoke_AlreadyGone(t *testing.T) {
 	defer server.Close()
 
 	driver := grafanaTestDriver(server, nil)
-	require.NoError(t, driver.Revoke(context.Background(), "42:7"))
-	assert.Equal(t, int32(1), called.Load(), "404 is success, and must not be retried")
+	require.ErrorIs(t, driver.Revoke(context.Background(), "42:7"), credential.ErrLeaseGone)
+	assert.Equal(t, int32(1), called.Load(), "404 means gone, and must not be retried")
 }
 
 func TestGrafanaDriver_Revoke_APIError(t *testing.T) {

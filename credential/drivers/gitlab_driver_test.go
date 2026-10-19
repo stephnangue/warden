@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -379,6 +380,45 @@ func TestGitLabDriver_Revoke_ProjectAccessToken(t *testing.T) {
 
 	err := driver.Revoke(context.Background(), "project_access_token:42:99")
 	assert.NoError(t, err)
+}
+
+// GitLab answers 404 naming the access token when the token no longer exists:
+// that is ErrLeaseGone, which the manager counts as revoked. A 404 for the
+// project the source cannot see says nothing about the token, and stays an error.
+func TestGitLabDriver_Revoke_AlreadyGone(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantGone bool
+	}{
+		{"token not found", `{"message":"404 project Access Token Not Found"}`, true},
+		{"token not found, older releases", `{"message":"404 Could not find project access token with token_id: 99 Not Found"}`, true},
+		{"project not visible", `{"message":"404 Project Not Found"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			driver := &GitLabDriver{
+				credSource: &credential.CredSource{
+					Type: credential.SourceTypeGitLab,
+					Config: credential.NewConfig(map[string]string{
+						"gitlab_address":        server.URL,
+						"auth_method":           "pat",
+						"personal_access_token": "test-pat",
+					}),
+				},
+				httpClient: server.Client(),
+			}
+
+			err := driver.Revoke(context.Background(), "project_access_token:42:99")
+			require.Error(t, err)
+			assert.Equal(t, tc.wantGone, errors.Is(err, credential.ErrLeaseGone))
+		})
+	}
 }
 
 func TestGitLabDriver_Revoke_GroupAccessToken(t *testing.T) {

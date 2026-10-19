@@ -39,6 +39,12 @@ var (
 	// ErrRevocationFailed is returned when credential revocation fails
 	ErrRevocationFailed = errors.New("credential revocation failed")
 
+	// ErrLeaseGone is returned (wrapped) by a driver's Revoke when the upstream
+	// reports the lease no longer exists: revoked already, or expired. The manager
+	// counts it as revoked, so a dead lease is not retried. A driver wraps it via
+	// fmt.Errorf("...: %w", credential.ErrLeaseGone).
+	ErrLeaseGone = errors.New("lease no longer exists at the source")
+
 	// ErrDriverCreationFailed is returned when driver creation failed
 	ErrDriverCreationFailed = errors.New("driver creation failed")
 

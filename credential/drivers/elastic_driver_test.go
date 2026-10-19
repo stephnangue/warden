@@ -1045,8 +1045,35 @@ func TestElasticDriver_Revoke_AcceptsAlreadyInvalidatedKey(t *testing.T) {
 
 	d := newTestElasticDriver(t, srv.URL)
 
-	require.NoError(t, d.Revoke(context.TODO(), "elastic:some-key-id"),
-		"a key that is already invalidated leaves nothing live, so this is success")
+	require.ErrorIs(t, d.Revoke(context.TODO(), "elastic:some-key-id"), credential.ErrLeaseGone,
+		"a key that is already invalidated leaves nothing live; the manager counts it as revoked")
+}
+
+func TestElasticDriver_Revoke_MissingKeyIsGone(t *testing.T) {
+	srv := newElasticInvalidateServer(t, map[string]interface{}{
+		"invalidated_api_keys":            []string{},
+		"previously_invalidated_api_keys": []string{},
+		"error_count":                     1,
+		"error_details": []map[string]interface{}{
+			{"type": "resource_not_found_exception", "reason": "no API key owned by requesting user found for id [some-key-id]"},
+		},
+	})
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	require.ErrorIs(t, d.Revoke(context.TODO(), "elastic:some-key-id"), credential.ErrLeaseGone)
+}
+
+func TestElasticDriver_Revoke_InvalidatedKeyIsRevoked(t *testing.T) {
+	srv := newElasticInvalidateServer(t, map[string]interface{}{
+		"invalidated_api_keys":            []string{"some-key-id"},
+		"previously_invalidated_api_keys": []string{},
+		"error_count":                     0,
+	})
+
+	d := newTestElasticDriver(t, srv.URL)
+
+	require.NoError(t, d.Revoke(context.TODO(), "elastic:some-key-id"))
 }
 
 // A key that is gone entirely must not fail either. Cleanup failures are

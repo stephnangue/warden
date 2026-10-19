@@ -1187,7 +1187,7 @@ func TestScalewayDriverFactory_ValidateConfig_ActivationDelay(t *testing.T) {
 	assert.Contains(t, err.Error(), "activation_delay")
 }
 
-func TestScalewayDriver_Revoke_NotFoundBodyIsSuccessBareIsNot(t *testing.T) {
+func TestScalewayDriver_Revoke_NotFoundBodyIsGoneBareIsNot(t *testing.T) {
 	t.Run("not_found body means already gone", func(t *testing.T) {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -1204,7 +1204,7 @@ func TestScalewayDriver_Revoke_NotFoundBodyIsSuccessBareIsNot(t *testing.T) {
 		}), createScalewayTestLogger())
 		require.NoError(t, err)
 
-		require.NoError(t, driver.Revoke(context.Background(), "SCWGONEKEYXXXXXXXXX"))
+		require.ErrorIs(t, driver.Revoke(context.Background(), "SCWGONEKEYXXXXXXXXX"), credential.ErrLeaseGone)
 	})
 
 	t.Run("bare 404 does not claim revocation", func(t *testing.T) {
