@@ -484,12 +484,16 @@ func (d *GrafanaDriver) Revoke(ctx context.Context, leaseID string) error {
 		return nil
 	}
 
-	// 200 = deleted, 404 = already gone — both are success. Returning an error for a
-	// token that is no longer there would send the expiration manager into backoff
-	// and then a daily retry, forever, for a request that can never succeed.
+	// 200 = deleted, 404 = already gone. Gone is reported as ErrLeaseGone, which
+	// the manager counts as revoked rather than retrying a request that can never
+	// succeed.
 	path := fmt.Sprintf("/api/serviceaccounts/%s/tokens/%s", url.PathEscape(saID), url.PathEscape(tokenID))
-	if _, _, err := d.doGrafanaRequest(ctx, d.getAdminToken(), http.MethodDelete, path, nil, 200, 204, 404); err != nil {
+	_, status, err := d.doGrafanaRequest(ctx, d.getAdminToken(), http.MethodDelete, path, nil, 200, 204, 404)
+	if err != nil {
 		return fmt.Errorf("failed to delete token %s: %w", leaseID, err)
+	}
+	if status == http.StatusNotFound {
+		return fmt.Errorf("token %s: %w", leaseID, credential.ErrLeaseGone)
 	}
 
 	if d.logger != nil {

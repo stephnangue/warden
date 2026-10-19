@@ -351,14 +351,25 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 			sessionTTL = caller.User.TokenTTL
 		}
 
-		// Cache the credential for the shortest of its lease, the session and the
-		// spec's max_ttl (MaxServe), so an entry is evicted at whichever ends first;
-		// the IsExpired guard on the read path is the correctness backstop for the
-		// lease. A static credential has no lease, but is still bound to the session,
-		// so it self-evicts at session end, and to max_ttl, so a rotated upstream
-		// secret is re-read at most that much later. An untimed set is left only when
-		// none applies (internal/non-request callers with no max_ttl).
-		if ttl := smallestPositive(cred.LeaseTTL, sessionTTL, cred.MaxServe); ttl > 0 {
+		// The credential is served for the shortest of its lease, the session and the
+		// spec's max_ttl (MaxServe), and ends at whichever comes first; the IsExpired
+		// guard on the read path is the correctness backstop for the lease. A static
+		// credential has no lease, but is still bound to the session, so it
+		// self-evicts at session end, and to max_ttl, so a rotated upstream secret is
+		// re-read at most that much later. Zero is left only when none applies
+		// (internal/non-request callers with no max_ttl).
+		ttl := smallestPositive(cred.LeaseTTL, sessionTTL, cred.MaxServe)
+
+		// A revocable credential is registered before it is cached, for the same span:
+		// its lease is revoked when the entry stops being served, not when the session
+		// ends, and one the expiration manager does not hold is never served. This
+		// runs inside the coalesced mint, so only a NEW credential is registered.
+		if err := m.registerExpiration(ctx, cred, cacheKey, ttl); err != nil {
+			m.revokeOrphan(ctx, cred)
+			return nil, err
+		}
+
+		if ttl > 0 {
 			m.cache.SetWithTTL(cacheKey, cred, 1, ttl)
 		} else {
 			m.cache.Set(cacheKey, cred, 1)
@@ -366,28 +377,6 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 
 		// Wait for value to be processed (Ristretto is async)
 		m.cache.Wait()
-
-		// Register with expiration manager for timer-based TTL enforcement
-		// This is done INSIDE the coalesced mint, so it only happens when a NEW credential is issued
-		if m.expirationRegistrar != nil && cred.Revocable {
-			if regErr := m.expirationRegistrar.RegisterCredential(
-				ctx,               // Context with namespace
-				cred.CredentialID, // Unique ID for this credential instance (UUID)
-				cacheKey,          // Cache key for cache lookup/deletion
-				sessionTTL,
-				cred.LeaseID,
-				cred.SourceName,
-				cred.SourceType,
-				cred.SpecName,
-				cred.Revocable,
-			); regErr != nil {
-				m.log.Warn("failed to register credential with expiration manager",
-					logger.String("credential_id", cred.CredentialID),
-					logger.String("cache_key", cacheKey),
-					logger.Err(regErr))
-				// Don't fail - credential is still valid, just relies on cache eviction
-			}
-		}
 
 		return cred, nil
 	})
@@ -703,18 +692,7 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 	// bounds any cache entry to it. The create-time guard forbids a lease; fail closed
 	// (best-effort revoke) if config drift produced one anyway.
 	if credB.LeaseID != "" {
-		// Best-effort revoke on a fresh context (the request ctx may be near its
-		// issuance deadline); log rather than drop the outcome.
-		revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if drv, derr := m.driverCoordinator.GetOrCreateDriver(ctx, credB.SourceName); derr == nil {
-			if rerr := drv.Revoke(revokeCtx, credB.LeaseID); rerr != nil {
-				m.log.Warn("failed to revoke orphaned lease from a leased secret_spec",
-					logger.String("secret_spec", secretRef),
-					logger.String("lease_id", credB.LeaseID),
-					logger.Err(rerr))
-			}
-		}
-		cancel()
+		m.revokeOrphan(ctx, credB)
 		return nil, fmt.Errorf("secret_spec %q must reference a leaseless credential, but it returned a lease", secretRef)
 	}
 
@@ -1393,6 +1371,57 @@ func (m *Manager) RevokeByExpiration(ctx context.Context, credentialID, cacheKey
 	return nil
 }
 
+// registerExpiration hands a revocable credential to the expiration manager, which
+// revokes its lease after ttl. A failure is returned: a lease nothing tracks would
+// outlive every bound Warden sets on it.
+//
+// A ttl of zero has no end to schedule. The expiration manager would hold such an
+// entry in memory only, losing it on restart, so it is not registered at all; only
+// internal callers with no session and no max_ttl reach this.
+func (m *Manager) registerExpiration(ctx context.Context, cred *Credential, cacheKey string, ttl time.Duration) error {
+	if m.expirationRegistrar == nil || !cred.Revocable {
+		return nil
+	}
+	if ttl <= 0 {
+		m.log.Debug("revocable credential has no lifetime to schedule; not registered for expiration",
+			logger.String("credential_id", cred.CredentialID),
+			logger.String("spec", cred.SpecName))
+		return nil
+	}
+	if err := m.expirationRegistrar.RegisterCredential(
+		ctx,               // Context with namespace
+		cred.CredentialID, // Unique ID for this credential instance (UUID)
+		cacheKey,          // Cache key for cache lookup/deletion
+		ttl,
+		cred.LeaseID,
+		cred.SourceName,
+		cred.SourceType,
+		cred.SpecName,
+		cred.Revocable,
+	); err != nil {
+		return fmt.Errorf("failed to register credential for expiration: %w", err)
+	}
+	return nil
+}
+
+// revokeOrphan revokes the lease of a credential that will be neither served nor
+// tracked. Best effort: nothing else knows the lease exists, so a failure is
+// logged and the lease lives until its own expiry.
+func (m *Manager) revokeOrphan(ctx context.Context, cred *Credential) {
+	// The lookup may rebuild the driver; neither it nor the revoke may die with the
+	// request that minted the lease.
+	ctx = context.WithoutCancel(ctx)
+	driver, err := m.driverCoordinator.GetOrCreateDriver(ctx, cred.SourceName)
+	if err != nil {
+		m.log.Warn("failed to get driver to revoke an orphaned lease; it lives until it expires",
+			logger.String("lease_id", cred.LeaseID),
+			logger.String("source", cred.SourceName),
+			logger.Err(err))
+		return
+	}
+	m.mintingService.revokeOrphanedLease(ctx, driver, cred.LeaseID, cred.SourceName)
+}
+
 // revokeLeaseAtSource attempts to revoke a lease at the source if applicable.
 // Returns an error only if revocation fails and should be retried.
 func (m *Manager) revokeLeaseAtSource(ctx context.Context, revocable bool, leaseID, sourceName string) error {
@@ -1410,11 +1439,17 @@ func (m *Manager) revokeLeaseAtSource(ctx context.Context, revocable bool, lease
 		return err // Return error to trigger retry
 	}
 
-	if err := driver.Revoke(ctx, leaseID); err != nil {
+	gone, err := RevokeLease(ctx, driver, leaseID)
+	if err != nil {
 		m.log.Warn("failed to revoke credential lease",
 			logger.String("lease_id", leaseID),
 			logger.Err(err))
 		return err // Return error to trigger retry
+	}
+	if gone {
+		m.log.Debug("credential lease was already gone at the source",
+			logger.String("lease_id", leaseID),
+			logger.String("source_name", sourceName))
 	}
 
 	return nil

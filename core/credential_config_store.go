@@ -1325,7 +1325,7 @@ func (s *CredentialConfigStore) revokeValidationLease(driver credential.SourceDr
 	revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := driver.Revoke(revokeCtx, leaseID); err != nil {
+	if _, err := credential.RevokeLease(revokeCtx, driver, leaseID); err != nil {
 		s.logger.Warn("failed to release the credential minted to validate a spec; it may still exist at the source",
 			logger.String("lease_id", leaseID),
 			logger.String("source", sourceName),

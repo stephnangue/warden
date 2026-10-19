@@ -651,10 +651,7 @@ func (d *ScalewayDriver) Revoke(ctx context.Context, leaseID string) error {
 	_, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, scalewayRetryConfig())
 	if err != nil {
 		if isScalewayNotFound(err) {
-			d.logger.Info("dynamic Scaleway API key was already gone",
-				logger.String("access_key", truncateID(leaseID, 8)),
-			)
-			return nil
+			return fmt.Errorf("Scaleway API key %s: %w", truncateID(leaseID, 8), credential.ErrLeaseGone)
 		}
 		// A bare 404 is not a revocation. It is almost always a misconfigured
 		// iam_api_path, and returning an error would send the expiration manager

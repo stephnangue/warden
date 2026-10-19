@@ -1224,6 +1224,9 @@ func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 	if !containsSlash(leaseID) {
 		// Try to revoke as token accessor
 		err := d.vault.Auth().Token().RevokeAccessorWithContext(ctx, leaseID)
+		if isTokenGone(err) {
+			return fmt.Errorf("token accessor %s: %w", leaseID, credential.ErrLeaseGone)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to revoke token accessor %s: %w", leaseID, err)
 		}
@@ -1249,6 +1252,22 @@ func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 	}
 
 	return nil
+}
+
+// isTokenGone reports whether revoking an accessor failed because its token no
+// longer exists: a 400 reading "token not found". An accessor nobody knows is a
+// 200, so this is the expired-or-revoked token whose accessor is still indexed.
+func isTokenGone(err error) bool {
+	var refused *api.ResponseError
+	if !errors.As(err, &refused) || refused.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	for _, msg := range refused.Errors {
+		if msg == "token not found" {
+			return true
+		}
+	}
+	return false
 }
 
 // containsSlash checks if a string contains a forward slash

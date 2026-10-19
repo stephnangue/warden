@@ -662,6 +662,134 @@ func TestManager_RevokeByExpiration_RevokeFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "revoke failed")
 }
 
+// A lease the source reports gone is revoked as far as anyone can tell: no error,
+// so the expiration manager does not retry it into the irrevocable tier.
+func TestManager_RevokeByExpiration_LeaseGoneCountsAsRevoked(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	factory.driver.revokeFunc = func(ctx context.Context, leaseID string) error {
+		return fmt.Errorf("token accessor %s: %w", leaseID, ErrLeaseGone)
+	}
+
+	err := manager.RevokeByExpiration(createNamespaceContext(), "cred-uuid-123", "ns:token", "lease-123", "test-source", true)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.revokeCalls.Load())
+}
+
+// recordingRegistrar is an ExpirationRegistrar that records the TTL of each
+// registration and fails every one when err is set.
+type recordingRegistrar struct {
+	mu   sync.Mutex
+	ttls []time.Duration
+	err  error
+}
+
+func (r *recordingRegistrar) RegisterCredential(_ context.Context, _, _ string, ttl time.Duration, _, _, _, _ string, _ bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	r.ttls = append(r.ttls, ttl)
+	return nil
+}
+
+func (r *recordingRegistrar) registered() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Duration(nil), r.ttls...)
+}
+
+// A lease the expiration manager does not hold would outlive every bound Warden
+// sets on it. A failed registration revokes the lease and fails the mint, and
+// nothing is cached.
+func TestManager_IssueCredential_FailedRegistrationRevokesAndFails(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	manager.SetExpirationRegistrar(&recordingRegistrar{err: errors.New("storage sealed")})
+
+	// The orphan revoke keeps the namespace and is not cut short by the request.
+	var revokeNamespaced, revokeLive atomic.Bool
+	factory.driver.revokeFunc = func(ctx context.Context, leaseID string) error {
+		_, err := namespace.FromContext(ctx)
+		revokeNamespaced.Store(err == nil)
+		revokeLive.Store(ctx.Err() == nil)
+		return nil
+	}
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
+
+	ctx, cancel := context.WithCancel(createNamespaceContext())
+	defer cancel()
+	factory.driver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		cancel() // the request gives up while the mint is in flight
+		return map[string]interface{}{"username": "u", "password": "p"}, nil, time.Hour, "lease-123", nil
+	}
+	_, err := issueForTest(manager, ctx, "token-unregistered", "test-spec", time.Hour, nil)
+	require.Error(t, err)
+
+	// The request stopped waiting, so its error may be its own cancellation; the
+	// flight still ran to its end, so give it a moment to finish revoking.
+	require.Eventually(t, func() bool { return factory.driver.revokeCalls.Load() == 1 }, 5*time.Second, 5*time.Millisecond,
+		"the minted lease must be revoked")
+	assert.True(t, revokeNamespaced.Load(), "the revoke must carry the namespace")
+	assert.True(t, revokeLive.Load(), "the revoke must not run on a cancelled context")
+	factory.driver.lastRevokeMu.Lock()
+	assert.Equal(t, "lease-123", factory.driver.lastRevokeID)
+	factory.driver.lastRevokeMu.Unlock()
+
+	// Nothing was cached: once registration works, the same caller mints afresh.
+	// Until the failed flight has returned, a new request joins it and shares its
+	// error, so retry until one runs on its own.
+	manager.SetExpirationRegistrar(&recordingRegistrar{})
+	require.Eventually(t, func() bool {
+		_, err := issueForTest(manager, createNamespaceContext(), "token-unregistered", "test-spec", time.Hour, nil)
+		return err == nil
+	}, 5*time.Second, 5*time.Millisecond)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "a credential nothing tracks must not be served")
+}
+
+// A revocable credential is registered for the span it is served: the shortest
+// positive of its lease, the session and max_ttl. With none of them there is no
+// end to schedule, and it is not registered.
+func TestManager_IssueCredential_RegistrationTTL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		lease   time.Duration
+		session time.Duration
+		maxTTL  time.Duration
+		want    []time.Duration
+	}{
+		{"lease shorter than the session", 30 * time.Minute, time.Hour, 0, []time.Duration{30 * time.Minute}},
+		{"session shorter than the lease", 2 * time.Hour, time.Hour, 0, []time.Duration{time.Hour}},
+		{"static credential takes the session", 0, time.Hour, 0, []time.Duration{time.Hour}},
+		{"lease with no session", 30 * time.Minute, 0, 0, []time.Duration{30 * time.Minute}},
+		{"static credential bounded by max_ttl", 0, time.Hour, 20 * time.Minute, []time.Duration{20 * time.Minute}},
+		{"nothing to schedule", 0, 0, 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, configStore, factory := createTestManager(t)
+			defer manager.Stop()
+			registrar := &recordingRegistrar{}
+			manager.SetExpirationRegistrar(registrar)
+
+			factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+				return map[string]interface{}{"username": "u", "password": "p"}, nil, tc.lease, "lease-123", nil
+			}
+			configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+			configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", MaxTTL: tc.maxTTL, Config: NewConfig(map[string]string{})})
+
+			_, err := issueForTest(manager, createNamespaceContext(), "token-ttl", "test-spec", tc.session, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, registrar.registered())
+			assert.Equal(t, int32(0), factory.driver.revokeCalls.Load())
+		})
+	}
+}
+
 func TestManager_IssueCredential_Concurrent(t *testing.T) {
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()

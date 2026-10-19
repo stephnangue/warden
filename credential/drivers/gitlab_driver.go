@@ -649,6 +649,17 @@ func (d *GitLabDriver) mintGroupAccessToken(ctx context.Context, spec *credentia
 	return rawData, nil, ttl, leaseID, nil
 }
 
+// isGitLabTokenGone reports whether a revoke failed because the access token no
+// longer exists. GitLab answers 404 for that, naming the access token in its
+// message ("404 project Access Token Not Found"; older releases "Could not find
+// project access token with token_id: …"). It also answers 404 for a project or
+// group the source cannot see ("404 Project Not Found"), which says nothing about
+// the token — a live token behind it must stay an error, not count as revoked.
+func isGitLabTokenGone(status int, err error) bool {
+	return status == http.StatusNotFound && err != nil &&
+		strings.Contains(strings.ToLower(err.Error()), "access token")
+}
+
 // Revoke revokes a previously minted access token.
 //
 // It authenticates with the source's inline token, which is the only one it can
@@ -686,7 +697,10 @@ func (d *GitLabDriver) Revoke(ctx context.Context, leaseID string) error {
 		return fmt.Errorf("unknown token type in lease ID: %s", tokenType)
 	}
 
-	_, _, err := d.doGitLabRequest(ctx, http.MethodDelete, path, nil, nil)
+	_, status, err := d.doGitLabRequest(ctx, http.MethodDelete, path, nil, nil)
+	if isGitLabTokenGone(status, err) {
+		return fmt.Errorf("%s %s: %w", tokenType, tokenID, credential.ErrLeaseGone)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to revoke %s: %w", tokenType, err)
 	}

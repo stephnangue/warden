@@ -6,6 +6,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,9 @@ const (
 	// restoreWorkerCount is the number of parallel workers for restoring entries from storage
 	restoreWorkerCount = 32
 )
+
+// ErrExpirationManagerStopped refuses a registration that arrives after Stop.
+var ErrExpirationManagerStopped = errors.New("expiration manager is stopped")
 
 // ExpirationEntry is the persisted representation of an expiration
 type ExpirationEntry struct {
@@ -257,6 +261,14 @@ func (m *ExpirationManager) RegisterCredential(ctx context.Context, credentialID
 // register is the internal registration method.
 // If persist is false, the entry is only tracked in memory (no storage durability).
 func (m *ExpirationManager) register(entry *ExpirationEntry, ttl time.Duration, persist bool) error {
+	// A stopped manager never fires a timer, so an entry accepted now would wait for
+	// the next unseal to be revoked, if one ever comes. Refusing lets the caller
+	// revoke it at once. A registration racing Stop past this check is persisted
+	// like any entry pending at Stop, and restored at the next unseal.
+	if m.quitCtx.Err() != nil {
+		return ErrExpirationManagerStopped
+	}
+
 	key := buildKey(entry.EntryType, entry.ID)
 
 	// Handle zero TTL (nonexpiring)
