@@ -1076,7 +1076,7 @@ func (d *GitLabDriver) getOAuth2Token(ctx context.Context, chained *gitlabChaine
 	// Without expires_in there is no lifetime to cache against, and an entry written
 	// with a zero expiry is one Get always refuses. Grant per call instead.
 	if tokenResp.ExpiresIn > 0 {
-		expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+		expiresAt := ExpiryFromExpiresIn(tokenResp.ExpiresIn, 0, MaxTokenLifetime)
 		d.tokenCache.Set(cacheKey, tokenResp.AccessToken, expiresAt)
 	}
 

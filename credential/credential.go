@@ -68,8 +68,8 @@ const (
 // and Data["secret_access_key"] for AWS SigV4 re-signing).
 //
 // Each instance is bound to a session token (TokenID) and cached in the Manager.
-// Dynamic credentials (LeaseTTL > 0) are tracked by the expiration manager for
-// automatic revocation when the token expires.
+// Revocable credentials are tracked by the expiration manager for automatic
+// revocation when the token expires.
 type Credential struct {
 	// Identity
 	// CredentialID is the unique identifier for this credential instance.
@@ -87,6 +87,12 @@ type Credential struct {
 	TokenID  string        // Session token this credential is bound to
 	IssuedAt time.Time     // When the credential was issued
 
+	// MaxServe is the spec's max_ttl: the longest Warden serves this credential
+	// before minting or reading it again, zero for no bound. A dynamic lease is
+	// already capped at it; MaxServe is what bounds a static credential, whose
+	// LeaseTTL stays 0 so that everything reading it still sees a static one.
+	MaxServe time.Duration
+
 	// The secret part of the credential
 	Data map[string]string // Type-specific credential data
 
@@ -102,12 +108,37 @@ type Credential struct {
 	Metadata map[string]string
 }
 
-// IsExpired checks if the credential has expired
+// IsExpired reports whether the credential should no longer be served: its lease
+// is over, or close enough to over that it could lapse mid-request (see
+// ExpiresWithin).
 func (c *Credential) IsExpired() bool {
 	if c.LeaseTTL == 0 {
 		return false // Static credentials don't expire
 	}
-	return time.Since(c.IssuedAt) >= c.LeaseTTL
+	return ExpiresWithin(c.IssuedAt, c.LeaseTTL)
+}
+
+// smallestPositive returns the smallest of durations that is above zero, or zero
+// when none is: a zero bound is no bound.
+func smallestPositive(durations ...time.Duration) time.Duration {
+	var least time.Duration
+	for _, d := range durations {
+		if d > 0 && (least == 0 || d < least) {
+			least = d
+		}
+	}
+	return least
+}
+
+// expirySkewCap bounds the margin ExpiresWithin keeps before a lease ends.
+const expirySkewCap = 30 * time.Second
+
+// ExpiresWithin reports whether something issued at issuedAt and valid for ttl
+// should be treated as expired: from a margin before the end of ttl — a tenth of
+// it, at most 30s — so a credential is not handed out to lapse in flight, or to an
+// upstream whose clock runs a little ahead.
+func ExpiresWithin(issuedAt time.Time, ttl time.Duration) bool {
+	return time.Since(issuedAt) >= ttl-min(expirySkewCap, ttl/10)
 }
 
 // RemainingTTL returns the remaining time until expiration

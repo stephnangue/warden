@@ -86,6 +86,8 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 			Describe("Token endpoint (HTTPS) of the STS/IdP performing the exchange").
 			Example("https://idp.example.com/oauth2/v1/token"),
 
+		defaultTokenTTLField(),
+
 		credential.StringField("grant").
 			OneOf(tokenExchangeGrants...).
 			Describe("Exchange grant: rfc8693 (token-exchange), jwt_bearer (assertion; Entra OBO), or id_jag (cross-app access)").
@@ -454,7 +456,7 @@ func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential
 		return nil, nil, 0, "", fmt.Errorf("token_exchange: token response missing access_token")
 	}
 
-	return accessTokenRawData(resp), d.subjectMetadata(resp, inputs), ttlFromExpiresIn(resp.ExpiresIn), "", nil
+	return accessTokenRawData(resp), d.subjectMetadata(resp, inputs), exchangedTokenLease(resp.ExpiresIn, d.credSource.Config, spec), "", nil
 }
 
 // exchangeOnce performs a single-hop exchange (rfc8693 or jwt_bearer). chained,

@@ -31,11 +31,15 @@ import (
 const (
 	azureMintMethodOnBehalfOf = "on_behalf_of"
 
-	oboGrantType          = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-	oboRequestedTokenUse  = "on_behalf_of"
-	oboOperation          = "acquireOnBehalfOf"
-	oboRefreshBuffer      = 2 * time.Minute
-	oboMaxTokenLifetime   = 24 * time.Hour
+	oboGrantType         = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+	oboRequestedTokenUse = "on_behalf_of"
+	oboOperation         = "acquireOnBehalfOf"
+	oboRefreshBuffer     = 2 * time.Minute
+	oboMaxTokenLifetime  = 24 * time.Hour
+	// entraTokenFallback is the lifetime assumed for an Entra token without
+	// expires_in. Acquiring a token refuses a missing one, so it never applies;
+	// it is short so that, if it ever did, a re-mint corrects the guess.
+	entraTokenFallback    = 5 * time.Minute
 	oboMaxClaimsChallenge = 4 << 10
 	maxEntraErrorCodes    = 8
 )
@@ -183,11 +187,12 @@ func (d *AzureDriver) mintOnBehalfOfWith(ctx context.Context, spec *credential.C
 		return nil, nil, 0, "", err
 	}
 
-	lifetime := time.Duration(tok.ExpiresIn) * time.Second
-	if lifetime > oboMaxTokenLifetime {
-		lifetime = oboMaxTokenLifetime
-	}
-	ttl := federatedLeaseTTL(lifetime, oboRefreshBuffer, spec.MaxTTL)
+	ttl := LeaseFromExpiresIn(tok.ExpiresIn, LeaseOpts{
+		Fallback: entraTokenFallback,
+		Max:      oboMaxTokenLifetime,
+		Buffer:   oboRefreshBuffer,
+		MaxTTL:   spec.MaxTTL,
+	})
 
 	rawData := map[string]interface{}{"access_token": tok.AccessToken}
 	metadata := azureOBOTokenMetadata(clientID, tenantID, resourceURI, inputs, ttl, time.Now())

@@ -431,6 +431,38 @@ func TestKubernetesDriver_MintCredential_DefaultTTL(t *testing.T) {
 	assert.True(t, ttl > 59*time.Minute && ttl <= 1*time.Hour, "expected ~1h TTL, got %v", ttl)
 }
 
+// max_ttl shortens the requested token lifetime, but never below the 10 minutes
+// the TokenRequest API accepts.
+func TestKubernetesDriver_MintCredential_MaxTTLBoundsTheRequestedLifetime(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		maxTTL time.Duration
+		want   time.Duration
+	}{
+		{"no max_ttl keeps the requested ttl", 0, time.Hour},
+		{"max_ttl shortens the requested ttl", 20 * time.Minute, 20 * time.Minute},
+		{"max_ttl below the API minimum requests the minimum", time.Minute, k8sMinTokenLifetime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newK8sMockServer(t)
+			defer server.Close()
+
+			_, _, ttl, _, err := newTestK8sDriver(t, server.URL).MintCredential(context.TODO(), &credential.CredSpec{
+				Name:   "test-spec",
+				MaxTTL: tc.maxTTL,
+				Config: credential.NewConfig(map[string]string{
+					"service_account": "my-sa",
+					"namespace":       "default",
+					"ttl":             "1h",
+				}),
+			})
+			require.NoError(t, err)
+			// The mock echoes expirationSeconds into a second-precision timestamp.
+			assert.InDelta(t, tc.want.Seconds(), ttl.Seconds(), 2, "got %v", ttl)
+		})
+	}
+}
+
 func TestKubernetesDriver_MintCredential_CustomAudiences(t *testing.T) {
 	server := newK8sMockServer(t)
 	defer server.Close()

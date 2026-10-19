@@ -896,7 +896,12 @@ func (d *AzureDriver) mintBearerToken(ctx context.Context, spec *credential.Cred
 		return nil, nil, 0, "", fmt.Errorf("failed to acquire Azure AD token: %w", err)
 	}
 
-	ttl := time.Duration(expiresIn) * time.Second
+	ttl := LeaseFromExpiresIn(expiresIn, LeaseOpts{
+		Fallback: entraTokenFallback,
+		Max:      oboMaxTokenLifetime,
+		Buffer:   oboRefreshBuffer,
+		MaxTTL:   spec.MaxTTL,
+	})
 
 	rawData := map[string]interface{}{
 		"access_token": token,
@@ -924,7 +929,8 @@ func azureBearerTokenMetadata(clientID, tenantID, resourceURI string, ttl time.D
 		"subject":      clientID,
 		"tenant_id":    tenantID,
 		"resource_uri": resourceURI,
-		"expiration":   now.Add(ttl).UTC().Format(time.RFC3339),
+		// When Warden stops serving the token (the lease), not the token's own exp.
+		"expiration": now.Add(ttl).UTC().Format(time.RFC3339),
 	}
 }
 
@@ -1360,7 +1366,7 @@ func (d *AzureDriver) getSourceTokenWith(ctx context.Context, resourceURI string
 			if err != nil {
 				return sourceTokenResult{}, err
 			}
-			expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+			expiresAt := ExpiryFromExpiresIn(expiresIn, 0, MaxTokenLifetime)
 			stored := d.tokenCache.SetIfGeneration(resourceURI, token, expiresAt, gen)
 			return sourceTokenResult{token: token, stored: stored}, nil
 		})

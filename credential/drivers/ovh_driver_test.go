@@ -218,7 +218,7 @@ func TestOVHDriver_MintOAuth2Token(t *testing.T) {
 	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "eyJhbGciOiJSUzI1NiIs.test-token", rawData["api_token"])
-	assert.Equal(t, 3599*time.Second, ttl)
+	assert.Equal(t, 3599*time.Second-ovhTokenBuffer, ttl)
 	assert.Empty(t, leaseID) // OAuth2 tokens expire naturally
 }
 
@@ -395,7 +395,7 @@ func TestOVHDriver_MintOAuth2Token_MissingExpiresIn(t *testing.T) {
 	// A token of unstated lifetime is served for a short span, not an assumed
 	// hour: the credential is cached for the whole lease, so guessing long hands
 	// out a bearer that is already dead.
-	assert.Equal(t, ovhFallbackTokenTTL, ttl)
+	assert.Equal(t, ovhFallbackTokenTTL-ovhTokenBuffer, ttl)
 	assert.Less(t, ttl, 1*time.Hour)
 }
 
@@ -595,7 +595,7 @@ func TestOVHDriver_MintFromSecret_OAuth2Token(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "chained-token", rawData["api_token"])
-	assert.Equal(t, time.Hour, ttl)
+	assert.Equal(t, time.Hour-ovhTokenBuffer, ttl)
 	assert.Empty(t, leaseID)
 
 	// The grant is made with the fetched pair, not with anything held here.

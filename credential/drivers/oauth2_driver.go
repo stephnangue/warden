@@ -138,6 +138,8 @@ func (f *OAuth2DriverFactory) ValidateConfig(config credential.Config) error {
 			Describe("OAuth2 token endpoint (HTTPS)").
 			Example("https://identity.pagerduty.com/oauth/token"),
 
+		defaultTokenTTLField(),
+
 		credential.StringField("auth_url").
 			Custom(func(v string) error {
 				if v == "" {
@@ -492,7 +494,7 @@ func (d *OAuth2Driver) mintFromClientCredentials(ctx context.Context, spec *cred
 		return nil, nil, 0, "", fmt.Errorf("%s OAuth2 token response missing access_token", name)
 	}
 
-	return accessTokenRawData(tokenResp), d.extractMetadata(ctx, spec, tokenResp.AccessToken), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+	return accessTokenRawData(tokenResp), d.extractMetadata(ctx, spec, tokenResp.AccessToken), exchangedTokenLease(tokenResp.ExpiresIn, d.credSource.Config, spec), "", nil
 }
 
 // mintFromRefreshToken exchanges the sealed refresh token for a fresh access
@@ -554,7 +556,7 @@ func (d *OAuth2Driver) refreshGrant(ctx context.Context, spec *credential.CredSp
 			rawData[credential.RawRotatedRefreshTokenExpiresAtKey] = expiresAt(tokenResp.RefreshTokenExpiresIn)
 		}
 	}
-	return rawData, d.extractMetadata(ctx, spec, tokenResp.AccessToken), ttlFromExpiresIn(tokenResp.ExpiresIn), "", nil
+	return rawData, d.extractMetadata(ctx, spec, tokenResp.AccessToken), exchangedTokenLease(tokenResp.ExpiresIn, d.credSource.Config, spec), "", nil
 }
 
 // MintFromSecret implements credential.ChainedSecretMinter: it mints a bearer token
@@ -930,17 +932,14 @@ func accessTokenRawData(resp *oauth2TokenResponse) map[string]interface{} {
 	return map[string]interface{}{"api_key": resp.AccessToken}
 }
 
-// ttlFromExpiresIn converts an expires_in (seconds) into a lease TTL (0 if absent).
-func ttlFromExpiresIn(expiresIn int) time.Duration {
-	if expiresIn > 0 {
-		return time.Duration(expiresIn) * time.Second
-	}
-	return 0
-}
+// recordedExpiryMax caps an expiry the driver records for later, such as a refresh
+// token's, so a provider's outsized expires_in cannot overflow the arithmetic.
+const recordedExpiryMax = 10 * 365 * 24 * time.Hour
 
-// expiresAt returns an RFC3339 UTC timestamp expiresIn seconds from now.
+// expiresAt returns an RFC3339 UTC timestamp expiresIn seconds from now. Callers
+// pass a positive expiresIn; they record nothing when the provider gave none.
 func expiresAt(expiresIn int) string {
-	return time.Now().Add(time.Duration(expiresIn) * time.Second).UTC().Format(time.RFC3339)
+	return ExpiryFromExpiresIn(expiresIn, 0, recordedExpiryMax).UTC().Format(time.RFC3339)
 }
 
 // normalizeOAuth2Scopes returns scopes space-separated, tolerating comma- or

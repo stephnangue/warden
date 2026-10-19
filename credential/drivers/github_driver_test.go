@@ -1384,3 +1384,20 @@ func TestGitHubDriver_AppMint_ErrorNotCached(t *testing.T) {
 	assert.Equal(t, "ghs_second_try", rawData["token"])
 	assert.Equal(t, int32(2), calls.Load(), "a failed mint must not be cached")
 }
+
+// An installation token whose expires_at is already past would carry a lease of
+// zero or less: served, it reads as static or as expired at once. The mint fails.
+func TestGitHubDriver_AppMint_RefusesATokenAlreadyExpired(t *testing.T) {
+	key := generateTestRSAKey(t)
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      "ghs_stale",
+			"expires_at": time.Now().Add(-time.Minute).Format(time.RFC3339),
+		})
+	})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), inlineAppSpec("stale", "67890", key))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already expired")
+}

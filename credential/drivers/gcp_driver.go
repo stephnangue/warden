@@ -76,6 +76,14 @@ const (
 // constant there would hand out a lease outliving the token (see impersonationTTL).
 const gcpSTSTokenFallbackTTL = 1 * time.Hour
 
+// gcpSTSTokenMaxLifetime caps the STS token's reported lifetime before any
+// arithmetic, so an outsized expires_in cannot overflow; and gcpSTSTokenBuffer is
+// taken off it so a token is replaced while still good.
+const (
+	gcpSTSTokenMaxLifetime = 24 * time.Hour
+	gcpSTSTokenBuffer      = time.Minute
+)
+
 // gcpMaxImpersonationLifetime is the ceiling generateAccessToken accepts. The API's
 // own default maximum is 3600s; 43200s requires the target service account to sit in
 // an org policy carrying the credential-lifetime-extension constraint. Validating
@@ -900,7 +908,7 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 	case "access_token":
 		// The federated token itself is the issued credential; honor the spec's scopes.
 		scopesStr := credential.GetString(spec.Config, "scopes", gcpFederationScope)
-		fedToken, ttl, err := d.exchangeWIFToken(ctx, inputs.SubjectToken, inputs.SubjectTokenType, scopesStr)
+		fedToken, lifetime, err := d.exchangeWIFToken(ctx, inputs.SubjectToken, inputs.SubjectTokenType, scopesStr)
 		if err != nil {
 			return nil, nil, 0, "", err
 		}
@@ -909,9 +917,7 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 		// unlike the AWS assume-role path (where a duration is requested), the STS
 		// token's lifetime is fixed by GCP, so a value below MinTTL cannot be raised —
 		// capping to MaxTTL is the only bound we can apply.
-		if spec.MaxTTL > 0 && ttl > spec.MaxTTL {
-			ttl = spec.MaxTTL
-		}
+		ttl := federatedLeaseTTL(lifetime, gcpSTSTokenBuffer, spec.MaxTTL)
 		// The subject is the principal the token was federated for, not the provider
 		// it was federated through — the provider is one value for the whole source,
 		// so recording it here made every caller look identical in the audit trail.
@@ -1002,11 +1008,7 @@ func (d *GCPDriver) exchangeWIFToken(ctx context.Context, subjectToken, subjectT
 		return "", 0, fmt.Errorf("STS token-exchange response missing access_token")
 	}
 
-	ttl := time.Duration(tokenResp.ExpiresIn) * time.Second
-	if ttl <= 0 {
-		ttl = gcpSTSTokenFallbackTTL
-	}
-	return tokenResp.AccessToken, ttl, nil
+	return tokenResp.AccessToken, federatedTokenLifetime(clampExpiresIn(tokenResp.ExpiresIn), gcpSTSTokenFallbackTTL, gcpSTSTokenMaxLifetime), nil
 }
 
 // gcpLifetimePattern matches the only spelling the IAM Credentials API accepts for

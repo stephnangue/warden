@@ -348,7 +348,11 @@ func (d *GitHubDriver) mintAppCredentialWithKey(ctx context.Context, spec *crede
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
-	return appTokenRawData(entry), nil, time.Until(entry.expiresAt), "", nil
+	ttl := time.Until(entry.expiresAt)
+	if ttl <= 0 {
+		return nil, nil, 0, "", fmt.Errorf("GitHub installation token already expired or has an invalid expiration time")
+	}
+	return appTokenRawData(entry), nil, ttl, "", nil
 }
 
 // appTokenRefreshBuffer is how long before expiry a cached installation token stops

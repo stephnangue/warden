@@ -391,6 +391,35 @@ func TestIBMDriver_MintIAMToken_InvalidKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "IBM IAM token")
 }
 
+// An expiration already past would carry a lease of zero or less: served, the
+// token reads as static or as expired at once. The mint fails.
+func TestIBMDriver_MintIAMToken_RefusesATokenAlreadyExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "stale-token",
+			"token_type":   "Bearer",
+			"expiration":   time.Now().Add(-time.Minute).Unix(),
+		})
+	}))
+	defer srv.Close()
+
+	t.Run("inline key", func(t *testing.T) {
+		_, _, _, _, err := newTestIBMDriver(t, srv.URL).MintCredential(context.TODO(), &credential.CredSpec{
+			Name:   "test-spec",
+			Config: credential.NewConfig(map[string]string{"mint_method": "iam_token"}),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already expired")
+	})
+	t.Run("fetched key", func(t *testing.T) {
+		material := credential.SecretMaterial{Data: map[string]string{"api_key": "fetched-key"}}
+		_, _, _, _, err := newChainedIBMDriver(t, srv.URL).MintFromSecret(context.TODO(), bearerSpec(), material)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already expired")
+	})
+}
+
 func TestIBMDriver_TokenCaching(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

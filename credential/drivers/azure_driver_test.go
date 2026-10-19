@@ -555,7 +555,7 @@ func TestAzureDriver_MintCredentialWithExchange_HappyPath(t *testing.T) {
 	// The minted bearer token surfaces as the credential.
 	assert.Equal(t, "eyJ.azure.token", rawData["access_token"])
 	assert.Equal(t, "11111111-1111-1111-1111-111111111111", metadata["subject"])
-	assert.Equal(t, time.Hour, ttl)
+	assert.Equal(t, time.Hour-oboRefreshBuffer, ttl, "the lease ends a buffer before the token does")
 	assert.Empty(t, leaseID, "bearer tokens expire naturally; no lease")
 }
 

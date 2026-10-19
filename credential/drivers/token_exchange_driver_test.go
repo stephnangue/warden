@@ -81,7 +81,7 @@ func TestTokenExchangeDriver_RFC8693(t *testing.T) {
 	rawData, meta, ttl, leaseID, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
 	require.NoError(t, err)
 	assert.Equal(t, "downstream-token", rawData["api_key"])
-	assert.Equal(t, 1800*time.Second, ttl)
+	assert.Equal(t, 1800*time.Second-exchangedTokenBuffer, ttl)
 	assert.Empty(t, leaseID)
 	assert.Equal(t, "user-123", meta["subject"])
 }
@@ -1122,7 +1122,7 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 	rawData, _, ttl, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
 	require.NoError(t, err)
 	assert.Equal(t, "final-access", rawData["api_key"], "the final resource-AS access token is returned, not the ID-JAG")
-	assert.Equal(t, 600*time.Second, ttl)
+	assert.Equal(t, 600*time.Second-exchangedTokenBuffer, ttl)
 }
 
 func TestTokenExchangeDriverFactory_Basics(t *testing.T) {

@@ -471,6 +471,37 @@ func TestManager_IssueCredential_ExpiredNotServed(t *testing.T) {
 	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "expired credential must be re-minted, not served stale")
 }
 
+// A static credential keeps LeaseTTL 0, so it never reads as expired; the spec's
+// max_ttl still bounds how long its cache entry serves it.
+func TestManager_IssueCredential_StaticServedNoLongerThanMaxTTL(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"username": "u", "password": "p"}, nil, 0, "", nil
+	}
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", MaxTTL: 40 * time.Millisecond, Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	tokenID := "token-static"
+	tokenTTL := time.Hour
+
+	cred, err := issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), cred.LeaseTTL, "a static credential stays static")
+
+	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.mintCalls.Load(), "should serve from cache within max_ttl")
+
+	time.Sleep(80 * time.Millisecond)
+	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "a static credential must be read again after max_ttl")
+}
+
 func TestManager_IssueCredential_SpecNotFound(t *testing.T) {
 	manager, _, _ := createTestManager(t)
 	defer manager.Stop()
