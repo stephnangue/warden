@@ -73,8 +73,8 @@ serial).
 
 'entity_kind' (agent or human, default agent) names what the mount admits.
 'facts' maps certificate fields to the fact names the mount publishes beyond
-its built-in facts (cn, serial, ou, org, dns_san, email_san, uri_san, and ca:
-the SHA-256 fingerprint of each trust anchor the certificate verified to); a
+its built-in facts (ca, cn, dns_san, email_san, org, ou, serial, uri_san; ca
+is the SHA-256 fingerprint of each trust anchor the certificate verified to); a
 write replaces the whole map.`,
 	}
 }

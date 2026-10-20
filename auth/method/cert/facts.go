@@ -3,6 +3,7 @@ package cert
 import (
 	"crypto/x509"
 	"slices"
+	"strings"
 
 	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/helper/selector"
@@ -47,7 +48,7 @@ func (b *certAuthBackend) FactNames() []string { return helper.FactNames(b.mount
 // newAdmission returns what a successful login verified about cert: its
 // subject and SAN fields, and as "ca" the SHA-256 fingerprint (lowercase hex
 // of the DER) of the anchor of every chain in chains, the chains cert was
-// verified along, each distinct anchor once. The serial is rendered in
+// verified along, each distinct anchor once, sorted. The serial is rendered in
 // decimal and a URI SAN as its URL string, as token metadata renders them
 // today.
 //
@@ -63,11 +64,9 @@ func newAdmission(cert *x509.Certificate, chains [][]*x509.Certificate, mount *l
 	}
 	var uris []string
 	if len(cert.URIs) > 0 {
-		uris = make([]string, 0, len(cert.URIs))
-		for _, u := range cert.URIs {
-			if u != nil {
-				uris = append(uris, u.String())
-			}
+		uris = make([]string, len(cert.URIs))
+		for i, u := range cert.URIs {
+			uris[i] = u.String()
 		}
 	}
 	facts := selector.NewTable(
@@ -78,7 +77,7 @@ func newAdmission(cert *x509.Certificate, chains [][]*x509.Certificate, mount *l
 		helper.TableValues(factDNSSAN, cert.DNSNames),
 		helper.TableValues(factEmailSAN, cert.EmailAddresses),
 		helper.TableValues(factURISAN, uris),
-		helper.TableValues(factCA, anchorFingerprints(chains)),
+		helper.TableValues(factCA, helper.AnchorFingerprints(chains)),
 	)
 	return &logical.Admission{
 		Facts: facts,
@@ -87,26 +86,8 @@ func newAdmission(cert *x509.Certificate, chains [][]*x509.Certificate, mount *l
 	}
 }
 
-// anchorFingerprints returns the fingerprint of the last certificate of each
-// chain, the trust anchor it was verified to, each distinct one once, in the
-// order the chains first reach it. Verification yields a handful of chains, so
-// a linear scan dedupes them.
-func anchorFingerprints(chains [][]*x509.Certificate) []string {
-	var out []string
-	for _, chain := range chains {
-		if len(chain) == 0 {
-			continue
-		}
-		fp := certFingerprint(chain[len(chain)-1])
-		if !slices.Contains(out, fp) {
-			out = append(out, fp)
-		}
-	}
-	return out
-}
-
 // factsSources is the phrase the config path uses for what a facts source is
-// on a cert mount.
-const factsSources = "one of the certificate fields: " +
-	factCommonName + ", " + factSerial + ", " + factOrgUnit + ", " + factOrg + ", " +
-	factDNSSAN + ", " + factEmailSAN + ", " + factURISAN + ", " + factCA
+// on a cert mount: the built-in names, sorted, as CompileFields lists them when
+// it refuses a source.
+var factsSources = "one of the certificate fields: " +
+	strings.Join(slices.Sorted(slices.Values(certBuiltinFacts())), ", ")

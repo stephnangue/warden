@@ -121,6 +121,17 @@ func fingerprint(c *x509.Certificate) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// sortedFingerprints returns the "ca" values of as, in the order "ca" holds
+// them: sorted.
+func sortedFingerprints(as ...*authority) []string {
+	out := make([]string, len(as))
+	for i, a := range as {
+		out[i] = fingerprint(a.cert)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // verifyChains verifies leaf as login does, against roots, with intermediates
 // when given.
 func verifyChains(t testing.TB, leaf *x509.Certificate, roots []*authority, intermediates []*authority) [][]*x509.Certificate {
@@ -254,8 +265,7 @@ func TestFacts_FromCertificate(t *testing.T) {
 }
 
 // An empty value is not a fact: a certificate without a common name has no
-// "cn", and empty subject entries are left out. Chains that are empty name no
-// anchor.
+// "cn", and empty subject entries are left out.
 func TestFacts_EmptyValues(t *testing.T) {
 	naming, err := compileCertFacts("", nil)
 	require.NoError(t, err)
@@ -265,7 +275,7 @@ func TestFacts_EmptyValues(t *testing.T) {
 	})
 	require.Equal(t, []string{"", "eng"}, leaf.Subject.OrganizationalUnit, "the empty entry survives encoding")
 
-	adm := newAdmission(leaf, [][]*x509.Certificate{{}}, nil)
+	adm := newAdmission(leaf, nil, nil)
 	for _, name := range []string{"cn", "org", "dns_san", "email_san", "uri_san", "ca"} {
 		assert.Empty(t, factstest.Values(adm, naming, name), "fact %q", name)
 	}
@@ -296,14 +306,18 @@ func TestFacts_CAOncePerDistinctAnchor(t *testing.T) {
 		chains := verifyChains(t, leaf, []*authority{root, cross}, nil)
 		require.Len(t, chains, 2)
 		adm := newAdmission(leaf, chains, nil)
-		assert.ElementsMatch(t, []string{fingerprint(root.cert), fingerprint(cross.cert)}, factstest.Values(adm, naming, "ca"))
+		assert.Equal(t, sortedFingerprints(root, cross), factstest.Values(adm, naming, "ca"))
+
+		// The same anchors in the same order, whatever order the chains came in.
+		slices.Reverse(chains)
+		assert.Equal(t, sortedFingerprints(root, cross), factstest.Values(newAdmission(leaf, chains, nil), naming, "ca"))
 
 		// The classic cross-signed shape: the cross-certificate as an
 		// intermediate to the other root.
 		chains = verifyChains(t, leaf, []*authority{root, other}, []*authority{cross})
 		require.Len(t, chains, 2)
 		adm = newAdmission(leaf, chains, nil)
-		assert.ElementsMatch(t, []string{fingerprint(root.cert), fingerprint(other.cert)}, factstest.Values(adm, naming, "ca"))
+		assert.Equal(t, sortedFingerprints(root, other), factstest.Values(adm, naming, "ca"))
 	})
 
 	t.Run("two chains to one root", func(t *testing.T) {
@@ -376,7 +390,7 @@ func TestFactNames(t *testing.T) {
 
 	// The facts field names the sources a cert mount has, and no pointers.
 	desc := b.pathConfig().Fields["facts"].Description
-	assert.Contains(t, desc, "one of the certificate fields: cn, serial, ou, org, dns_san, email_san, uri_san, ca")
+	assert.Contains(t, desc, "one of the certificate fields: "+strings.Join(builtins, ", "))
 	assert.NotContains(t, desc, "Pointer")
 }
 
@@ -447,7 +461,7 @@ func TestLogin_AdmissionAnchors(t *testing.T) {
 	resp := certLogin(t, b, leaf, "reader")
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	adm := resp.Auth.Admission
-	assert.ElementsMatch(t, []string{fingerprint(root.cert), fingerprint(cross.cert)}, factstest.Values(adm, adm.Mount.Load(), "ca"))
+	assert.Equal(t, sortedFingerprints(root, cross), factstest.Values(adm, adm.Mount.Load(), "ca"))
 
 	// A role CA replaces the mount's: its anchor alone.
 	require.NoError(t, b.setRole(ctx, &CertRole{
@@ -1271,6 +1285,7 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 		accepted, refused, narrowed, roleCAs, widenedRoles, globs, uris, exacts)
 	assert.Greater(t, accepted, 30)
 	assert.Greater(t, refused, 30)
+	assert.Greater(t, narrowed, 0)
 	assert.Greater(t, roleCAs, 30)
 	assert.Greater(t, widenedRoles, 30)
 	assert.Greater(t, globs, 30)

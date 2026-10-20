@@ -2,9 +2,7 @@ package cert
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"sync"
@@ -292,10 +290,7 @@ func buildCAPool(caPEM string) (*x509.CertPool, error) {
 }
 
 // certFingerprint returns the hex-encoded SHA-256 fingerprint of a certificate's raw DER bytes.
-func certFingerprint(cert *x509.Certificate) string {
-	hash := sha256.Sum256(cert.Raw)
-	return hex.EncodeToString(hash[:])
-}
+func certFingerprint(cert *x509.Certificate) string { return helper.CertFingerprint(cert) }
 
 const certAuthHelp = `
 The certificate auth method authenticates clients using TLS client certificates.

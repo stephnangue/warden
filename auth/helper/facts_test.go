@@ -1,8 +1,12 @@
 package helper
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -253,4 +257,34 @@ func TestJWTPayloadBytes(t *testing.T) {
 	assert.Zero(t, JWTPayloadBytes(""))
 	assert.Zero(t, JWTPayloadBytes("no-dots"))
 	assert.Zero(t, JWTPayloadBytes("one.dot"))
+}
+
+func TestAnchorFingerprints(t *testing.T) {
+	// A fingerprint hashes the DER alone, so certificates holding only Raw do.
+	cert := func(der string) *x509.Certificate { return &x509.Certificate{Raw: []byte(der)} }
+	fp := func(der string) string {
+		sum := sha256.Sum256([]byte(der))
+		return hex.EncodeToString(sum[:])
+	}
+	assert.Equal(t, fp("leaf"), CertFingerprint(cert("leaf")))
+	assert.Regexp(t, "^[0-9a-f]{64}$", CertFingerprint(cert("leaf")))
+
+	leaf, mid := cert("leaf"), cert("mid")
+	rootA, rootB := cert("root a"), cert("root b")
+	want := []string{fp("root a"), fp("root b")}
+	slices.Sort(want)
+
+	// Each distinct anchor once, sorted, whatever the order of the chains.
+	chains := [][]*x509.Certificate{
+		{leaf, rootB},
+		{leaf, mid, rootA},
+		{leaf, rootA},
+		{leaf, mid, rootB},
+	}
+	assert.Equal(t, want, AnchorFingerprints(chains))
+	slices.Reverse(chains)
+	assert.Equal(t, want, AnchorFingerprints(chains))
+
+	assert.Equal(t, []string{fp("root a")}, AnchorFingerprints([][]*x509.Certificate{{leaf, rootA}}))
+	assert.Empty(t, AnchorFingerprints(nil))
 }

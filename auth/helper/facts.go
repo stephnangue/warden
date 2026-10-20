@@ -1,7 +1,10 @@
 package helper
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -170,6 +173,28 @@ func TableValues(name string, vs []string) selector.Field {
 		return selector.Field{Name: name, Values: out}
 	}
 	return selector.Field{Name: name, Values: vs}
+}
+
+// CertFingerprint returns the SHA-256 fingerprint of a certificate's DER, as
+// lowercase hex.
+func CertFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// AnchorFingerprints returns the fingerprint (CertFingerprint) of the trust
+// anchor of each chain a certificate verification returned, the chain's last
+// certificate: each distinct anchor once, sorted, so a credential yields the
+// same values in the same order whatever order the chains came in. A verified
+// chain is never empty. The slice is fresh, and empty when there are no
+// chains.
+func AnchorFingerprints(chains [][]*x509.Certificate) []string {
+	out := make([]string, 0, len(chains))
+	for _, chain := range chains {
+		out = append(out, CertFingerprint(chain[len(chain)-1]))
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // ParseFactsField converts the facts field of a config write to a source to
