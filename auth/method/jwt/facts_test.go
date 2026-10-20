@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/auth/helper"
+	"github.com/stephnangue/warden/auth/helper/factstest"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/logical"
@@ -92,14 +95,11 @@ func login(t *testing.T, b *jwtAuthBackend, token string) *logical.Response {
 	return resp
 }
 
-// values drains what adm answers for name under n, rendered.
-func values(adm *logical.Admission, n *logical.MountNaming, name string) []string {
-	cur := adm.Lookup(n, name)
-	var out []string
-	for v, ok := cur.Next(); ok; v, ok = cur.Next() {
-		out = append(out, string(selector.FormatScalar(nil, v)))
-	}
-	return out
+// compileFacts compiles kind and facts as a jwt mount config does.
+func compileFacts(kind string, facts map[string]string) (*logical.MountNaming, error) {
+	fc := helper.FactsConfig{EntityKind: kind, Facts: facts}
+	fc.Compile(jwtBuiltinFacts())
+	return fc.Naming(), fc.Err()
 }
 
 // =============================================================================
@@ -107,7 +107,7 @@ func values(adm *logical.Admission, n *logical.MountNaming, name string) []strin
 // =============================================================================
 
 func TestFacts_FromClaims(t *testing.T) {
-	naming, err := compileNaming("", map[string]string{
+	naming, err := compileFacts("", map[string]string{
 		"repository":      "repo",
 		"/deployment/env": "env",
 		"/deployment/0":   "first", // an object has no index
@@ -160,7 +160,7 @@ func TestFacts_FromClaims(t *testing.T) {
 		{"mount", nil}, // set by core at LoginCreateToken
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.want, values(adm, naming, tc.name), "fact %q", tc.name)
+		assert.Equal(t, tc.want, factstest.Values(adm, naming, tc.name), "fact %q", tc.name)
 	}
 
 	assert.Equal(t, map[string]string{
@@ -175,18 +175,46 @@ func TestFacts_FromClaims(t *testing.T) {
 	}, adm.RenderMetadata(naming))
 }
 
-func TestFacts_IssuedAtAndBytes(t *testing.T) {
-	assert.True(t, issuedAt(map[string]any{}).IsZero())
-	assert.True(t, issuedAt(map[string]any{"iat": "1700000000"}).IsZero())
-	assert.True(t, issuedAt(map[string]any{"iat": 0.0}).IsZero())
-	assert.True(t, issuedAt(map[string]any{"iat": -5.0}).IsZero())
-	assert.Equal(t, time.Unix(1700000000, 0), issuedAt(map[string]any{"iat": 1700000000.0}))
+// Claims decoded with UseNumber hold json.Number, which is a fact and an iat;
+// a Go integer is neither a JSON-decoded value nor a fact (selector.NewClaims),
+// though it is still read as an iat.
+func TestFacts_NumberTypes(t *testing.T) {
+	naming, err := compileFacts("", map[string]string{"attempt": "attempt", "count": "count"})
+	require.NoError(t, err)
+	claims := map[string]any{
+		"attempt": json.Number("2"),
+		"count":   int64(7),
+		"iat":     json.Number("1700000000"),
+	}
+	adm := newAdmission(claims, "", nil)
+	assert.Equal(t, []string{"2"}, factstest.Values(adm, naming, "attempt"))
+	assert.Empty(t, factstest.Values(adm, naming, "count"))
+	assert.Equal(t, map[string]string{"attempt": "2"}, adm.RenderMetadata(naming))
+	assert.Equal(t, time.Unix(1700000000, 0), adm.IssuedAt)
 
-	payload := `{"sub":"agent-1","n":12345}`
-	seg := base64.RawURLEncoding.EncodeToString([]byte(payload))
-	assert.Equal(t, int64(len(payload)), payloadBytes("eyJhbGciOiJFUzI1NiJ9."+seg+".sig"))
-	assert.Zero(t, payloadBytes("no-dots"))
-	assert.Zero(t, payloadBytes("one.dot"))
+	adm = newAdmission(map[string]any{"iat": int64(1700000000)}, "", nil)
+	assert.Equal(t, time.Unix(1700000000, 0), adm.IssuedAt)
+}
+
+// FactsConfig is flattened into the config's own keys on the way in (the
+// map round-trip in mapToJWTAuthConfig) and on the way to storage.
+func TestFactsConfig_JSONFlattened(t *testing.T) {
+	config, err := mapToJWTAuthConfig(map[string]any{
+		"jwks_url":    "https://example.com/jwks",
+		"entity_kind": "human",
+		"facts":       map[string]any{"repository": "repo"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "human", config.EntityKind)
+	assert.Equal(t, map[string]string{"repository": "repo"}, config.Facts)
+
+	raw, err := json.Marshal(config)
+	require.NoError(t, err)
+	var flat map[string]any
+	require.NoError(t, json.Unmarshal(raw, &flat))
+	assert.Equal(t, "human", flat["entity_kind"])
+	assert.Equal(t, map[string]any{"repository": "repo"}, flat["facts"])
+	assert.NotContains(t, flat, "FactsConfig")
 }
 
 func TestFactNames(t *testing.T) {
@@ -244,10 +272,10 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	assert.Positive(t, adm.Size())
 
 	n := adm.Mount.Load()
-	assert.Equal(t, []string{"agent-1"}, values(adm, n, "sub"))
-	assert.Equal(t, []string{"warden"}, values(adm, n, "aud"))
-	assert.Equal(t, []string{"prod"}, values(adm, n, "env"))
-	assert.Empty(t, values(adm, n, "act"))
+	assert.Equal(t, []string{"agent-1"}, factstest.Values(adm, n, "sub"))
+	assert.Equal(t, []string{"warden"}, factstest.Values(adm, n, "aud"))
+	assert.Equal(t, []string{"prod"}, factstest.Values(adm, n, "env"))
+	assert.Empty(t, factstest.Values(adm, n, "act"))
 }
 
 // A failed login carries no admission.
@@ -283,12 +311,12 @@ func TestLogin_EntraLikeTokenWithManyGroups(t *testing.T) {
 	require.NotNil(t, adm)
 	assert.Greater(t, adm.Bytes, int64(8000))
 
-	assert.Empty(t, values(adm, adm.Mount.Load(), "groups"), "groups are invisible until mapped")
+	assert.Empty(t, factstest.Values(adm, adm.Mount.Load(), "groups"), "groups are invisible until mapped")
 
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{
 		"facts": map[string]any{"groups": "groups"},
 	}).StatusCode)
-	got := values(adm, adm.Mount.Load(), "groups")
+	got := factstest.Values(adm, adm.Mount.Load(), "groups")
 	require.Len(t, got, 200)
 	assert.Equal(t, groups[199], got[199])
 }
@@ -336,7 +364,7 @@ func TestRenderMetadata_EquivalentToExtractMetadata(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			want, err := extractMetadata(tc.claims, tc.mapping)
 			require.NoError(t, err)
-			naming, err := compileNaming("", tc.mapping)
+			naming, err := compileFacts("", tc.mapping)
 			require.NoError(t, err)
 			adm := newAdmission(tc.claims, "", nil)
 			assert.Equal(t, want, adm.RenderMetadata(naming))
@@ -364,7 +392,7 @@ func TestRenderMetadata_NonStringClaimRenders(t *testing.T) {
 			mapping := map[string]string{tc.source: "x"}
 			_, err := extractMetadata(tc.claims, mapping)
 			require.Error(t, err, "today's extractor refuses a non-string claim")
-			naming, err := compileNaming("", mapping)
+			naming, err := compileFacts("", mapping)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, newAdmission(tc.claims, "", nil).RenderMetadata(naming))
 		})
@@ -485,7 +513,7 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 
 		require.NoError(t, b.Initialize(ctx), "a bad mapping does not fail the load")
 		require.NotNil(t, b.config)
-		require.Error(t, b.config.namingErr)
+		require.Error(t, b.config.FactsConfig.Err())
 		assert.Nil(t, b.mountFacts.Load())
 		assert.Empty(t, b.FactNames())
 
@@ -495,19 +523,27 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		require.NotNil(t, adm)
 		adm.MountPath = "auth/jwt/"
 		for _, name := range []string{"sub", "iss", "aud", "mount", "kind"} {
-			assert.Empty(t, values(adm, adm.Mount.Load(), name), "fact %q", name)
+			assert.Empty(t, factstest.Values(adm, adm.Mount.Load(), name), "fact %q", name)
 		}
+
+		// A write that leaves the stored facts in place is told how to
+		// replace them, and changes nothing.
+		before := b.config
+		resp = writeConfig(b, map[string]any{"bound_subject": "agent-1"})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.EqualError(t, resp.Err, `the stored facts do not compile (facts: fact source "path": "mount" is reserved for every mount and cannot be mapped); send facts (and entity_kind) in this write to replace them`)
+		assert.Same(t, before, b.config)
 
 		// Rewriting the facts restores the naming, for this admission too.
 		require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"facts": map[string]any{}}).StatusCode)
-		assert.Equal(t, []string{"agent-1"}, values(adm, adm.Mount.Load(), "sub"))
+		assert.Equal(t, []string{"agent-1"}, factstest.Values(adm, adm.Mount.Load(), "sub"))
 	})
 
 	t.Run("from the mount table", func(t *testing.T) {
 		backend, err := Factory(ctx, &logical.BackendConfig{Logger: testLogger(), Config: bad})
 		require.NoError(t, err, "a bad mapping does not fail the mount")
 		b := backend.(*jwtAuthBackend)
-		require.Error(t, b.config.namingErr)
+		require.Error(t, b.config.FactsConfig.Err())
 		assert.Nil(t, b.mountFacts.Load())
 	})
 }
@@ -558,11 +594,11 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 					report("FactNames saw %v", names)
 				}
 				b.configMu.RLock()
-				if b.config.naming != b.mountFacts.Load() {
+				if b.config.Naming() != b.mountFacts.Load() {
 					report("config and published naming disagree under configMu")
 				}
-				if b.config.EntityKind != b.config.naming.Kind {
-					report("config entity_kind %q, naming kind %q", b.config.EntityKind, b.config.naming.Kind)
+				if b.config.EntityKind != b.config.Naming().Kind {
+					report("config entity_kind %q, naming kind %q", b.config.EntityKind, b.config.Naming().Kind)
 				}
 				b.configMu.RUnlock()
 			}
@@ -587,7 +623,7 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 					report("admission saw a partial naming")
 				}
 				// A naming answers what it maps, whichever is in force.
-				if n.Kind == logical.EntityKindAgent && len(values(adm, n, "team")) != 1 {
+				if n.Kind == logical.EntityKindAgent && len(factstest.Values(adm, n, "team")) != 1 {
 					report("agent naming lost team")
 				}
 			}
@@ -607,7 +643,7 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 }
 
 // =============================================================================
-// Equivalence: today's role matcher and the converted rule (§2.7)
+// Equivalence: today's role matcher and the role converted to a selector rule
 // =============================================================================
 
 // escapeValue writes s as an exact selector value.
@@ -635,19 +671,16 @@ func renderValue(v any) string {
 	panic(fmt.Sprintf("unexpected bound claim %T", v))
 }
 
-// admissionSource is the Source core builds over an admission and the naming
-// in force.
-type admissionSource struct {
-	adm *logical.Admission
-	n   *logical.MountNaming
-}
-
-func (s admissionSource) Lookup(name string) selector.Cursor { return s.adm.Lookup(s.n, name) }
-
-// convertRole applies the §2.7 conversion of one role on a mount: bound claims
+// convertRole converts one role on a mount to a selector rule: bound claims
 // become identity-mapped facts and rule values, bound_subject a "sub" value,
 // role audiences an "aud" rule (the mount enforces the union), and the rule
 // pins the mount.
+//
+// A role bound claim on a built-in name (sub, iss, aud) is refused rather than
+// converted: it would share the rule's one entry for that name with
+// bound_subject or the audiences, and a rule ANDs names but ORs the values of
+// one name, so the two constraints cannot both be written there. The
+// generator below never binds a built-in claim.
 func convertRole(t *testing.T, mountPath string, role *JWTRole) (*selector.Rule, *logical.MountNaming) {
 	t.Helper()
 	rule := map[string][]string{"mount": {mountPath}}
@@ -661,12 +694,15 @@ func convertRole(t *testing.T, mountPath string, role *JWTRole) (*selector.Rule,
 		}
 	}
 	for k, v := range role.BoundClaims {
+		if slices.Contains(jwtBuiltinFacts(), k) {
+			t.Fatalf("bound claim %q names a built-in fact; it has no single-rule conversion", k)
+		}
 		facts[k] = k
 		rule[k] = []string{renderValue(v)}
 	}
 	compiled, err := selector.Compile(rule)
 	require.NoError(t, err)
-	naming, err := compileNaming("", facts)
+	naming, err := compileFacts("", facts)
 	require.NoError(t, err)
 	return compiled, naming
 }
@@ -678,12 +714,19 @@ func union(a, b []string) []string {
 }
 
 // TestEquivalence_RoleMatcherAndConvertedRule checks, over generated claim
-// sets and roles, that today's matcher (the role's validator expectations via
-// validateJWTForRole, then matchRole's bound claims) accepts a token exactly
-// when the converted model does: the mount validates the issuer and the union
-// of the audiences, and the converted rule matches the token's admission.
-// Values are scalar and same-typed per claim, and never empty (a selector
-// value cannot be): the domain where §2.7 says the conversion is exact.
+// sets, roles and mount configs, that today's matcher (the role's validator
+// expectations via validateJWTForRole, then matchRole's config and role bound
+// claims) accepts a token exactly when the converted model does: the mount
+// validates the issuer, its own bound_subject and the union of the audiences,
+// keeps checking its own bound_claims, and the converted rule matches the
+// token's admission.
+//
+// The domain is the one where the conversion is exact: values are scalar,
+// same-typed per claim and never empty (a selector value cannot be); role
+// bound claims never name a built-in (see convertRole); and a config-level
+// bound_subject appears only on samples whose role sets none, since a role's
+// subject overrides the mount's today, and a mount that keeps its subject
+// cannot express that override.
 func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 	ctx := context.Background()
 	b, key := factsBackend(t, nil)
@@ -712,7 +755,9 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 		"level": func() any { return []float64{0, 1, 2, 1.5}[rng.Intn(4)] },
 		"admin": func() any { return rng.Intn(2) == 0 },
 	}
-	claimNames := []string{"admin", "env", "level", "team"} // fixed order: the seed reproduces a run
+	// Fixed order, so the seed reproduces a run; no built-in name (sub, iss, aud).
+	claimNames := []string{"admin", "env", "level", "team"}
+	var configSubjects, configClaims int
 
 	var accepted, refused int
 	for i := 0; i < 600; i++ {
@@ -747,29 +792,48 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 		}
 		cfg := base
 		cfg.BoundAudiences = someAudiences()
+		cfg.BoundSubject = ""
+		cfg.BoundClaims = nil
+		if role.BoundSubject == "" && rng.Intn(3) == 0 {
+			cfg.BoundSubject = pick(subjects)
+			configSubjects++
+		}
+		if rng.Intn(3) == 0 {
+			cfg.BoundClaims = map[string]any{}
+			for _, k := range claimNames {
+				if rng.Intn(3) == 0 {
+					cfg.BoundClaims[k] = typed[k]()
+				}
+			}
+			configClaims++
+		}
 
 		token := signES256(t, key, claims)
 
-		// Today: the role's expectations, then the bound claims.
+		// Today: the role's expectations, then the config and role bound
+		// claims.
 		oldClaims, err := validateJWTForRole(ctx, &cfg, role, token)
 		old := err == nil && matchRole(oldClaims, cfg.BoundClaims, role) == nil
 
-		// Converted: the mount validates the issuer and the audience union,
+		// Converted: the mount validates the issuer, its subject and the
+		// audience union and checks its bound claims, all carried unchanged;
 		// then the rule matches the admission.
 		rule, naming := convertRole(t, mountPath, role)
 		got := false
 		newClaims, err := cfg.validator.Validate(ctx, token, capjwt.Expected{
 			SigningAlgorithms: []capjwt.Alg{capjwt.ES256},
 			Issuer:            cfg.BoundIssuer,
+			Subject:           cfg.BoundSubject,
 			Audiences:         union(cfg.BoundAudiences, role.BoundAudiences),
 		})
-		if err == nil {
+		if err == nil && validateBoundClaims(newClaims, cfg.BoundClaims) == nil {
 			adm := newAdmission(newClaims, token, mount)
 			adm.MountPath = mountPath
-			got = rule.Match(admissionSource{adm: adm, n: naming})
+			got = rule.Match(factstest.Source{Adm: adm, Naming: naming})
 		}
 
-		require.Equal(t, old, got, "sample %d: claims %v, role %+v, config audiences %v", i, claims, role, cfg.BoundAudiences)
+		require.Equal(t, old, got, "sample %d: claims %v, role %+v, config subject %q, claims %v, audiences %v",
+			i, claims, role, cfg.BoundSubject, cfg.BoundClaims, cfg.BoundAudiences)
 		if old {
 			accepted++
 		} else {
@@ -779,6 +843,8 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 	// Both outcomes are exercised, so agreement is not vacuous.
 	assert.Greater(t, accepted, 30)
 	assert.Greater(t, refused, 30)
+	assert.Greater(t, configSubjects, 30)
+	assert.Greater(t, configClaims, 30)
 }
 
 // The documented widenings: the converted rule accepts where today's
@@ -819,12 +885,12 @@ func TestEquivalence_DocumentedWidenings(t *testing.T) {
 			for k := range tc.rule {
 				facts[k] = k
 			}
-			naming, err := compileNaming("", facts)
+			naming, err := compileFacts("", facts)
 			require.NoError(t, err)
 			rule, err := selector.Compile(tc.rule)
 			require.NoError(t, err)
 			adm := newAdmission(tc.claims, "", nil)
-			assert.True(t, rule.Match(admissionSource{adm: adm, n: naming}), "the converted rule accepts")
+			assert.True(t, rule.Match(factstest.Source{Adm: adm, Naming: naming}), "the converted rule accepts")
 		})
 	}
 }

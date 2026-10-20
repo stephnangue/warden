@@ -7,82 +7,78 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
 
 // pathConfig returns the config path definition
 func (b *jwtAuthBackend) pathConfig() *framework.Path {
+	fields := map[string]*framework.FieldSchema{
+		"oidc_discovery_url": {
+			Type:        framework.TypeString,
+			Description: "OIDC Discovery URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
+		},
+		"oidc_discovery_ca_pem": {
+			Type:        framework.TypeString,
+			Description: "CA certificate for OIDC discovery",
+		},
+		"jwks_url": {
+			Type:        framework.TypeString,
+			Description: "JWKS URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
+		},
+		"jwks_ca_pem": {
+			Type:        framework.TypeString,
+			Description: "CA certificate for JWKS endpoint",
+		},
+		"bound_issuer": {
+			Type:        framework.TypeString,
+			Description: "Required issuer for JWT validation",
+		},
+		"bound_audiences": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: "Required audiences for JWT validation",
+		},
+		"bound_subject": {
+			Type:        framework.TypeString,
+			Description: "Required subject for JWT validation",
+		},
+		"bound_claims": {
+			Type:        framework.TypeMap,
+			Description: "Map of claims to required values for JWT validation",
+		},
+		"jwt_validation_pubkeys": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: "PEM-encoded RSA or ECDSA public keys for static JWT validation. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
+		},
+		"user_claim": {
+			Type:        framework.TypeString,
+			Description: "Claim to use as principal identity (default: sub)",
+			Default:     "sub",
+		},
+		"groups_claim": {
+			Type:        framework.TypeString,
+			Description: "JWT claim containing group names for dynamic policy mapping. Empty disables group-based policies.",
+		},
+		"group_policy_prefix": {
+			Type:        framework.TypeString,
+			Description: "Prefix prepended to each group name to form the policy name (default: group-)",
+			Default:     "group-",
+		},
+		"token_ttl": {
+			Type:        framework.TypeDurationSecond,
+			Description: "Token TTL (default: 1h)",
+		},
+		"default_role": {
+			Type:        framework.TypeString,
+			Description: "Default role for transparent operations when no role is specified",
+		},
+	}
+	maps.Copy(fields, helper.FactsFieldSchemas())
+
 	return &framework.Path{
 		Pattern: "config",
-		Fields: map[string]*framework.FieldSchema{
-			"oidc_discovery_url": {
-				Type:        framework.TypeString,
-				Description: "OIDC Discovery URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
-			},
-			"oidc_discovery_ca_pem": {
-				Type:        framework.TypeString,
-				Description: "CA certificate for OIDC discovery",
-			},
-			"jwks_url": {
-				Type:        framework.TypeString,
-				Description: "JWKS URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
-			},
-			"jwks_ca_pem": {
-				Type:        framework.TypeString,
-				Description: "CA certificate for JWKS endpoint",
-			},
-			"bound_issuer": {
-				Type:        framework.TypeString,
-				Description: "Required issuer for JWT validation",
-			},
-			"bound_audiences": {
-				Type:        framework.TypeCommaStringSlice,
-				Description: "Required audiences for JWT validation",
-			},
-			"bound_subject": {
-				Type:        framework.TypeString,
-				Description: "Required subject for JWT validation",
-			},
-			"bound_claims": {
-				Type:        framework.TypeMap,
-				Description: "Map of claims to required values for JWT validation",
-			},
-			"jwt_validation_pubkeys": {
-				Type:        framework.TypeCommaStringSlice,
-				Description: "PEM-encoded RSA or ECDSA public keys for static JWT validation. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
-			},
-			"user_claim": {
-				Type:        framework.TypeString,
-				Description: "Claim to use as principal identity (default: sub)",
-				Default:     "sub",
-			},
-			"groups_claim": {
-				Type:        framework.TypeString,
-				Description: "JWT claim containing group names for dynamic policy mapping. Empty disables group-based policies.",
-			},
-			"group_policy_prefix": {
-				Type:        framework.TypeString,
-				Description: "Prefix prepended to each group name to form the policy name (default: group-)",
-				Default:     "group-",
-			},
-			"token_ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Token TTL (default: 1h)",
-			},
-			"default_role": {
-				Type:        framework.TypeString,
-				Description: "Default role for transparent operations when no role is specified",
-			},
-			"entity_kind": {
-				Type:        framework.TypeString,
-				Description: "Kind of entity this mount admits: agent (default) or human.",
-			},
-			"facts": {
-				Type:        framework.TypeMap,
-				Description: "Map of source claim to the fact name it is published as. The source is a claim name, or a JSON Pointer (leading /) for a nested claim. sub, iss and aud are always published under their own names.",
-			},
-		},
+		Fields:  fields,
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
 				Callback: b.handleConfigRead,
@@ -158,9 +154,25 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 	// Build config map from field data
 	conf := make(map[string]any)
 
+	_, factsSent := d.GetOk("facts")
+	_, kindSent := d.GetOk("entity_kind")
+	factsTouched := factsSent || kindSent
+
 	// Copy existing config if present (under lock to avoid data race)
 	b.configMu.RLock()
 	if b.config != nil {
+		// Stored facts that do not compile would fail a write that leaves
+		// them in place, whatever else it changes; say how to replace them
+		// before any key set is fetched.
+		if !factsTouched {
+			if err := helper.FactsWriteError(&b.config.FactsConfig, false); err != nil {
+				b.configMu.RUnlock()
+				return &logical.Response{
+					StatusCode: http.StatusBadRequest,
+					Err:        err,
+				}, nil
+			}
+		}
 		conf["oidc_discovery_url"] = b.config.OIDCDiscoveryURL
 		conf["oidc_discovery_ca_pem"] = b.config.OIDCDiscoveryCA
 		conf["jwks_url"] = b.config.JWKSURL
@@ -189,7 +201,7 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 
 	// A facts write replaces the whole mapping; every name must be a string.
 	if raw, ok := d.GetOk("facts"); ok {
-		facts, err := factsFromField(raw.(map[string]any))
+		facts, err := helper.ParseFactsField(raw)
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusBadRequest,
@@ -209,10 +221,10 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 	}
 	// A write is the one place facts can be refused outright; storage and
 	// load only ever see a config that compiled here.
-	if config.namingErr != nil {
+	if err := helper.FactsWriteError(&config.FactsConfig, factsTouched); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
-			Err:        config.namingErr,
+			Err:        err,
 		}, nil
 	}
 

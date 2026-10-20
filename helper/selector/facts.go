@@ -206,6 +206,23 @@ func NewTable(fields ...Field) *Table {
 	return &Table{fields: out}
 }
 
+// Bytes returns the length of every field name and value t holds, summed: an
+// estimate of the memory it retains, for cache accounting. A nil Table holds
+// nothing.
+func (t *Table) Bytes() int64 {
+	if t == nil {
+		return 0
+	}
+	var n int64
+	for i := range t.fields {
+		n += int64(len(t.fields[i].Name))
+		for _, v := range t.fields[i].Values {
+			n += int64(len(v))
+		}
+	}
+	return n
+}
+
 // Lookup returns the values of the field key names. A JSON pointer yields
 // nothing: a Table has no nesting.
 func (t *Table) Lookup(key Key) Cursor {

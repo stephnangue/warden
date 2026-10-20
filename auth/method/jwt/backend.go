@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -48,23 +49,17 @@ type JWTAuthConfig struct {
 	// Default role for transparent operations when no role is specified
 	DefaultRole string `json:"default_role,omitempty"`
 
-	// Facts: the kind of entity the mount admits, and the claims it publishes
-	// beyond its built-in facts, as source claim (a name or a JSON pointer)
-	// to canonical fact name.
-	EntityKind string            `json:"entity_kind,omitempty"`
-	Facts      map[string]string `json:"facts,omitempty"`
+	// Facts: entity_kind, and the claims (a name or a JSON pointer) the mount
+	// publishes beyond its built-in facts. Compiled in buildJWTConfig. A
+	// config write refuses facts that do not compile, so they are never
+	// stored; ones that still fail at load (the mount table's, or storage
+	// written under looser rules) are installed with a nil naming: the mount
+	// answers no fact, so nothing that reads facts can match it.
+	helper.FactsConfig
 
 	// Internal
 	validator *jwt.Validator `json:"-"`
 	keySet    jwt.KeySet     `json:"-"`
-
-	// naming is EntityKind and Facts compiled; when they do not compile it is
-	// nil and namingErr says why. A config write refuses such a config, so it
-	// is never stored. One that still fails at load (the mount table's, or
-	// storage written under looser rules) is installed with a nil naming: the
-	// mount answers no fact, so nothing that reads facts can match it.
-	naming    *logical.MountNaming `json:"-"`
-	namingErr error                `json:"-"`
 }
 
 // jwtAuthBackend is the framework-based JWT authentication backend
@@ -141,9 +136,8 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 	if err != nil {
 		return err
 	}
-	if config.namingErr != nil {
-		b.logger.Error("JWT auth facts do not compile; the mount answers no fact until its config is rewritten",
-			logger.Err(config.namingErr))
+	if err := config.FactsConfig.Err(); err != nil {
+		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
 	}
 	b.installConfig(config)
 	return nil
@@ -155,7 +149,7 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 func (b *jwtAuthBackend) installConfig(config *JWTAuthConfig) {
 	b.configMu.Lock()
 	b.config = config
-	b.mountFacts.Publish(config.naming)
+	b.mountFacts.Publish(config.Naming())
 	b.configMu.Unlock()
 }
 
@@ -167,12 +161,9 @@ func buildJWTConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, e
 		return nil, err
 	}
 
-	// A naming that does not compile is kept on the config, not returned:
-	// the caller decides whether to refuse it or fail closed.
-	config.naming, config.namingErr = compileNaming(config.EntityKind, config.Facts)
-	if config.namingErr == nil {
-		config.EntityKind = config.naming.Kind
-	}
+	// Facts that do not compile are kept on the config, not returned: the
+	// caller decides whether to refuse them or fail closed.
+	config.Compile(jwtBuiltinFacts())
 
 	var keySet jwt.KeySet
 

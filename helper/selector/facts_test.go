@@ -178,6 +178,25 @@ func TestNewTable_Copies(t *testing.T) {
 	}
 }
 
+func TestTableBytes(t *testing.T) {
+	var nilTable *Table
+	if got := nilTable.Bytes(); got != 0 {
+		t.Fatalf("nil Table: %d", got)
+	}
+	if got := NewTable().Bytes(); got != 0 {
+		t.Fatalf("empty Table: %d", got)
+	}
+	tbl := NewTable(
+		Field{Name: "cn", Values: []string{"agent-1"}},   // 2 + 7
+		Field{Name: "ou", Values: []string{"a", "bc"}},   // 2 + 1 + 2
+		Field{Name: "serial", Values: nil},               // 6
+		Field{Name: "dns_san", Values: []string{"x.io"}}, // 7 + 4
+	)
+	if got := tbl.Bytes(); got != 31 {
+		t.Fatalf("Bytes = %d, want 31", got)
+	}
+}
+
 func TestNewTable_Panics(t *testing.T) {
 	mustPanic := func(name string, fn func()) {
 		t.Helper()
