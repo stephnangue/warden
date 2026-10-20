@@ -23,8 +23,11 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 }
 
 // resolveRoleGrant decides the role req runs under when its token te takes its
-// role per request, and projects that role onto te. For any other token it
-// clears req.RoleGrant and leaves te untouched.
+// role per request, and projects that role onto te. The role asked for is
+// req.RequestedRole, which only implicit auth sets (with req.Transparent): a
+// qualifying token on a request that is not transparent was presented
+// explicitly and is refused. For any other token it clears req.RoleGrant,
+// leaves te untouched and allocates nothing.
 //
 // te must be this request's own copy of the token entry: the role, its
 // policies and spec, and the membership's metadata are written onto it, and
@@ -39,7 +42,8 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 // by the next request of a cached admission: nothing here is cached on the
 // token.
 //
-// Lock-free; a granted request on a steady membership does not allocate.
+// Lock-free; on a steady membership a granted request allocates only its
+// RoleGrant.
 func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, now time.Time) {
 	if !takesRoleGrant(te) {
 		req.RoleGrant = nil
@@ -51,14 +55,14 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	te.Policies = nil
 	te.CredentialSpec = ""
 
-	rg := req.RoleGrant
-	if rg == nil {
-		// Only the request that admitted the credential creates a grant: this
-		// admission token arrived as a Warden token.
+	if !req.Transparent {
+		// Only implicit auth, admitting this request's own credential, asks
+		// for a role: this admission token arrived as a Warden token.
 		req.RoleGrant = &logical.RoleGrant{DeniedReason: logical.RoleDeniedExplicitAdmission, Groups: noGroups}
 		return
 	}
-	rg.Role, rg.GrantedBy, rg.Groups, rg.DeniedReason = nil, "", noGroups, ""
+	rg := &logical.RoleGrant{RoleName: req.RequestedRole, Groups: noGroups}
+	req.RoleGrant = rg
 
 	adm := te.Admission
 	if adm == nil {

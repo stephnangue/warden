@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -110,16 +115,21 @@ func (e *grantEnv) issue(adm *logical.Admission, policies []string) string {
 	return entry.Data["token"]
 }
 
-// transparent builds a request as implicit auth leaves it: the token's
-// per-request copy set on it and the requested role in a fresh grant.
+// transparent builds a request as implicit auth leaves it: transparent, the
+// token's per-request copy set on it and the requested role recorded.
 func (e *grantEnv) transparent(token, role string) (*logical.Request, error) {
 	te, err := e.c.LookupToken(e.ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	req := &logical.Request{Operation: logical.ReadOperation, Path: "secret/x", ClientToken: token}
+	req := &logical.Request{
+		Operation:     logical.ReadOperation,
+		Path:          "secret/x",
+		ClientToken:   token,
+		Transparent:   true,
+		RequestedRole: role,
+	}
 	req.SetTokenEntry(te)
-	req.RoleGrant = &logical.RoleGrant{RoleName: role}
 	return req, nil
 }
 
@@ -219,8 +229,18 @@ func TestRoleGrant_Refusals(t *testing.T) {
 			name: "admission token presented explicitly",
 			request: func(e *grantEnv) *logical.Request {
 				// No implicit auth ran: the token is looked up from ClientToken
-				// and nothing created a grant.
+				// and the request is not transparent.
 				return &logical.Request{Operation: logical.ReadOperation, Path: "secret/x", ClientToken: e.token}
+			},
+			reason:  logical.RoleDeniedExplicitAdmission,
+			message: "admission token presented explicitly; present the credential instead",
+		},
+		{
+			name: "a requested role without implicit auth",
+			request: func(e *grantEnv) *logical.Request {
+				// A role recorded on a request implicit auth did not mark
+				// transparent grants nothing.
+				return &logical.Request{Operation: logical.ReadOperation, Path: "secret/x", ClientToken: e.token, RequestedRole: "deploy"}
 			},
 			reason:  logical.RoleDeniedExplicitAdmission,
 			message: "admission token presented explicitly; present the credential instead",
@@ -324,24 +344,49 @@ func TestRoleGrant_VerdictSkippedUnauth(t *testing.T) {
 	assert.Equal(t, logical.RoleDeniedNotAssumable, req.RoleGrant.DeniedReason, "resolved, but not a verdict")
 }
 
-func TestRoleGrant_ResolveDoesNotAllocate(t *testing.T) {
+// On a steady membership a granted request allocates its RoleGrant and nothing
+// else: no membership compute, no role copy, no metadata copy.
+func TestRoleGrant_ResolveAllocatesOnlyTheGrant(t *testing.T) {
 	e := newGrantEnv(t)
 	req := mustTransparent(e, e.token, "deploy")
 	te := req.TokenEntry()
-	rg := req.RoleGrant
 	now := time.Now()
 
 	e.c.resolveRoleGrant(req, te, now) // computes and caches the membership
-	require.True(t, rg.Granted())
+	require.True(t, req.RoleGrant.Granted())
 
 	allocs := testing.AllocsPerRun(1000, func() {
 		te.RoleName = ""
-		req.RoleGrant = rg
 		e.c.resolveRoleGrant(req, te, now)
 	})
-	assert.Zero(t, allocs, "a granted request on a steady membership allocates nothing")
-	assert.True(t, rg.Granted())
+	assert.Equal(t, 1.0, allocs, "the grant itself")
+	assert.True(t, req.RoleGrant.Granted())
 	assert.Equal(t, "deploy", te.RoleName)
+}
+
+// A transparent request whose token carries its role (every login today)
+// creates no grant and allocates nothing for one.
+func TestRoleGrant_LegacyTransparentAllocatesNothing(t *testing.T) {
+	e := newGrantEnv(t)
+	entry, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
+		PrincipalID:   "agent-1",
+		RoleName:      "reader",
+		MountAccessor: grantAccessor,
+		ExpireAt:      time.Now().Add(time.Hour),
+		Policies:      []string{"deploy"},
+		Admission:     e.adm,
+	})
+	require.NoError(t, err)
+	req := mustTransparent(e, entry.Data["token"], "deploy")
+	te := req.TokenEntry()
+	now := time.Now()
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		e.c.resolveRoleGrant(req, te, now)
+	})
+	assert.Zero(t, allocs)
+	assert.Nil(t, req.RoleGrant)
+	assert.Equal(t, "reader", te.RoleName)
 }
 
 // Every consumer reads the role from the token entry, so the projection is what
@@ -708,14 +753,67 @@ func TestRoleGrant_KindKeepsHumanMountOut(t *testing.T) {
 	requireGranted(t, req, te, err, "deploy")
 }
 
-// A mount that publishes no naming answers no fact, so no group matches.
+// A mount that publishes no naming answers no fact, so no group matches; an
+// admission with no mount at all is the same.
 func TestRoleGrant_NoNamingNoGroups(t *testing.T) {
-	e := newGrantEnv(t)
-	adm := e.admission(grantMount)
-	adm.Mount = &logical.MountFacts{}
-	req, _, _, err := e.checkToken(e.issue(adm, nil), "deploy")
-	requireDenied(t, req, err, logical.RoleDeniedNotAssumable)
-	assert.Empty(t, req.RoleGrant.Groups)
+	for name, mount := range map[string]*logical.MountFacts{
+		"no naming published": {},
+		"no mount":            nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newGrantEnv(t)
+			adm := e.admission(grantMount)
+			adm.Mount = mount
+			req, _, te, err := e.checkToken(e.issue(adm, nil), "deploy")
+			requireDenied(t, req, err, logical.RoleDeniedNotAssumable)
+			assert.Empty(t, req.RoleGrant.Groups)
+			assert.Nil(t, te.Metadata)
+		})
+	}
+}
+
+// The transparent marker and the requested role are set by implicit auth
+// alone: no other code in core writes them, and neither is decoded from a
+// request body.
+func TestRoleGrant_RequestedRoleSetOnlyByImplicitAuth(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	require.NoError(t, err)
+
+	writers := map[string][]string{}
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					as, ok := n.(*ast.AssignStmt)
+					if !ok {
+						return true
+					}
+					for _, lhs := range as.Lhs {
+						if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "RequestedRole" || sel.Sel.Name == "Transparent") {
+							writers[sel.Sel.Name] = append(writers[sel.Sel.Name], fn.Name.Name)
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+	assert.Equal(t, []string{"performImplicitAuth"}, writers["RequestedRole"])
+	assert.Equal(t, []string{"performImplicitAuth"}, writers["Transparent"])
+
+	f, ok := reflect.TypeOf(logical.Request{}).FieldByName("RequestedRole")
+	require.True(t, ok)
+	assert.Equal(t, "-", f.Tag.Get("json"))
+	f, ok = reflect.TypeOf(logical.Request{}).FieldByName("Transparent")
+	require.True(t, ok)
+	assert.Equal(t, "-", f.Tag.Get("json"))
 }
 
 func TestRoleGrant_AgentGroups(t *testing.T) {
@@ -768,8 +866,8 @@ func TestRoleGrant_AgentGroups(t *testing.T) {
 }
 
 // A token that carries its role (every login today) and a root token
-// authorize exactly as before: the grant a transparent request created is
-// dropped, the entry is not rewritten, and audit gains no field.
+// authorize exactly as before on a transparent request: no grant, the entry
+// is not rewritten, and audit gains no field.
 func TestRoleGrant_LegacyTokensUnchanged(t *testing.T) {
 	e := newGrantEnv(t)
 	metadata := map[string]string{"team": "platform"}
@@ -795,7 +893,7 @@ func TestRoleGrant_LegacyTokensUnchanged(t *testing.T) {
 			te, err := e.c.LookupToken(e.ctx, token)
 			require.NoError(t, err)
 			req.SetTokenEntry(te)
-			req.RoleGrant = &logical.RoleGrant{RoleName: "deploy"} // what implicit auth now creates
+			req.Transparent, req.RequestedRole = true, "deploy" // what implicit auth records
 		}
 		auth, _, te, err := e.c.CheckToken(e.ctx, req, false)
 		return req, auth, te, err
@@ -805,6 +903,9 @@ func TestRoleGrant_LegacyTokensUnchanged(t *testing.T) {
 		entry := e.c.buildRequestAuditEntry(e.ctx, req, auth, te, nil)
 		entry.Timestamp = time.Time{}
 		entry.Auth.TokenTTL = 0
+		// The flag records the path a request took, not its token; this
+		// compares only what the token decides.
+		entry.Request.Transparent = false
 		b, err := json.Marshal(entry)
 		require.NoError(t, err)
 		return string(b)

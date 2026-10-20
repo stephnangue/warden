@@ -2550,11 +2550,12 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 	}
 	req.SetTokenEntry(te)
 	// The role this request asks for, for CheckToken to grant when the token
-	// takes its role per request (an admission token). Its presence is also
-	// what tells CheckToken the token came from admitting this request's own
-	// credential, not from a Warden token presented explicitly. CheckToken
-	// clears it for a token that carries its role itself.
-	req.RoleGrant = &logical.RoleGrant{RoleName: authRole}
+	// takes its role per request (an admission token); a token that carries
+	// its role ignores it. With req.Transparent, set above, it is also what
+	// tells CheckToken the token came from admitting this request's own
+	// credential, not from a Warden token presented explicitly. A string, so a
+	// request whose token carries its role allocates nothing for it.
+	req.RequestedRole = authRole
 	// Ensure ClientToken is set so downstream policy checks (fetchCBPAndTokenEntry)
 	// don't short-circuit on the empty-token guard. For JWT transparent auth the
 	// JWT string is already in ClientToken, but for cert transparent auth there is
@@ -2831,7 +2832,8 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	// The flight hands one entry to every request that waited on it. Each gets
 	// its own copy, since a request writes onto its entry (its role, or an
 	// access backend's spec); the copies share the one *Admission, as every
-	// copy of a token entry does. One allocation, on a cache miss only.
+	// copy of a token entry does. One allocation per waiter on a cache miss
+	// (the flight's shared result is itself a copy).
 	return te.Copy(), clearClientToken, nil
 }
 

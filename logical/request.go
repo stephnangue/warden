@@ -103,11 +103,15 @@ type Request struct {
 	TokenMetadata map[string]string
 
 	// RoleGrant is the role this request runs under when its token takes its
-	// role per request (an admission token). A transparent request creates it
-	// with the requested role before it authenticates; CheckToken resolves it,
-	// or sets it to nil for a token that carries its role itself. Nil on every
-	// other request.
+	// role per request (an admission token): CheckToken creates it, from
+	// RequestedRole, only for such a token. Nil on every other request.
 	RoleGrant *RoleGrant `json:"-"`
+
+	// RequestedRole is the role a transparent request asks for (X-Warden-Role,
+	// the role/<name>/ segment, ?role=, the provider's default_role), set by
+	// implicit auth alongside Transparent and never from client input
+	// directly. Empty when the request named none, or is not transparent.
+	RequestedRole string `json:"-"`
 
 	// Request metadata
 	ClientIP  string

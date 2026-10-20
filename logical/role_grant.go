@@ -27,10 +27,9 @@ const (
 )
 
 // RoleGrant is the role a request runs under, resolved once per request from
-// the caller's admission and never stored on a token. A transparent request
-// creates it with the requested RoleName before it authenticates; core fills
-// the rest when it resolves the grant, and drops it (sets Request.RoleGrant to
-// nil) for a token that does not take its role per request.
+// the caller's admission and never stored on a token. Core creates it when it
+// resolves the grant, only for a token that takes its role per request; every
+// other request has none.
 //
 // A RoleGrant belongs to one request and is read and written by that request's
 // goroutine only. Role and Groups are shared with the published role and the
