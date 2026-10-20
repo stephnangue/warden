@@ -68,6 +68,58 @@ func TestUserAttribution_JSONCompat(t *testing.T) {
 	}
 }
 
+// TestCloneRoleGrant: the role-grant fields survive Clone, and the groups are
+// copied, not aliased: the entry's slice may come from a membership every
+// request of a credential shares.
+func TestCloneRoleGrant(t *testing.T) {
+	entry := &LogEntry{Auth: &Auth{
+		RoleName:         "deploy",
+		RoleGrantedBy:    "group:deployers",
+		RoleDeniedReason: "not assumable",
+		Groups:           []string{"deployers", "readers"},
+	}}
+
+	clone := entry.Clone()
+	entry.Auth.Groups[0] = "modified"
+	entry.Auth.RoleGrantedBy = "modified"
+	entry.Auth.RoleDeniedReason = "modified"
+
+	if clone.Auth.RoleGrantedBy != "group:deployers" || clone.Auth.RoleDeniedReason != "not assumable" {
+		t.Errorf("clone role grant fields mismatch: %+v", clone.Auth)
+	}
+	if len(clone.Auth.Groups) != 2 || clone.Auth.Groups[0] != "deployers" || clone.Auth.Groups[1] != "readers" {
+		t.Errorf("clone shares or drops the groups: %v", clone.Auth.Groups)
+	}
+}
+
+// TestRoleGrant_JSONKeys: the new keys are omitempty, so an entry for a token
+// that carries its role serializes as before, and the wire names are pinned.
+func TestRoleGrant_JSONKeys(t *testing.T) {
+	b, err := json.Marshal(&Auth{RoleName: "deploy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"role_name":"deploy"}`; string(b) != want {
+		t.Errorf("got  %s\nwant %s", b, want)
+	}
+
+	b, err = json.Marshal(&Auth{RoleName: "deploy", RoleGrantedBy: "group:deployers", Groups: []string{"deployers"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"role_name":"deploy","role_granted_by":"group:deployers","groups":["deployers"]}`; string(b) != want {
+		t.Errorf("got  %s\nwant %s", b, want)
+	}
+
+	b, err = json.Marshal(&Auth{RoleName: "", RoleDeniedReason: "role not found"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"role_denied_reason":"role not found"}`; string(b) != want {
+		t.Errorf("got  %s\nwant %s", b, want)
+	}
+}
+
 func TestCloneNil(t *testing.T) {
 	var entry *LogEntry
 	if entry.Clone() != nil {

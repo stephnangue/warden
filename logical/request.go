@@ -96,7 +96,18 @@ type Request struct {
 	// against it. Set from the token entry at the policy-check seam; never
 	// compiled into the cached CBP, so a CBP shared across tokens with the
 	// same policy set is still matched against each token's own metadata.
+	//
+	// Shared with the token entry it came from, which may share it further (a
+	// cached token's metadata, or a membership rendered for every request of
+	// one credential): read only.
 	TokenMetadata map[string]string
+
+	// RoleGrant is the role this request runs under when its token takes its
+	// role per request (an admission token). A transparent request creates it
+	// with the requested role before it authenticates; CheckToken resolves it,
+	// or sets it to nil for a token that carries its role itself. Nil on every
+	// other request.
+	RoleGrant *RoleGrant `json:"-"`
 
 	// Request metadata
 	ClientIP  string

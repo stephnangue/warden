@@ -3848,9 +3848,9 @@ func TestResolveExchangeInputs_DefaultWithholdsUser(t *testing.T) {
 
 		// An agent carrying its own act chain is not refused here: no user is
 		// disclosed, so the actor token makes no delegation claim to misstate.
-		acted := *agentTE
+		acted := agentTE.Copy()
 		acted.Actors = []logical.ActorRef{{Subject: "orchestrator"}}
-		_, err = resolveExchangeInputsForTest(c, ctx, req, &acted)
+		_, err = resolveExchangeInputsForTest(c, ctx, req, acted)
 		require.NoError(t, err)
 	})
 

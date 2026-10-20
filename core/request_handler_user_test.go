@@ -264,13 +264,13 @@ func TestStampUserAttribution(t *testing.T) {
 	// are recorded — the namespace and prior actors a delegation assertion asserts.
 	// The chain is copied, never aliased: the token entry is shared by the cache.
 	t.Run("stamps the user's namespace path and act chain", func(t *testing.T) {
-		chained := *userTE
+		chained := userTE.Copy()
 		chained.NamespacePath = "team-payments/orders/"
 		chained.Actors = []logical.ActorRef{
 			{Subject: "broker-beta", Issuer: "https://idp.example.com"},
 			{Subject: "agents/alpha"},
 		}
-		req := &logical.Request{User: &logical.UserPrincipal{TokenEntry: &chained, RawToken: userJWT}}
+		req := &logical.Request{User: &logical.UserPrincipal{TokenEntry: chained, RawToken: userJWT}}
 
 		entry := core.buildRequestAuditEntry(ctx, req, &logical.Auth{}, nil, nil)
 		require.NotNil(t, entry.Auth)

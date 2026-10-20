@@ -22,6 +22,9 @@ type blockingLoginBackend struct {
 	release     chan struct{}
 	releaseOnce sync.Once
 	logins      atomic.Int32
+
+	// adm, when set, is the admission every login hands over.
+	adm *logical.Admission
 }
 
 // open releases every login held, once, whether the test or its cleanup calls it.
@@ -48,6 +51,7 @@ func (b *blockingLoginBackend) HandleRequest(ctx context.Context, req *logical.R
 			TokenType:   TypeJWTRole,
 			TokenTTL:    time.Hour,
 			ClientToken: jwt,
+			Admission:   b.adm,
 		},
 		Data: map[string]any{},
 	}, nil

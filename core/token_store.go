@@ -373,7 +373,10 @@ func (s *TokenStore) GenerateToken(ctx context.Context, tokenTypeName string, au
 		s.metrics.IncrementTokensGenerated()
 	}
 
-	return entry, nil
+	// generateWithCollisionDetection hands back the entry the cache holds,
+	// whether it stored a new one or found one already there; the caller gets a
+	// copy, as from every lookup, so nothing it does reaches the cache.
+	return entry.Copy(), nil
 }
 
 // generateWithCollisionDetection generates a token with retry logic for collisions
@@ -435,9 +438,10 @@ func (s *TokenStore) generateWithCollisionDetection(
 			// credential+mount+role already has a valid cache entry — return it
 			// instead of treating it as a collision.
 			//
-			// The caller receives the shared cached entry itself, not a copy,
-			// and its Admission may differ from the one in authData (a
-			// concurrent login won). Callers must not mutate it.
+			// This returns the shared cached entry itself, whose Admission may
+			// differ from the one in authData (a concurrent login won).
+			// GenerateToken copies it before handing it out; a caller of this
+			// function must not modify it.
 			if s.registry.IsTransparent(meta.Name) {
 				return existingEntry, nil
 			}
@@ -668,8 +672,7 @@ func (s *TokenStore) LookupByAccessor(ctx context.Context, accessor string) (*To
 		}
 
 		// Return a copy to prevent external modification
-		entryCopy := *entry
-		return &entryCopy, nil
+		return entry.Copy(), nil
 	}
 
 	// Retrieve full entry from ID cache
@@ -702,8 +705,7 @@ func (s *TokenStore) LookupByAccessor(ctx context.Context, accessor string) (*To
 	}
 
 	// Return a copy to prevent external modification
-	entryCopy := *entry
-	return &entryCopy, nil
+	return entry.Copy(), nil
 }
 
 // RevokeByAccessor revokes a token by its accessor
@@ -1525,8 +1527,7 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	}
 
 	// Return a copy to prevent external modification
-	entryCopy := *entry
-	return &entryCopy, nil
+	return entry.Copy(), nil
 }
 
 // LookupTransparentTokenWithRole looks up a cached transparent-auth token
@@ -1642,8 +1643,8 @@ func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType Tra
 		s.metrics.IncrementTokensResolved()
 	}
 
-	entryCopy := *entry
-	return &entryCopy, nil
+	// A copy: the request projects its role onto it, never onto the cached entry.
+	return entry.Copy(), nil
 }
 
 // Helper functions

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -294,6 +295,7 @@ func (c *Core) buildRequestAuditEntry(
 		Request:   buildAuditRequest(req, ns),
 		Auth:      buildAuditAuth(auth, te),
 	}
+	stampRoleGrant(entry, req)
 	stampUserAttribution(entry, req)
 	stampMCPClient(entry, req)
 
@@ -302,6 +304,29 @@ func (c *Core) buildRequestAuditEntry(
 	}
 
 	return entry
+}
+
+// stampRoleGrant records how the request's role was decided when its token
+// takes its role per request: the granting group, or why none granted it, and
+// the caller's groups. A no-op for every other request, whose entry reads as
+// before. The groups are copied: the slice is shared with the cached
+// membership.
+func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.RoleGrant == nil {
+		return
+	}
+	rg := req.RoleGrant
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	if rg.Granted() {
+		entry.Auth.RoleGrantedBy = rg.GrantedBy
+	} else {
+		entry.Auth.RoleDeniedReason = rg.DeniedReason
+	}
+	if len(rg.Groups) > 0 {
+		entry.Auth.Groups = slices.Clone(rg.Groups)
+	}
 }
 
 // stampUserAttribution records the secondary (user) principal onto an audit
@@ -382,6 +407,7 @@ func (c *Core) buildResponseAuditEntry(
 		Auth:      buildAuditAuth(auth, te),
 		Response:  buildAuditResponse(resp, req, cred),
 	}
+	stampRoleGrant(entry, req)
 	stampUserAttribution(entry, req)
 	stampMCPClient(entry, req)
 
