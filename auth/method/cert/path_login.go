@@ -96,11 +96,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 
 	// Verify certificate chain
-	verifyOpts := x509.VerifyOptions{
-		Roots:     caPool,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	verifiedChains, err := cert.Verify(verifyOpts)
+	verifiedChains, err := verifyChain(caPool, cert)
 	if err != nil {
 		b.logger.Warn("login failed: certificate verification error", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
@@ -130,13 +126,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 
 	// Determine principal claim source: role overrides global config
-	principalClaim := role.PrincipalClaim
-	if principalClaim == "" && config != nil {
-		principalClaim = config.PrincipalClaim
-	}
-	if principalClaim == "" {
-		principalClaim = "cn"
-	}
+	principalClaim := principalClaimOf(config, role)
 
 	// Extract principal identity from the certificate
 	principalID := extractPrincipal(cert, principalClaim)
@@ -183,9 +173,10 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 }
 
 // getCAPool returns the CA pool to use for cert verification.
-// Role-specific CA overrides the global trusted CAs.
+// Role-specific CA overrides the global trusted CAs. A nil role is the
+// role-free admission: the mount's pool alone. nil when there is none.
 func getCAPool(config *CertAuthConfig, role *CertRole) (*x509.CertPool, error) {
-	if role.Certificate != "" {
+	if role != nil && role.Certificate != "" {
 		return buildCAPool(role.Certificate)
 	}
 	if config != nil && config.caPool != nil {

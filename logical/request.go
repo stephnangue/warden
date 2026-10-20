@@ -134,6 +134,13 @@ type Request struct {
 	// requests are cache-only, not persisted to storage.
 	Transparent bool `json:"-"`
 
+	// Internal marks a request core builds and routes in process, never one
+	// that arrived over HTTP. Paths that hand back in-process values (an auth
+	// mount's introspect/admit returns a *Admission) refuse a request without
+	// it. Only core sets it, on requests it routes itself; the HTTP layer
+	// never does, and it is not decoded from JSON.
+	Internal bool `json:"-"`
+
 	// StreamUnauthenticated marks this streaming request for upstream
 	// pass-through without Warden authentication. Set by core when a
 	// TransparentModeProvider's IsUnauthenticatedPath returns true —

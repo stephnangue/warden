@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/helper"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -62,43 +61,15 @@ func (b *kubernetesAuthBackend) handleIntrospectRoles(ctx context.Context, req *
 		return introspectEmpty(), nil
 	}
 
-	// Per-mount issuer pinning: if the mount has an issuer pinned,
-	// short-circuit when the token's iss doesn't match. Keeps the
-	// aggregator decoupled from per-mount config.
-	if cfg.Issuer != "" && !cfg.DisableIssValidation {
-		claims, _ := helper.ParseJWTClaimsUnverified(jwtToken)
-		if claims == nil {
-			return introspectEmpty(), nil
-		}
-		issClaim, _ := claims["iss"].(string)
-		if issClaim != cfg.Issuer {
-			return introspectEmpty(), nil
-		}
-	}
-
-	// Bearer for the TokenReview call: prefer the configured reviewer
-	// JWT (standard Vault path); fall back to the workload's JWT in
-	// self-reviewing mode.
-	bearer := cfg.TokenReviewerJWT
-	if bearer == "" {
-		bearer = jwtToken
-	}
-
-	// One TokenReview with no audience binding. Response status.audiences
-	// gives us the token's natural audiences for per-role filtering.
-	status, err := reviewToken(ctx, cfg.httpClient, cfg.KubernetesHost, bearer, jwtToken, nil)
+	// The issuer pre-filter, then one TokenReview with no audience binding:
+	// status.audiences gives the token's natural audiences for per-role
+	// filtering.
+	rv, err := reviewWorkload(ctx, cfg, jwtToken, nil)
 	if err != nil {
-		b.logger.Warn("introspect: TokenReview call failed", lgr.Err(err))
+		b.logger.Debug("introspect: token not reviewed", lgr.Err(err))
 		return introspectEmpty(), nil
 	}
-	if !status.Authenticated || status.Error != "" {
-		return introspectEmpty(), nil
-	}
-
-	saNamespace, saName, ok := parseSAUsername(status.User.Username)
-	if !ok {
-		return introspectEmpty(), nil
-	}
+	status, saNamespace, saName := rv.status, rv.namespace, rv.name
 
 	roleNames, err := b.listRoles(ctx)
 	if err != nil {

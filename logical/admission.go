@@ -1,6 +1,7 @@
 package logical
 
 import (
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -127,6 +128,17 @@ type Membership struct {
 type GroupGrant struct {
 	Group string // the group's name
 	Label string // GroupLabel(Group), built once when the group is compiled
+}
+
+// ErrAdmissionNotSerializable is MarshalJSON's refusal: an admission carries
+// verified facts, which never leave the process.
+var ErrAdmissionNotSerializable = errors.New("an admission is in-process only and is never serialized")
+
+// MarshalJSON refuses to encode the admission, so a response, log or audit
+// entry that carried one by mistake fails to encode rather than disclose the
+// facts. Every struct field holding an admission is also tagged json:"-".
+func (a *Admission) MarshalJSON() ([]byte, error) {
+	return nil, ErrAdmissionNotSerializable
 }
 
 // Size returns the admission's byte estimate for cache accounting: Bytes,

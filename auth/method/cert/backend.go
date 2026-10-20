@@ -87,6 +87,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathRole(),
 			b.pathRoleList(),
 			b.pathIntrospect(),
+			helper.AdmitPath(b.admit),
 		},
 	}
 

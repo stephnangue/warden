@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hashicorp/cap/jwt"
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -88,31 +87,9 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		}, nil
 	}
 
-	// Build expected claims - merge global config with role-specific
-	expected := jwt.Expected{
-		SigningAlgorithms: []jwt.Alg{jwt.RS256, jwt.RS384, jwt.RS512, jwt.ES256, jwt.ES384, jwt.ES512},
-	}
-
-	// Global issuer from config
-	if config.BoundIssuer != "" {
-		expected.Issuer = config.BoundIssuer
-	}
-
-	// Role-specific subject (overrides config)
-	if role.BoundSubject != "" {
-		expected.Subject = role.BoundSubject
-	} else if config.BoundSubject != "" {
-		expected.Subject = config.BoundSubject
-	}
-
-	// Role-specific audiences (overrides config)
-	if len(role.BoundAudiences) > 0 {
-		expected.Audiences = role.BoundAudiences
-	} else if len(config.BoundAudiences) > 0 {
-		expected.Audiences = config.BoundAudiences
-	}
-
-	claims, err := config.validator.Validate(ctx, jwtToken, expected)
+	// Expected claims: the mount's, with the role's subject and audiences
+	// overriding where the role sets them.
+	claims, err := config.validator.Validate(ctx, jwtToken, expectedClaims(config, role))
 	if err != nil {
 		b.logger.Warn("login failed: JWT validation error", lgr.Err(err), lgr.String("role", roleName))
 		return &logical.Response{
@@ -146,25 +123,14 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	}
 
 	// Extract expiration time
-	expValue, ok := claims["exp"]
-	if !ok {
-		b.logger.Warn("login failed: no exp claim in JWT", lgr.String("role", roleName))
+	jwtExpiration, err := tokenExpiry(claims)
+	if err != nil {
+		b.logger.Warn("login failed: "+err.Error(), lgr.String("role", roleName))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
 			Err:        errAuthFailed,
 		}, nil
 	}
-
-	expTimestamp, ok := parseNumericClaim(expValue)
-	if !ok {
-		b.logger.Warn("login failed: invalid exp format in JWT", lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errAuthFailed,
-		}, nil
-	}
-
-	jwtExpiration := time.Unix(expTimestamp, 0)
 	jwtTTL := time.Until(jwtExpiration)
 
 	if jwtTTL <= 0 {

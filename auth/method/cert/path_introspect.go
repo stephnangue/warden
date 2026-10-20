@@ -107,10 +107,7 @@ func verifyCertForRole(config *CertAuthConfig, cert *x509.Certificate, role *Cer
 	if caPool == nil {
 		return errCertAuthFailed
 	}
-	_, err = cert.Verify(x509.VerifyOptions{
-		Roots:     caPool,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	})
+	_, err = verifyChain(caPool, cert)
 	return err
 }
 

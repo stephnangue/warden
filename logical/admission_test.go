@@ -314,4 +314,27 @@ func TestAdmission_NeverSerialized(t *testing.T) {
 		assert.NotContains(t, string(b), "Admission", name)
 		assert.NotContains(t, string(b), "agent-1", name)
 	}
+
+	// Held anywhere else, such as a response's data map, it refuses to encode.
+	for name, v := range map[string]any{
+		"pointer":  adm,
+		"data map": map[string]any{"admission": adm},
+	} {
+		b, err := json.Marshal(v)
+		assert.ErrorIs(t, err, ErrAdmissionNotSerializable, name)
+		assert.Nil(t, b, name)
+	}
+}
+
+// A request is marked internal only in process: the flag never encodes or
+// decodes.
+func TestRequest_InternalNotSerialized(t *testing.T) {
+	b, err := json.Marshal(&Request{Internal: true})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "Internal")
+	assert.NotContains(t, string(b), "internal")
+
+	var req Request
+	require.NoError(t, json.Unmarshal([]byte(`{"Internal":true,"internal":true}`), &req))
+	assert.False(t, req.Internal)
 }

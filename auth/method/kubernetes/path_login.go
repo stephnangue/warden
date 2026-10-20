@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/framework"
-	"github.com/stephnangue/warden/helper"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -132,59 +131,18 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 		return logical.ErrorResponse(logical.ErrNotFoundf("role %q not found", roleStr)), nil
 	}
 
-	// Cheap issuer pre-filter: parse-unverified, check iss matches the
-	// mount's configured issuer. Cuts noise before the TokenReview round-trip
-	// for tokens from the wrong cluster.
-	claims, _ := helper.ParseJWTClaimsUnverified(jwtStr)
-	if cfg.Issuer != "" && !cfg.DisableIssValidation {
-		if claims == nil {
-			b.logger.Warn("kubernetes login: failed to parse JWT for issuer pre-filter")
-			return logical.ErrorResponse(errAuthFailed), nil
-		}
-		issClaim, _ := claims["iss"].(string)
-		if issClaim != cfg.Issuer {
-			b.logger.Warn("kubernetes login: iss mismatch",
-				lgr.String("role", roleStr),
-				lgr.String("got_iss", issClaim),
-				lgr.String("want_iss", cfg.Issuer))
-			return logical.ErrorResponse(errAuthFailed), nil
-		}
-	}
-
-	// TokenReview call. Bearer is the operator-configured token_reviewer_jwt
-	// when set, otherwise the workload's own JWT (self-reviewing mode).
-	bearer := cfg.TokenReviewerJWT
-	if bearer == "" {
-		bearer = jwtStr
-	}
+	// The issuer pre-filter, the TokenReview (with the role's audience) and
+	// the service-account check, shared with the role-free admission.
 	var audiences []string
 	if role.Audience != "" {
 		audiences = []string{role.Audience}
 	}
-	status, err := reviewToken(ctx, cfg.httpClient, cfg.KubernetesHost, bearer, jwtStr, audiences)
+	rv, err := reviewWorkload(ctx, cfg, jwtStr, audiences)
 	if err != nil {
-		b.logger.Warn("kubernetes login: TokenReview call failed",
-			lgr.String("role", roleStr),
-			lgr.Err(err))
+		b.logger.Warn("kubernetes login: "+err.Error(), lgr.String("role", roleStr))
 		return logical.ErrorResponse(errAuthFailed), nil
 	}
-	if !status.Authenticated || status.Error != "" {
-		b.logger.Warn("kubernetes login: TokenReview rejected token",
-			lgr.String("role", roleStr),
-			lgr.String("tokenreview_error", status.Error))
-		return logical.ErrorResponse(errAuthFailed), nil
-	}
-
-	// Username must be a SA token: "system:serviceaccount:<ns>:<name>".
-	// Anything else (system:anonymous, OIDC users, node identities) is
-	// out of scope for this auth method.
-	saNamespace, saName, ok := parseSAUsername(status.User.Username)
-	if !ok {
-		b.logger.Warn("kubernetes login: username is not a service account",
-			lgr.String("role", roleStr),
-			lgr.String("username", status.User.Username))
-		return logical.ErrorResponse(errAuthFailed), nil
-	}
+	status, saNamespace, saName, claims := rv.status, rv.namespace, rv.name, rv.claims
 
 	if err := matchRoleBindings(role, saNamespace, saName); err != nil {
 		b.logger.Warn("kubernetes login: SA binding mismatch",
