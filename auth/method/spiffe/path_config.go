@@ -29,6 +29,7 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 				"logins do not use it yet (a role's bound_audiences still applies). " +
 				"No entry may be empty; an empty value clears the list.",
 		},
+		"max_age": helper.MaxAgeFieldSchema(),
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
 
@@ -47,16 +48,19 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 built-in facts (aud, path, spiffe_id, svid, trust_domain; svid is x509 or jwt,
 and aud holds a JWT-SVID's audiences); a write replaces the whole map.
 'bound_audiences' is stored for mount-level audience binding and not used by
-logins yet.`,
+logins yet.
+'max_age' bounds a credential's age at admission, from its issue time: an
+SVID older than it, or without an issue time (an X.509-SVID has none), is not
+admitted. It is enforced from the role-free admission, not by role logins.`,
 	}
 }
 
 // unconfigured is what a mount with no config runs with, as a config read
 // renders it: the agent kind with the built-in facts only (the naming Factory
-// publishes), no audiences, no default role, and a token_ttl of zero, which
-// calculateTTL reads as no cap from the mount (the role's TTL and the SVID's
-// lifetime still apply). It is never written, so reads share it without a
-// lock.
+// publishes), no audiences, no default role, no max_age, and a token_ttl of
+// zero, which calculateTTL reads as no cap from the mount (the role's TTL and
+// the SVID's lifetime still apply). It is never written, so reads share it
+// without a lock.
 var unconfigured = &SPIFFEAuthConfig{FactsConfig: helper.FactsConfig{EntityKind: logical.EntityKindAgent}}
 
 func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -73,6 +77,7 @@ func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.R
 			"token_ttl":       config.TokenTTL.String(),
 			"default_role":    config.DefaultRole,
 			"bound_audiences": slices.Clone(config.BoundAudiences),
+			"max_age":         config.MaxAge.String(),
 			"entity_kind":     config.EntityKind,
 			"facts":           maps.Clone(config.Facts),
 		},
@@ -106,6 +111,7 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["default_role"] = b.config.DefaultRole
 		conf["bound_audiences"] = b.config.BoundAudiences
+		conf["max_age"] = b.config.MaxAge
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
 	}

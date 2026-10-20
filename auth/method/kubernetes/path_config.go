@@ -56,6 +56,7 @@ func (b *kubernetesAuthBackend) pathConfig() *framework.Path {
 				"where it is sent to TokenReview as spec.audiences; logins do not use it yet (a role's audience still applies). " +
 				"No entry may be empty; an empty value clears the list.",
 		},
+		"max_age": helper.MaxAgeFieldSchema(),
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
 
@@ -80,7 +81,10 @@ func (b *kubernetesAuthBackend) pathConfig() *framework.Path {
 built-in facts (service_account_namespace, service_account_name,
 service_account_uid, username, groups, aud); a write replaces the whole map.
 'bound_audiences' is stored for mount-level audience binding and not used by
-logins yet.`,
+logins yet.
+'max_age' bounds a workload token's age at admission, from its iat: a token
+older than it, or without an iat, is not admitted. It is enforced from the
+role-free admission; role logins keep their role's max_age.`,
 	}
 }
 
@@ -111,6 +115,7 @@ func (b *kubernetesAuthBackend) handleConfigRead(_ context.Context, _ *logical.R
 			"token_ttl":              b.config.TokenTTL.String(),
 			"default_role":           b.config.DefaultRole,
 			"bound_audiences":        slices.Clone(b.config.BoundAudiences),
+			"max_age":                b.config.MaxAge.String(),
 			"entity_kind":            b.config.EntityKind,
 			"facts":                  maps.Clone(b.config.Facts),
 		},
@@ -155,6 +160,7 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["default_role"] = b.config.DefaultRole
 		conf["bound_audiences"] = b.config.BoundAudiences
+		conf["max_age"] = b.config.MaxAge
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
 	}

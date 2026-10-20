@@ -70,6 +70,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeDurationSecond,
 			Description: "Token TTL (default: 1h)",
 		},
+		"max_age": helper.MaxAgeFieldSchema(),
 		"default_role": {
 			Type:        framework.TypeString,
 			Description: "Default role for transparent operations when no role is specified",
@@ -103,7 +104,10 @@ JWT claims into token metadata for use in token_metadata policy conditions.
 
 'entity_kind' (agent or human, default agent) names what the mount admits.
 'facts' maps source claims to the fact names the mount publishes beyond its
-built-in facts (sub, iss, aud); a write replaces the whole map.`,
+built-in facts (sub, iss, aud); a write replaces the whole map.
+'max_age' bounds a JWT's age at admission, from its iat: a JWT older than it,
+or without an iat, is not admitted. It is enforced from the role-free
+admission; role logins keep their role's max_age.`,
 	}
 }
 
@@ -135,6 +139,7 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"groups_claim":           b.config.GroupsClaim,
 			"group_policy_prefix":    b.config.GroupPolicyPrefix,
 			"token_ttl":              b.config.TokenTTL.String(),
+			"max_age":                b.config.MaxAge.String(),
 			"default_role":           b.config.DefaultRole,
 			"entity_kind":            b.config.EntityKind,
 			"facts":                  maps.Clone(b.config.Facts),
@@ -187,6 +192,7 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["groups_claim"] = b.config.GroupsClaim
 		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
 		conf["token_ttl"] = b.config.TokenTTL
+		conf["max_age"] = b.config.MaxAge
 		conf["default_role"] = b.config.DefaultRole
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts

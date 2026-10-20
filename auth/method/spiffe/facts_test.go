@@ -468,8 +468,8 @@ func TestConfigWrite_FactsAndAudiences(t *testing.T) {
 }
 
 // A mount with no config reads back what it runs with: the agent kind and the
-// built-in facts it answers, no audiences or default role, and a token_ttl of
-// zero, meaning no cap from the mount, which logins honour.
+// built-in facts it answers, no audiences, default role or max_age, and a
+// token_ttl of zero, meaning no cap from the mount, which logins honour.
 func TestConfigRead_UnconfiguredRendersDefaults(t *testing.T) {
 	b, ctx := createTestBackend(t)
 	require.Nil(t, b.config)
@@ -481,6 +481,7 @@ func TestConfigRead_UnconfiguredRendersDefaults(t *testing.T) {
 		"token_ttl":       "0s",
 		"default_role":    "",
 		"bound_audiences": []string(nil),
+		"max_age":         "0s",
 		"entity_kind":     logical.EntityKindAgent,
 		"facts":           map[string]string(nil),
 	}, resp.Data)
