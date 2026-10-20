@@ -408,6 +408,7 @@ func (s *TokenStore) generateWithCollisionDetection(
 			CreatedByIP:    authData.ClientIP,
 			Actors:         authData.Actors,
 			Metadata:       authData.Metadata,
+			Admission:      authData.Admission,
 		}
 
 		// Generate accessor (Tier 2)
@@ -1002,6 +1003,7 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 		Data:           map[string]string{"token": customToken},
 		Actors:         oldEntry.Actors,
 		Metadata:       oldEntry.Metadata,
+		Admission:      oldEntry.Admission,
 	}
 
 	// Compute new ID from custom token value

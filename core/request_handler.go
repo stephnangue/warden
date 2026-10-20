@@ -770,6 +770,17 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		mountAccessor = req.MountAccessor
 	}
 
+	// An admission names its mount relative to the namespace, the form a
+	// selector pins; req.MountPoint carries the namespace prefix. The auth
+	// method built this admission for this login alone, and it is written here,
+	// before the token store shares it, and never again.
+	if adm := auth.Admission; adm != nil && req != nil {
+		adm.MountPath = req.MountPoint
+		if ns, nsErr := namespace.FromContext(ctx); nsErr == nil && ns != nil {
+			adm.MountPath = strings.TrimPrefix(req.MountPoint, ns.Path)
+		}
+	}
+
 	now := time.Now()
 	authData := logical.AuthData{
 		PrincipalID:    auth.PrincipalID,
@@ -782,6 +793,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		MountAccessor:  mountAccessor,
 		Actors:         auth.Actors,
 		Metadata:       auth.Metadata,
+		Admission:      auth.Admission,
 	}
 
 	tokenValue, err := c.tokenStore.GenerateToken(ctx, auth.TokenType, &authData)
