@@ -73,6 +73,43 @@ func TestTokenEntryCopy_EveryField(t *testing.T) {
 	}
 }
 
+// TestRequestRoleGrant: the grant lives on the request; setting, reading and
+// clearing it allocate nothing, and a request copied by value reads its own.
+func TestRequestRoleGrant(t *testing.T) {
+	var nilReq *Request
+	if nilReq.RoleGrant() != nil {
+		t.Error("a nil request has no grant")
+	}
+	req := &Request{}
+	if req.RoleGrant() != nil {
+		t.Error("a new request has no grant")
+	}
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		rg := req.SetRoleGrant(RoleGrant{RoleName: "deploy", DeniedReason: RoleDeniedNotAssumable})
+		rg.DeniedReason, rg.GrantedBy = "", "group:deployers"
+		_ = req.RoleGrant().Granted()
+		req.ClearRoleGrant()
+	})
+	if allocs != 0 {
+		t.Errorf("grant set/read/clear allocated %v times", allocs)
+	}
+
+	rg := req.SetRoleGrant(RoleGrant{RoleName: "deploy"})
+	if req.RoleGrant() != rg {
+		t.Error("RoleGrant returns the grant set in place")
+	}
+	cp := *req
+	cp.RoleGrant().RoleName = "other"
+	if req.RoleGrant().RoleName != "deploy" {
+		t.Error("a request copied by value shares its grant with the original")
+	}
+	req.ClearRoleGrant()
+	if req.RoleGrant() != nil {
+		t.Error("ClearRoleGrant leaves a grant")
+	}
+}
+
 func TestRoleGrant_Granted(t *testing.T) {
 	var nilGrant *RoleGrant
 	if nilGrant.Granted() {

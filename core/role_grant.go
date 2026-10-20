@@ -26,8 +26,8 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 // role per request, and projects that role onto te. The role asked for is
 // req.RequestedRole, which only implicit auth sets (with req.Transparent): a
 // qualifying token on a request that is not transparent was presented
-// explicitly and is refused. For any other token it clears req.RoleGrant,
-// leaves te untouched and allocates nothing.
+// explicitly and is refused. For any other token it clears the request's
+// grant and leaves te untouched.
 //
 // te must be this request's own copy of the token entry: the role, its
 // policies and spec, and the membership's metadata are written onto it, and
@@ -36,17 +36,18 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 //
 // The grant is computed from the namespace's published groups and roles, read
 // once each, and the admission's cached membership under them at now. On a
-// grant it sets req.RoleGrant.GrantedBy; on a refusal, DeniedReason, and te
+// grant it sets the grant's GrantedBy; on a refusal, DeniedReason, and te
 // keeps no policies and no spec, so the request is refused by the CBP even if
 // nothing else refused it. A role edit, a group edit or a mapping edit is seen
 // by the next request of a cached admission: nothing here is cached on the
 // token.
 //
-// Lock-free; on a steady membership a granted request allocates only its
-// RoleGrant.
+// It is the only writer of the request's grant, which lives inside req by
+// value. Lock-free; on a steady membership it allocates nothing, whether it
+// grants, refuses, or leaves a role-carrying token alone.
 func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, now time.Time) {
 	if !takesRoleGrant(te) {
-		req.RoleGrant = nil
+		req.ClearRoleGrant()
 		return
 	}
 
@@ -58,11 +59,10 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	if !req.Transparent {
 		// Only implicit auth, admitting this request's own credential, asks
 		// for a role: this admission token arrived as a Warden token.
-		req.RoleGrant = &logical.RoleGrant{DeniedReason: logical.RoleDeniedExplicitAdmission, Groups: noGroups}
+		req.SetRoleGrant(logical.RoleGrant{DeniedReason: logical.RoleDeniedExplicitAdmission, Groups: noGroups})
 		return
 	}
-	rg := &logical.RoleGrant{RoleName: req.RequestedRole, Groups: noGroups}
-	req.RoleGrant = rg
+	rg := req.SetRoleGrant(logical.RoleGrant{RoleName: req.RequestedRole, Groups: noGroups})
 
 	adm := te.Admission
 	if adm == nil {

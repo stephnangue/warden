@@ -102,10 +102,12 @@ type Request struct {
 	// one credential): read only.
 	TokenMetadata map[string]string
 
-	// RoleGrant is the role this request runs under when its token takes its
-	// role per request (an admission token): CheckToken creates it, from
-	// RequestedRole, only for such a token. Nil on every other request.
-	RoleGrant *RoleGrant `json:"-"`
+	// roleGrant is the role this request runs under when its token takes its
+	// role per request (an admission token), and hasRoleGrant says whether it
+	// is set. Held by value, so resolving a grant allocates nothing; read it
+	// through RoleGrant.
+	roleGrant    RoleGrant
+	hasRoleGrant bool
 
 	// RequestedRole is the role a transparent request asks for (X-Warden-Role,
 	// the role/<name>/ segment, ?role=, the provider's default_role), set by
@@ -180,6 +182,30 @@ func (r *Request) TokenEntry() *TokenEntry {
 
 func (r *Request) SetTokenEntry(te *TokenEntry) {
 	r.tokenEntry = te
+}
+
+// RoleGrant returns the role grant core resolved for this request, or nil when
+// none is set: the request's token carries its role itself, or no token was
+// checked. The grant lives inside r, so the pointer is valid as long as r is,
+// and it is r's goroutine's to read.
+func (r *Request) RoleGrant() *RoleGrant {
+	if r == nil || !r.hasRoleGrant {
+		return nil
+	}
+	return &r.roleGrant
+}
+
+// SetRoleGrant stores g as the request's role grant and returns it in place.
+// Core calls it, and ClearRoleGrant, from one place: where it resolves the
+// grant. Neither allocates.
+func (r *Request) SetRoleGrant(g RoleGrant) *RoleGrant {
+	r.roleGrant, r.hasRoleGrant = g, true
+	return &r.roleGrant
+}
+
+// ClearRoleGrant removes the request's role grant.
+func (r *Request) ClearRoleGrant() {
+	r.roleGrant, r.hasRoleGrant = RoleGrant{}, false
 }
 
 // UserPrincipal is a request's secondary (user) principal: a first-class Warden

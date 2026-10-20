@@ -843,8 +843,8 @@ func (c *Core) performPolicyChecks(ctx context.Context, cbp *CBP, te *logical.To
 	// to it. Refused in every mode, ahead of the CBP; an unauthenticated check
 	// (a login) never evaluates it, as it never evaluates the CBP. The CBP would
 	// refuse anyway: an ungranted admission token carries no policies.
-	if !opts.Unauth && req.RoleGrant != nil && !req.RoleGrant.Granted() && !testHookSkipRoleVerdict {
-		ret.Error = multierror.Append(ret.Error, roleRefusal(req.RoleGrant, te))
+	if rg := req.RoleGrant(); !opts.Unauth && rg != nil && !rg.Granted() && !testHookSkipRoleVerdict {
+		ret.Error = multierror.Append(ret.Error, roleRefusal(rg, te))
 		return ret
 	}
 

@@ -312,10 +312,10 @@ func (c *Core) buildRequestAuditEntry(
 // before. The groups are copied: the slice is shared with the cached
 // membership.
 func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
-	if entry == nil || req == nil || req.RoleGrant == nil {
+	rg := req.RoleGrant()
+	if entry == nil || rg == nil {
 		return
 	}
-	rg := req.RoleGrant
 	if entry.Auth == nil {
 		entry.Auth = &audit.Auth{}
 	}

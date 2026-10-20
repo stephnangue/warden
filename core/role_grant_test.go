@@ -151,9 +151,9 @@ func (e *grantEnv) checkToken(token, role string) (*logical.Request, *logical.Au
 func requireGranted(t *testing.T, req *logical.Request, te *logical.TokenEntry, err error, role string) {
 	t.Helper()
 	require.NoError(t, err)
-	require.NotNil(t, req.RoleGrant)
-	assert.Equal(t, "group:deployers", req.RoleGrant.GrantedBy)
-	assert.Empty(t, req.RoleGrant.DeniedReason)
+	require.NotNil(t, req.RoleGrant())
+	assert.Equal(t, "group:deployers", req.RoleGrant().GrantedBy)
+	assert.Empty(t, req.RoleGrant().DeniedReason)
 	assert.Equal(t, role, te.RoleName)
 }
 
@@ -164,9 +164,9 @@ func requireDenied(t *testing.T, req *logical.Request, err error, reason string)
 	var rerr *ErrRoleNotGranted
 	require.True(t, errors.As(err, &rerr), "want a role refusal, got %v", err)
 	assert.Equal(t, reason, rerr.DeniedReason)
-	require.NotNil(t, req.RoleGrant)
-	assert.Equal(t, reason, req.RoleGrant.DeniedReason)
-	assert.Empty(t, req.RoleGrant.GrantedBy)
+	require.NotNil(t, req.RoleGrant())
+	assert.Equal(t, reason, req.RoleGrant().DeniedReason)
+	assert.Empty(t, req.RoleGrant().GrantedBy)
 	return rerr
 }
 
@@ -179,8 +179,8 @@ func TestRoleGrant_GrantedAndProjected(t *testing.T) {
 	assert.Equal(t, "deploy-spec", te.CredentialSpec)
 	assert.Equal(t, map[string]string{"repo": "acme/infra", "sub": "agent-1"}, te.Metadata,
 		"token metadata is the membership's rendering of the mapped facts")
-	assert.Equal(t, []string{"deployers"}, req.RoleGrant.Groups)
-	assert.Equal(t, "deploy", req.RoleGrant.Role.Name)
+	assert.Equal(t, []string{"deployers"}, req.RoleGrant().Groups)
+	assert.Equal(t, "deploy", req.RoleGrant().Role.Name)
 	assert.Equal(t, []string{"deploy"}, auth.Policies, "the per-request Auth reads the projection")
 	assert.True(t, auth.PolicyResults.Allowed)
 	assert.Equal(t, te.Metadata, req.TokenMetadata)
@@ -290,7 +290,7 @@ func TestRoleGrant_NoSnapshots(t *testing.T) {
 		e.c.identityStore.Unload()
 		req, _, _, err := e.check("deploy")
 		requireDenied(t, req, err, logical.RoleDeniedNotFound)
-		assert.Empty(t, req.RoleGrant.Groups)
+		assert.Empty(t, req.RoleGrant().Groups)
 	})
 	t.Run("no stores", func(t *testing.T) {
 		e := newGrantEnv(t)
@@ -341,34 +341,15 @@ func TestRoleGrant_VerdictSkippedUnauth(t *testing.T) {
 	auth, _, _, err := e.c.CheckToken(e.ctx, req, true)
 	require.NoError(t, err)
 	assert.True(t, auth.PolicyResults.Allowed)
-	assert.Equal(t, logical.RoleDeniedNotAssumable, req.RoleGrant.DeniedReason, "resolved, but not a verdict")
+	assert.Equal(t, logical.RoleDeniedNotAssumable, req.RoleGrant().DeniedReason, "resolved, but not a verdict")
 }
 
-// On a steady membership a granted request allocates its RoleGrant and nothing
-// else: no membership compute, no role copy, no metadata copy.
-func TestRoleGrant_ResolveAllocatesOnlyTheGrant(t *testing.T) {
+// On a steady membership resolving a grant allocates nothing, whatever the
+// outcome: the grant lives on the request, the reasons are constants, and the
+// membership, role and metadata are shared.
+func TestRoleGrant_ResolveDoesNotAllocate(t *testing.T) {
 	e := newGrantEnv(t)
-	req := mustTransparent(e, e.token, "deploy")
-	te := req.TokenEntry()
-	now := time.Now()
-
-	e.c.resolveRoleGrant(req, te, now) // computes and caches the membership
-	require.True(t, req.RoleGrant.Granted())
-
-	allocs := testing.AllocsPerRun(1000, func() {
-		te.RoleName = ""
-		e.c.resolveRoleGrant(req, te, now)
-	})
-	assert.Equal(t, 1.0, allocs, "the grant itself")
-	assert.True(t, req.RoleGrant.Granted())
-	assert.Equal(t, "deploy", te.RoleName)
-}
-
-// A transparent request whose token carries its role (every login today)
-// creates no grant and allocates nothing for one.
-func TestRoleGrant_LegacyTransparentAllocatesNothing(t *testing.T) {
-	e := newGrantEnv(t)
-	entry, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
+	legacy, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
 		PrincipalID:   "agent-1",
 		RoleName:      "reader",
 		MountAccessor: grantAccessor,
@@ -377,16 +358,52 @@ func TestRoleGrant_LegacyTransparentAllocatesNothing(t *testing.T) {
 		Admission:     e.adm,
 	})
 	require.NoError(t, err)
-	req := mustTransparent(e, entry.Data["token"], "deploy")
-	te := req.TokenEntry()
-	now := time.Now()
+	noAdmission := e.issue(nil, nil)
 
-	allocs := testing.AllocsPerRun(1000, func() {
-		e.c.resolveRoleGrant(req, te, now)
-	})
-	assert.Zero(t, allocs)
-	assert.Nil(t, req.RoleGrant)
-	assert.Equal(t, "reader", te.RoleName)
+	explicit := func() *logical.Request {
+		req := mustTransparent(e, e.token, "deploy")
+		req.Transparent, req.RequestedRole = false, ""
+		return req
+	}
+	cases := []struct {
+		name   string
+		req    *logical.Request
+		reason string // "" granted; "-" no grant at all
+	}{
+		{"granted", mustTransparent(e, e.token, "deploy"), ""},
+		{"no role selected", mustTransparent(e, e.token, ""), logical.RoleDeniedNoRole},
+		{"role not found", mustTransparent(e, e.token, "nope"), logical.RoleDeniedNotFound},
+		{"not assumable", mustTransparent(e, e.token, "other"), logical.RoleDeniedNotAssumable},
+		{"presented explicitly", explicit(), logical.RoleDeniedExplicitAdmission},
+		{"no admission", mustTransparent(e, noAdmission, "deploy"), logical.RoleDeniedNoAdmission},
+		{"token carries its role", mustTransparent(e, legacy.Data["token"], "deploy"), "-"},
+	}
+	now := time.Now()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, te := tc.req, tc.req.TokenEntry()
+			role := te.RoleName
+			e.c.resolveRoleGrant(req, te, now) // computes and caches the membership
+
+			allocs := testing.AllocsPerRun(1000, func() {
+				te.RoleName = role
+				e.c.resolveRoleGrant(req, te, now)
+			})
+			assert.Zero(t, allocs)
+
+			switch tc.reason {
+			case "-":
+				assert.Nil(t, req.RoleGrant())
+				assert.Equal(t, "reader", te.RoleName)
+			case "":
+				assert.True(t, req.RoleGrant().Granted())
+				assert.Equal(t, "deploy", te.RoleName)
+			default:
+				assert.Equal(t, tc.reason, req.RoleGrant().DeniedReason)
+				assert.Nil(t, te.Policies)
+			}
+		})
+	}
 }
 
 // Every consumer reads the role from the token entry, so the projection is what
@@ -537,7 +554,7 @@ func TestRoleGrant_RevocationTiming(t *testing.T) {
 				var rerr *ErrRoleNotGranted
 				assert.False(t, errors.As(err, &rerr), "still granted; the policy no longer allows the path")
 				assert.ErrorIs(t, err, sdklogical.ErrPermissionDenied)
-				assert.Equal(t, "group:deployers", req.RoleGrant.GrantedBy)
+				assert.Equal(t, "group:deployers", req.RoleGrant().GrantedBy)
 			},
 		},
 		{
@@ -619,9 +636,10 @@ func TestRoleGrant_ConcurrentPublish(t *testing.T) {
 				_, _, te, err := e.c.CheckToken(e.ctx, req, false)
 				switch {
 				case err == nil:
-					if te.RoleName != "deploy" || req.RoleGrant.GrantedBy != "group:deployers" ||
-						len(req.RoleGrant.Groups) != 1 || req.RoleGrant.Groups[0] != "deployers" {
-						errs <- fmt.Errorf("granted with an inconsistent projection: role %q, grant %+v", te.RoleName, req.RoleGrant)
+					rg := req.RoleGrant()
+					if te.RoleName != "deploy" || rg.GrantedBy != "group:deployers" ||
+						len(rg.Groups) != 1 || rg.Groups[0] != "deployers" {
+						errs <- fmt.Errorf("granted with an inconsistent projection: role %q, grant %+v", te.RoleName, rg)
 					}
 				default:
 					var rerr *ErrRoleNotGranted
@@ -766,7 +784,7 @@ func TestRoleGrant_NoNamingNoGroups(t *testing.T) {
 			adm.Mount = mount
 			req, _, te, err := e.checkToken(e.issue(adm, nil), "deploy")
 			requireDenied(t, req, err, logical.RoleDeniedNotAssumable)
-			assert.Empty(t, req.RoleGrant.Groups)
+			assert.Empty(t, req.RoleGrant().Groups)
 			assert.Nil(t, te.Metadata)
 		})
 	}
@@ -774,8 +792,8 @@ func TestRoleGrant_NoNamingNoGroups(t *testing.T) {
 
 // The transparent marker and the requested role are set by implicit auth
 // alone: no other code in core writes them, and neither is decoded from a
-// request body.
-func TestRoleGrant_RequestedRoleSetOnlyByImplicitAuth(t *testing.T) {
+// request body. The grant itself has one writer, resolveRoleGrant.
+func TestRoleGrant_SingleWriters(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")
@@ -791,13 +809,16 @@ func TestRoleGrant_RequestedRoleSetOnlyByImplicitAuth(t *testing.T) {
 					continue
 				}
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					as, ok := n.(*ast.AssignStmt)
-					if !ok {
-						return true
-					}
-					for _, lhs := range as.Lhs {
-						if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "RequestedRole" || sel.Sel.Name == "Transparent") {
-							writers[sel.Sel.Name] = append(writers[sel.Sel.Name], fn.Name.Name)
+					switch n := n.(type) {
+					case *ast.AssignStmt:
+						for _, lhs := range n.Lhs {
+							if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "RequestedRole" || sel.Sel.Name == "Transparent") {
+								writers[sel.Sel.Name] = append(writers[sel.Sel.Name], fn.Name.Name)
+							}
+						}
+					case *ast.CallExpr:
+						if sel, ok := n.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "SetRoleGrant" || sel.Sel.Name == "ClearRoleGrant") {
+							writers["grant"] = append(writers["grant"], fn.Name.Name)
 						}
 					}
 					return true
@@ -807,6 +828,10 @@ func TestRoleGrant_RequestedRoleSetOnlyByImplicitAuth(t *testing.T) {
 	}
 	assert.Equal(t, []string{"performImplicitAuth"}, writers["RequestedRole"])
 	assert.Equal(t, []string{"performImplicitAuth"}, writers["Transparent"])
+	assert.NotEmpty(t, writers["grant"])
+	for _, w := range writers["grant"] {
+		assert.Equal(t, "resolveRoleGrant", w, "only resolveRoleGrant writes the request's grant")
+	}
 
 	f, ok := reflect.TypeOf(logical.Request{}).FieldByName("RequestedRole")
 	require.True(t, ok)
@@ -821,7 +846,8 @@ func TestRoleGrant_AgentGroups(t *testing.T) {
 
 	t.Run("bound by reference", func(t *testing.T) {
 		groups := []string{"a", "b"}
-		req := &logical.Request{RoleGrant: &logical.RoleGrant{Groups: groups}}
+		req := &logical.Request{}
+		req.SetRoleGrant(logical.RoleGrant{Groups: groups})
 		ns := buildPrincipalNS(celAgentInput(req, &logical.TokenEntry{}, now), fieldSet{all: true}, legAgent)
 		bound, ok := ns["groups"].([]string)
 		require.True(t, ok)
@@ -857,7 +883,7 @@ func TestRoleGrant_AgentGroups(t *testing.T) {
 			te := &logical.TokenEntry{}
 			req := &logical.Request{}
 			if cond != `size(agent.groups) == 0` {
-				req.RoleGrant = &logical.RoleGrant{Groups: []string{"deployers"}}
+				req.SetRoleGrant(logical.RoleGrant{Groups: []string{"deployers"}})
 			}
 			ok, _ := evaluatePathConditions([]*compiledCondition{cc}, req, te, now, "")
 			assert.Equal(t, want, ok, cond)
@@ -918,7 +944,7 @@ func TestRoleGrant_LegacyTokensUnchanged(t *testing.T) {
 			require.NoError(t, plainErr)
 			require.NoError(t, err)
 
-			assert.Nil(t, req.RoleGrant, "the grant is dropped for a token that carries its role")
+			assert.Nil(t, req.RoleGrant(), "no grant for a token that carries its role")
 			assert.Equal(t, plainTE, te)
 			assert.Equal(t, plainAuth.Policies, auth.Policies)
 			assert.Equal(t, plainAuth.PolicyResults, auth.PolicyResults)

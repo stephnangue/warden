@@ -900,8 +900,8 @@ func celPrincipalInputFromEntry(te *logical.TokenEntry, now time.Time) celPrinci
 // the groups its role grant recorded. req may be nil.
 func celAgentInput(req *logical.Request, te *logical.TokenEntry, now time.Time) celPrincipalInput {
 	in := celPrincipalInputFromEntry(te, now)
-	if req != nil && req.RoleGrant != nil {
-		in.Groups = req.RoleGrant.Groups
+	if rg := req.RoleGrant(); rg != nil {
+		in.Groups = rg.Groups
 	}
 	return in
 }
