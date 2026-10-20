@@ -24,7 +24,7 @@ var (
 	ErrIdentityStoreNotLoaded = errors.New("identity store is not loaded")
 	ErrGroupNotFound          = errors.New("group not found")
 	ErrGroupAlreadyExists     = errors.New("group already exists")
-	ErrTooManyGroups          = errors.New("too many groups in the namespace")
+	ErrTooManyVirtualGroups   = errors.New("too many virtual groups in the namespace")
 	ErrTooManySelectors       = errors.New("too many selectors in the namespace")
 
 	// ErrGroupChanged is returned by UpdateGroup and DeleteGroup when the
@@ -98,11 +98,11 @@ type IdentityStore struct {
 	storage sdklogical.Storage // barrier view at identityStorePath
 	loaded  bool
 
-	// maxGroups and maxSelectors are the namespace caps a write checks and a
-	// listing reports: logical.MaxGroupsPerNamespace and
-	// logical.MaxSelectorsPerNamespace, lowered by tests only. Atomic, so a
-	// listing reads them without taking mu.
-	maxGroups, maxSelectors atomic.Int64
+	// maxVirtualGroups and maxSelectors are the namespace caps a write checks
+	// and Usage reports: logical.MaxVirtualGroupsPerNamespace and
+	// logical.MaxSelectorsPerNamespace, lowered by tests only. Atomic, so Usage
+	// reads them without taking mu.
+	maxVirtualGroups, maxSelectors atomic.Int64
 
 	// beforeGroupUpdate, when set, runs in UpdateGroup after validation and
 	// before the commit. Nil outside tests.
@@ -116,7 +116,7 @@ func NewIdentityStore(c *Core) *IdentityStore {
 		core:   c,
 		logger: c.logger.WithSystem("identity.store"),
 	}
-	s.maxGroups.Store(logical.MaxGroupsPerNamespace)
+	s.maxVirtualGroups.Store(logical.MaxVirtualGroupsPerNamespace)
 	s.maxSelectors.Store(logical.MaxSelectorsPerNamespace)
 	s.groups.Store(emptyGroupSnapshot)
 	return s
@@ -128,22 +128,46 @@ func (s *IdentityStore) namespaceGroups(nsID string) *nsGroups {
 	return s.groups.Load().namespace(nsID)
 }
 
-// GroupUsage is how much of its caps a namespace's groups use.
-type GroupUsage struct {
-	Groups       int `json:"groups"`
-	MaxGroups    int `json:"max_groups"`
+// IdentityUsage is a namespace's identity objects counted by kind, against
+// their caps. Each kind is one top-level key; groups is the only one yet.
+type IdentityUsage struct {
+	Groups GroupsUsage `json:"groups"`
+}
+
+// GroupsUsage counts a namespace's groups: all of them, then by type, each
+// type with the caps that apply to it.
+type GroupsUsage struct {
+	Total   int                `json:"total"`
+	Virtual VirtualGroupsUsage `json:"virtual"`
+}
+
+// VirtualGroupsUsage counts a namespace's virtual groups and the selectors of
+// their rules ("mount" included), against MaxVirtualGroupsPerNamespace and
+// MaxSelectorsPerNamespace.
+type VirtualGroupsUsage struct {
+	Count        int `json:"count"`
+	Max          int `json:"max"`
 	Selectors    int `json:"selectors"`
 	MaxSelectors int `json:"max_selectors"`
 }
 
-// usageOf reports gs's usage against the store's caps. Lock-free.
-func (s *IdentityStore) usageOf(gs *nsGroups) GroupUsage {
-	return GroupUsage{
-		Groups:       len(gs.byName),
-		MaxGroups:    int(s.maxGroups.Load()),
-		Selectors:    gs.selectors,
-		MaxSelectors: int(s.maxSelectors.Load()),
+// Usage reports the identity usage of the namespace in ctx. It reads one
+// snapshot, takes no lock and reads no storage.
+func (s *IdentityStore) Usage(ctx context.Context) (IdentityUsage, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return IdentityUsage{}, ErrNamespaceNotInContext
 	}
+	gs := s.namespaceGroups(ns.ID)
+	return IdentityUsage{Groups: GroupsUsage{
+		Total: len(gs.byName),
+		Virtual: VirtualGroupsUsage{
+			Count:        len(gs.selecting),
+			Max:          int(s.maxVirtualGroups.Load()),
+			Selectors:    gs.selectors,
+			MaxSelectors: int(s.maxSelectors.Load()),
+		},
+	}}, nil
 }
 
 // GroupsListingRole returns the names of the groups of namespace nsID that
@@ -209,13 +233,11 @@ func (s *IdentityStore) GetGroup(ctx context.Context, name string) (*logical.Gro
 }
 
 // ListGroups returns copies of the groups of the namespace in ctx, sorted by
-// name, with their hashes, and the namespace's usage of its caps. A non-empty
-// role keeps only the groups listing it; the usage always covers the whole
-// namespace. Both come from one snapshot, with no storage read.
-func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical.Group, []string, GroupUsage, error) {
+// name, with their hashes. A non-empty role keeps only the groups listing it.
+func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical.Group, []string, error) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
-		return nil, nil, GroupUsage{}, ErrNamespaceNotInContext
+		return nil, nil, ErrNamespaceNotInContext
 	}
 	gs := s.namespaceGroups(ns.ID)
 	names := make([]string, 0, len(gs.byName))
@@ -231,7 +253,7 @@ func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical
 		cg := gs.byName[name]
 		groups[i], hashes[i] = cg.Group.Clone(), cg.hash
 	}
-	return groups, hashes, s.usageOf(gs), nil
+	return groups, hashes, nil
 }
 
 // CreateGroup stores a new group in the namespace in ctx. g is normalized in
@@ -263,8 +285,9 @@ func (s *IdentityStore) CreateGroup(ctx context.Context, g *logical.Group) ([]st
 		if cur.byName[g.Name] != nil {
 			return ErrGroupAlreadyExists
 		}
-		if maxGroups := int(s.maxGroups.Load()); len(cur.byName) >= maxGroups {
-			return fmt.Errorf("%w: the namespace has %d/%d groups", ErrTooManyGroups, len(cur.byName), maxGroups)
+		// The caps bound what recomputes evaluate: virtual groups only.
+		if max := int(s.maxVirtualGroups.Load()); g.Type == logical.GroupTypeVirtual && len(cur.selecting) >= max {
+			return fmt.Errorf("%w: the namespace has %d/%d virtual groups", ErrTooManyVirtualGroups, len(cur.selecting), max)
 		}
 		if err := s.checkSelectorsLocked(cur, nil, cg); err != nil {
 			return err
@@ -340,15 +363,15 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 var errGroupTypeChange = logical.ErrBadRequest("type cannot change; create a new group")
 
 // checkSelectorsLocked refuses a write that would take the namespace past its
-// selector cap: cur's total, less old's selectors (the group replaced, if
-// any), plus next's. Caller holds mu.
+// cap on the selectors of virtual groups' rules: cur's total, less old's
+// selectors (the group replaced, if any), plus next's. Caller holds mu.
 func (s *IdentityStore) checkSelectorsLocked(cur *nsGroups, old, next *compiledGroup) error {
 	total := cur.selectors + next.selectors
 	if old != nil {
 		total -= old.selectors
 	}
 	if maxSelectors := int(s.maxSelectors.Load()); total > maxSelectors {
-		return fmt.Errorf("%w: this write would make %d/%d selectors (currently %d; every key of every rule counts, \"mount\" included)",
+		return fmt.Errorf("%w: this write would make %d/%d virtual selectors (currently %d; every key of every rule counts, \"mount\" included)",
 			ErrTooManySelectors, total, maxSelectors, cur.selectors)
 	}
 	return nil

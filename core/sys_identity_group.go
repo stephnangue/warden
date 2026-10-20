@@ -11,9 +11,9 @@ import (
 )
 
 // pathIdentityGroups returns the paths for namespace groups:
-// sys/identity/group/<name> (CRUD) and sys/identity/group (LIST). Every
-// operation needs sudo (PathsSpecial.Root); a group is scoped to the namespace
-// of the request.
+// sys/identity/group/<name> (CRUD) and sys/identity/group (LIST), every
+// operation needing sudo (PathsSpecial.Root), and sys/identity/usage (READ), a
+// normal ACL path. Each is scoped to the namespace of the request.
 func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 	return []*framework.Path{
 		{
@@ -104,9 +104,22 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 					Summary:  "List the namespace's groups",
 				},
 			},
-			HelpSynopsis: "List namespace groups",
-			HelpDescription: "List every group of the namespace, optionally only those granting one role. " +
-				"usage reports the whole namespace's groups and selectors against their caps, whatever the filter.",
+			HelpSynopsis:    "List namespace groups",
+			HelpDescription: "List every group of the namespace, optionally only those granting one role.",
+		},
+		{
+			// A normal ACL path, not sudo: only the group paths are root paths.
+			Pattern: "identity/usage$",
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.ReadOperation: &framework.PathOperation{
+					Callback: b.handleIdentityUsage,
+					Summary:  "Read the namespace's identity usage",
+				},
+			},
+			HelpSynopsis: "Read the namespace's identity usage",
+			HelpDescription: "Count the namespace's identity objects by kind against their caps. groups.total counts " +
+				"every group; groups.virtual counts virtual groups and the selectors of their rules (\"mount\" " +
+				"included) against max and max_selectors.",
 		},
 	}
 }
@@ -165,7 +178,7 @@ func groupErrorResponse(name string, err error) *logical.Response {
 	case errors.Is(err, ErrGroupChanged):
 		return logical.ErrorResponse(logical.ErrConflictf(
 			"group %q changed since it was read (expected_hash no longer matches); read it again and retry", name))
-	case errors.Is(err, ErrTooManyGroups), errors.Is(err, ErrTooManySelectors):
+	case errors.Is(err, ErrTooManyVirtualGroups), errors.Is(err, ErrTooManySelectors):
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error()))
 	case errors.Is(err, ErrIdentityStoreNotLoaded):
 		return logical.ErrorResponse(logical.ErrServiceUnavailable(err.Error()))
@@ -351,10 +364,9 @@ func (b *SystemBackend) handleGroupDelete(ctx context.Context, req *logical.Requ
 
 // handleGroupList handles LIST sys/identity/group. It returns the names under
 // "keys" and the groups themselves (with their hashes) under "groups", both
-// sorted by name; ?role= keeps only the groups granting that role. "usage"
-// reports the whole namespace against its caps, whatever the filter.
+// sorted by name; ?role= keeps only the groups granting that role.
 func (b *SystemBackend) handleGroupList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	groups, hashes, usage, err := b.core.identityStore.ListGroups(ctx, d.Get("role").(string))
+	groups, hashes, err := b.core.identityStore.ListGroups(ctx, d.Get("role").(string))
 	if err != nil {
 		return groupErrorResponse("", err), nil
 	}
@@ -368,11 +380,17 @@ func (b *SystemBackend) handleGroupList(ctx context.Context, req *logical.Reques
 	return b.respondSuccess(map[string]any{
 		"keys":   keys,
 		"groups": items,
-		"usage": map[string]any{
-			"groups":        usage.Groups,
-			"max_groups":    usage.MaxGroups,
-			"selectors":     usage.Selectors,
-			"max_selectors": usage.MaxSelectors,
-		},
+	}), nil
+}
+
+// handleIdentityUsage handles GET sys/identity/usage: the namespace's identity
+// objects counted by kind, against their caps, one top-level key per kind.
+func (b *SystemBackend) handleIdentityUsage(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	usage, err := b.core.identityStore.Usage(ctx)
+	if err != nil {
+		return groupErrorResponse("", err), nil
+	}
+	return b.respondSuccess(map[string]any{
+		"groups": usage.Groups,
 	}), nil
 }

@@ -46,17 +46,17 @@ const (
 	MaxGroupRoles            = 64
 	MaxGroupRules            = 16
 
-	// MaxGroupsPerNamespace bounds the groups of one namespace. Each group write
-	// rebuilds the namespace's index, and a recompute in which every group
-	// matches lists every group and fills a role map. Measured
-	// (core/identity_groups_bench_test.go, Apple M4 Pro): a group write at
-	// 8000 groups takes about 1.2 ms; 8000 groups all matching, with the two
-	// selectors per rule MaxSelectorsPerNamespace then allows, recompute in
-	// about 0.8 ms (1.3 MB, 56 allocations).
-	MaxGroupsPerNamespace = 8000
+	// MaxVirtualGroupsPerNamespace bounds the virtual groups of one namespace.
+	// Each group write rebuilds the namespace's index, and a recompute in which
+	// every virtual group matches lists every one and fills a role map.
+	// Measured (core/identity_groups_bench_test.go, Apple M4 Pro): a group
+	// write at 8000 groups takes about 1.2 ms; 8000 virtual groups all
+	// matching, with the two selectors per rule MaxSelectorsPerNamespace then
+	// allows, recompute in about 0.8 ms (1.3 MB, 56 allocations).
+	MaxVirtualGroupsPerNamespace = 8000
 
 	// MaxSelectorsPerNamespace bounds the selectors ("mount" included) across
-	// every rule of every group of one namespace. A group change makes every
+	// every rule of every virtual group of one namespace. A group change makes every
 	// cached admission of the namespace recompute its membership on its next
 	// request, and the worst case (every rule lists the admission's mount and
 	// fails only on its last selector) looks up and compares every selector

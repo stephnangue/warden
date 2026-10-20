@@ -66,8 +66,8 @@ type nsGroups struct {
 
 	byName map[string]*compiledGroup
 
-	// selectors is the number of selectors across every rule of every group,
-	// "mount" included: what a worst-case recompute evaluates.
+	// selectors is the number of selectors across every rule of every virtual
+	// group, "mount" included: what a worst-case recompute evaluates.
 	selectors int
 
 	// selecting are the virtual groups, sorted by name.
@@ -167,9 +167,9 @@ func buildNSGroups(byName map[string]*compiledGroup, gen uint64) *nsGroups {
 	g := &nsGroups{gen: gen, byName: byName, byMount: map[string][]int32{}}
 	g.selecting = make([]*compiledGroup, 0, len(byName))
 	for _, cg := range byName {
-		g.selectors += cg.selectors
 		if cg.Type == logical.GroupTypeVirtual {
 			g.selecting = append(g.selecting, cg)
+			g.selectors += cg.selectors
 		}
 	}
 	slices.SortFunc(g.selecting, func(a, b *compiledGroup) int { return strings.Compare(a.Name, b.Name) })

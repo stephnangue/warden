@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -355,12 +356,10 @@ const listedGroups = `{"data":{
 	"keys":["ci-deployers"],
 	"groups":[{"name":"ci-deployers","type":"virtual","roles":["deploy"],
 		"rules":[{"mount":["auth/k8s/"],"workload":["a"]}],"rule_count":1,"selector_count":2,
-		"max_age":"","hash":"h1"}],
-	"usage":{"groups":42,"max_groups":8000,"selectors":310,"max_selectors":16000}
+		"max_age":"","hash":"h1"}]
 }}`
 
-// TestGroupList_JSON: -o json is one object holding the groups and the
-// namespace's usage; -role filters the groups only.
+// TestGroupList_JSON: -o json is a plain array of groups; -role filters.
 func TestGroupList_JSON(t *testing.T) {
 	f, stdout, _ := setupFake(t, http.StatusOK, listedGroups)
 	listRole = "deploy"
@@ -370,21 +369,16 @@ func TestGroupList_JSON(t *testing.T) {
 	assert.Equal(t, "true", req.query.Get("warden-list"))
 	assert.Equal(t, "deploy", req.query.Get("role"))
 
-	out := decodeOut(t, stdout)
-	assert.Equal(t, map[string]any{
-		"groups": float64(42), "max_groups": float64(8000),
-		"selectors": float64(310), "max_selectors": float64(16000),
-	}, out["usage"])
-	items, _ := out["groups"].([]any)
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &items), "an array: %s", stdout.String())
 	require.Len(t, items, 1)
-	item := items[0].(map[string]any)
-	assert.Equal(t, "ci-deployers", item["name"])
-	assert.Equal(t, []any{map[string]any{"mount": []any{"auth/k8s/"}, "workload": []any{"a"}}}, item["rules"])
-	assert.Equal(t, float64(1), item["rule_count"])
-	assert.Equal(t, float64(2), item["selector_count"])
+	assert.Equal(t, "ci-deployers", items[0]["name"])
+	assert.Equal(t, []any{map[string]any{"mount": []any{"auth/k8s/"}, "workload": []any{"a"}}}, items[0]["rules"])
+	assert.Equal(t, float64(1), items[0]["rule_count"])
+	assert.Equal(t, float64(2), items[0]["selector_count"])
 }
 
-// TestGroupList_NDJSON: one group per line, without the usage.
+// TestGroupList_NDJSON: one group per line.
 func TestGroupList_NDJSON(t *testing.T) {
 	_, stdout, _ := setupFake(t, http.StatusOK, listedGroups)
 	helpers.SetOutputFormat("ndjson")
@@ -394,7 +388,6 @@ func TestGroupList_NDJSON(t *testing.T) {
 	var item map[string]any
 	require.NoError(t, json.Unmarshal(lines[0], &item))
 	assert.Equal(t, "ci-deployers", item["name"])
-	assert.NotContains(t, item, "usage")
 }
 
 // captureStdout runs fn with os.Stdout redirected, as the table printers
@@ -412,15 +405,57 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(raw)
 }
 
-// TestGroupList_TableFooter: the table ends with the namespace's usage.
-func TestGroupList_TableFooter(t *testing.T) {
+// TestGroupList_Table: the table lists the groups and nothing after them.
+func TestGroupList_Table(t *testing.T) {
 	setupFake(t, http.StatusOK, listedGroups)
 	helpers.SetOutputFormat("table")
 	out := captureStdout(t, func() { require.NoError(t, runGroupList(GroupListCmd, nil)) })
 	assert.Contains(t, out, "ci-deployers")
-	assert.Contains(t, out, "groups 42/8000 · selectors 310/16000")
-	assert.Equal(t, "groups 0/8000 · selectors 0/16000",
-		usageFooter(api.GroupUsage{MaxGroups: 8000, MaxSelectors: 16000}))
+	assert.NotContains(t, out, "groups ")
+	assert.NotContains(t, out, "/")
+}
+
+const usageJSON = `{"data":{
+	"groups":{
+		"total":42,
+		"virtual":{"count":42,"max":8000,"selectors":310,"max_selectors":16000}
+	}
+}}`
+
+// TestUsage_Table: one section per kind, counts against their caps.
+func TestUsage_Table(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusOK, usageJSON)
+	helpers.SetOutputFormat("table")
+	out := captureStdout(t, func() { require.NoError(t, runUsage(UsageCmd, nil)) })
+	assert.Equal(t, "/v1/sys/identity/usage", f.last(t).path)
+	assert.Equal(t, http.MethodGet, f.last(t).method)
+	assert.Equal(t, strings.Join([]string{
+		"GROUPS",
+		"  TYPE      COUNT     SELECTORS",
+		"  virtual   42/8000   310/16000",
+		"  total     42",
+		"",
+	}, "\n"), out)
+}
+
+// TestUsage_JSON: -o json prints the server's data as is.
+func TestUsage_JSON(t *testing.T) {
+	_, stdout, _ := setupFake(t, http.StatusOK, usageJSON)
+	require.NoError(t, runUsage(UsageCmd, nil))
+	assert.JSONEq(t, `{
+		"groups": {
+			"total": 42,
+			"virtual": {"count": 42, "max": 8000, "selectors": 310, "max_selectors": 16000}
+		}
+	}`, stdout.String())
+}
+
+// TestUsage_Forbidden: a refusal surfaces as an error.
+func TestUsage_Forbidden(t *testing.T) {
+	setupFake(t, http.StatusForbidden, `{"errors":["permission denied"]}`)
+	err := runUsage(UsageCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "permission denied")
 }
 
 // TestPrintGroupTable: one row per rule, a selector at a time with "mount"

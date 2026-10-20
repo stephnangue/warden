@@ -33,20 +33,27 @@ type Group struct {
 	Warnings      []string              `json:"warnings,omitempty"`
 }
 
-// GroupUsage is how much of its caps a namespace's groups use: every group
-// and every selector of every rule, "mount" included.
-type GroupUsage struct {
-	Groups       int `json:"groups"`
-	MaxGroups    int `json:"max_groups"`
-	Selectors    int `json:"selectors"`
-	MaxSelectors int `json:"max_selectors"`
+// IdentityUsage is a namespace's identity objects counted by kind, against
+// their caps, as sys/identity/usage returns it. Groups is the only kind yet.
+type IdentityUsage struct {
+	Groups GroupsUsage `json:"groups"`
 }
 
-// GroupList is a group listing: the groups (all, or those granting the role
-// asked for) and the whole namespace's usage, whatever the filter.
-type GroupList struct {
-	Groups []*Group
-	Usage  GroupUsage
+// GroupsUsage counts a namespace's groups: Total counts every group, Virtual
+// the virtual ones with their caps.
+type GroupsUsage struct {
+	Total   int                `json:"total"`
+	Virtual VirtualGroupsUsage `json:"virtual"`
+}
+
+// VirtualGroupsUsage counts virtual groups (Count, against Max) and the
+// selectors of their rules, "mount" included (Selectors, against
+// MaxSelectors).
+type VirtualGroupsUsage struct {
+	Count        int `json:"count"`
+	Max          int `json:"max"`
+	Selectors    int `json:"selectors"`
+	MaxSelectors int `json:"max_selectors"`
 }
 
 // GroupInput is the body of a group create or update. On update a nil field
@@ -195,15 +202,14 @@ func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, expectedHash str
 	return nil
 }
 
-// ListGroups lists the groups of the client's namespace, sorted by name, with
-// the namespace's usage. A non-empty role lists only the groups that grant it;
-// the usage still covers the whole namespace.
-func (c *Sys) ListGroups(role string) (*GroupList, error) {
+// ListGroups lists the groups of the client's namespace, sorted by name. A
+// non-empty role lists only the groups that grant it.
+func (c *Sys) ListGroups(role string) ([]*Group, error) {
 	return c.ListGroupsWithContext(context.Background(), role)
 }
 
 // ListGroupsWithContext lists the groups with context.
-func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) (*GroupList, error) {
+func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) ([]*Group, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -223,9 +229,9 @@ func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) (*GroupLis
 	if err != nil {
 		return nil, err
 	}
-	list := &GroupList{Groups: []*Group{}}
+	groups := []*Group{}
 	if resource == nil || resource.Data == nil {
-		return list, nil
+		return groups, nil
 	}
 	items, _ := resource.Data["groups"].([]any)
 	for _, item := range items {
@@ -233,16 +239,42 @@ func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) (*GroupLis
 		if err != nil {
 			return nil, err
 		}
-		list.Groups = append(list.Groups, g)
+		groups = append(groups, g)
 	}
-	if raw, ok := resource.Data["usage"]; ok {
-		b, err := json.Marshal(raw)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(b, &list.Usage); err != nil {
-			return nil, fmt.Errorf("failed to decode group usage: %w", err)
-		}
+	return groups, nil
+}
+
+// ReadIdentityUsage reads the identity usage of the client's namespace.
+func (c *Sys) ReadIdentityUsage() (*IdentityUsage, error) {
+	return c.ReadIdentityUsageWithContext(context.Background())
+}
+
+// ReadIdentityUsageWithContext reads the identity usage with context.
+func (c *Sys) ReadIdentityUsageWithContext(ctx context.Context) (*IdentityUsage, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodGet, "/v1/sys/identity/usage")
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if err != nil {
+		return nil, err
 	}
-	return list, nil
+	defer resp.Body.Close()
+
+	resource, err := ParseResource(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resource == nil || resource.Data == nil {
+		return nil, errors.New("data from server response is empty")
+	}
+	raw, err := json.Marshal(resource.Data)
+	if err != nil {
+		return nil, err
+	}
+	var u IdentityUsage
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return nil, fmt.Errorf("failed to decode identity usage: %w", err)
+	}
+	return &u, nil
 }

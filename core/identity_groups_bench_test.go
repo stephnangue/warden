@@ -83,7 +83,7 @@ func BenchmarkGroupCompute(b *testing.B) {
 	for _, rules := range []int{1, logical.MaxGroupRules} {
 		// The sizes asked about, plus the most groups of that many rules the
 		// caps allow (each bench rule has three selectors).
-		capped := min(logical.MaxGroupsPerNamespace, logical.MaxSelectorsPerNamespace/(3*rules))
+		capped := min(logical.MaxVirtualGroupsPerNamespace, logical.MaxSelectorsPerNamespace/(3*rules))
 		for _, n := range []int{100, 1000, capped, 10000} {
 			spread := buildNSGroups(benchGroups(b, n, rules, 10), 1)
 			worst := buildNSGroups(benchGroups(b, n, rules, 1), 1)
@@ -193,7 +193,7 @@ func BenchmarkGroupComputeWide(b *testing.B) {
 // BenchmarkGroupComputeAllMatch measures a recompute in which every group
 // matches, so the membership lists every group and grants every role (one
 // each): the most a recompute allocates. Rules have one to three selectors;
-// at MaxGroupsPerNamespace groups the selector cap allows two per rule.
+// at MaxVirtualGroupsPerNamespace groups the selector cap allows two per rule.
 func BenchmarkGroupComputeAllMatch(b *testing.B) {
 	adm := benchAdmission(b)
 	naming := adm.Mount.Load()
@@ -202,10 +202,10 @@ func BenchmarkGroupComputeAllMatch(b *testing.B) {
 		n         int
 		selectors int
 	}{
-		{1000, 3}, {logical.MaxGroupsPerNamespace, 3},
-		{1000, 1}, {logical.MaxGroupsPerNamespace, 1},
+		{1000, 3}, {logical.MaxVirtualGroupsPerNamespace, 3},
+		{1000, 1}, {logical.MaxVirtualGroupsPerNamespace, 1},
 		// The most selectors 8000 groups may hold together.
-		{logical.MaxGroupsPerNamespace, logical.MaxSelectorsPerNamespace / logical.MaxGroupsPerNamespace},
+		{logical.MaxVirtualGroupsPerNamespace, logical.MaxSelectorsPerNamespace / logical.MaxVirtualGroupsPerNamespace},
 	} {
 		n := tc.n
 		byName := make(map[string]*compiledGroup, n)
@@ -241,7 +241,7 @@ func BenchmarkGroupComputeAllMatch(b *testing.B) {
 // BenchmarkGroupPublish measures what a write does under the store lock beyond
 // storage: clone the namespace's name map and rebuild its index.
 func BenchmarkGroupPublish(b *testing.B) {
-	for _, n := range []int{100, 1000, logical.MaxGroupsPerNamespace, 10000} {
+	for _, n := range []int{100, 1000, logical.MaxVirtualGroupsPerNamespace, 10000} {
 		byName := benchGroups(b, n, 1, 10)
 		cg := benchGroup(b, "g00000", "auth/m0/", 1)
 		b.Run(fmt.Sprintf("groups=%d", n), func(b *testing.B) {
@@ -262,7 +262,7 @@ func BenchmarkGroupPublish(b *testing.B) {
 // namespace already holding n groups: validation (compile, role and mount
 // checks), the storage write and the publish.
 func BenchmarkGroupWrite(b *testing.B) {
-	for _, n := range []int{100, 1000, logical.MaxGroupsPerNamespace, 10000} {
+	for _, n := range []int{100, 1000, logical.MaxVirtualGroupsPerNamespace, 10000} {
 		b.Run(fmt.Sprintf("groups=%d", n), func(b *testing.B) {
 			c := createTestCore(b)
 			ctx := rootCtx()
@@ -273,7 +273,7 @@ func BenchmarkGroupWrite(b *testing.B) {
 			target.ID = "target-id"
 			byName[target.Name] = target
 			s.mu.Lock()
-			s.maxGroups.Store(int64(2 * n))
+			s.maxVirtualGroups.Store(int64(2 * n))
 			s.maxSelectors.Store(int64(8 * n))
 			if err := s.persistGroup(ctx, namespace.RootNamespaceUUID, target); err != nil {
 				b.Fatal(err)

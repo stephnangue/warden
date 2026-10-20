@@ -1,7 +1,7 @@
 // Package identity implements `warden identity`, the namespace's identity
-// objects. Its one command group today is `warden identity group`: create,
-// read, update, delete and list the groups that grant roles. Every command
-// needs a token with sudo on sys/identity.
+// objects: `warden identity group` creates, reads, updates, deletes and lists
+// the groups that grant roles (sudo on sys/identity/group), and `warden
+// identity usage` counts them against their caps (read on sys/identity/usage).
 package identity
 
 import "github.com/spf13/cobra"
@@ -71,8 +71,8 @@ Usage: warden identity group <subcommand> [options]
       $ warden identity group read ci-deployers
       $ warden identity group delete ci-deployers
 
-  A namespace holds at most 8000 groups and 16000 selectors across all
-  their rules; 'warden identity group list' shows how much is used.
+  A namespace's virtual groups, and the selectors across all their rules,
+  are capped; 'warden identity usage' shows the usage and the caps.
 
   Please see the individual subcommand help for detailed usage information.
 `,
@@ -80,6 +80,7 @@ Usage: warden identity group <subcommand> [options]
 
 func init() {
 	IdentityCmd.AddCommand(GroupCmd)
+	IdentityCmd.AddCommand(UsageCmd)
 	GroupCmd.AddCommand(GroupCreateCmd)
 	GroupCmd.AddCommand(GroupReadCmd)
 	GroupCmd.AddCommand(GroupUpdateCmd)

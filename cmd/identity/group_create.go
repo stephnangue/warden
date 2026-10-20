@@ -33,9 +33,9 @@ Usage: warden identity group create <name> [options]
   accepted with a warning. A role that does not exist yet, or a fact none
   of the listed mounts produces, is accepted with a warning on stderr.
 
-  A namespace holds at most 8000 groups and 16000 selectors across all
-  their rules ("mount" included); a write past either is refused with the
-  current usage.
+  A namespace's virtual groups, and the selectors across all their rules
+  ("mount" included), are capped; a write past either cap is refused with
+  the current usage. 'warden identity usage' shows the usage and the caps.
 
   "max_age" bounds how old the caller's credential may be, counted from
   when it was issued (its "iat"), on every request. With "max_age": "10m",

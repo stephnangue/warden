@@ -86,18 +86,16 @@ func TestSys_ListGroups(t *testing.T) {
 		"groups":[
 			{"name":"ci","type":"virtual","roles":["deploy","read"]},
 			{"name":"deployers","type":"virtual","roles":["deploy"]}
-		],
-		"usage":{"groups":42,"max_groups":8000,"selectors":310,"max_selectors":16000}
+		]
 	}}`)
 
-	list, err := client.Sys().ListGroups("deploy")
+	groups, err := client.Sys().ListGroups("deploy")
 	require.NoError(t, err)
 	assert.Equal(t, "/v1/sys/identity/group", rec.path)
 	assert.Equal(t, "true", rec.query.Get("warden-list"))
 	assert.Equal(t, "deploy", rec.query.Get("role"))
-	require.Len(t, list.Groups, 2)
-	assert.Equal(t, []string{"deploy", "read"}, list.Groups[0].Roles)
-	assert.Equal(t, GroupUsage{Groups: 42, MaxGroups: 8000, Selectors: 310, MaxSelectors: 16000}, list.Usage)
+	require.Len(t, groups, 2)
+	assert.Equal(t, []string{"deploy", "read"}, groups[0].Roles)
 
 	_, err = client.Sys().ListGroups("")
 	require.NoError(t, err)
@@ -105,11 +103,35 @@ func TestSys_ListGroups(t *testing.T) {
 }
 
 func TestSys_ListGroups_Empty(t *testing.T) {
-	client, _ := newRoleServer(t, http.StatusOK, `{"data":{"keys":[],"groups":[],
-		"usage":{"groups":0,"max_groups":8000,"selectors":0,"max_selectors":16000}}}`)
-	list, err := client.Sys().ListGroups("")
+	client, _ := newRoleServer(t, http.StatusOK, `{"data":{"keys":[],"groups":[]}}`)
+	groups, err := client.Sys().ListGroups("")
 	require.NoError(t, err)
-	assert.Empty(t, list.Groups)
-	assert.NotNil(t, list.Groups)
-	assert.Equal(t, 16000, list.Usage.MaxSelectors)
+	assert.Empty(t, groups)
+	assert.NotNil(t, groups)
+}
+
+func TestSys_ReadIdentityUsage(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{
+		"groups":{
+			"total":42,
+			"virtual":{"count":42,"max":8000,"selectors":310,"max_selectors":16000}
+		}
+	}}`)
+
+	u, err := client.Sys().ReadIdentityUsage()
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.method)
+	assert.Equal(t, "/v1/sys/identity/usage", rec.path)
+	assert.Equal(t, &IdentityUsage{Groups: GroupsUsage{
+		Total:   42,
+		Virtual: VirtualGroupsUsage{Count: 42, Max: 8000, Selectors: 310, MaxSelectors: 16000},
+	}}, u)
+}
+
+func TestSys_ReadIdentityUsage_Forbidden(t *testing.T) {
+	client, _ := newRoleServer(t, http.StatusForbidden, `{"errors":["permission denied"]}`)
+	_, err := client.Sys().ReadIdentityUsage()
+	var respErr *ResponseError
+	require.ErrorAs(t, err, &respErr)
+	assert.Equal(t, http.StatusForbidden, respErr.StatusCode)
 }

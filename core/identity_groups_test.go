@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -503,7 +505,7 @@ func TestGroups_Caps(t *testing.T) {
 	// The namespace caps, lowered for the test.
 	other := namespace.ContextWithNamespace(context.Background(),
 		&namespace.Namespace{ID: "caps-ns", UUID: "caps-ns-uuid", Path: "caps/"})
-	c.identityStore.maxGroups.Store(3)
+	c.identityStore.maxVirtualGroups.Store(3)
 	c.identityStore.maxSelectors.Store(7)
 
 	// virtualGroup's one rule has two selectors: mount and sub.
@@ -513,10 +515,11 @@ func TestGroups_Caps(t *testing.T) {
 	}
 	assert.Equal(t, 6, c.identityStore.namespaceGroups("caps-ns").selectors)
 	_, err = c.identityStore.CreateGroup(other, virtualGroup("d"))
-	assert.ErrorIs(t, err, ErrTooManyGroups)
+	assert.ErrorIs(t, err, ErrTooManyVirtualGroups)
+	assert.EqualError(t, err, "too many virtual groups in the namespace: the namespace has 3/3 virtual groups")
 	resp := roleRequest(t, c, other, logical.CreateOperation, "identity/group/d", deployersBody())
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "the namespace has 3/3 groups")
+	assert.Contains(t, resp.Err.Error(), "the namespace has 3/3 virtual groups")
 
 	// An update counts the selectors it replaces and adds: 6 - 2 + 4 = 8 is
 	// over, 6 - 2 + 3 = 7 is exactly the cap.
@@ -531,7 +534,8 @@ func TestGroups_Caps(t *testing.T) {
 		},
 	})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "this write would make 8/7 selectors (currently 6;")
+	assert.Contains(t, resp.Err.Error(),
+		`too many selectors in the namespace: this write would make 8/7 virtual selectors (currently 6; every key of every rule counts, "mount" included)`)
 	at := virtualGroup("a")
 	at.Rules = append(at.Rules, logical.GroupRule{"mount": {"auth/jwt/"}})
 	_, err = c.identityStore.UpdateGroup(other, at, "")
@@ -544,40 +548,36 @@ func TestGroups_Caps(t *testing.T) {
 	g.Rules[0]["iss"] = []string{"z"}
 	_, err = c.identityStore.CreateGroup(other, g)
 	assert.ErrorIs(t, err, ErrTooManySelectors, "5 + 3 is over")
-	assert.Contains(t, err.Error(), "this write would make 8/7 selectors (currently 5;")
+	assert.Contains(t, err.Error(), "this write would make 8/7 virtual selectors (currently 5;")
 	_, err = c.identityStore.CreateGroup(other, virtualGroup("e"))
 	require.NoError(t, err, "5 + 2 is exactly the cap")
 }
 
-// listUsage lists the groups of the root namespace, optionally under a role
-// filter, and returns the response's usage and keys.
-func listUsage(t *testing.T, c *Core, role string) (map[string]any, []string) {
+// readUsage reads sys/identity/usage in the root namespace and returns its
+// groups section.
+func readUsage(t *testing.T, c *Core) GroupsUsage {
 	t.Helper()
-	var data map[string]any
-	if role != "" {
-		data = map[string]any{"role": role}
-	}
-	resp := groupRequest(t, c, logical.ListOperation, "group", data)
+	resp := roleRequest(t, c, rootCtx(), logical.ReadOperation, "identity/usage", nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
-	return resp.Data["usage"].(map[string]any), resp.Data["keys"].([]string)
+	assert.Len(t, resp.Data, 1, "groups is the only kind yet")
+	return resp.Data["groups"].(GroupsUsage)
 }
 
-// TestGroups_Usage: a listing reports the whole namespace's groups and
-// selectors against the caps after every kind of write, whatever the role
-// filter, and every group reports what it adds.
-func TestGroups_Usage(t *testing.T) {
+// TestIdentityUsage: sys/identity/usage counts the namespace's groups, and
+// the virtual groups and their selectors against the caps, after every kind of
+// write; a listing carries no usage; every group reports what it adds.
+func TestIdentityUsage(t *testing.T) {
 	c := createTestCore(t)
-	want := func(groups, selectors int) map[string]any {
-		return map[string]any{
-			"groups":        groups,
-			"max_groups":    logical.MaxGroupsPerNamespace,
-			"selectors":     selectors,
-			"max_selectors": logical.MaxSelectorsPerNamespace,
-		}
+	want := func(groups, selectors int) GroupsUsage {
+		return GroupsUsage{Total: groups, Virtual: VirtualGroupsUsage{
+			Count:        groups,
+			Max:          logical.MaxVirtualGroupsPerNamespace,
+			Selectors:    selectors,
+			MaxSelectors: logical.MaxSelectorsPerNamespace,
+		}}
 	}
 
-	usage, _ := listUsage(t, c, "")
-	assert.Equal(t, want(0, 0), usage, "an empty namespace")
+	assert.Equal(t, want(0, 0), readUsage(t, c), "an empty namespace")
 
 	resp := groupRequest(t, c, logical.CreateOperation, "group/deployers", deployersBody()) // 1 rule, 2 selectors
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -592,16 +592,14 @@ func TestGroups_Usage(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
 	assert.Equal(t, 2, resp.Data["rule_count"])
 	assert.Equal(t, 4, resp.Data["selector_count"])
-	usage, _ = listUsage(t, c, "")
-	assert.Equal(t, want(2, 6), usage, "after creates")
+	assert.Equal(t, want(2, 6), readUsage(t, c), "after creates")
 
-	// The filter narrows the groups, never the usage.
-	usage, keys := listUsage(t, c, "deploy")
-	assert.Equal(t, []string{"deployers"}, keys)
-	assert.Equal(t, want(2, 6), usage, "under ?role=")
-	usage, keys = listUsage(t, c, "nobody")
-	assert.Empty(t, keys)
-	assert.Equal(t, want(2, 6), usage)
+	// A listing carries the groups only, filtered or not.
+	for _, data := range []map[string]any{nil, {"role": "deploy"}} {
+		resp = groupRequest(t, c, logical.ListOperation, "group", data)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.NotContains(t, resp.Data, "usage")
+	}
 
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/readers", map[string]any{
 		"rules": []any{map[string]any{"mount": "auth/jwt/"}},
@@ -609,16 +607,14 @@ func TestGroups_Usage(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, 1, resp.Data["rule_count"])
 	assert.Equal(t, 1, resp.Data["selector_count"])
-	usage, _ = listUsage(t, c, "")
-	assert.Equal(t, want(2, 3), usage, "after an update")
+	assert.Equal(t, want(2, 3), readUsage(t, c), "after an update")
 
 	resp = groupRequest(t, c, logical.ReadOperation, "group/deployers", nil)
 	assert.Equal(t, 1, resp.Data["rule_count"])
 	assert.Equal(t, 2, resp.Data["selector_count"])
 
 	require.Equal(t, http.StatusOK, groupRequest(t, c, logical.DeleteOperation, "group/deployers", nil).StatusCode)
-	usage, _ = listUsage(t, c, "")
-	assert.Equal(t, want(1, 1), usage, "after a delete")
+	assert.Equal(t, want(1, 1), readUsage(t, c), "after a delete")
 
 	// Every listed group reports its own counts.
 	resp = groupRequest(t, c, logical.ListOperation, "group", nil)
@@ -627,10 +623,39 @@ func TestGroups_Usage(t *testing.T) {
 	assert.Equal(t, 1, items[0]["rule_count"])
 	assert.Equal(t, 1, items[0]["selector_count"])
 
-	// The usage reports the caps in force.
-	c.identityStore.maxGroups.Store(5)
-	usage, _ = listUsage(t, c, "")
-	assert.Equal(t, 5, usage["max_groups"])
+	// The usage reports the caps in force, and only its own namespace.
+	c.identityStore.maxVirtualGroups.Store(5)
+	assert.Equal(t, 5, readUsage(t, c).Virtual.Max)
+	other := namespace.ContextWithNamespace(context.Background(),
+		&namespace.Namespace{ID: "usage-ns", UUID: "usage-ns-uuid", Path: "usage/"})
+	_, err := c.identityStore.CreateGroup(other, virtualGroup("elsewhere"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, readUsage(t, c).Total)
+	u, err := c.identityStore.Usage(other)
+	require.NoError(t, err)
+	assert.Equal(t, 1, u.Groups.Virtual.Count)
+	assert.Equal(t, 2, u.Groups.Virtual.Selectors)
+}
+
+// TestIdentityUsage_HTTP: GET sys/identity/usage through the request path
+// returns data keyed by kind.
+func TestIdentityUsage_HTTP(t *testing.T) {
+	c := createTestCore(t)
+	root, err := c.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated,
+		roleHTTP(t, c, root, http.MethodPost, "/v1/sys/identity/group/deployers", deployersBody()).StatusCode)
+
+	resp := roleHTTP(t, c, root, http.MethodGet, "/v1/sys/identity/usage", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"groups": {
+			"total": 1,
+			"virtual": {"count": 1, "max": 8000, "selectors": 2, "max_selectors": 16000}
+		}
+	}`, string(raw))
 }
 
 // TestGroups_OldSelectorsField: "selectors" is no field of the group path. The
@@ -724,6 +749,86 @@ func TestGroups_SudoRequired(t *testing.T) {
 		require.NoError(t, err)
 		res = c.performPolicyChecks(ctx, withSudo, nil, req, &PolicyCheckOpts{RootPrivsRequired: c.router.RootPath(ctx, tc.path)})
 		assert.True(t, res.Allowed, "%s %s with sudo must be allowed", tc.op, tc.path)
+	}
+}
+
+// TestIdentityUsage_NormalACL: sys/identity/usage is not a root path. A token
+// whose policy grants read on it, without sudo, reads it; the same token is
+// refused the group paths, which need sudo however broad the policy.
+func TestIdentityUsage_NormalACL(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+
+	assert.False(t, c.router.RootPath(ctx, "sys/identity/usage"), "usage needs no sudo")
+	for _, p := range []string{"sys/identity/group", "sys/identity/group/", "sys/identity/group/x"} {
+		assert.True(t, c.router.RootPath(ctx, p), "%s still needs sudo", p)
+	}
+
+	check := func(cbp *CBP, op logical.Operation, path string) bool {
+		t.Helper()
+		req := &logical.Request{Operation: op, Path: path}
+		return c.performPolicyChecks(ctx, cbp, nil, req,
+			&PolicyCheckOpts{RootPrivsRequired: c.router.RootPath(ctx, path)}).Allowed
+	}
+
+	reader, err := NewCBP(ctx, []*Policy{testParsePolicy(t,
+		`path "sys/identity/usage" { capabilities = ["read"] }`)})
+	require.NoError(t, err)
+	assert.True(t, check(reader, logical.ReadOperation, "sys/identity/usage"), "read on the path is enough")
+	assert.False(t, check(reader, logical.ListOperation, "sys/identity/group"))
+	assert.False(t, check(reader, logical.ReadOperation, "sys/identity/group/g"))
+
+	broad, err := NewCBP(ctx, []*Policy{testParsePolicy(t,
+		`path "sys/identity/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+		 path "sys/identity/group" { capabilities = ["list"] }`)})
+	require.NoError(t, err)
+	assert.True(t, check(broad, logical.ReadOperation, "sys/identity/usage"))
+	assert.False(t, check(broad, logical.ReadOperation, "sys/identity/group/g"), "group paths need sudo")
+	assert.False(t, check(broad, logical.ListOperation, "sys/identity/group"), "the group list needs sudo")
+
+	none, err := NewCBP(ctx, []*Policy{testParsePolicy(t,
+		`path "sys/roles/*" { capabilities = ["read"] }`)})
+	require.NoError(t, err)
+	assert.False(t, check(none, logical.ReadOperation, "sys/identity/usage"), "it is still an ACL path")
+}
+
+// TestIdentityUsage_NonSudoToken drives the request path with a token whose
+// one policy grants read on sys/identity/usage: the usage answers, the group
+// paths refuse it.
+func TestIdentityUsage_NonSudoToken(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+
+	p := testParsePolicy(t, `path "sys/identity/usage" { capabilities = ["read"] }
+		path "sys/identity/group" { capabilities = ["list"] }
+		path "sys/identity/group/*" { capabilities = ["read"] }`)
+	p.Name, p.Type = "usage-reader", PolicyTypeCBP
+	require.NoError(t, c.policyStore.SetPolicy(ctx, p, nil))
+	te, err := c.tokenStore.GenerateToken(ctx, TypeWardenToken, &AuthData{
+		PrincipalID: "operator",
+		ExpireAt:    time.Now().Add(time.Hour),
+		Policies:    []string{"usage-reader"},
+	})
+	require.NoError(t, err)
+	token := te.Data["token"]
+	require.NotEmpty(t, token)
+
+	resp := roleHTTP(t, c, token, http.MethodGet, "/v1/sys/identity/usage", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, logical.MaxVirtualGroupsPerNamespace, resp.Data["groups"].(GroupsUsage).Virtual.Max)
+
+	for _, target := range []string{"/v1/sys/identity/group?warden-list=true", "/v1/sys/identity/group/g"} {
+		httpReq := httptest.NewRequest(http.MethodGet, target, nil)
+		httpReq.Header.Set("X-Warden-Token", token)
+		op := logical.ReadOperation
+		if httpReq.URL.Query().Get("warden-list") == "true" {
+			op = logical.ListOperation
+		}
+		resp, err := c.HandleRequest(rootCtx(), &logical.Request{
+			Path: strings.TrimPrefix(httpReq.URL.Path, "/v1/"), Operation: op, HTTPRequest: httpReq,
+		})
+		refused := err != nil || (resp != nil && resp.StatusCode == http.StatusForbidden)
+		assert.True(t, refused, "%s needs sudo the token does not have", target)
 	}
 }
 
@@ -843,7 +948,7 @@ func TestGroups_ClearNamespace(t *testing.T) {
 
 	require.NoError(t, c.namespaceStore.clearNamespaceResources(childCtx, child))
 
-	groups, _, _, err := c.identityStore.ListGroups(childCtx, "")
+	groups, _, err := c.identityStore.ListGroups(childCtx, "")
 	require.NoError(t, err)
 	assert.Empty(t, groups)
 	assert.Same(t, emptyNSGroups, c.identityStore.namespaceGroups(child.ID))

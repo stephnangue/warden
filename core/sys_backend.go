@@ -42,7 +42,9 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 				"dev/*",
 				"roles",
 				"roles/*",
-				"identity/*",
+				// The group paths only: identity/usage is a normal ACL path.
+				"identity/group",
+				"identity/group/*",
 			},
 		},
 		Paths: b.paths(),

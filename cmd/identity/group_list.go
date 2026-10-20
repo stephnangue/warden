@@ -20,26 +20,21 @@ var (
 Usage: warden identity group list [options]
 
   List every group of the current namespace, or with -role only the
-  groups that grant one role, and how much of the namespace's caps its
-  groups use: every group, and every selector of every rule ("mount"
-  included). The usage always covers the whole namespace, whatever the
-  filter. Requires a token with sudo on sys/identity/group.
+  groups that grant one role. Requires a token with sudo on
+  sys/identity/group. 'warden identity usage' shows how much of the
+  namespace's caps the groups use.
 
   Output honors the global -output flag:
-    table    one row per group, then a usage footer (default for TTY):
-             groups 42/8000 · selectors 310/16000
-    json     {"groups": [{"name", "type", "description", "roles",
-             "rules", "rule_count", "selector_count", "max_age",
-             "metadata", "hash"}, ...],
-             "usage": {"groups", "max_groups", "selectors",
-             "max_selectors"}}
-    ndjson   one group per line, without the usage
+    table    one row per group (default for TTY)
+    json     [{"name", "type", "description", "roles", "rules",
+             "rule_count", "selector_count", "max_age", "metadata",
+             "hash"}, ...]
+    ndjson   one group per line
 
   Examples:
 
       $ warden identity group list
       $ warden identity group list -role deploy
-      $ warden identity group list -o json | jq .usage
       $ warden identity group list -o ndjson | jq -r .name
 `,
 		Args: cobra.NoArgs,
@@ -61,34 +56,14 @@ func runGroupList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	list, err := c.Sys().ListGroups(listRole)
+	groups, err := c.Sys().ListGroups(listRole)
 	if err != nil {
 		return fmt.Errorf("failed to list groups: %w", err)
 	}
-	items := projectGroups(list.Groups)
-
-	// One group per line for ndjson, as agents pipe it; the usage, which
-	// belongs to no group, rides only in the json and table forms.
-	if helpers.ResolveFormat() == helpers.FormatNDJSON {
-		return helpers.RenderList(items, nil)
-	}
-	return helpers.RenderMap(map[string]any{
-		"groups": items,
-		"usage": map[string]any{
-			"groups":        list.Usage.Groups,
-			"max_groups":    list.Usage.MaxGroups,
-			"selectors":     list.Usage.Selectors,
-			"max_selectors": list.Usage.MaxSelectors,
-		},
-	}, func() {
+	items := projectGroups(groups)
+	return helpers.RenderList(items, func() {
 		printGroupsTable(items)
-		fmt.Println(usageFooter(list.Usage))
 	})
-}
-
-// usageFooter renders the namespace's usage of its caps on one line.
-func usageFooter(u api.GroupUsage) string {
-	return fmt.Sprintf("groups %d/%d · selectors %d/%d", u.Groups, u.MaxGroups, u.Selectors, u.MaxSelectors)
 }
 
 func projectGroups(groups []*api.Group) []map[string]any {
