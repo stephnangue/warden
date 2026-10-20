@@ -36,16 +36,16 @@ func testNS(t testing.TB, gen uint64, groups ...*logical.Group) *nsGroups {
 	return gs
 }
 
-func rule(kv ...any) logical.Selector {
-	s := logical.Selector{}
+func rule(kv ...any) logical.GroupRule {
+	s := logical.GroupRule{}
 	for i := 0; i < len(kv); i += 2 {
 		s[kv[i].(string)] = kv[i+1].([]string)
 	}
 	return s
 }
 
-func group(name string, roles []string, maxAge time.Duration, rules ...logical.Selector) *logical.Group {
-	return &logical.Group{Name: name, Roles: roles, MaxAge: maxAge, Selectors: rules}
+func group(name string, roles []string, maxAge time.Duration, rules ...logical.GroupRule) *logical.Group {
+	return &logical.Group{Name: name, Roles: roles, MaxAge: maxAge, Rules: rules}
 }
 
 // groupAdmission admits claims through a jwt-like mount at mountPath that maps
@@ -400,7 +400,7 @@ func TestMembership_ThroughStore(t *testing.T) {
 	_, err := s.CreateGroup(ctxY, virtualGroup("yg", "deploy"))
 	require.NoError(t, err)
 	_, err = s.CreateGroup(ctxX, &logical.Group{Name: "xg", Type: logical.GroupTypeVirtual,
-		Selectors: []logical.Selector{{"mount": {"auth/jwt/"}, "sub": {"a"}}}})
+		Rules: []logical.GroupRule{{"mount": {"auth/jwt/"}, "sub": {"a"}}}})
 	require.NoError(t, err)
 	mY = membership(admY, s.namespaceGroups(nsY.ID), now)
 	assert.NotZero(t, mY.Gen)
@@ -429,7 +429,7 @@ func TestMembership_ThroughStore(t *testing.T) {
 	for i := range 50 {
 		_, err := s.UpdateGroup(ctxX, &logical.Group{Name: "xg", Type: logical.GroupTypeVirtual,
 			Description: fmt.Sprint(i),
-			Selectors:   []logical.Selector{{"mount": {"auth/jwt/"}, "sub": {"a"}}}}, "")
+			Rules:       []logical.GroupRule{{"mount": {"auth/jwt/"}, "sub": {"a"}}}}, "")
 		require.NoError(t, err)
 	}
 	close(stop)

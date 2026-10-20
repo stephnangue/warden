@@ -15,7 +15,7 @@ func testGroup() *Group {
 		Type:        GroupTypeVirtual,
 		Description: "CI deployers",
 		Roles:       []string{"deploy", "read"},
-		Selectors: []Selector{
+		Rules: []GroupRule{
 			{"mount": {"auth/jwt/"}, "repo": {"acme/*"}},
 			{"mount": {"auth/k8s/"}, "workload": {"a", "b"}},
 		},
@@ -42,16 +42,16 @@ func TestGroup_CloneIsDeep(t *testing.T) {
 	require.Equal(t, g, c)
 
 	c.Roles[0] = "x"
-	c.Selectors[0]["repo"][0] = "x"
-	c.Selectors[1]["new"] = []string{"y"}
+	c.Rules[0]["repo"][0] = "x"
+	c.Rules[1]["new"] = []string{"y"}
 	c.Metadata["owner"] = "x"
 	assert.Equal(t, "deploy", g.Roles[0])
-	assert.Equal(t, "acme/*", g.Selectors[0]["repo"][0])
-	assert.NotContains(t, g.Selectors[1], "new")
+	assert.Equal(t, "acme/*", g.Rules[0]["repo"][0])
+	assert.NotContains(t, g.Rules[1], "new")
 	assert.Equal(t, "platform", g.Metadata["owner"])
 
 	assert.Equal(t, len(c.Roles), cap(c.Roles), "no spare capacity")
-	assert.Equal(t, len(c.Selectors[1]["workload"]), cap(c.Selectors[1]["workload"]))
+	assert.Equal(t, len(c.Rules[1]["workload"]), cap(c.Rules[1]["workload"]))
 	assert.Nil(t, (*Group)(nil).Clone())
 }
 
@@ -67,17 +67,22 @@ func TestGroup_Hash(t *testing.T) {
 		"type":        func(g *Group) { g.Type = GroupTypeInternal },
 		"description": func(g *Group) { g.Description = "x" },
 		"roles":       func(g *Group) { g.Roles = []string{"deploy"} },
-		"selector":    func(g *Group) { g.Selectors[0]["repo"] = []string{"acme/x"} },
-		"rule order":  func(g *Group) { g.Selectors[0], g.Selectors[1] = g.Selectors[1], g.Selectors[0] },
+		"selector":    func(g *Group) { g.Rules[0]["repo"] = []string{"acme/x"} },
+		"rule order":  func(g *Group) { g.Rules[0], g.Rules[1] = g.Rules[1], g.Rules[0] },
 		"max_age":     func(g *Group) { g.MaxAge = time.Minute },
 		"metadata":    func(g *Group) { g.Metadata["owner"] = "x" },
-		"split value": func(g *Group) { g.Selectors[1]["workload"] = []string{"ab"} },
+		"split value": func(g *Group) { g.Rules[1]["workload"] = []string{"ab"} },
 	} {
 		g := testGroup()
 		mutate(g)
 		assert.NotEqual(t, base, g.Hash(), name)
 	}
 	assert.Equal(t, "group:deployers", GroupLabel("deployers"))
+}
+
+func TestGroup_SelectorCount(t *testing.T) {
+	assert.Equal(t, 4, testGroup().SelectorCount(), "every key of every rule, mount included")
+	assert.Zero(t, (&Group{}).SelectorCount())
 }
 
 func TestAdmission_Membership(t *testing.T) {

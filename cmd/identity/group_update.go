@@ -22,7 +22,7 @@ Usage: warden identity group update <name> [options]
 
   Update a group. A field you pass replaces the stored value, including
   with an empty one ("roles": [] stops the group granting anything); a
-  field you leave out keeps its value. "selectors" is replaced whole.
+  field you leave out keeps its value. "rules" is replaced whole.
   "type" may be left out; if present it must equal the stored type. The
   change applies to callers on their next request. Requires a token with
   sudo on sys/identity/group.
@@ -36,7 +36,7 @@ Usage: warden identity group update <name> [options]
     Full JSON payload (agent-friendly):
 
       $ warden identity group update ci-deployers -json '{
-          "selectors": [
+          "rules": [
             {
               "mount": ["auth/github-oidc/"],
               "repo": ["acme/infra"],
@@ -53,7 +53,7 @@ Usage: warden identity group update <name> [options]
       $ warden identity group update ci-deployers -roles=deploy,read-secrets
       $ warden identity group update ci-deployers -roles=""
       $ warden identity group update ci-deployers \
-          -selector='{"mount": ["auth/kubernetes/"], "workload": ["ci"]}'
+          -rule='{"mount": ["auth/kubernetes/"], "workload": ["ci"]}'
 
   Combine with -dry-run to validate the payload locally without sending
   it.

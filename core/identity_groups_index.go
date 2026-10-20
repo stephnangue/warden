@@ -66,9 +66,9 @@ type nsGroups struct {
 
 	byName map[string]*compiledGroup
 
-	// names is the number of fact names across every rule of every group,
+	// selectors is the number of selectors across every rule of every group,
 	// "mount" included: what a worst-case recompute evaluates.
-	names int
+	selectors int
 
 	// selecting are the virtual groups, sorted by name.
 	selecting []*compiledGroup
@@ -93,11 +93,11 @@ type compiledGroup struct {
 	*logical.Group
 	hash string
 
-	// rules are compiled from Group.Selectors, index-aligned.
+	// rules are compiled from Group.Rules, index-aligned.
 	rules []*selector.Rule
 
-	// names is the number of fact names across rules.
-	names int
+	// selectors is the number of selectors across rules.
+	selectors int
 
 	// grants are the roles the group grants, each with its label built once.
 	grants []groupGrant
@@ -113,41 +113,41 @@ type groupGrant struct {
 	grant logical.GroupGrant
 }
 
-// compileGroup compiles g's selectors and grants. It reads g but keeps no
+// compileGroup compiles g's rules and grants. It reads g but keeps no
 // reference to it: the caller sets Group and hash on the result before
-// publishing it. An error names the selector at fault.
+// publishing it. An error names the rule at fault.
 func compileGroup(g *logical.Group) (*compiledGroup, error) {
 	cg := &compiledGroup{
-		rules:  make([]*selector.Rule, len(g.Selectors)),
+		rules:  make([]*selector.Rule, len(g.Rules)),
 		grants: make([]groupGrant, len(g.Roles)),
 	}
 	label := logical.GroupLabel(g.Name)
 	for i, role := range g.Roles {
 		cg.grants[i] = groupGrant{role: role, grant: logical.GroupGrant{Group: g.Name, Label: label}}
 	}
-	for i, s := range g.Selectors {
-		mounts, ok := s[selector.NameMount]
+	for i, rule := range g.Rules {
+		mounts, ok := rule[selector.NameMount]
 		if !ok {
-			return nil, fmt.Errorf(`selectors[%d]: "mount" is required: list the auth mounts this rule trusts (e.g. "auth/kubernetes/")`, i)
+			return nil, fmt.Errorf(`rules[%d]: every rule must include a "mount" selector listing the auth mounts it trusts (e.g. "auth/kubernetes/")`, i)
 		}
-		r, err := selector.Compile(s)
+		r, err := selector.Compile(rule)
 		if err != nil {
-			return nil, fmt.Errorf("selectors[%d]: %w", i, err)
+			return nil, fmt.Errorf("rules[%d]: %w", i, err)
 		}
 		cg.rules[i] = r
-		cg.names += len(r.Names())
+		cg.selectors += len(r.Names())
 		for _, v := range mounts {
 			if selector.IsPattern(v) {
 				gl, err := selector.CompileGlob(v)
 				if err != nil {
-					return nil, fmt.Errorf("selectors[%d]: mount %q: %w", i, v, err)
+					return nil, fmt.Errorf("rules[%d]: mount %q: %w", i, v, err)
 				}
 				cg.mountGlobs = append(cg.mountGlobs, gl)
 				continue
 			}
 			lit, err := selector.Unescape(v)
 			if err != nil {
-				return nil, fmt.Errorf("selectors[%d]: mount %q: %w", i, v, err)
+				return nil, fmt.Errorf("rules[%d]: mount %q: %w", i, v, err)
 			}
 			if !slices.Contains(cg.exactMounts, lit) {
 				cg.exactMounts = append(cg.exactMounts, lit)
@@ -167,7 +167,7 @@ func buildNSGroups(byName map[string]*compiledGroup, gen uint64) *nsGroups {
 	g := &nsGroups{gen: gen, byName: byName, byMount: map[string][]int32{}}
 	g.selecting = make([]*compiledGroup, 0, len(byName))
 	for _, cg := range byName {
-		g.names += cg.names
+		g.selectors += cg.selectors
 		if cg.Type == logical.GroupTypeVirtual {
 			g.selecting = append(g.selecting, cg)
 		}

@@ -20,19 +20,26 @@ var (
 Usage: warden identity group list [options]
 
   List every group of the current namespace, or with -role only the
-  groups that grant one role. Requires a token with sudo on
-  sys/identity/group.
+  groups that grant one role, and how much of the namespace's caps its
+  groups use: every group, and every selector of every rule ("mount"
+  included). The usage always covers the whole namespace, whatever the
+  filter. Requires a token with sudo on sys/identity/group.
 
   Output honors the global -output flag:
-    table    one row per group (default for TTY)
-    json     [{"name", "type", "description", "roles", "selectors",
-             "max_age", "metadata", "hash"}, ...]
-    ndjson   one group per line
+    table    one row per group, then a usage footer (default for TTY):
+             groups 42/8000 · selectors 310/16000
+    json     {"groups": [{"name", "type", "description", "roles",
+             "rules", "rule_count", "selector_count", "max_age",
+             "metadata", "hash"}, ...],
+             "usage": {"groups", "max_groups", "selectors",
+             "max_selectors"}}
+    ndjson   one group per line, without the usage
 
   Examples:
 
       $ warden identity group list
       $ warden identity group list -role deploy
+      $ warden identity group list -o json | jq .usage
       $ warden identity group list -o ndjson | jq -r .name
 `,
 		Args: cobra.NoArgs,
@@ -54,14 +61,34 @@ func runGroupList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	groups, err := c.Sys().ListGroups(listRole)
+	list, err := c.Sys().ListGroups(listRole)
 	if err != nil {
 		return fmt.Errorf("failed to list groups: %w", err)
 	}
-	items := projectGroups(groups)
-	return helpers.RenderList(items, func() {
+	items := projectGroups(list.Groups)
+
+	// One group per line for ndjson, as agents pipe it; the usage, which
+	// belongs to no group, rides only in the json and table forms.
+	if helpers.ResolveFormat() == helpers.FormatNDJSON {
+		return helpers.RenderList(items, nil)
+	}
+	return helpers.RenderMap(map[string]any{
+		"groups": items,
+		"usage": map[string]any{
+			"groups":        list.Usage.Groups,
+			"max_groups":    list.Usage.MaxGroups,
+			"selectors":     list.Usage.Selectors,
+			"max_selectors": list.Usage.MaxSelectors,
+		},
+	}, func() {
 		printGroupsTable(items)
+		fmt.Println(usageFooter(list.Usage))
 	})
+}
+
+// usageFooter renders the namespace's usage of its caps on one line.
+func usageFooter(u api.GroupUsage) string {
+	return fmt.Sprintf("groups %d/%d · selectors %d/%d", u.Groups, u.MaxGroups, u.Selectors, u.MaxSelectors)
 }
 
 func projectGroups(groups []*api.Group) []map[string]any {
@@ -71,27 +98,29 @@ func projectGroups(groups []*api.Group) []map[string]any {
 		if roles == nil {
 			roles = []string{}
 		}
-		selectors := make([]any, 0, len(g.Selectors))
-		for _, s := range g.Selectors {
-			m := make(map[string]any, len(s))
-			for k, vs := range s {
+		rules := make([]any, 0, len(g.Rules))
+		for _, r := range g.Rules {
+			m := make(map[string]any, len(r))
+			for k, vs := range r {
 				m[k] = stringsToAny(vs)
 			}
-			selectors = append(selectors, m)
+			rules = append(rules, m)
 		}
 		metadata := make(map[string]any, len(g.Metadata))
 		for k, v := range g.Metadata {
 			metadata[k] = v
 		}
 		items = append(items, map[string]any{
-			"name":        g.Name,
-			"type":        g.Type,
-			"description": g.Description,
-			"roles":       roles,
-			"selectors":   selectors,
-			"max_age":     g.MaxAge,
-			"metadata":    metadata,
-			"hash":        g.Hash,
+			"name":           g.Name,
+			"type":           g.Type,
+			"description":    g.Description,
+			"roles":          roles,
+			"rules":          rules,
+			"rule_count":     g.RuleCount,
+			"selector_count": g.SelectorCount,
+			"max_age":        g.MaxAge,
+			"metadata":       metadata,
+			"hash":           g.Hash,
 		})
 	}
 	return items
@@ -99,20 +128,20 @@ func projectGroups(groups []*api.Group) []map[string]any {
 
 func printGroupsTable(items []map[string]any) {
 	if len(items) == 0 {
-		fmt.Println("No groups defined in this namespace.")
+		fmt.Println("No groups to list.")
 		return
 	}
 	rows := make([][]any, len(items))
 	for i, it := range items {
-		sel, _ := it["selectors"].([]any)
 		rows[i] = []any{
 			cell(it["name"]),
 			cell(it["type"]),
 			cell(it["roles"]),
-			fmt.Sprint(len(sel)),
+			cell(it["rule_count"]),
+			cell(it["selector_count"]),
 			cell(it["max_age"]),
 			cell(it["description"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Type", "Roles", "Selectors", "Max Age", "Description"}, rows)
+	helpers.PrintTable([]string{"Name", "Type", "Roles", "Rules", "Selectors", "Max Age", "Description"}, rows)
 }

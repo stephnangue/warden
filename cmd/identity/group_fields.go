@@ -18,7 +18,7 @@ type groupFlags struct {
 	typ         string
 	description string
 	roles       []string
-	selectors   []string
+	rules       []string
 	maxAge      string
 	metadata    map[string]string
 }
@@ -28,7 +28,7 @@ var groupFlagNames = []struct{ flag, key string }{
 	{"type", "type"},
 	{"description", "description"},
 	{"roles", "roles"},
-	{"selector", "selectors"},
+	{"rule", "rules"},
 	{"max-age", "max_age"},
 	{"metadata", "metadata"},
 }
@@ -38,8 +38,9 @@ func (f *groupFlags) bind(cmd *cobra.Command) {
 	fs.StringVar(&f.typ, "type", "", `Where membership comes from: "virtual" (required on create; never changes)`)
 	fs.StringVar(&f.description, "description", "", "What the group is for")
 	fs.StringSliceVar(&f.roles, "roles", nil, "Roles membership grants (repeat or comma-separated)")
-	fs.StringArrayVar(&f.selectors, "selector", nil,
-		`One selector as a JSON object of fact name to values (a list, or one string), e.g. '{"mount": "auth/kubernetes/", "workload": ["ci", "cd"]}' (repeatable; any one matching makes a member)`)
+	fs.StringArrayVar(&f.rules, "rule", nil,
+		`One rule as a JSON object of selectors, each a fact name with its values (a list, or one string), `+
+			`including "mount", e.g. '{"mount": "auth/kubernetes/", "workload": ["ci", "cd"]}' (repeatable; any one rule matching makes a member)`)
 	fs.StringVar(&f.maxAge, "max-age", "", "Longest time since the credential was issued for its holder to be a member (e.g. 10m)")
 	fs.StringToStringVar(&f.metadata, "metadata", nil, "Free-form label (key=value, repeatable)")
 }
@@ -75,16 +76,16 @@ func (f *groupFlags) payload(cmd *cobra.Command) (map[string]any, error) {
 		}
 		out["metadata"] = md
 	}
-	if cmd.Flags().Changed("selector") {
-		selectors := make([]any, 0, len(f.selectors))
-		for i, raw := range f.selectors {
-			var s map[string]any
-			if err := json.Unmarshal([]byte(raw), &s); err != nil {
-				return nil, fmt.Errorf("-selector #%d is not a JSON object: %v: %w", i+1, err, helpers.ErrUsage)
+	if cmd.Flags().Changed("rule") {
+		rules := make([]any, 0, len(f.rules))
+		for i, raw := range f.rules {
+			var r map[string]any
+			if err := json.Unmarshal([]byte(raw), &r); err != nil {
+				return nil, fmt.Errorf("-rule #%d is not a JSON object: %v: %w", i+1, err, helpers.ErrUsage)
 			}
-			selectors = append(selectors, s)
+			rules = append(rules, r)
 		}
-		out["selectors"] = selectors
+		out["rules"] = rules
 	}
 	return out, nil
 }
@@ -103,9 +104,9 @@ func validateGroupName(name string) error {
 	return helpers.ValidateIdentifier("group name", name)
 }
 
-// formatSelector renders one selector on one line: "mount" first, then the
-// other names sorted, each as name=v1|v2.
-func formatSelector(s map[string]any) string {
+// formatRule renders one rule on one line, a selector at a time: "mount"
+// first, then the others sorted by name, each as name=v1|v2.
+func formatRule(s map[string]any) string {
 	names := make([]string, 0, len(s))
 	for k := range s {
 		if k != "mount" {
@@ -134,8 +135,8 @@ func formatSelector(s map[string]any) string {
 	return strings.Join(parts, "  ")
 }
 
-// selectorsOf returns the selectors of a group's response data as maps.
-func selectorsOf(v any) []map[string]any {
+// rulesOf returns the rules of a group's response data as maps.
+func rulesOf(v any) []map[string]any {
 	switch t := v.(type) {
 	case []any:
 		out := make([]map[string]any, 0, len(t))
@@ -160,8 +161,9 @@ func selectorsOf(v any) []map[string]any {
 }
 
 // printGroupTable renders one group's response data as a key/value table,
-// one row per selector ("#i  mount=…  name=v1|v2"). Empty optional fields are
-// left out; warnings go to stderr through PrintWarnings.
+// one row per rule ("#i  mount=…  name=v1|v2"), then the group's rule and
+// selector counts. Empty optional fields are left out; warnings go to stderr
+// through PrintWarnings.
 func printGroupTable(data map[string]any) {
 	rows := [][]any{{"Name", cell(data["name"])}}
 	add := func(label string, v any) {
@@ -173,13 +175,15 @@ func printGroupTable(data map[string]any) {
 	add("Type", data["type"])
 	add("Description", data["description"])
 	add("Roles", data["roles"])
-	for i, s := range selectorsOf(data["selectors"]) {
+	for i, r := range rulesOf(data["rules"]) {
 		label := ""
 		if i == 0 {
-			label = "Selectors"
+			label = "Rules"
 		}
-		rows = append(rows, []any{label, fmt.Sprintf("#%d  %s", i, formatSelector(s))})
+		rows = append(rows, []any{label, fmt.Sprintf("#%d  %s", i, formatRule(r))})
 	}
+	add("Rule Count", data["rule_count"])
+	add("Selector Count", data["selector_count"])
 	add("Max Age", data["max_age"])
 	add("Metadata", data["metadata"])
 	add("Hash", data["hash"])

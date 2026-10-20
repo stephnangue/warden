@@ -37,11 +37,12 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 					Type:        framework.TypeCommaStringSlice,
 					Description: fmt.Sprintf("Roles membership grants, by name (at most %d)", logical.MaxGroupRoles),
 				},
-				"selectors": {
+				"rules": {
 					Type: framework.TypeSlice,
 					Description: "Rules a caller's verified facts must satisfy, any one of them (virtual groups). " +
-						"Each rule maps a fact name to the values it may take (a list, or one string): every name must match one of its values. " +
-						`Every rule must name "mount", the auth mounts it trusts (e.g. "auth/kubernetes/"). ` +
+						"A rule is a set of selectors, each a fact name with the values it may take (a list, or one string); " +
+						"every selector must match one of its values. " +
+						`Every rule must include a "mount" selector listing the auth mounts it trusts (e.g. "auth/kubernetes/"). ` +
 						`A value holding an unescaped "*" or "?" is a glob.`,
 				},
 				"max_age": {
@@ -85,8 +86,9 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 			},
 			HelpSynopsis: "Manage namespace groups",
 			HelpDescription: "A group grants roles to its members. A virtual group's members are the callers whose verified " +
-				"facts match one of its selectors, through one of the auth mounts the selector lists. A role that does " +
-				"not exist yet, or a fact no listed mount produces, is accepted with a warning.",
+				"facts match one of its rules, through one of the auth mounts the rule's \"mount\" selector lists. A role " +
+				"that does not exist yet, or a fact no listed mount produces, is accepted with a warning. Responses carry " +
+				"rule_count and selector_count, what the group adds to the namespace's usage.",
 		},
 		{
 			Pattern: "identity/group/?$",
@@ -102,23 +104,25 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 					Summary:  "List the namespace's groups",
 				},
 			},
-			HelpSynopsis:    "List namespace groups",
-			HelpDescription: "List every group of the namespace, optionally only those granting one role.",
+			HelpSynopsis: "List namespace groups",
+			HelpDescription: "List every group of the namespace, optionally only those granting one role. " +
+				"usage reports the whole namespace's groups and selectors against their caps, whatever the filter.",
 		},
 	}
 }
 
 // groupToMap renders a group for a response. Every key is present, so the
-// shape is the same whichever fields the group sets; selectors render as
-// written.
+// shape is the same whichever fields the group sets; rules render as written.
+// rule_count and selector_count are what the group adds to the namespace's
+// usage.
 func groupToMap(g *logical.Group) map[string]any {
 	roles := g.Roles
 	if roles == nil {
 		roles = []string{}
 	}
-	selectors := make([]map[string][]string, len(g.Selectors))
-	for i, s := range g.Selectors {
-		selectors[i] = s
+	rules := make([]map[string][]string, len(g.Rules))
+	for i, r := range g.Rules {
+		rules[i] = r
 	}
 	metadata := g.Metadata
 	if metadata == nil {
@@ -129,16 +133,18 @@ func groupToMap(g *logical.Group) map[string]any {
 		maxAge = g.MaxAge.String()
 	}
 	return map[string]any{
-		"id":          g.ID,
-		"name":        g.Name,
-		"type":        string(g.Type),
-		"description": g.Description,
-		"roles":       roles,
-		"selectors":   selectors,
-		"max_age":     maxAge,
-		"metadata":    metadata,
-		"created_at":  g.CreatedAt,
-		"updated_at":  g.UpdatedAt,
+		"id":             g.ID,
+		"name":           g.Name,
+		"type":           string(g.Type),
+		"description":    g.Description,
+		"roles":          roles,
+		"rules":          rules,
+		"rule_count":     len(g.Rules),
+		"selector_count": g.SelectorCount(),
+		"max_age":        maxAge,
+		"metadata":       metadata,
+		"created_at":     g.CreatedAt,
+		"updated_at":     g.UpdatedAt,
 	}
 }
 
@@ -159,7 +165,7 @@ func groupErrorResponse(name string, err error) *logical.Response {
 	case errors.Is(err, ErrGroupChanged):
 		return logical.ErrorResponse(logical.ErrConflictf(
 			"group %q changed since it was read (expected_hash no longer matches); read it again and retry", name))
-	case errors.Is(err, ErrTooManyGroups), errors.Is(err, ErrTooManySelectorNames):
+	case errors.Is(err, ErrTooManyGroups), errors.Is(err, ErrTooManySelectors):
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error()))
 	case errors.Is(err, ErrIdentityStoreNotLoaded):
 		return logical.ErrorResponse(logical.ErrServiceUnavailable(err.Error()))
@@ -178,25 +184,25 @@ func refuseOtherTypeFields(d *framework.FieldData, t logical.GroupType) error {
 	return nil
 }
 
-// parseSelectors converts the selectors field of a write: a list of objects,
-// each mapping a fact name to a list of strings, or to one string standing for
-// a one-element list.
-func parseSelectors(raw []any) ([]logical.Selector, error) {
-	out := make([]logical.Selector, 0, len(raw))
+// parseRules converts the rules field of a write: a list of objects, each a
+// set of selectors mapping a fact name to a list of strings, or to one string
+// standing for a one-element list.
+func parseRules(raw []any) ([]logical.GroupRule, error) {
+	out := make([]logical.GroupRule, 0, len(raw))
 	for i, item := range raw {
 		m, ok := item.(map[string]any)
 		if !ok {
-			return nil, logical.ErrBadRequestf("selectors[%d]: must be an object of fact name to values, got %T", i, item)
+			return nil, logical.ErrBadRequestf("rules[%d]: must be an object of selectors (fact name to values), got %T", i, item)
 		}
-		s := make(logical.Selector, len(m))
+		rule := make(logical.GroupRule, len(m))
 		for name, v := range m {
 			values, err := stringList(v)
 			if err != nil {
-				return nil, logical.ErrBadRequestf("selectors[%d]: %q: %v", i, name, err)
+				return nil, logical.ErrBadRequestf("rules[%d]: selector %q: %v", i, name, err)
 			}
-			s[name] = values
+			rule[name] = values
 		}
-		out = append(out, s)
+		out = append(out, rule)
 	}
 	return out, nil
 }
@@ -233,12 +239,12 @@ func mergeGroupFields(g *logical.Group, d *framework.FieldData) error {
 	if v, ok := d.GetOk("roles"); ok {
 		g.Roles = v.([]string)
 	}
-	if v, ok := d.GetOk("selectors"); ok {
-		selectors, err := parseSelectors(v.([]any))
+	if v, ok := d.GetOk("rules"); ok {
+		rules, err := parseRules(v.([]any))
 		if err != nil {
 			return err
 		}
-		g.Selectors = selectors
+		g.Rules = rules
 	}
 	if v, ok := d.GetOk("max_age"); ok {
 		g.MaxAge = time.Duration(v.(int)) * time.Second
@@ -345,9 +351,10 @@ func (b *SystemBackend) handleGroupDelete(ctx context.Context, req *logical.Requ
 
 // handleGroupList handles LIST sys/identity/group. It returns the names under
 // "keys" and the groups themselves (with their hashes) under "groups", both
-// sorted by name; ?role= keeps only the groups granting that role.
+// sorted by name; ?role= keeps only the groups granting that role. "usage"
+// reports the whole namespace against its caps, whatever the filter.
 func (b *SystemBackend) handleGroupList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	groups, hashes, err := b.core.identityStore.ListGroups(ctx, d.Get("role").(string))
+	groups, hashes, usage, err := b.core.identityStore.ListGroups(ctx, d.Get("role").(string))
 	if err != nil {
 		return groupErrorResponse("", err), nil
 	}
@@ -361,5 +368,11 @@ func (b *SystemBackend) handleGroupList(ctx context.Context, req *logical.Reques
 	return b.respondSuccess(map[string]any{
 		"keys":   keys,
 		"groups": items,
+		"usage": map[string]any{
+			"groups":        usage.Groups,
+			"max_groups":    usage.MaxGroups,
+			"selectors":     usage.Selectors,
+			"max_selectors": usage.MaxSelectors,
+		},
 	}), nil
 }

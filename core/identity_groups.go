@@ -25,7 +25,7 @@ var (
 	ErrGroupNotFound          = errors.New("group not found")
 	ErrGroupAlreadyExists     = errors.New("group already exists")
 	ErrTooManyGroups          = errors.New("too many groups in the namespace")
-	ErrTooManySelectorNames   = errors.New("too many selector fact names in the namespace")
+	ErrTooManySelectors       = errors.New("too many selectors in the namespace")
 
 	// ErrGroupChanged is returned by UpdateGroup and DeleteGroup when the
 	// caller passed an expected hash and the stored group no longer has it.
@@ -98,10 +98,11 @@ type IdentityStore struct {
 	storage sdklogical.Storage // barrier view at identityStorePath
 	loaded  bool
 
-	// maxGroups and maxNames are the namespace caps a write checks:
-	// logical.MaxGroupsPerNamespace and logical.MaxSelectorNamesPerNamespace,
-	// lowered by tests only. Read and written under mu.
-	maxGroups, maxNames int
+	// maxGroups and maxSelectors are the namespace caps a write checks and a
+	// listing reports: logical.MaxGroupsPerNamespace and
+	// logical.MaxSelectorsPerNamespace, lowered by tests only. Atomic, so a
+	// listing reads them without taking mu.
+	maxGroups, maxSelectors atomic.Int64
 
 	// beforeGroupUpdate, when set, runs in UpdateGroup after validation and
 	// before the commit. Nil outside tests.
@@ -112,11 +113,11 @@ type IdentityStore struct {
 // barrier is unsealed.
 func NewIdentityStore(c *Core) *IdentityStore {
 	s := &IdentityStore{
-		core:      c,
-		logger:    c.logger.WithSystem("identity.store"),
-		maxGroups: logical.MaxGroupsPerNamespace,
-		maxNames:  logical.MaxSelectorNamesPerNamespace,
+		core:   c,
+		logger: c.logger.WithSystem("identity.store"),
 	}
+	s.maxGroups.Store(logical.MaxGroupsPerNamespace)
+	s.maxSelectors.Store(logical.MaxSelectorsPerNamespace)
 	s.groups.Store(emptyGroupSnapshot)
 	return s
 }
@@ -125,6 +126,24 @@ func NewIdentityStore(c *Core) *IdentityStore {
 // empty namespace when it has none. Lock-free; does not allocate.
 func (s *IdentityStore) namespaceGroups(nsID string) *nsGroups {
 	return s.groups.Load().namespace(nsID)
+}
+
+// GroupUsage is how much of its caps a namespace's groups use.
+type GroupUsage struct {
+	Groups       int `json:"groups"`
+	MaxGroups    int `json:"max_groups"`
+	Selectors    int `json:"selectors"`
+	MaxSelectors int `json:"max_selectors"`
+}
+
+// usageOf reports gs's usage against the store's caps. Lock-free.
+func (s *IdentityStore) usageOf(gs *nsGroups) GroupUsage {
+	return GroupUsage{
+		Groups:       len(gs.byName),
+		MaxGroups:    int(s.maxGroups.Load()),
+		Selectors:    gs.selectors,
+		MaxSelectors: int(s.maxSelectors.Load()),
+	}
 }
 
 // GroupsListingRole returns the names of the groups of namespace nsID that
@@ -190,11 +209,13 @@ func (s *IdentityStore) GetGroup(ctx context.Context, name string) (*logical.Gro
 }
 
 // ListGroups returns copies of the groups of the namespace in ctx, sorted by
-// name, with their hashes. A non-empty role keeps only the groups listing it.
-func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical.Group, []string, error) {
+// name, with their hashes, and the namespace's usage of its caps. A non-empty
+// role keeps only the groups listing it; the usage always covers the whole
+// namespace. Both come from one snapshot, with no storage read.
+func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical.Group, []string, GroupUsage, error) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
-		return nil, nil, ErrNamespaceNotInContext
+		return nil, nil, GroupUsage{}, ErrNamespaceNotInContext
 	}
 	gs := s.namespaceGroups(ns.ID)
 	names := make([]string, 0, len(gs.byName))
@@ -210,13 +231,13 @@ func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical
 		cg := gs.byName[name]
 		groups[i], hashes[i] = cg.Group.Clone(), cg.hash
 	}
-	return groups, hashes, nil
+	return groups, hashes, s.usageOf(gs), nil
 }
 
 // CreateGroup stores a new group in the namespace in ctx. g is normalized in
 // place and receives its ID and timestamps; the store keeps its own copy. The
-// returned warnings name roles that do not exist yet and selector facts or
-// mounts nothing in the namespace answers.
+// returned warnings name roles that do not exist yet and selectors or mounts
+// nothing in the namespace answers.
 func (s *IdentityStore) CreateGroup(ctx context.Context, g *logical.Group) ([]string, error) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
@@ -242,10 +263,10 @@ func (s *IdentityStore) CreateGroup(ctx context.Context, g *logical.Group) ([]st
 		if cur.byName[g.Name] != nil {
 			return ErrGroupAlreadyExists
 		}
-		if len(cur.byName) >= s.maxGroups {
-			return fmt.Errorf("%w: a namespace holds at most %d groups", ErrTooManyGroups, s.maxGroups)
+		if maxGroups := int(s.maxGroups.Load()); len(cur.byName) >= maxGroups {
+			return fmt.Errorf("%w: the namespace has %d/%d groups", ErrTooManyGroups, len(cur.byName), maxGroups)
 		}
-		if err := s.checkNamesLocked(cur, nil, cg); err != nil {
+		if err := s.checkSelectorsLocked(cur, nil, cg); err != nil {
 			return err
 		}
 
@@ -301,7 +322,7 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 		if g.Type != old.Type {
 			return errGroupTypeChange
 		}
-		if err := s.checkNamesLocked(cur, old, cg); err != nil {
+		if err := s.checkSelectorsLocked(cur, old, cg); err != nil {
 			return err
 		}
 		g.ID, g.CreatedAt, g.UpdatedAt = old.ID, old.CreatedAt, time.Now().UTC()
@@ -318,17 +339,17 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 
 var errGroupTypeChange = logical.ErrBadRequest("type cannot change; create a new group")
 
-// checkNamesLocked refuses a write that would take the namespace past its cap
-// on selector fact names: cur's total, less old's names (the group replaced,
-// if any), plus next's. Caller holds mu.
-func (s *IdentityStore) checkNamesLocked(cur *nsGroups, old, next *compiledGroup) error {
-	total := cur.names + next.names
+// checkSelectorsLocked refuses a write that would take the namespace past its
+// selector cap: cur's total, less old's selectors (the group replaced, if
+// any), plus next's. Caller holds mu.
+func (s *IdentityStore) checkSelectorsLocked(cur *nsGroups, old, next *compiledGroup) error {
+	total := cur.selectors + next.selectors
 	if old != nil {
-		total -= old.names
+		total -= old.selectors
 	}
-	if total > s.maxNames {
-		return fmt.Errorf("%w: the selectors of a namespace's groups name at most %d facts together (\"mount\" included); this write would make %d",
-			ErrTooManySelectorNames, s.maxNames, total)
+	if maxSelectors := int(s.maxSelectors.Load()); total > maxSelectors {
+		return fmt.Errorf("%w: this write would make %d/%d selectors (currently %d; every key of every rule counts, \"mount\" included)",
+			ErrTooManySelectors, total, maxSelectors, cur.selectors)
 	}
 	return nil
 }
@@ -581,12 +602,12 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 	}
 	g.Roles = roles
 
-	if len(g.Selectors) == 0 {
-		return nil, nil, logical.ErrBadRequest("a virtual group needs at least one selector")
+	if len(g.Rules) == 0 {
+		return nil, nil, logical.ErrBadRequest("a virtual group needs at least one rule")
 	}
-	if len(g.Selectors) > logical.MaxGroupSelectors {
-		return nil, nil, logical.ErrBadRequestf("a group has at most %d selectors, got %d",
-			logical.MaxGroupSelectors, len(g.Selectors))
+	if len(g.Rules) > logical.MaxGroupRules {
+		return nil, nil, logical.ErrBadRequestf("a group has at most %d rules, got %d",
+			logical.MaxGroupRules, len(g.Rules))
 	}
 	cg, err := compileGroup(g)
 	if err != nil {
@@ -602,7 +623,7 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 			}
 		}
 	}
-	warnings = append(warnings, selectorWarnings(g, s.core.namespaceAuthMountFacts(ctx))...)
+	warnings = append(warnings, ruleWarnings(g, s.core.namespaceAuthMountFacts(ctx))...)
 	return cg, warnings, nil
 }
 
@@ -667,20 +688,20 @@ func (c *Core) namespaceAuthMountFacts(ctx context.Context) []authMountFacts {
 	return out
 }
 
-// selectorWarnings checks each rule of g against the namespace's auth mounts:
-// the mounts a rule lists must exist, and every other fact it names must be
-// answered by at least one of them. Facts are checked only against the mounts
-// the rule lists, since only those can ever match it.
-func selectorWarnings(g *logical.Group, mounts []authMountFacts) []string {
+// ruleWarnings checks each rule of g against the namespace's auth mounts: the
+// mounts its "mount" selector lists must exist, and the fact every other
+// selector names must be answered by at least one of them. Facts are checked
+// only against the mounts the rule lists, since only those can ever match it.
+func ruleWarnings(g *logical.Group, mounts []authMountFacts) []string {
 	var warnings []string
-	for i, s := range g.Selectors {
+	for i, rule := range g.Rules {
 		listed := map[int]bool{}
 		literalMiss := false
-		for _, v := range s[selector.NameMount] {
+		for _, v := range rule[selector.NameMount] {
 			if selector.IsPattern(v) {
 				if strings.Contains(v, "**") {
 					warnings = append(warnings, fmt.Sprintf(
-						`selectors[%d]: mount %q uses "**", which matches across "/": it trusts every auth mount it reaches, including ones enabled later`, i, v))
+						`rules[%d]: mount %q uses "**", which matches across "/": it trusts every auth mount it reaches, including ones enabled later`, i, v))
 				}
 				gl, err := selector.CompileGlob(v)
 				if err != nil {
@@ -706,26 +727,26 @@ func selectorWarnings(g *logical.Group, mounts []authMountFacts) []string {
 			if !found {
 				literalMiss = true
 				warnings = append(warnings, fmt.Sprintf(
-					"selectors[%d]: mount %q names no auth mount in this namespace; the rule cannot match through it until one is enabled there", i, v))
+					"rules[%d]: mount %q names no auth mount in this namespace; the rule cannot match through it until one is enabled there", i, v))
 			}
 		}
 		if len(listed) == 0 {
 			if !literalMiss {
 				warnings = append(warnings, fmt.Sprintf(
-					"selectors[%d]: no auth mount in this namespace matches the rule's mount patterns", i))
+					`rules[%d]: no auth mount in this namespace matches the rule's "mount" selector`, i))
 			}
 			continue
 		}
 
-		for _, name := range slices.Sorted(maps.Keys(s)) {
+		for _, name := range slices.Sorted(maps.Keys(rule)) {
 			switch name {
 			case selector.NameMount:
 				continue
 			case selector.NameKind:
-				for _, v := range s[name] {
+				for _, v := range rule[name] {
 					if !selector.IsPattern(v) && v != logical.EntityKindAgent && v != logical.EntityKindHuman {
 						warnings = append(warnings, fmt.Sprintf(
-							"selectors[%d]: kind %q is neither %q nor %q and never matches", i, v,
+							`rules[%d]: the "kind" selector's value %q is neither %q nor %q and never matches`, i, v,
 							logical.EntityKindAgent, logical.EntityKindHuman))
 					}
 				}
@@ -740,7 +761,7 @@ func selectorWarnings(g *logical.Group, mounts []authMountFacts) []string {
 			}
 			if !produced {
 				warnings = append(warnings, fmt.Sprintf(
-					"selectors[%d]: no auth mount the rule lists produces fact %q; the rule cannot match until one maps it", i, name))
+					"rules[%d]: no auth mount the rule lists produces fact %q; its selector cannot match until one maps it", i, name))
 			}
 		}
 
@@ -756,7 +777,7 @@ func selectorWarnings(g *logical.Group, mounts []authMountFacts) []string {
 			if allNoIssuedAt {
 				slices.Sort(paths)
 				warnings = append(warnings, fmt.Sprintf(
-					"selectors[%d]: max_age never matches this rule: its mounts (%s) admit credentials that carry no issue time",
+					"rules[%d]: max_age never matches this rule: its mounts (%s) admit credentials that carry no issue time",
 					i, strings.Join(paths, ", ")))
 			}
 		}

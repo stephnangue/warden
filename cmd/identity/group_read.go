@@ -15,10 +15,11 @@ var GroupReadCmd = &cobra.Command{
 	Long: `
 Usage: warden identity group read <name>
 
-  Read one group: its type, the roles it grants, its selectors (one line
-  each, "#i  mount=…  name=v1|v2"), max_age, metadata, and the hash a
-  conditional update or delete passes back. Requires a token with sudo on
-  sys/identity/group.
+  Read one group: its type, the roles it grants, its rules (one line each,
+  a selector at a time: "#i  mount=…  name=v1|v2"), its rule and selector
+  counts (what it adds to the namespace's usage), max_age, metadata, and
+  the hash a conditional update or delete passes back. Requires a token
+  with sudo on sys/identity/group.
 
   Examples:
 

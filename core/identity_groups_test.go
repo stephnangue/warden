@@ -63,7 +63,7 @@ func deployersBody() map[string]any {
 		"type":        "virtual",
 		"description": "CI deployers",
 		"roles":       []any{"deploy", "read-secrets", "deploy"},
-		"selectors": []any{
+		"rules": []any{
 			map[string]any{
 				"mount": []any{"auth/jwt/"},
 				"repo":  []any{"acme/*"},
@@ -77,10 +77,10 @@ func deployersBody() map[string]any {
 // virtualGroup returns a valid group with one rule.
 func virtualGroup(name string, roles ...string) *logical.Group {
 	return &logical.Group{
-		Name:      name,
-		Type:      logical.GroupTypeVirtual,
-		Roles:     roles,
-		Selectors: []logical.Selector{{"mount": {"auth/jwt/"}, "sub": {"x"}}},
+		Name:  name,
+		Type:  logical.GroupTypeVirtual,
+		Roles: roles,
+		Rules: []logical.GroupRule{{"mount": {"auth/jwt/"}, "sub": {"x"}}},
 	}
 }
 
@@ -93,8 +93,10 @@ func TestGroups_CRUD(t *testing.T) {
 	assert.Equal(t, "deployers", resp.Data["name"])
 	assert.Equal(t, "virtual", resp.Data["type"])
 	assert.Equal(t, []string{"deploy", "read-secrets"}, resp.Data["roles"], "roles are sorted and deduplicated")
-	assert.Equal(t, []map[string][]string{{"mount": {"auth/jwt/"}, "repo": {"acme/*"}}}, resp.Data["selectors"],
-		"selectors render as written")
+	assert.Equal(t, []map[string][]string{{"mount": {"auth/jwt/"}, "repo": {"acme/*"}}}, resp.Data["rules"],
+		"rules render as written")
+	assert.Equal(t, 1, resp.Data["rule_count"])
+	assert.Equal(t, 2, resp.Data["selector_count"], "mount and repo")
 	assert.Equal(t, "10m0s", resp.Data["max_age"])
 	assert.Equal(t, map[string]string{"owner": "platform"}, resp.Data["metadata"])
 	assert.NotEmpty(t, resp.Data["id"])
@@ -126,9 +128,9 @@ func TestGroups_CRUD(t *testing.T) {
 	assert.NotEqual(t, h1, resp.Data["hash"])
 
 	require.Equal(t, http.StatusCreated, groupRequest(t, c, logical.CreateOperation, "group/readers", map[string]any{
-		"type":      "virtual",
-		"roles":     []any{"read-secrets"},
-		"selectors": []any{map[string]any{"mount": []any{"auth/jwt/"}, "sub": []any{"r"}}},
+		"type":  "virtual",
+		"roles": []any{"read-secrets"},
+		"rules": []any{map[string]any{"mount": []any{"auth/jwt/"}, "sub": []any{"r"}}},
 	}).StatusCode)
 
 	resp = groupRequest(t, c, logical.ListOperation, "group", nil)
@@ -149,11 +151,11 @@ func TestGroups_CRUD(t *testing.T) {
 	g, _, err := c.identityStore.GetGroup(ctx, "readers")
 	require.NoError(t, err)
 	g.Roles[0] = "mutated"
-	g.Selectors[0]["sub"][0] = "mutated"
+	g.Rules[0]["sub"][0] = "mutated"
 	g2, _, err := c.identityStore.GetGroup(ctx, "readers")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"read-secrets"}, g2.Roles)
-	assert.Equal(t, []string{"r"}, g2.Selectors[0]["sub"])
+	assert.Equal(t, []string{"r"}, g2.Rules[0]["sub"])
 }
 
 func TestGroups_CAS(t *testing.T) {
@@ -318,20 +320,21 @@ func TestGroups_Selectors(t *testing.T) {
 	c := createTestCore(t)
 	ctx := rootCtx()
 
-	create := func(selectors ...logical.Selector) ([]string, error) {
+	create := func(rules ...logical.GroupRule) ([]string, error) {
 		return c.identityStore.CreateGroup(ctx, &logical.Group{
-			Name: "g", Type: logical.GroupTypeVirtual, Selectors: selectors,
+			Name: "g", Type: logical.GroupTypeVirtual, Rules: rules,
 		})
 	}
 
 	_, err := create()
-	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), "a virtual group needs a selector")
+	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), "a virtual group needs a rule")
+	assert.Contains(t, err.Error(), "a virtual group needs at least one rule")
 
-	_, err = create(logical.Selector{"mount": {"auth/jwt/"}}, logical.Selector{"sub": {"x"}})
+	_, err = create(logical.GroupRule{"mount": {"auth/jwt/"}}, logical.GroupRule{"sub": {"x"}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `selectors[1]: "mount" is required`)
+	assert.Contains(t, err.Error(), `rules[1]: every rule must include a "mount" selector`)
 
-	for _, s := range []logical.Selector{
+	for _, s := range []logical.GroupRule{
 		{"mount": {"auth/jwt/"}, "Sub": {"x"}},              // bad fact name
 		{"mount": {"auth/jwt/"}, "sub": {}},                 // no values
 		{"mount": {"auth/jwt/"}, "sub": {""}},               // empty value
@@ -344,13 +347,13 @@ func TestGroups_Selectors(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), "%v", s)
 	}
 
-	tooMany := make([]logical.Selector, logical.MaxGroupSelectors+1)
+	tooMany := make([]logical.GroupRule, logical.MaxGroupRules+1)
 	for i := range tooMany {
-		tooMany[i] = logical.Selector{"mount": {"auth/jwt/"}, "sub": {fmt.Sprint(i)}}
+		tooMany[i] = logical.GroupRule{"mount": {"auth/jwt/"}, "sub": {fmt.Sprint(i)}}
 	}
 	_, err = create(tooMany...)
 	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
-	_, err = create(tooMany[:logical.MaxGroupSelectors]...)
+	_, err = create(tooMany[:logical.MaxGroupRules]...)
 	assert.NoError(t, err)
 
 	// Any mount value holding "**" is accepted with a warning; one "*" is not
@@ -358,15 +361,15 @@ func TestGroups_Selectors(t *testing.T) {
 	for i, v := range []string{"**", "**/", "a**", "**/**", "auth/**", "auth/k8s-**/"} {
 		warnings, err := c.identityStore.CreateGroup(ctx, &logical.Group{
 			Name: fmt.Sprintf("any-%d", i), Type: logical.GroupTypeVirtual,
-			Selectors: []logical.Selector{{"mount": {v}, "sub": {"x"}}},
+			Rules: []logical.GroupRule{{"mount": {v}, "sub": {"x"}}},
 		})
 		require.NoError(t, err, "%q is accepted", v)
 		assert.Contains(t, warnings, fmt.Sprintf(
-			`selectors[0]: mount %q uses "**", which matches across "/": it trusts every auth mount it reaches, including ones enabled later`, v))
+			`rules[0]: mount %q uses "**", which matches across "/": it trusts every auth mount it reaches, including ones enabled later`, v))
 	}
 	warnings, err := c.identityStore.CreateGroup(ctx, &logical.Group{
 		Name: "one-star", Type: logical.GroupTypeVirtual,
-		Selectors: []logical.Selector{{"mount": {"auth/*/", `auth/\*\*/`}, "sub": {"x"}}},
+		Rules: []logical.GroupRule{{"mount": {"auth/*/", `auth/\*\*/`}, "sub": {"x"}}},
 	})
 	require.NoError(t, err)
 	for _, w := range warnings {
@@ -377,7 +380,7 @@ func TestGroups_Selectors(t *testing.T) {
 	// or one string.
 	for _, sel := range []any{"x", map[string]any{"mount": []any{1}}, map[string]any{"mount": 1}} {
 		resp := groupRequest(t, c, logical.CreateOperation, "group/api", map[string]any{
-			"type": "virtual", "selectors": []any{sel},
+			"type": "virtual", "rules": []any{sel},
 		})
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%v", sel)
 	}
@@ -389,17 +392,17 @@ func TestGroups_ScalarSelectorValue(t *testing.T) {
 	c := createTestCore(t)
 
 	resp := groupRequest(t, c, logical.CreateOperation, "group/g", map[string]any{
-		"type":      "virtual",
-		"selectors": []any{map[string]any{"mount": "auth/jwt/", "sub": []any{"a", "b"}}},
+		"type":  "virtual",
+		"rules": []any{map[string]any{"mount": "auth/jwt/", "sub": []any{"a", "b"}}},
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
-	assert.Equal(t, []map[string][]string{{"mount": {"auth/jwt/"}, "sub": {"a", "b"}}}, resp.Data["selectors"])
+	assert.Equal(t, []map[string][]string{{"mount": {"auth/jwt/"}, "sub": {"a", "b"}}}, resp.Data["rules"])
 
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{
-		"selectors": []any{map[string]any{"mount": "auth/k8s/", "workload": "ci"}},
+		"rules": []any{map[string]any{"mount": "auth/k8s/", "workload": "ci"}},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
-	assert.Equal(t, []map[string][]string{{"mount": {"auth/k8s/"}, "workload": {"ci"}}}, resp.Data["selectors"])
+	assert.Equal(t, []map[string][]string{{"mount": {"auth/k8s/"}, "workload": {"ci"}}}, resp.Data["rules"])
 }
 
 func TestGroups_FactNameWarnings(t *testing.T) {
@@ -419,59 +422,59 @@ func TestGroups_FactNameWarnings(t *testing.T) {
 	}
 
 	// A built-in or mapped name of a listed mount, and mount/kind: no warning.
-	assert.Empty(t, warn(&logical.Group{Selectors: []logical.Selector{
+	assert.Empty(t, warn(&logical.Group{Rules: []logical.GroupRule{
 		{"mount": {"auth/github-oidc/"}, "repo": {"acme/*"}, "sub": {"x"}, "kind": {"agent"}},
 	}}))
 
 	// A name only an unlisted mount produces warns: facts are checked against
 	// the rule's own mounts.
 	assert.Equal(t, []string{
-		`selectors[0]: no auth mount the rule lists produces fact "workload"; the rule cannot match until one maps it`,
-	}, warn(&logical.Group{Selectors: []logical.Selector{
+		`rules[0]: no auth mount the rule lists produces fact "workload"; its selector cannot match until one maps it`,
+	}, warn(&logical.Group{Rules: []logical.GroupRule{
 		{"mount": {"auth/github-oidc/"}, "workload": {"x"}},
 	}}))
 
 	// Listing both mounts: one of them produces it.
-	assert.Empty(t, warn(&logical.Group{Selectors: []logical.Selector{
+	assert.Empty(t, warn(&logical.Group{Rules: []logical.GroupRule{
 		{"mount": {"auth/github-oidc/", "auth/k8s/"}, "workload": {"x"}},
 	}}))
 
 	// A glob that lists both reaches them too.
-	assert.Empty(t, warn(&logical.Group{Selectors: []logical.Selector{
+	assert.Empty(t, warn(&logical.Group{Rules: []logical.GroupRule{
 		{"mount": {"auth/*/"}, "workload": {"x"}, "repo": {"y"}},
 	}}))
 
 	// A literal mount naming no mount warns; facts are then not checked.
 	assert.Equal(t, []string{
-		`selectors[0]: mount "auth/gone/" names no auth mount in this namespace; the rule cannot match through it until one is enabled there`,
-	}, warn(&logical.Group{Selectors: []logical.Selector{{"mount": {"auth/gone/"}, "email": {"x"}}}}))
+		`rules[0]: mount "auth/gone/" names no auth mount in this namespace; the rule cannot match through it until one is enabled there`,
+	}, warn(&logical.Group{Rules: []logical.GroupRule{{"mount": {"auth/gone/"}, "email": {"x"}}}}))
 	assert.Equal(t, []string{
-		`selectors[0]: no auth mount in this namespace matches the rule's mount patterns`,
-	}, warn(&logical.Group{Selectors: []logical.Selector{{"mount": {"auth/zz-*/"}, "email": {"x"}}}}))
+		`rules[0]: no auth mount in this namespace matches the rule's "mount" selector`,
+	}, warn(&logical.Group{Rules: []logical.GroupRule{{"mount": {"auth/zz-*/"}, "email": {"x"}}}}))
 
 	// An unknown kind never matches.
-	assert.Contains(t, warn(&logical.Group{Selectors: []logical.Selector{
+	assert.Contains(t, warn(&logical.Group{Rules: []logical.GroupRule{
 		{"mount": {"auth/k8s/"}, "kind": {"robot"}},
-	}}), `selectors[0]: kind "robot" is neither "agent" nor "human" and never matches`)
+	}}), `rules[0]: the "kind" selector's value "robot" is neither "agent" nor "human" and never matches`)
 
 	// max_age on a rule that lists only cert mounts warns; with a mount that
 	// carries an issue time it does not.
 	assert.Equal(t, []string{
-		`selectors[0]: max_age never matches this rule: its mounts (auth/cert/) admit credentials that carry no issue time`,
-	}, warn(&logical.Group{MaxAge: time.Minute, Selectors: []logical.Selector{
+		`rules[0]: max_age never matches this rule: its mounts (auth/cert/) admit credentials that carry no issue time`,
+	}, warn(&logical.Group{MaxAge: time.Minute, Rules: []logical.GroupRule{
 		{"mount": {"auth/cert/"}, "cn": {"x"}},
 	}}))
-	assert.Empty(t, warn(&logical.Group{MaxAge: time.Minute, Selectors: []logical.Selector{
+	assert.Empty(t, warn(&logical.Group{MaxAge: time.Minute, Rules: []logical.GroupRule{
 		{"mount": {"auth/cert/", "auth/k8s/"}, "workload": {"x"}},
 	}}))
 
 	// Warnings are indexed by rule.
-	w := warn(&logical.Group{Selectors: []logical.Selector{
+	w := warn(&logical.Group{Rules: []logical.GroupRule{
 		{"mount": {"auth/k8s/"}, "workload": {"x"}},
 		{"mount": {"auth/k8s/"}, "repo": {"x"}},
 	}})
 	assert.Equal(t, []string{
-		`selectors[1]: no auth mount the rule lists produces fact "repo"; the rule cannot match until one maps it`,
+		`rules[1]: no auth mount the rule lists produces fact "repo"; its selector cannot match until one maps it`,
 	}, w)
 }
 
@@ -500,50 +503,158 @@ func TestGroups_Caps(t *testing.T) {
 	// The namespace caps, lowered for the test.
 	other := namespace.ContextWithNamespace(context.Background(),
 		&namespace.Namespace{ID: "caps-ns", UUID: "caps-ns-uuid", Path: "caps/"})
-	c.identityStore.mu.Lock()
-	c.identityStore.maxGroups, c.identityStore.maxNames = 3, 7
-	c.identityStore.mu.Unlock()
+	c.identityStore.maxGroups.Store(3)
+	c.identityStore.maxSelectors.Store(7)
 
-	// virtualGroup's one rule names two facts: mount and sub.
+	// virtualGroup's one rule has two selectors: mount and sub.
 	for _, n := range []string{"a", "b", "c"} {
 		_, err := c.identityStore.CreateGroup(other, virtualGroup(n))
 		require.NoError(t, err)
 	}
-	assert.Equal(t, 6, c.identityStore.namespaceGroups("caps-ns").names)
+	assert.Equal(t, 6, c.identityStore.namespaceGroups("caps-ns").selectors)
 	_, err = c.identityStore.CreateGroup(other, virtualGroup("d"))
 	assert.ErrorIs(t, err, ErrTooManyGroups)
 	resp := roleRequest(t, c, other, logical.CreateOperation, "identity/group/d", deployersBody())
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "at most 3 groups")
+	assert.Contains(t, resp.Err.Error(), "the namespace has 3/3 groups")
 
-	// An update counts the names it replaces and adds: 6 - 2 + 4 = 8 is over,
-	// 6 - 2 + 3 = 7 is exactly the cap.
+	// An update counts the selectors it replaces and adds: 6 - 2 + 4 = 8 is
+	// over, 6 - 2 + 3 = 7 is exactly the cap.
 	over := virtualGroup("a")
-	over.Selectors = append(over.Selectors, logical.Selector{"mount": {"auth/jwt/"}, "sub": {"y"}})
+	over.Rules = append(over.Rules, logical.GroupRule{"mount": {"auth/jwt/"}, "sub": {"y"}})
 	_, err = c.identityStore.UpdateGroup(other, over, "")
-	assert.ErrorIs(t, err, ErrTooManySelectorNames)
+	assert.ErrorIs(t, err, ErrTooManySelectors)
 	resp = roleRequest(t, c, other, logical.UpdateOperation, "identity/group/a", map[string]any{
-		"selectors": []any{
+		"rules": []any{
 			map[string]any{"mount": "auth/jwt/", "sub": "x"},
 			map[string]any{"mount": "auth/jwt/", "sub": "y"},
 		},
 	})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "name at most 7 facts together")
+	assert.Contains(t, resp.Err.Error(), "this write would make 8/7 selectors (currently 6;")
 	at := virtualGroup("a")
-	at.Selectors = append(at.Selectors, logical.Selector{"mount": {"auth/jwt/"}})
+	at.Rules = append(at.Rules, logical.GroupRule{"mount": {"auth/jwt/"}})
 	_, err = c.identityStore.UpdateGroup(other, at, "")
 	require.NoError(t, err, "exactly at the cap")
-	assert.Equal(t, 7, c.identityStore.namespaceGroups("caps-ns").names)
+	assert.Equal(t, 7, c.identityStore.namespaceGroups("caps-ns").selectors)
 
-	// A create counts its names; a delete gives them back.
+	// A create counts its selectors; a delete gives them back.
 	require.NoError(t, c.identityStore.DeleteGroup(other, "c", ""))
 	g = virtualGroup("e")
-	g.Selectors[0]["iss"] = []string{"z"}
+	g.Rules[0]["iss"] = []string{"z"}
 	_, err = c.identityStore.CreateGroup(other, g)
-	assert.ErrorIs(t, err, ErrTooManySelectorNames, "5 + 3 is over")
+	assert.ErrorIs(t, err, ErrTooManySelectors, "5 + 3 is over")
+	assert.Contains(t, err.Error(), "this write would make 8/7 selectors (currently 5;")
 	_, err = c.identityStore.CreateGroup(other, virtualGroup("e"))
 	require.NoError(t, err, "5 + 2 is exactly the cap")
+}
+
+// listUsage lists the groups of the root namespace, optionally under a role
+// filter, and returns the response's usage and keys.
+func listUsage(t *testing.T, c *Core, role string) (map[string]any, []string) {
+	t.Helper()
+	var data map[string]any
+	if role != "" {
+		data = map[string]any{"role": role}
+	}
+	resp := groupRequest(t, c, logical.ListOperation, "group", data)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	return resp.Data["usage"].(map[string]any), resp.Data["keys"].([]string)
+}
+
+// TestGroups_Usage: a listing reports the whole namespace's groups and
+// selectors against the caps after every kind of write, whatever the role
+// filter, and every group reports what it adds.
+func TestGroups_Usage(t *testing.T) {
+	c := createTestCore(t)
+	want := func(groups, selectors int) map[string]any {
+		return map[string]any{
+			"groups":        groups,
+			"max_groups":    logical.MaxGroupsPerNamespace,
+			"selectors":     selectors,
+			"max_selectors": logical.MaxSelectorsPerNamespace,
+		}
+	}
+
+	usage, _ := listUsage(t, c, "")
+	assert.Equal(t, want(0, 0), usage, "an empty namespace")
+
+	resp := groupRequest(t, c, logical.CreateOperation, "group/deployers", deployersBody()) // 1 rule, 2 selectors
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	resp = groupRequest(t, c, logical.CreateOperation, "group/readers", map[string]any{
+		"type":  "virtual",
+		"roles": []any{"read-secrets"},
+		"rules": []any{
+			map[string]any{"mount": "auth/jwt/", "sub": "r", "iss": "i"},
+			map[string]any{"mount": "auth/k8s/"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, 2, resp.Data["rule_count"])
+	assert.Equal(t, 4, resp.Data["selector_count"])
+	usage, _ = listUsage(t, c, "")
+	assert.Equal(t, want(2, 6), usage, "after creates")
+
+	// The filter narrows the groups, never the usage.
+	usage, keys := listUsage(t, c, "deploy")
+	assert.Equal(t, []string{"deployers"}, keys)
+	assert.Equal(t, want(2, 6), usage, "under ?role=")
+	usage, keys = listUsage(t, c, "nobody")
+	assert.Empty(t, keys)
+	assert.Equal(t, want(2, 6), usage)
+
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/readers", map[string]any{
+		"rules": []any{map[string]any{"mount": "auth/jwt/"}},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, resp.Data["rule_count"])
+	assert.Equal(t, 1, resp.Data["selector_count"])
+	usage, _ = listUsage(t, c, "")
+	assert.Equal(t, want(2, 3), usage, "after an update")
+
+	resp = groupRequest(t, c, logical.ReadOperation, "group/deployers", nil)
+	assert.Equal(t, 1, resp.Data["rule_count"])
+	assert.Equal(t, 2, resp.Data["selector_count"])
+
+	require.Equal(t, http.StatusOK, groupRequest(t, c, logical.DeleteOperation, "group/deployers", nil).StatusCode)
+	usage, _ = listUsage(t, c, "")
+	assert.Equal(t, want(1, 1), usage, "after a delete")
+
+	// Every listed group reports its own counts.
+	resp = groupRequest(t, c, logical.ListOperation, "group", nil)
+	items := resp.Data["groups"].([]map[string]any)
+	require.Len(t, items, 1)
+	assert.Equal(t, 1, items[0]["rule_count"])
+	assert.Equal(t, 1, items[0]["selector_count"])
+
+	// The usage reports the caps in force.
+	c.identityStore.maxGroups.Store(5)
+	usage, _ = listUsage(t, c, "")
+	assert.Equal(t, 5, usage["max_groups"])
+}
+
+// TestGroups_OldSelectorsField: "selectors" is no field of the group path. The
+// framework ignores it with a response warning rather than refusing it, so a
+// create carrying rules only under it has no rules and is refused, and an
+// update carrying only it changes nothing and says so.
+func TestGroups_OldSelectorsField(t *testing.T) {
+	c := createTestCore(t)
+	old := []any{map[string]any{"mount": []any{"auth/jwt/"}, "sub": []any{"x"}}}
+
+	resp := groupRequest(t, c, logical.CreateOperation, "group/g", map[string]any{"type": "virtual", "selectors": old})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), "a virtual group needs at least one rule")
+
+	require.Equal(t, http.StatusCreated, groupRequest(t, c, logical.CreateOperation, "group/g", deployersBody()).StatusCode)
+	before, hash, err := c.identityStore.GetGroup(rootCtx(), "g")
+	require.NoError(t, err)
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"selectors": old})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Warnings, "Endpoint ignored these unrecognized parameters: [selectors]")
+	after, hash2, err := c.identityStore.GetGroup(rootCtx(), "g")
+	require.NoError(t, err)
+	assert.Equal(t, before.Rules, after.Rules, "the rules are untouched")
+	assert.Equal(t, hash, hash2)
 }
 
 // TestGroups_RoleFilterAndHTTP drives the paths through the request path:
@@ -558,9 +669,9 @@ func TestGroups_RoleFilterAndHTTP(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
 	hash := resp.Data["hash"].(string)
 	resp = roleHTTP(t, c, root, http.MethodPost, "/v1/sys/identity/group/readers", map[string]any{
-		"type":      "virtual",
-		"roles":     []string{"read-secrets"},
-		"selectors": []any{map[string]any{"mount": []string{"auth/jwt/"}, "sub": []string{"r"}}},
+		"type":  "virtual",
+		"roles": []string{"read-secrets"},
+		"rules": []any{map[string]any{"mount": []string{"auth/jwt/"}, "sub": []string{"r"}}},
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
 
@@ -660,7 +771,7 @@ func TestGroups_LoadFromStorage(t *testing.T) {
 	require.NoError(t, view.Put(ctx, &sdklogical.StorageEntry{Key: groupStorageKey("gone-ns-uuid", "x"), Value: []byte(`{"version":1}`)}))
 	dup := want.Clone()
 	dup.ID = "zz-dup"
-	raw := `{"version":1,"group":{"id":"zz-dup","name":"deployers","type":"virtual","roles":["other"],"selectors":[{"mount":["auth/jwt/"],"sub":["x"]}]}}`
+	raw := `{"version":1,"group":{"id":"zz-dup","name":"deployers","type":"virtual","roles":["other"],"rules":[{"mount":["auth/jwt/"],"sub":["x"]}]}}`
 	require.NoError(t, view.Put(ctx, &sdklogical.StorageEntry{Key: groupStorageKey(namespace.RootNamespaceUUID, dup.ID), Value: []byte(raw)}))
 
 	c.teardownIdentityStore()
@@ -732,7 +843,7 @@ func TestGroups_ClearNamespace(t *testing.T) {
 
 	require.NoError(t, c.namespaceStore.clearNamespaceResources(childCtx, child))
 
-	groups, _, err := c.identityStore.ListGroups(childCtx, "")
+	groups, _, _, err := c.identityStore.ListGroups(childCtx, "")
 	require.NoError(t, err)
 	assert.Empty(t, groups)
 	assert.Same(t, emptyNSGroups, c.identityStore.namespaceGroups(child.ID))

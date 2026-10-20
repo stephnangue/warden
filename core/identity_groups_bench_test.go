@@ -17,7 +17,7 @@ func benchGroup(tb testing.TB, name, mount string, rules int) *compiledGroup {
 	tb.Helper()
 	g := &logical.Group{Name: name, Type: logical.GroupTypeVirtual, Roles: []string{"deploy", "read"}}
 	for i := range rules {
-		g.Selectors = append(g.Selectors, logical.Selector{
+		g.Rules = append(g.Rules, logical.GroupRule{
 			"mount": {mount},
 			"ref":   {"refs/heads/main"},
 			"repo":  {fmt.Sprintf("acme/%s-%d", name, i)},
@@ -80,10 +80,10 @@ func BenchmarkGroupCompute(b *testing.B) {
 	adm := benchAdmission(b)
 	naming := adm.Mount.Load()
 	now := time.Now()
-	for _, rules := range []int{1, logical.MaxGroupSelectors} {
+	for _, rules := range []int{1, logical.MaxGroupRules} {
 		// The sizes asked about, plus the most groups of that many rules the
-		// caps allow (each bench rule names three facts).
-		capped := min(logical.MaxGroupsPerNamespace, logical.MaxSelectorNamesPerNamespace/(3*rules))
+		// caps allow (each bench rule has three selectors).
+		capped := min(logical.MaxGroupsPerNamespace, logical.MaxSelectorsPerNamespace/(3*rules))
 		for _, n := range []int{100, 1000, capped, 10000} {
 			spread := buildNSGroups(benchGroups(b, n, rules, 10), 1)
 			worst := buildNSGroups(benchGroups(b, n, rules, 1), 1)
@@ -109,8 +109,9 @@ func BenchmarkGroupCompute(b *testing.B) {
 	}
 }
 
-// wideNames is how many facts a wide rule names besides "mount": the most a
-// rule may name, all sorting after "mount" so it is evaluated first.
+// wideNames is how many selectors a wide rule has besides "mount": the most a
+// rule may have, all naming facts that sort after "mount" so it is evaluated
+// first.
 const wideNames = 31
 
 // wideFact is the canonical name of the i-th wide fact.
@@ -138,15 +139,16 @@ func wideAdmission(tb testing.TB) *logical.Admission {
 	return &logical.Admission{MountPath: "auth/m0/", Facts: selector.NewClaims(claims), Mount: mf}
 }
 
-// wideGroups builds n groups of one rule naming the most facts a rule may,
-// all on the admission's mount. Each fact lists an exact value that fails and
-// a glob that matches, so it is compared twice; the last fact matches only
-// when match is set, so without it every rule fails on its last name.
+// wideGroups builds n groups of one rule with the most selectors a rule may
+// have, all on the admission's mount. Each selector lists an exact value that
+// fails and a glob that matches, so it is compared twice; the last selector
+// matches only when match is set, so without it every rule fails on its last
+// selector.
 func wideGroups(tb testing.TB, n int, match bool) *nsGroups {
 	tb.Helper()
 	byName := make(map[string]*compiledGroup, n)
 	for i := range n {
-		s := logical.Selector{"mount": {"auth/m0/"}}
+		s := logical.GroupRule{"mount": {"auth/m0/"}}
 		for j := range wideNames {
 			s[wideFact(j)] = []string{"nomatch", "val-*"}
 		}
@@ -154,7 +156,7 @@ func wideGroups(tb testing.TB, n int, match bool) *nsGroups {
 			s[wideFact(wideNames-1)] = []string{"nomatch", "zzz-*"}
 		}
 		g := &logical.Group{Name: fmt.Sprintf("g%05d", i), Type: logical.GroupTypeVirtual,
-			Roles: []string{fmt.Sprintf("role-%05d", i)}, Selectors: []logical.Selector{s}}
+			Roles: []string{fmt.Sprintf("role-%05d", i)}, Rules: []logical.GroupRule{s}}
 		cg, err := compileGroup(g)
 		if err != nil {
 			tb.Fatal(err)
@@ -165,19 +167,19 @@ func wideGroups(tb testing.TB, n int, match bool) *nsGroups {
 	return buildNSGroups(byName, 1)
 }
 
-// BenchmarkGroupComputeWide measures the worst case per fact name: every
-// group lists the admission's mount, and its one rule names the most facts a
-// rule may (32, "mount" included), every one matching but the last. total is
-// the namespace's fact names, which MaxSelectorNamesPerNamespace bounds.
+// BenchmarkGroupComputeWide measures the worst case per selector: every group
+// lists the admission's mount, and its one rule has the most selectors a rule
+// may (32, "mount" included), every one matching but the last. selectors is
+// the namespace's total, which MaxSelectorsPerNamespace bounds.
 func BenchmarkGroupComputeWide(b *testing.B) {
 	adm := wideAdmission(b)
 	naming := adm.Mount.Load()
 	now := time.Now()
 	perRule := wideNames + 1
-	capped := logical.MaxSelectorNamesPerNamespace / perRule
+	capped := logical.MaxSelectorsPerNamespace / perRule
 	for _, n := range []int{100, 250, capped, 1000} {
 		gs := wideGroups(b, n, false)
-		b.Run(fmt.Sprintf("groups=%d/names=%d", n, n*perRule), func(b *testing.B) {
+		b.Run(fmt.Sprintf("groups=%d/selectors=%d", n, n*perRule), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				if m := compute(adm, naming, gs, now); len(m.Groups) != 0 {
@@ -190,33 +192,33 @@ func BenchmarkGroupComputeWide(b *testing.B) {
 
 // BenchmarkGroupComputeAllMatch measures a recompute in which every group
 // matches, so the membership lists every group and grants every role (one
-// each): the most a recompute allocates. Rules name one to three facts; at
-// MaxGroupsPerNamespace groups the fact-name cap allows two per rule.
+// each): the most a recompute allocates. Rules have one to three selectors;
+// at MaxGroupsPerNamespace groups the selector cap allows two per rule.
 func BenchmarkGroupComputeAllMatch(b *testing.B) {
 	adm := benchAdmission(b)
 	naming := adm.Mount.Load()
 	now := time.Now()
 	for _, tc := range []struct {
-		n     int
-		facts int
+		n         int
+		selectors int
 	}{
 		{1000, 3}, {logical.MaxGroupsPerNamespace, 3},
 		{1000, 1}, {logical.MaxGroupsPerNamespace, 1},
-		// The most names 8000 groups may hold together.
-		{logical.MaxGroupsPerNamespace, logical.MaxSelectorNamesPerNamespace / logical.MaxGroupsPerNamespace},
+		// The most selectors 8000 groups may hold together.
+		{logical.MaxGroupsPerNamespace, logical.MaxSelectorsPerNamespace / logical.MaxGroupsPerNamespace},
 	} {
 		n := tc.n
 		byName := make(map[string]*compiledGroup, n)
 		for i := range n {
-			s := logical.Selector{"mount": {"auth/m0/"}}
-			if tc.facts >= 2 {
+			s := logical.GroupRule{"mount": {"auth/m0/"}}
+			if tc.selectors >= 2 {
 				s["ref"] = []string{"refs/heads/main"}
 			}
-			if tc.facts >= 3 {
+			if tc.selectors >= 3 {
 				s["repo"] = []string{"acme/*"}
 			}
 			g := &logical.Group{Name: fmt.Sprintf("g%05d", i), Type: logical.GroupTypeVirtual,
-				Roles: []string{fmt.Sprintf("role-%05d", i)}, Selectors: []logical.Selector{s}}
+				Roles: []string{fmt.Sprintf("role-%05d", i)}, Rules: []logical.GroupRule{s}}
 			cg, err := compileGroup(g)
 			if err != nil {
 				b.Fatal(err)
@@ -225,7 +227,7 @@ func BenchmarkGroupComputeAllMatch(b *testing.B) {
 			byName[g.Name] = cg
 		}
 		gs := buildNSGroups(byName, 1)
-		b.Run(fmt.Sprintf("facts=%d/groups=%d", tc.facts, n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("selectors=%d/groups=%d", tc.selectors, n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				if m := compute(adm, naming, gs, now); len(m.Groups) != n || len(m.Roles) != n {
@@ -271,7 +273,8 @@ func BenchmarkGroupWrite(b *testing.B) {
 			target.ID = "target-id"
 			byName[target.Name] = target
 			s.mu.Lock()
-			s.maxGroups, s.maxNames = 2*n, 8*n
+			s.maxGroups.Store(int64(2 * n))
+			s.maxSelectors.Store(int64(8 * n))
 			if err := s.persistGroup(ctx, namespace.RootNamespaceUUID, target); err != nil {
 				b.Fatal(err)
 			}
@@ -283,7 +286,7 @@ func BenchmarkGroupWrite(b *testing.B) {
 				i++
 				if _, err := s.UpdateGroup(ctx, &logical.Group{
 					Name: "target", Type: logical.GroupTypeVirtual, Roles: []string{"deploy"},
-					Selectors: []logical.Selector{{"mount": {"auth/m0/"}, "repo": {fmt.Sprintf("acme/x%d", i)}}},
+					Rules: []logical.GroupRule{{"mount": {"auth/m0/"}, "repo": {fmt.Sprintf("acme/x%d", i)}}},
 				}, ""); err != nil {
 					b.Fatal(err)
 				}

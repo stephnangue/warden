@@ -39,7 +39,7 @@ const groupSchemaDoc = `{"data":{"openapi":{"paths":{"/sys/identity/group/{name}
 		"type":{"type":"string"},
 		"description":{"type":"string"},
 		"roles":{"type":"array"},
-		"selectors":{"type":"array"},
+		"rules":{"type":"array"},
 		"max_age":{"type":"integer","format":"seconds"},
 		"metadata":{"type":"object"},
 		"members":{"type":"array"},
@@ -54,16 +54,18 @@ const cannedGroup = `{"data":{
 	"type":"virtual",
 	"description":"CI deployers",
 	"roles":["deploy"],
-	"selectors":[
+	"rules":[
 		{"mount":["auth/github-oidc/"],"repo":["acme/*"],"ref":["refs/heads/main"]},
 		{"mount":["auth/kubernetes/"],"workload":["a","b"]}
 	],
+	"rule_count":2,
+	"selector_count":5,
 	"max_age":"10m0s",
 	"metadata":{},
 	"hash":"h1",
 	"created_at":"2026-10-20T10:00:00Z",
 	"updated_at":"2026-10-20T10:00:00Z",
-	"warnings":["selectors[1]: no auth mount the rule lists produces fact \"workload\"; the rule cannot match until one maps it"]
+	"warnings":["rules[1]: no auth mount the rule lists produces fact \"workload\"; its selector cannot match until one maps it"]
 }}`
 
 func (f *fakeWarden) last(t *testing.T) recorded {
@@ -158,7 +160,7 @@ func TestGroupCreate_JSON(t *testing.T) {
 	createJSON = `{
 		"type": "virtual",
 		"roles": ["deploy"],
-		"selectors": [
+		"rules": [
 			{
 				"mount": ["auth/github-oidc/"],
 				"repo": ["acme/*"]
@@ -172,16 +174,18 @@ func TestGroupCreate_JSON(t *testing.T) {
 	assert.Equal(t, http.MethodPost, req.method)
 	assert.Equal(t, "/v1/sys/identity/group/ci-deployers", req.path)
 	assert.Equal(t, map[string]any{
-		"type":      "virtual",
-		"roles":     []any{"deploy"},
-		"selectors": []any{map[string]any{"mount": []any{"auth/github-oidc/"}, "repo": []any{"acme/*"}}},
-		"max_age":   "10m",
+		"type":    "virtual",
+		"roles":   []any{"deploy"},
+		"rules":   []any{map[string]any{"mount": []any{"auth/github-oidc/"}, "repo": []any{"acme/*"}}},
+		"max_age": "10m",
 	}, req.body)
 
 	out := decodeOut(t, stdout)
 	assert.Equal(t, true, out["created"])
 	assert.Equal(t, "h1", out["hash"])
-	assert.Contains(t, stderr.String(), `warning: selectors[1]: no auth mount the rule lists produces fact "workload"`)
+	assert.Equal(t, float64(2), out["rule_count"])
+	assert.Equal(t, float64(5), out["selector_count"])
+	assert.Contains(t, stderr.String(), `warning: rules[1]: no auth mount the rule lists produces fact "workload"`)
 }
 
 func TestGroupCreate_TypedFlags(t *testing.T) {
@@ -189,8 +193,8 @@ func TestGroupCreate_TypedFlags(t *testing.T) {
 	cmd := freshCreateCmd()
 	require.NoError(t, cmd.Flags().Set("type", "virtual"))
 	require.NoError(t, cmd.Flags().Set("roles", "deploy,read"))
-	require.NoError(t, cmd.Flags().Set("selector", `{"mount": ["auth/k8s/"], "workload": ["a"]}`))
-	require.NoError(t, cmd.Flags().Set("selector", `{"mount": ["auth/cert/"], "cn": ["x,y"]}`))
+	require.NoError(t, cmd.Flags().Set("rule", `{"mount": ["auth/k8s/"], "workload": ["a"]}`))
+	require.NoError(t, cmd.Flags().Set("rule", `{"mount": ["auth/cert/"], "cn": ["x,y"]}`))
 	require.NoError(t, cmd.Flags().Set("max-age", "5m"))
 	require.NoError(t, cmd.Flags().Set("metadata", "owner=platform"))
 
@@ -198,40 +202,42 @@ func TestGroupCreate_TypedFlags(t *testing.T) {
 	assert.Equal(t, map[string]any{
 		"type":  "virtual",
 		"roles": []any{"deploy", "read"},
-		"selectors": []any{
+		"rules": []any{
 			map[string]any{"mount": []any{"auth/k8s/"}, "workload": []any{"a"}},
 			map[string]any{"mount": []any{"auth/cert/"}, "cn": []any{"x,y"}},
 		},
 		"max_age":  "5m",
 		"metadata": map[string]any{"owner": "platform"},
-	}, f.last(t).body, "each -selector is one rule; a comma inside a value stays")
+	}, f.last(t).body, "each -rule is one rule; a comma inside a value stays")
+	assert.Nil(t, cmd.Flags().Lookup("selector"), "the flag is -rule; -selector is gone")
 }
 
-// TestGroupSelectorFlag_ScalarValue: a -selector value written as one string
+// TestGroupRuleFlag_ScalarValue: a -rule selector value written as one string
 // is sent as written, which the server takes as a one-element list, on create
 // and on update.
-func TestGroupSelectorFlag_ScalarValue(t *testing.T) {
+func TestGroupRuleFlag_ScalarValue(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusCreated, cannedGroup)
 	cmd := freshCreateCmd()
 	require.NoError(t, cmd.Flags().Set("type", "virtual"))
-	require.NoError(t, cmd.Flags().Set("selector", `{"mount": "auth/k8s/", "workload": ["a", "b"]}`))
+	require.NoError(t, cmd.Flags().Set("rule", `{"mount": "auth/k8s/", "workload": ["a", "b"]}`))
 	require.NoError(t, runGroupCreate(cmd, []string{"g"}))
 	assert.Equal(t, []any{map[string]any{"mount": "auth/k8s/", "workload": []any{"a", "b"}}},
-		f.last(t).body["selectors"])
+		f.last(t).body["rules"])
 
 	cmd = freshUpdateCmd()
-	require.NoError(t, cmd.Flags().Set("selector", `{"mount": "auth/jwt/", "sub": "x"}`))
+	require.NoError(t, cmd.Flags().Set("rule", `{"mount": "auth/jwt/", "sub": "x"}`))
 	require.NoError(t, runGroupUpdate(cmd, []string{"g"}))
-	assert.Equal(t, []any{map[string]any{"mount": "auth/jwt/", "sub": "x"}}, f.last(t).body["selectors"])
+	assert.Equal(t, []any{map[string]any{"mount": "auth/jwt/", "sub": "x"}}, f.last(t).body["rules"])
 }
 
-func TestGroupCreate_BadSelectorFlag(t *testing.T) {
+func TestGroupCreate_BadRuleFlag(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusCreated, cannedGroup)
 	cmd := freshCreateCmd()
-	require.NoError(t, cmd.Flags().Set("selector", `mount=auth/k8s/`))
+	require.NoError(t, cmd.Flags().Set("rule", `mount=auth/k8s/`))
 	err := runGroupCreate(cmd, []string{"g"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, helpers.ErrUsage))
+	assert.Contains(t, err.Error(), "-rule #1 is not a JSON object")
 	assert.Zero(t, f.count())
 }
 
@@ -265,11 +271,20 @@ func TestGroupCreate_DryRun(t *testing.T) {
 	assert.Zero(t, f.count())
 
 	cmd = freshCreateCmd()
-	createJSON = `{"type": "virtual", "selector": []}`
+	createJSON = `{"type": "virtual", "rule": []}`
 	err := runGroupCreate(cmd, []string{"g"})
 	require.Error(t, err)
 	assert.True(t, helpers.IsValidationError(err))
-	assert.Contains(t, err.Error(), `did you mean "selectors"`)
+	assert.Contains(t, err.Error(), `did you mean "rules"`)
+	assert.Zero(t, f.count())
+
+	// The old field name is no field of the path: a dry run flags it.
+	cmd = freshCreateCmd()
+	createJSON = `{"type": "virtual", "selectors": []}`
+	err = runGroupCreate(cmd, []string{"g"})
+	require.Error(t, err)
+	assert.True(t, helpers.IsValidationError(err))
+	assert.Contains(t, err.Error(), `"selectors"`)
 	assert.Zero(t, f.count())
 }
 
@@ -336,12 +351,18 @@ func TestGroupDelete(t *testing.T) {
 	assert.Equal(t, true, decodeOut(t, stdout)["deleted"])
 }
 
-func TestGroupList_RoleFilter(t *testing.T) {
-	f, stdout, _ := setupFake(t, http.StatusOK, `{"data":{
-		"keys":["ci-deployers"],
-		"groups":[{"name":"ci-deployers","type":"virtual","roles":["deploy"],
-			"selectors":[{"mount":["auth/k8s/"],"workload":["a"]}],"max_age":"","hash":"h1"}]
-	}}`)
+const listedGroups = `{"data":{
+	"keys":["ci-deployers"],
+	"groups":[{"name":"ci-deployers","type":"virtual","roles":["deploy"],
+		"rules":[{"mount":["auth/k8s/"],"workload":["a"]}],"rule_count":1,"selector_count":2,
+		"max_age":"","hash":"h1"}],
+	"usage":{"groups":42,"max_groups":8000,"selectors":310,"max_selectors":16000}
+}}`
+
+// TestGroupList_JSON: -o json is one object holding the groups and the
+// namespace's usage; -role filters the groups only.
+func TestGroupList_JSON(t *testing.T) {
+	f, stdout, _ := setupFake(t, http.StatusOK, listedGroups)
 	listRole = "deploy"
 	require.NoError(t, runGroupList(GroupListCmd, nil))
 	req := f.last(t)
@@ -349,37 +370,81 @@ func TestGroupList_RoleFilter(t *testing.T) {
 	assert.Equal(t, "true", req.query.Get("warden-list"))
 	assert.Equal(t, "deploy", req.query.Get("role"))
 
-	var items []map[string]any
-	require.NoError(t, json.Unmarshal(stdout.Bytes(), &items))
+	out := decodeOut(t, stdout)
+	assert.Equal(t, map[string]any{
+		"groups": float64(42), "max_groups": float64(8000),
+		"selectors": float64(310), "max_selectors": float64(16000),
+	}, out["usage"])
+	items, _ := out["groups"].([]any)
 	require.Len(t, items, 1)
-	assert.Equal(t, "ci-deployers", items[0]["name"])
-	assert.Equal(t, []any{map[string]any{"mount": []any{"auth/k8s/"}, "workload": []any{"a"}}}, items[0]["selectors"])
+	item := items[0].(map[string]any)
+	assert.Equal(t, "ci-deployers", item["name"])
+	assert.Equal(t, []any{map[string]any{"mount": []any{"auth/k8s/"}, "workload": []any{"a"}}}, item["rules"])
+	assert.Equal(t, float64(1), item["rule_count"])
+	assert.Equal(t, float64(2), item["selector_count"])
 }
 
-// TestPrintGroupTable: one row per selector, "mount" first, values joined
-// with "|".
-func TestPrintGroupTable(t *testing.T) {
+// TestGroupList_NDJSON: one group per line, without the usage.
+func TestGroupList_NDJSON(t *testing.T) {
+	_, stdout, _ := setupFake(t, http.StatusOK, listedGroups)
+	helpers.SetOutputFormat("ndjson")
+	require.NoError(t, runGroupList(GroupListCmd, nil))
+	lines := bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))
+	require.Len(t, lines, 1)
+	var item map[string]any
+	require.NoError(t, json.Unmarshal(lines[0], &item))
+	assert.Equal(t, "ci-deployers", item["name"])
+	assert.NotContains(t, item, "usage")
+}
+
+// captureStdout runs fn with os.Stdout redirected, as the table printers
+// write there, and returns what it wrote.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
 	orig := os.Stdout
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	os.Stdout = w
-	printGroupTable(map[string]any{
-		"name":  "ci-deployers",
-		"type":  "virtual",
-		"roles": []any{"deploy"},
-		"selectors": []any{
-			map[string]any{"repo": []any{"acme/*"}, "mount": []any{"auth/github-oidc/"}, "ref": []any{"refs/heads/main"}},
-			map[string]any{"mount": []any{"auth/k8s/", "auth/spiffe/"}, "workload": []any{"a", "b"}},
-		},
-		"max_age": "10m0s",
-	})
+	fn()
 	_ = w.Close()
 	os.Stdout = orig
 	raw, _ := io.ReadAll(r)
-	out := string(raw)
+	return string(raw)
+}
+
+// TestGroupList_TableFooter: the table ends with the namespace's usage.
+func TestGroupList_TableFooter(t *testing.T) {
+	setupFake(t, http.StatusOK, listedGroups)
+	helpers.SetOutputFormat("table")
+	out := captureStdout(t, func() { require.NoError(t, runGroupList(GroupListCmd, nil)) })
+	assert.Contains(t, out, "ci-deployers")
+	assert.Contains(t, out, "groups 42/8000 · selectors 310/16000")
+	assert.Equal(t, "groups 0/8000 · selectors 0/16000",
+		usageFooter(api.GroupUsage{MaxGroups: 8000, MaxSelectors: 16000}))
+}
+
+// TestPrintGroupTable: one row per rule, a selector at a time with "mount"
+// first and values joined with "|", then the counts.
+func TestPrintGroupTable(t *testing.T) {
+	out := captureStdout(t, func() {
+		printGroupTable(map[string]any{
+			"name":  "ci-deployers",
+			"type":  "virtual",
+			"roles": []any{"deploy"},
+			"rules": []any{
+				map[string]any{"repo": []any{"acme/*"}, "mount": []any{"auth/github-oidc/"}, "ref": []any{"refs/heads/main"}},
+				map[string]any{"mount": []any{"auth/k8s/", "auth/spiffe/"}, "workload": []any{"a", "b"}},
+			},
+			"rule_count":     float64(2),
+			"selector_count": float64(5),
+			"max_age":        "10m0s",
+		})
+	})
 
 	assert.Contains(t, out, "#0  mount=auth/github-oidc/  ref=refs/heads/main  repo=acme/*")
 	assert.Contains(t, out, "#1  mount=auth/k8s/|auth/spiffe/  workload=a|b")
+	assert.Contains(t, out, "Rule Count")
+	assert.Contains(t, out, "Selector Count")
 	assert.Contains(t, out, "10m0s")
 	assert.NotContains(t, out, "Description")
 }

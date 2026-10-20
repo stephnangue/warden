@@ -13,12 +13,12 @@ import (
 // server filters by role for one role, and the inventory inverts the full
 // listing client-side rather than asking once per role.
 func grantingGroups(c *api.Client, role string) (map[string][]string, error) {
-	groups, err := c.Sys().ListGroups(role)
+	list, err := c.Sys().ListGroups(role)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string][]string{}
-	for _, g := range groups {
+	for _, g := range list.Groups {
 		for _, r := range g.Roles {
 			out[r] = append(out[r], g.Name)
 		}

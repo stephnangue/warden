@@ -39,57 +39,68 @@ func ParseGroupType(s string) (GroupType, error) {
 		s, GroupTypeVirtual, GroupTypeInternal, GroupTypeDirectory)
 }
 
-// Bounds on a group. The selector-level bounds (names per rule, values per
-// name, name and value length) are the selector package's.
+// Bounds on a group. The bounds inside a rule (selectors per rule, values per
+// selector, name and value length) are the selector package's.
 const (
 	MaxGroupDescriptionBytes = 1024
 	MaxGroupRoles            = 64
-	MaxGroupSelectors        = 16
+	MaxGroupRules            = 16
 
 	// MaxGroupsPerNamespace bounds the groups of one namespace. Each group write
 	// rebuilds the namespace's index, and a recompute in which every group
 	// matches lists every group and fills a role map. Measured
 	// (core/identity_groups_bench_test.go, Apple M4 Pro): a group write at
 	// 8000 groups takes about 1.2 ms; 8000 groups all matching, with the two
-	// facts per rule MaxSelectorNamesPerNamespace then allows, recompute in
+	// selectors per rule MaxSelectorsPerNamespace then allows, recompute in
 	// about 0.8 ms (1.3 MB, 56 allocations).
 	MaxGroupsPerNamespace = 8000
 
-	// MaxSelectorNamesPerNamespace bounds the fact names ("mount" included)
-	// across every rule of every group of one namespace. A group change makes
-	// every cached admission of the namespace recompute its membership on its
-	// next request, and the worst case (every rule lists the admission's mount
-	// and fails only on its last fact) looks up and compares every name once:
-	// about 60 ns a name when each matches after an exact value and a glob,
-	// so 16000 names recompute in about 0.96 ms. That assumes a name's values
-	// short-circuit on the first match, as any-of values do; a name whose every
-	// one of up to selector.MaxRuleValues globs must be tried costs more.
-	MaxSelectorNamesPerNamespace = 16000
+	// MaxSelectorsPerNamespace bounds the selectors ("mount" included) across
+	// every rule of every group of one namespace. A group change makes every
+	// cached admission of the namespace recompute its membership on its next
+	// request, and the worst case (every rule lists the admission's mount and
+	// fails only on its last selector) looks up and compares every selector
+	// once: about 60 ns a selector when each matches after an exact value and
+	// a glob, so 16000 selectors recompute in about 0.96 ms. That assumes a
+	// selector's values short-circuit on the first match, as any-of values do;
+	// a selector whose every one of up to selector.MaxRuleValues globs must be
+	// tried costs more.
+	MaxSelectorsPerNamespace = 16000
 )
 
-// Selector is one rule of a virtual group: a fact name mapped to the values it
-// may take. Every name must yield a value matching one of its values (AND
-// across names, any-of within a name); a value holding an unescaped '*' or '?'
-// is a glob. Every rule of a virtual group names "mount", the auth mounts it
-// trusts.
-type Selector map[string][]string
+// GroupRule is one rule of a virtual group: a set of selectors, each a fact
+// name mapped to the values it may take. Every selector must find a value
+// matching one of its values (AND across selectors, any-of within one); a
+// value holding an unescaped '*' or '?' is a glob. Every rule of a virtual
+// group includes a "mount" selector, the auth mounts it trusts.
+type GroupRule map[string][]string
 
-// Clone returns a deep copy of s, or nil for a nil selector.
-func (s Selector) Clone() Selector {
-	if s == nil {
+// Clone returns a deep copy of r, or nil for a nil rule.
+func (r GroupRule) Clone() GroupRule {
+	if r == nil {
 		return nil
 	}
-	out := make(Selector, len(s))
-	for k, v := range s {
+	out := make(GroupRule, len(r))
+	for k, v := range r {
 		out[k] = slices.Clip(slices.Clone(v))
 	}
 	return out
 }
 
+// SelectorCount returns the number of selectors across g's rules, "mount"
+// included: what MaxSelectorsPerNamespace counts.
+func (g *Group) SelectorCount() int {
+	n := 0
+	for _, r := range g.Rules {
+		n += len(r)
+	}
+	return n
+}
+
 // Group grants namespace roles to its members. Roles lists the roles membership
 // grants, by bare name; a name with no role behind it grants nothing until the
 // role exists. How a caller becomes a member depends on Type: a virtual group
-// matches the caller's verified facts against Selectors and, when MaxAge is
+// matches the caller's verified facts against its Rules and, when MaxAge is
 // set, requires a credential issued no longer than MaxAge ago.
 //
 // A *Group published by the group store is never written again: a write builds
@@ -101,7 +112,7 @@ type Group struct {
 	Type        GroupType         `json:"type"`
 	Description string            `json:"description,omitempty"`
 	Roles       []string          `json:"roles"` // sorted, deduplicated
-	Selectors   []Selector        `json:"selectors,omitempty"`
+	Rules       []GroupRule       `json:"rules,omitempty"`
 	MaxAge      time.Duration     `json:"max_age,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
@@ -117,10 +128,10 @@ func (g *Group) Clone() *Group {
 	}
 	out := *g
 	out.Roles = slices.Clip(slices.Clone(g.Roles))
-	if g.Selectors != nil {
-		out.Selectors = make([]Selector, len(g.Selectors))
-		for i, s := range g.Selectors {
-			out.Selectors[i] = s.Clone()
+	if g.Rules != nil {
+		out.Rules = make([]GroupRule, len(g.Rules))
+		for i, r := range g.Rules {
+			out.Rules[i] = r.Clone()
 		}
 	}
 	out.Metadata = maps.Clone(g.Metadata)
@@ -128,7 +139,7 @@ func (g *Group) Clone() *Group {
 }
 
 // Hash identifies the group's content: two groups with the same name, type,
-// roles, selectors, max_age and metadata hash alike, whenever they were
+// roles, rules, max_age and metadata hash alike, whenever they were
 // written. A writer that read a group passes its hash back to make the write
 // conditional on nothing having changed since. The ID and the timestamps are
 // not part of it.
@@ -147,13 +158,13 @@ func (g *Group) Hash() string {
 	field(string(g.Type))
 	field(g.Description)
 	list(g.Roles)
-	fmt.Fprintf(h, "%d:", len(g.Selectors))
-	for _, s := range g.Selectors {
-		names := slices.Sorted(maps.Keys(s))
+	fmt.Fprintf(h, "%d:", len(g.Rules))
+	for _, r := range g.Rules {
+		names := slices.Sorted(maps.Keys(r))
 		fmt.Fprintf(h, "%d:", len(names))
 		for _, name := range names {
 			field(name)
-			list(s[name])
+			list(r[name])
 		}
 	}
 	fmt.Fprintf(h, "%d;", int64(g.MaxAge))

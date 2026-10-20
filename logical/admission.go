@@ -92,7 +92,7 @@ func (a *Admission) CompareAndSwapMembership(old, next *Membership) bool {
 }
 
 // Membership is what an admission's verified facts earn it in its namespace:
-// the groups whose selectors match, and the roles those groups grant. It is
+// the groups one of whose rules matches, and the roles those groups grant. It is
 // computed from one group snapshot (Gen) and one mount naming (Naming), and is
 // immutable once built; a change to either, or the passing of ValidUntil,
 // makes the next request compute a new one.

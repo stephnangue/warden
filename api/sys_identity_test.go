@@ -14,7 +14,9 @@ const deployersGroupJSON = `{"data":{
 	"type":"virtual",
 	"description":"CI deployers",
 	"roles":["deploy"],
-	"selectors":[{"mount":["auth/jwt/"],"repo":["acme/*"]}],
+	"rules":[{"mount":["auth/jwt/"],"repo":["acme/*"]}],
+	"rule_count":1,
+	"selector_count":2,
 	"max_age":"10m0s",
 	"metadata":{"owner":"platform"},
 	"hash":"h1",
@@ -30,7 +32,7 @@ func TestSys_CreateGroup(t *testing.T) {
 		Type:        "virtual",
 		Description: strPtr("CI deployers"),
 		Roles:       []string{"deploy"},
-		Selectors:   []map[string][]string{{"mount": {"auth/jwt/"}, "repo": {"acme/*"}}},
+		Rules:       []map[string][]string{{"mount": {"auth/jwt/"}, "repo": {"acme/*"}}},
 		MaxAge:      strPtr("10m"),
 	})
 	require.NoError(t, err)
@@ -41,13 +43,15 @@ func TestSys_CreateGroup(t *testing.T) {
 		"type":        "virtual",
 		"description": "CI deployers",
 		"roles":       []any{"deploy"},
-		"selectors":   []any{map[string]any{"mount": []any{"auth/jwt/"}, "repo": []any{"acme/*"}}},
+		"rules":       []any{map[string]any{"mount": []any{"auth/jwt/"}, "repo": []any{"acme/*"}}},
 		"max_age":     "10m",
 	}, rec.body, "only the fields the input sets are sent")
 
 	assert.Equal(t, "0f1e", g.ID)
 	assert.Equal(t, "virtual", g.Type)
-	assert.Equal(t, []map[string][]string{{"mount": {"auth/jwt/"}, "repo": {"acme/*"}}}, g.Selectors)
+	assert.Equal(t, []map[string][]string{{"mount": {"auth/jwt/"}, "repo": {"acme/*"}}}, g.Rules)
+	assert.Equal(t, 1, g.RuleCount)
+	assert.Equal(t, 2, g.SelectorCount)
 	assert.Equal(t, "10m0s", g.MaxAge)
 	assert.Equal(t, "h1", g.Hash)
 	assert.Len(t, g.Warnings, 1)
@@ -82,18 +86,30 @@ func TestSys_ListGroups(t *testing.T) {
 		"groups":[
 			{"name":"ci","type":"virtual","roles":["deploy","read"]},
 			{"name":"deployers","type":"virtual","roles":["deploy"]}
-		]
+		],
+		"usage":{"groups":42,"max_groups":8000,"selectors":310,"max_selectors":16000}
 	}}`)
 
-	groups, err := client.Sys().ListGroups("deploy")
+	list, err := client.Sys().ListGroups("deploy")
 	require.NoError(t, err)
 	assert.Equal(t, "/v1/sys/identity/group", rec.path)
 	assert.Equal(t, "true", rec.query.Get("warden-list"))
 	assert.Equal(t, "deploy", rec.query.Get("role"))
-	require.Len(t, groups, 2)
-	assert.Equal(t, []string{"deploy", "read"}, groups[0].Roles)
+	require.Len(t, list.Groups, 2)
+	assert.Equal(t, []string{"deploy", "read"}, list.Groups[0].Roles)
+	assert.Equal(t, GroupUsage{Groups: 42, MaxGroups: 8000, Selectors: 310, MaxSelectors: 16000}, list.Usage)
 
 	_, err = client.Sys().ListGroups("")
 	require.NoError(t, err)
 	assert.False(t, rec.query.Has("role"))
+}
+
+func TestSys_ListGroups_Empty(t *testing.T) {
+	client, _ := newRoleServer(t, http.StatusOK, `{"data":{"keys":[],"groups":[],
+		"usage":{"groups":0,"max_groups":8000,"selectors":0,"max_selectors":16000}}}`)
+	list, err := client.Sys().ListGroups("")
+	require.NoError(t, err)
+	assert.Empty(t, list.Groups)
+	assert.NotNil(t, list.Groups)
+	assert.Equal(t, 16000, list.Usage.MaxSelectors)
 }

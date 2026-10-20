@@ -9,24 +9,44 @@ import (
 	"time"
 )
 
-// Group is a namespace group as the server returns it. Selectors are the
-// group's rules as written; MaxAge is a duration string ("10m0s"), empty when
-// unset. Hash is what a conditional update or delete passes back as
+// Group is a namespace group as the server returns it. Rules are the group's
+// rules as written, each a set of selectors (fact name to the values it may
+// take); RuleCount and SelectorCount are what the group adds to the
+// namespace's usage. MaxAge is a duration string ("10m0s"), empty when unset.
+// Hash is what a conditional update or delete passes back as
 // GroupInput.ExpectedHash; Warnings carries non-fatal notices about a write (a
 // role that does not exist yet, a fact no listed auth mount produces).
 type Group struct {
-	ID          string                `json:"id"`
-	Name        string                `json:"name"`
-	Type        string                `json:"type"`
-	Description string                `json:"description"`
-	Roles       []string              `json:"roles"`
-	Selectors   []map[string][]string `json:"selectors"`
-	MaxAge      string                `json:"max_age"`
-	Metadata    map[string]string     `json:"metadata"`
-	Hash        string                `json:"hash,omitempty"`
-	CreatedAt   time.Time             `json:"created_at"`
-	UpdatedAt   time.Time             `json:"updated_at"`
-	Warnings    []string              `json:"warnings,omitempty"`
+	ID            string                `json:"id"`
+	Name          string                `json:"name"`
+	Type          string                `json:"type"`
+	Description   string                `json:"description"`
+	Roles         []string              `json:"roles"`
+	Rules         []map[string][]string `json:"rules"`
+	RuleCount     int                   `json:"rule_count"`
+	SelectorCount int                   `json:"selector_count"`
+	MaxAge        string                `json:"max_age"`
+	Metadata      map[string]string     `json:"metadata"`
+	Hash          string                `json:"hash,omitempty"`
+	CreatedAt     time.Time             `json:"created_at"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+	Warnings      []string              `json:"warnings,omitempty"`
+}
+
+// GroupUsage is how much of its caps a namespace's groups use: every group
+// and every selector of every rule, "mount" included.
+type GroupUsage struct {
+	Groups       int `json:"groups"`
+	MaxGroups    int `json:"max_groups"`
+	Selectors    int `json:"selectors"`
+	MaxSelectors int `json:"max_selectors"`
+}
+
+// GroupList is a group listing: the groups (all, or those granting the role
+// asked for) and the whole namespace's usage, whatever the filter.
+type GroupList struct {
+	Groups []*Group
+	Usage  GroupUsage
 }
 
 // GroupInput is the body of a group create or update. On update a nil field
@@ -37,7 +57,7 @@ type GroupInput struct {
 	Type        string
 	Description *string
 	Roles       []string
-	Selectors   []map[string][]string
+	Rules       []map[string][]string
 	MaxAge      *string
 	Metadata    map[string]string
 
@@ -60,8 +80,8 @@ func (in *GroupInput) body() map[string]any {
 	if in.Roles != nil {
 		out["roles"] = in.Roles
 	}
-	if in.Selectors != nil {
-		out["selectors"] = in.Selectors
+	if in.Rules != nil {
+		out["rules"] = in.Rules
 	}
 	if in.MaxAge != nil {
 		out["max_age"] = *in.MaxAge
@@ -175,14 +195,15 @@ func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, expectedHash str
 	return nil
 }
 
-// ListGroups lists the groups of the client's namespace, sorted by name. A
-// non-empty role lists only the groups that grant it.
-func (c *Sys) ListGroups(role string) ([]*Group, error) {
+// ListGroups lists the groups of the client's namespace, sorted by name, with
+// the namespace's usage. A non-empty role lists only the groups that grant it;
+// the usage still covers the whole namespace.
+func (c *Sys) ListGroups(role string) (*GroupList, error) {
 	return c.ListGroupsWithContext(context.Background(), role)
 }
 
 // ListGroupsWithContext lists the groups with context.
-func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) ([]*Group, error) {
+func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) (*GroupList, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -202,17 +223,26 @@ func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) ([]*Group,
 	if err != nil {
 		return nil, err
 	}
+	list := &GroupList{Groups: []*Group{}}
 	if resource == nil || resource.Data == nil {
-		return []*Group{}, nil
+		return list, nil
 	}
 	items, _ := resource.Data["groups"].([]any)
-	groups := make([]*Group, 0, len(items))
 	for _, item := range items {
 		g, err := decodeGroup(item)
 		if err != nil {
 			return nil, err
 		}
-		groups = append(groups, g)
+		list.Groups = append(list.Groups, g)
 	}
-	return groups, nil
+	if raw, ok := resource.Data["usage"]; ok {
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(b, &list.Usage); err != nil {
+			return nil, fmt.Errorf("failed to decode group usage: %w", err)
+		}
+	}
+	return list, nil
 }

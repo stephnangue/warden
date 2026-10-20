@@ -21,16 +21,21 @@ Usage: warden identity group create <name> [options]
 
   Create a group. "type" is required and never changes; "virtual" is the
   one type today. A virtual group's members are the callers whose verified
-  facts match any one of its selectors; membership grants the group's
-  roles. Requires a token with sudo on sys/identity/group.
+  facts match any one of its rules; membership grants the group's roles.
+  Requires a token with sudo on sys/identity/group.
 
-  Every selector must name "mount": the auth mounts it trusts. Its other
-  names are facts those mounts verify (built-in, or mapped in the mount's
-  "facts"); each lists the values it may take, and a caller must match one
-  value of every name. "*" and "?" are globs ("*" stops at "/", "**" does
-  not); "mount": ["**"] trusts every auth mount and is accepted with a
-  warning. A role that does not exist yet, or a fact none of the listed
-  mounts produces, is accepted with a warning on stderr.
+  A rule is a set of selectors, each a fact name with the values it may
+  take; a caller must match one value of every selector. Every rule must
+  include a "mount" selector: the auth mounts it trusts. Its other
+  selectors name facts those mounts verify (built-in, or mapped in the
+  mount's "facts"). "*" and "?" are globs ("*" stops at "/", "**" does
+  not); a "mount" value holding "**" trusts mounts enabled later and is
+  accepted with a warning. A role that does not exist yet, or a fact none
+  of the listed mounts produces, is accepted with a warning on stderr.
+
+  A namespace holds at most 8000 groups and 16000 selectors across all
+  their rules ("mount" included); a write past either is refused with the
+  current usage.
 
   "max_age" bounds how old the caller's credential may be, counted from
   when it was issued (its "iat"), on every request. With "max_age": "10m",
@@ -48,7 +53,7 @@ Usage: warden identity group create <name> [options]
           "type": "virtual",
           "description": "CI deployers from GitHub and the ci cluster",
           "roles": ["deploy", "read-secrets"],
-          "selectors": [
+          "rules": [
             {
               "mount": ["auth/github-oidc/"],
               "repo": ["acme/*"],
@@ -71,12 +76,12 @@ Usage: warden identity group create <name> [options]
       $ warden identity group create ci-deployers -json @ci-deployers.json
       $ cat ci-deployers.json | warden identity group create ci-deployers -json -
 
-    Typed flags (human-friendly), one -selector per rule:
+    Typed flags (human-friendly), one -rule per rule:
 
       $ warden identity group create ci-deployers \
           -type=virtual \
           -roles=deploy \
-          -selector='{"mount": ["auth/kubernetes/"], "service_account_namespace": ["ci"]}' \
+          -rule='{"mount": ["auth/kubernetes/"], "service_account_namespace": ["ci"]}' \
           -max-age=10m
 
   Combine with -dry-run to validate the payload locally without creating
