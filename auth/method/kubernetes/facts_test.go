@@ -227,6 +227,36 @@ func TestFacts_FromTokenReview(t *testing.T) {
 		len("aud") + len("warden") + len("vault")
 	assert.Equal(t, int64(want), adm.Bytes)
 	assert.Equal(t, int64(want), adm.Size())
+
+	// A username the API server would not split as a service account admits
+	// nothing, even for a role that binds any name in the namespace (before,
+	// "default:myapp:extra" was admitted as the name "myapp:extra").
+	for _, username := range []string{
+		"system:serviceaccount:default:myapp:extra",
+		"system:serviceaccount:default:",
+		"system:serviceaccount::myapp",
+		"system:serviceaccount:Default:myapp",
+		"system:serviceaccount:default:MyApp",
+		"system:node:worker-1",
+	} {
+		t.Run(username, func(t *testing.T) {
+			b, _ := loginSetup(t, tokenReviewStatus{
+				Authenticated: true,
+				User:          tokenReviewUser{Username: username},
+			}, nil)
+			require.NoError(t, b.setRole(context.Background(), &KubernetesRole{
+				Name:                          "anyname",
+				BoundServiceAccountNames:      []string{"*"},
+				BoundServiceAccountNamespaces: []string{"default", "Default"},
+				TokenPolicies:                 []string{"p"},
+				TokenTTL:                      "1h",
+				TokenType:                     "kubernetes_role",
+			}))
+			resp := login(t, b, mintJWT(map[string]any{"sub": username}), "anyname")
+			require.Error(t, resp.Err)
+			assert.Nil(t, resp.Auth)
+		})
+	}
 }
 
 // An empty value is not a fact, and an iat that is absent or not a number
@@ -252,8 +282,6 @@ func TestFacts_EmptyValuesAndIssuedAt(t *testing.T) {
 	} {
 		assert.True(t, newAdmission(status, "ci", "deployer", claims, nil).IssuedAt.IsZero(), "claims %v", claims)
 	}
-	assert.Equal(t, []string{"a"}, nonEmpty([]string{"a"}))
-	assert.Empty(t, nonEmpty(nil))
 }
 
 // FactsConfig is flattened into the config's own keys on the way in and on the
@@ -309,6 +337,13 @@ func TestFactNames(t *testing.T) {
 
 	unconfigured, _ := newTestBackend(t)
 	assert.Empty(t, unconfigured.FactNames())
+
+	// The facts field names the sources a kubernetes mount has, and no pointers.
+	desc := b.pathConfig().Fields["facts"].Description
+	for _, name := range builtins {
+		assert.Contains(t, desc, name)
+	}
+	assert.NotContains(t, desc, "Pointer")
 }
 
 // =============================================================================

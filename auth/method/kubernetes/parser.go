@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hashicorp/go-secure-stdlib/parseutil"
+	"github.com/stephnangue/warden/auth/helper"
 )
 
 // mapToKubernetesAuthConfig converts an operator-supplied config map
@@ -34,10 +34,10 @@ func mapToKubernetesAuthConfig(data map[string]any) (*KubernetesAuthConfig, erro
 
 	// bound_audiences arrives as a list from a write or storage, and may be a
 	// comma-separated string in a mount table config.
-	if raw, ok := dataCopy["bound_audiences"]; ok && raw != nil {
-		auds, err := parseutil.ParseCommaStringSlice(raw)
+	if raw, ok := dataCopy["bound_audiences"]; ok {
+		auds, err := helper.ParseBoundAudiences(raw)
 		if err != nil {
-			return nil, fmt.Errorf("bound_audiences: %w", err)
+			return nil, err
 		}
 		dataCopy["bound_audiences"] = auds
 	}

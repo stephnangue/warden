@@ -206,12 +206,6 @@ func buildConfig(_ context.Context, conf map[string]any) (*KubernetesAuthConfig,
 	if cfg.KubernetesCACert == "" && !cfg.TLSSkipVerify {
 		return nil, fmt.Errorf("kubernetes_ca_cert is required unless tls_skip_verify is true")
 	}
-	for i, aud := range cfg.BoundAudiences {
-		if aud == "" {
-			return nil, fmt.Errorf("bound_audiences: entry %d is empty", i)
-		}
-	}
-
 	// Facts that do not compile are kept on the config, not returned: the
 	// caller decides whether to refuse them or fail closed.
 	cfg.CompileFields(kubernetesBuiltinFacts())

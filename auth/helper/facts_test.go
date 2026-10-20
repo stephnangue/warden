@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -134,15 +135,63 @@ func TestParseFactsField(t *testing.T) {
 }
 
 func TestFactsFieldSchemas(t *testing.T) {
-	s := FactsFieldSchemas()
+	s := FactsFieldSchemas("one of the fields: a, b")
 	require.Len(t, s, 2)
 	assert.Equal(t, framework.TypeString, s["entity_kind"].Type)
 	assert.Equal(t, framework.TypeMap, s["facts"].Type)
 	assert.NotEmpty(t, s["entity_kind"].Description)
-	assert.NotEmpty(t, s["facts"].Description)
+	assert.Contains(t, s["facts"].Description, "Map of a source (one of the fields: a, b) to the fact name")
+	assert.NotContains(t, s["facts"].Description, "Pointer", "the source phrase is the method's")
 
 	s["facts"].Description = "changed"
-	assert.NotEqual(t, "changed", FactsFieldSchemas()["facts"].Description, "each call is fresh")
+	assert.NotEqual(t, "changed", FactsFieldSchemas("x")["facts"].Description, "each call is fresh")
+}
+
+func TestParseBoundAudiences(t *testing.T) {
+	cases := []struct {
+		raw  any
+		want []string
+		err  string
+	}{
+		{nil, nil, ""},
+		{"", nil, ""},
+		{[]string{}, nil, ""},
+		{[]any{}, nil, ""},
+		{"warden", []string{"warden"}, ""},
+		{" warden , vault ", []string{"warden", "vault"}, ""},
+		{[]string{"warden", " vault"}, []string{"warden", "vault"}, ""},
+		{[]any{"warden"}, []string{"warden"}, ""},
+		{"warden,,vault", nil, "bound_audiences: entry 1 is empty"},
+		{[]string{"warden", ""}, nil, "bound_audiences: entry 1 is empty"},
+		{[]string{"  "}, nil, "bound_audiences: entry 0 is empty"},
+		{map[string]any{"a": 1}, nil, "bound_audiences: "},
+	}
+	for _, tc := range cases {
+		got, err := ParseBoundAudiences(tc.raw)
+		if tc.err != "" {
+			assert.ErrorContains(t, err, tc.err, "raw %#v", tc.raw)
+			continue
+		}
+		require.NoError(t, err, "raw %#v", tc.raw)
+		assert.Equal(t, tc.want, got, "raw %#v", tc.raw)
+	}
+}
+
+func TestTableValues(t *testing.T) {
+	assert.Equal(t, selector.Field{Name: "uid"}, TableValue("uid", ""))
+	assert.Equal(t, selector.Field{Name: "uid", Values: []string{"u"}}, TableValue("uid", "u"))
+
+	assert.Equal(t, selector.Field{Name: "g"}, TableValues("g", nil))
+	assert.Equal(t, selector.Field{Name: "g", Values: []string{}}, TableValues("g", []string{"", ""}))
+	assert.Equal(t, []string{"a", "b"}, TableValues("g", []string{"", "a", "", "b", ""}).Values)
+
+	vs := []string{"a", "b"}
+	got := TableValues("g", vs)
+	assert.Same(t, &vs[0], &got.Values[0], "a list without empty entries is used as is")
+
+	in := []string{"a", "", "b"}
+	TableValues("g", in)
+	assert.Equal(t, []string{"a", "", "b"}, in, "the input is not modified")
 }
 
 func TestFactNames(t *testing.T) {

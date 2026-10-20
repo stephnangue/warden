@@ -50,12 +50,12 @@ func (b *kubernetesAuthBackend) FactNames() []string { return helper.FactNames(b
 // reaches this admission.
 func newAdmission(status *tokenReviewStatus, namespace, name string, claims map[string]any, mount *logical.MountFacts) *logical.Admission {
 	facts := selector.NewTable(
-		oneValue(factServiceAccountNamespace, namespace),
-		oneValue(factServiceAccountName, name),
-		oneValue(factServiceAccountUID, status.User.UID),
-		oneValue(factUsername, status.User.Username),
-		selector.Field{Name: factGroups, Values: nonEmpty(status.User.Groups)},
-		selector.Field{Name: factAudiences, Values: nonEmpty(status.Audiences)},
+		helper.TableValue(factServiceAccountNamespace, namespace),
+		helper.TableValue(factServiceAccountName, name),
+		helper.TableValue(factServiceAccountUID, status.User.UID),
+		helper.TableValue(factUsername, status.User.Username),
+		helper.TableValues(factGroups, status.User.Groups),
+		helper.TableValues(factAudiences, status.Audiences),
 	)
 	return &logical.Admission{
 		Facts:    facts,
@@ -65,30 +65,8 @@ func newAdmission(status *tokenReviewStatus, namespace, name string, claims map[
 	}
 }
 
-// oneValue returns a single-valued field, or a field with no value when v is
-// empty.
-func oneValue(name, v string) selector.Field {
-	if v == "" {
-		return selector.Field{Name: name}
-	}
-	return selector.Field{Name: name, Values: []string{v}}
-}
-
-// nonEmpty returns vs without its empty entries. It returns vs itself when it
-// has none, which is the norm; NewTable copies either way.
-func nonEmpty(vs []string) []string {
-	for i, v := range vs {
-		if v != "" {
-			continue
-		}
-		out := make([]string, 0, len(vs)-1)
-		out = append(out, vs[:i]...)
-		for _, w := range vs[i+1:] {
-			if w != "" {
-				out = append(out, w)
-			}
-		}
-		return out
-	}
-	return vs
-}
+// factsSources is the phrase the config path uses for what a facts source is
+// on a kubernetes mount.
+const factsSources = "one of the TokenReview fields: " +
+	factServiceAccountNamespace + ", " + factServiceAccountName + ", " + factServiceAccountUID + ", " +
+	factUsername + ", " + factGroups + ", " + factAudiences

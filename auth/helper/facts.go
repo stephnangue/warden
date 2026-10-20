@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-secure-stdlib/parseutil"
+
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/logical"
@@ -99,9 +101,11 @@ func FactsWriteError(built *FactsConfig, touched bool) error {
 }
 
 // FactsFieldSchemas returns the config fields every fact-naming auth method
-// accepts, so their descriptions stay identical. The map is fresh on each
-// call, for the caller to merge into its path's fields.
-func FactsFieldSchemas() map[string]*framework.FieldSchema {
+// accepts, so their descriptions stay alike. sources says what a source is on
+// the calling method, as a phrase ("a claim name, or …"; "one of the
+// TokenReview fields: …"). The map is fresh on each call, for the caller to
+// merge into its path's fields.
+func FactsFieldSchemas(sources string) map[string]*framework.FieldSchema {
 	return map[string]*framework.FieldSchema{
 		"entity_kind": {
 			Type:        framework.TypeString,
@@ -109,11 +113,63 @@ func FactsFieldSchemas() map[string]*framework.FieldSchema {
 		},
 		"facts": {
 			Type: framework.TypeMap,
-			Description: "Map of a source (a credential field or claim name, or a JSON Pointer with a leading / into nested claims) " +
+			Description: "Map of a source (" + sources + ") " +
 				"to the fact name it is published as. The method's built-in facts are always published under their own names. " +
 				"A write replaces the whole map; an empty map clears it.",
 		},
 	}
+}
+
+// ParseBoundAudiences converts a bound_audiences value, from a config write,
+// storage or a mount table config, to a list: a list of strings, or one
+// comma-separated string. Entries are trimmed and none may be empty; an empty
+// string or list (or nil) clears the list and returns nil.
+func ParseBoundAudiences(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	auds, err := parseutil.ParseCommaStringSlice(raw)
+	if err != nil {
+		return nil, fmt.Errorf("bound_audiences: %w", err)
+	}
+	for i, aud := range auds {
+		if aud == "" {
+			return nil, fmt.Errorf("bound_audiences: entry %d is empty", i)
+		}
+	}
+	if len(auds) == 0 {
+		return nil, nil
+	}
+	return auds, nil
+}
+
+// TableValue returns a single-valued field of a selector.Table, or a field
+// with no value when v is empty: an empty value is not a fact.
+func TableValue(name, v string) selector.Field {
+	if v == "" {
+		return selector.Field{Name: name}
+	}
+	return selector.Field{Name: name, Values: []string{v}}
+}
+
+// TableValues returns a multi-valued field of a selector.Table holding vs
+// without its empty entries: an empty value is not a fact. It holds vs itself
+// when vs has none, which is the norm; selector.NewTable copies either way.
+func TableValues(name string, vs []string) selector.Field {
+	for i, v := range vs {
+		if v != "" {
+			continue
+		}
+		out := make([]string, 0, len(vs)-1)
+		out = append(out, vs[:i]...)
+		for _, w := range vs[i+1:] {
+			if w != "" {
+				out = append(out, w)
+			}
+		}
+		return selector.Field{Name: name, Values: out}
+	}
+	return selector.Field{Name: name, Values: vs}
 }
 
 // ParseFactsField converts the facts field of a config write to a source to

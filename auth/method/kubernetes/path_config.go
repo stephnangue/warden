@@ -57,7 +57,7 @@ func (b *kubernetesAuthBackend) pathConfig() *framework.Path {
 				"No entry may be empty; an empty value clears the list.",
 		},
 	}
-	maps.Copy(fields, helper.FactsFieldSchemas())
+	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
 
 	return &framework.Path{
 		Pattern: "config",
