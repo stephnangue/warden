@@ -34,11 +34,11 @@ type SPIFFEAuthConfig struct {
 	// the audience every JWT-SVID is verified against.
 	BoundAudiences []string `json:"bound_audiences,omitempty"`
 
-	// MaxAge bounds a credential's age at admission, from its issue time:
-	// one older, or without an issue time (an X.509-SVID has none), is not
-	// admitted. Zero is unset. Stored, read back and validated (not
+	// MaxAge bounds a JWT-SVID's age at admission, from its iat: one older,
+	// or without an iat, is not admitted. X.509-SVIDs carry no issue time and
+	// are not checked. Zero is unset. Stored, read back and validated (not
 	// negative), but not used by role logins; the role-free admission
-	// enforces it, through helper.CheckMaxAge.
+	// enforces it, through CheckSVIDMaxAge.
 	MaxAge time.Duration `json:"max_age,omitempty"`
 
 	// Facts: entity_kind, and the SVID fields the mount publishes under other
@@ -248,5 +248,6 @@ Configuration:
 
 The mount's entity_kind and facts name what it admits; bound_audiences is
 stored for mount-level audience binding and not used by logins yet; max_age
-bounds a credential's age at the role-free admission, not at role logins.
+bounds a JWT-SVID's age at the role-free admission, not at role logins
+(X.509-SVIDs carry no issue time and are not checked).
 `

@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
@@ -108,6 +110,67 @@ func TestConfig_MaxAgeRefused(t *testing.T) {
 			assert.Contains(t, err.Error(), "max_age")
 		})
 	}
+}
+
+// max_age applies to JWT-SVIDs only: an X.509-SVID carries no issue time and
+// is not checked, while a JWT-SVID is held to helper.CheckMaxAge, which refuses
+// one without an iat.
+func TestCheckSVIDMaxAge(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	id := spiffeid.RequireFromString("spiffe://example.org/ns/a/sa/b")
+	x509 := newAdmission(id, svidX509, nil, time.Time{}, nil)
+	jwtAt := func(iat time.Time) *logical.Admission { return newAdmission(id, svidJWT, []string{"warden"}, iat, nil) }
+	cfg := &SPIFFEAuthConfig{MaxAge: 10 * time.Minute}
+
+	cases := []struct {
+		name    string
+		cfg     *SPIFFEAuthConfig
+		adm     *logical.Admission
+		wantErr string
+	}{
+		{"x509 is not checked", cfg, x509, ""},
+		{"x509 with a stale issue time is not checked", cfg, newAdmission(id, svidX509, nil, now.Add(-time.Hour), nil), ""},
+		{"jwt fresh", cfg, jwtAt(now.Add(-time.Minute)), ""},
+		{"jwt exactly max_age", cfg, jwtAt(now.Add(-10 * time.Minute)), ""},
+		{"jwt over max_age", cfg, jwtAt(now.Add(-10*time.Minute - time.Second)), "credential is 10m1s old, more than max_age 10m0s"},
+		{"jwt without iat", cfg, jwtAt(time.Time{}), "credential has no issue time"},
+		{"unset max_age", &SPIFFEAuthConfig{}, jwtAt(time.Time{}), ""},
+		{"unconfigured mount", nil, jwtAt(time.Time{}), ""},
+		{"an unknown kind is held to max_age", cfg, newAdmission(id, "other", nil, time.Time{}, nil), "credential has no issue time"},
+		{"no admission is held to max_age", cfg, nil, "credential has no issue time"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.CheckSVIDMaxAge(tc.adm, now)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.EqualError(t, err, tc.wantErr)
+		})
+	}
+	assert.ErrorIs(t, cfg.CheckSVIDMaxAge(jwtAt(time.Time{}), now), helper.ErrNoIssueTime)
+}
+
+// The admissions real logins produce: an X.509-SVID passes whatever max_age
+// is, a JWT-SVID issued before max_age does not.
+func TestCheckSVIDMaxAge_LoginAdmissions(t *testing.T) {
+	f := newFactsFixture(t, map[string]any{"max_age": "1m"})
+	ctx := context.Background()
+	const id = "spiffe://" + testTD + "/ns/a/sa/b"
+
+	resp := x509Login(t, f.b, ctx, "api", f.svid(t, id))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "x509: %v", resp.Err)
+	assert.NoError(t, f.b.config.CheckSVIDMaxAge(resp.Auth.Admission, time.Now()))
+
+	resp = jwtLogin(t, f.b, ctx, "api", f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "fresh jwt: %v", resp.Err)
+	assert.NoError(t, f.b.config.CheckSVIDMaxAge(resp.Auth.Admission, time.Now()))
+
+	resp = jwtLogin(t, f.b, ctx, "api", f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour),
+		map[string]any{"iat": time.Now().Add(-time.Hour).Unix()}))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "stale jwt: %v", resp.Err)
+	assert.ErrorContains(t, f.b.config.CheckSVIDMaxAge(resp.Auth.Admission, time.Now()), "more than max_age 1m0s")
 }
 
 // max_age is stored but not used by role logins: an X.509-SVID, which has no

@@ -83,6 +83,29 @@ func newAdmission(id spiffeid.ID, svid string, audiences []string, issuedAt time
 	}
 }
 
+// CheckSVIDMaxAge returns why adm, an admission of this mount, is too old to
+// admit at now under the mount's max_age, or nil. max_age applies to JWT-SVIDs
+// only: an X.509-SVID carries no issue time and is not checked. Any other
+// admission, a JWT-SVID or one whose kind is not x509, goes through
+// helper.CheckMaxAge, which refuses one without an issue time. A nil config is
+// the unconfigured mount, which sets no max_age.
+func (c *SPIFFEAuthConfig) CheckSVIDMaxAge(adm *logical.Admission, now time.Time) error {
+	if c == nil || c.MaxAge <= 0 {
+		return nil
+	}
+	if adm != nil && adm.Facts != nil {
+		cur := adm.Facts.Lookup(selector.Key{Name: factSVID})
+		if v, ok := cur.Next(); ok && v.Kind == selector.KindString && v.S == svidX509 {
+			return nil
+		}
+	}
+	var issuedAt time.Time
+	if adm != nil {
+		issuedAt = adm.IssuedAt
+	}
+	return helper.CheckMaxAge(c.MaxAge, issuedAt, now)
+}
+
 // factsSources is the phrase the config path uses for what a facts source is
 // on a spiffe mount: the built-in names, sorted, as CompileFields lists them
 // when it refuses a source.

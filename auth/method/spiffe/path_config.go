@@ -29,7 +29,14 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 				"logins do not use it yet (a role's bound_audiences still applies). " +
 				"No entry may be empty; an empty value clears the list.",
 		},
-		"max_age": helper.MaxAgeFieldSchema(),
+		"max_age": {
+			Type: framework.TypeDurationSecond,
+			Description: "Maximum age of an SVID at admission, measured from its issue time (iat): a duration such as 10m, " +
+				"or a number of seconds. Applies to JWT-SVIDs; X.509-SVIDs carry no issue time and are not checked. " +
+				"JWT-SVIDs older than max_age, or without an issue time, are not admitted. " +
+				"Enforced from the role-free admission; role logins do not use it. " +
+				"0 or empty leaves it unset.",
+		},
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
 
@@ -49,9 +56,10 @@ built-in facts (aud, path, spiffe_id, svid, trust_domain; svid is x509 or jwt,
 and aud holds a JWT-SVID's audiences); a write replaces the whole map.
 'bound_audiences' is stored for mount-level audience binding and not used by
 logins yet.
-'max_age' bounds a credential's age at admission, from its issue time: an
-SVID older than it, or without an issue time (an X.509-SVID has none), is not
-admitted. It is enforced from the role-free admission, not by role logins.`,
+'max_age' bounds a JWT-SVID's age at admission, from its iat: a JWT-SVID older
+than it, or without an iat, is not admitted. It applies to JWT-SVIDs;
+X.509-SVIDs carry no issue time and are not checked. It is enforced from the
+role-free admission, not by role logins.`,
 	}
 }
 
