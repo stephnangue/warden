@@ -114,7 +114,7 @@ func TestCredentialConfigStore_SpecRevision_ReKeysChainedConsumers(t *testing.T)
 	assert.GreaterOrEqual(t, store.SpecRevision(ctx, "consumer"), uint64(2), "an edit to the referenced spec's source re-keys its consumer")
 }
 
-func TestChainedConsumers(t *testing.T) {
+func TestChainGraph_ConsumersAndReferrers(t *testing.T) {
 	spec := func(name, source, ref string) *credential.CredSpec {
 		return &credential.CredSpec{Name: name, Source: source,
 			Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: ref})}
@@ -129,11 +129,12 @@ func TestChainedConsumers(t *testing.T) {
 		spec("overrides-source", "chained", "other"),
 		spec("unrelated", "plain", ""),
 	}
-	sources := []*credential.CredSource{source("plain", ""), source("chained", "secret")}
+	g := chainGraph{specs: specs, sources: []*credential.CredSource{source("plain", ""), source("chained", "secret")}}
 
-	assert.ElementsMatch(t, []string{"own-ref", "via-source"}, chainedConsumers(specs, sources, []string{"secret"}))
-	assert.Empty(t, chainedConsumers(specs, sources, []string{"unrelated"}))
-	assert.Empty(t, chainedConsumers(specs, sources, nil))
+	assert.ElementsMatch(t, []string{"own-ref", "via-source"}, g.consumers([]string{"secret"}))
+	assert.Empty(t, g.consumers([]string{"unrelated"}))
+	assert.Empty(t, g.consumers(nil))
+	assert.ElementsMatch(t, []string{"source/chained", "spec/own-ref"}, g.referrers("secret"))
 }
 
 // The bound specs are the ones a source update re-keys, so an update whose

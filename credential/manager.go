@@ -587,6 +587,13 @@ func (m *Manager) chainPreamble(ctx context.Context, caller Caller, spec *CredSp
 	if err != nil {
 		return nil, nil, fmt.Errorf("secret_spec %q: %w", secretRef, err)
 	}
+	// A referenced spec is minted as the caller (the store refuses one that is not,
+	// and refuses an edit that would stop it being so), so no inputs means config
+	// drift. Minted without them, the secret would be fetched and cached with no
+	// caller identity at all — one entry for every agent in the namespace.
+	if inputsB == nil {
+		return nil, nil, fmt.Errorf("secret_spec %q is not minted as the caller (no subject_token_source); refusing to chain from it", secretRef)
+	}
 	return ctx, inputsB, nil
 }
 
@@ -698,15 +705,16 @@ func (m *Manager) fetchChainedSecret(ctx context.Context, caller Caller, secretR
 	// minted via the non-caching internal path, which — unlike the caching wrapper —
 	// does not run ResolveSubjectToken/ResolveActorToken, so a warden_identity subject
 	// or actor would otherwise be forwarded empty (the driver would fail closed on the
-	// subject; a delegation actor would be silently dropped).
-	if inputsB != nil && inputsB.ResolveSubjectToken != nil && inputsB.SubjectToken == "" {
+	// subject; a delegation actor would be silently dropped). inputsB is never nil:
+	// chainPreamble refuses that.
+	if inputsB.ResolveSubjectToken != nil && inputsB.SubjectToken == "" {
 		tok, rerr := inputsB.ResolveSubjectToken(ctx)
 		if rerr != nil {
 			return nil, fmt.Errorf("secret_spec %q: failed to resolve subject token: %w", secretRef, rerr)
 		}
 		inputsB.SubjectToken = tok
 	}
-	if inputsB != nil && inputsB.ResolveActorToken != nil && inputsB.ActorToken == "" {
+	if inputsB.ResolveActorToken != nil && inputsB.ActorToken == "" {
 		tok, rerr := inputsB.ResolveActorToken(ctx)
 		if rerr != nil {
 			return nil, fmt.Errorf("secret_spec %q: failed to resolve actor token: %w", secretRef, rerr)
@@ -945,8 +953,9 @@ func (m *Manager) storeChainedSecret(key string, startedAt time.Time, cs chained
 // and a fingerprint of those claims are folded in — the first so one user's per-user
 // secret is never served to another, the second so a user whose claims have changed
 // under a stable token id is not served what the old ones fetched; a source-global
-// fetch (no user claims) omits both and is shared across users under the agent. A nil
-// inputsB (a referenced spec that requests no exchange) uses a fixed sentinel.
+// fetch (no user claims) omits both and is shared across users under the agent.
+// inputsB is never nil: chainPreamble refuses a referenced spec not minted as the
+// caller.
 //
 // refFP is chainedSpecFingerprint over the referenced spec and its source: the spec name
 // says which entry to look under, and refFP says what that name resolved to when the
@@ -964,10 +973,7 @@ func chainedSecretCacheKey(nsID, secretRef, refFP string, caller Caller, inputsB
 		return ""
 	}
 
-	fp := "noexchange"
-	if inputsB != nil {
-		fp = inputsB.Fingerprint()
-	}
+	fp := inputsB.Fingerprint()
 
 	// The agent's claims can select which secret is fetched — a templated path
 	// resolves from them — so they must key the entry that answers for it. The
@@ -978,7 +984,7 @@ func chainedSecretCacheKey(nsID, secretRef, refFP string, caller Caller, inputsB
 	// sets of claims behind one fingerprint, and editing a role's mapping changes
 	// them under a fingerprint that does not move at all.
 	agent := ""
-	if inputsB != nil && len(inputsB.AgentClaims) > 0 {
+	if len(inputsB.AgentClaims) > 0 {
 		agent = ":a:" + claimsFingerprint(inputsB.AgentClaims)
 	}
 
@@ -990,7 +996,7 @@ func chainedSecretCacheKey(nsID, secretRef, refFP string, caller Caller, inputsB
 	// under a key that never moved. The token id stays because it is what binds the
 	// entry to a principal's lifecycle; the fingerprint is what tracks what the
 	// store was actually shown.
-	if inputsB != nil && len(inputsB.UserClaims) > 0 {
+	if len(inputsB.UserClaims) > 0 {
 		if caller.User == nil {
 			return ""
 		}

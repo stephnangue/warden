@@ -326,42 +326,87 @@ func (s *CredentialConfigStore) checkSourceReferencesLocked(namespaceID, sourceN
 	return refs, nil
 }
 
-// chainedConsumersLocked returns the specs that mint from any of the named specs
-// through credential chaining, reading storage directly. A write that changes what
-// a referenced spec yields changes what they mint too, so their revisions advance
-// with its.
-func (s *CredentialConfigStore) chainedConsumersLocked(namespaceID string, names []string) ([]string, error) {
-	if len(names) == 0 {
-		return nil, nil
-	}
+// chainGraph is a namespace's specs and sources, read from storage in one pass for
+// the checks and re-keying that follow credential-chaining references. Writers
+// load it under s.mu, so it cannot change while they act on it.
+type chainGraph struct {
+	specs   []*credential.CredSpec
+	sources []*credential.CredSource
+}
+
+// loadChainGraphLocked reads every spec and source in the namespace from storage,
+// rather than through the caching list helpers.
+func (s *CredentialConfigStore) loadChainGraphLocked(namespaceID string) (chainGraph, error) {
 	sources, err := s.loadAllSources(namespaceID)
 	if err != nil {
-		return nil, err
+		return chainGraph{}, err
 	}
 	specs, err := s.loadAllSpecs(namespaceID)
 	if err != nil {
-		return nil, err
+		return chainGraph{}, err
 	}
-	return chainedConsumers(specs, sources, names), nil
+	return chainGraph{specs: specs, sources: sources}, nil
 }
 
-// chainedConsumers returns the names of the specs that mint from any of names: a
-// spec whose own secret_spec names one, or a spec setting no reference of its own
-// on a source whose secret_spec names one (a spec-level reference wins). Chaining
-// is one hop, so these are all of them.
-func chainedConsumers(specs []*credential.CredSpec, sources []*credential.CredSource, names []string) []string {
+// boundTo returns the specs bound to a source.
+func (g chainGraph) boundTo(sourceName string) []*credential.CredSpec {
+	var bound []*credential.CredSpec
+	for _, spec := range g.specs {
+		if spec.Source == sourceName {
+			bound = append(bound, spec)
+		}
+	}
+	return bound
+}
+
+// source returns the stored source of that name, nil if there is none.
+func (g chainGraph) source(name string) *credential.CredSource {
+	for _, src := range g.sources {
+		if src.Name == name {
+			return src
+		}
+	}
+	return nil
+}
+
+// referrers returns the sources and specs that name specName as their secret_spec,
+// as "source/<name>" and "spec/<name>".
+func (g chainGraph) referrers(specName string) []string {
+	var refs []string
+	for _, src := range g.sources {
+		if src.Config.Get(credential.ConfigSecretSpec) == specName {
+			refs = append(refs, "source/"+src.Name)
+		}
+	}
+	for _, spec := range g.specs {
+		if spec.Name == specName {
+			continue // a spec never references itself
+		}
+		if spec.Config.Get(credential.ConfigSecretSpec) == specName {
+			refs = append(refs, "spec/"+spec.Name)
+		}
+	}
+	return refs
+}
+
+// consumers returns the names of the specs that mint from any of names: a spec
+// whose own secret_spec names one, or a spec setting no reference of its own on a
+// source whose secret_spec names one (a spec-level reference wins). Chaining is
+// one hop, so these are all of them. A write that changes what a referenced spec
+// yields changes what they mint too, so their revisions advance with its.
+func (g chainGraph) consumers(names []string) []string {
 	referenced := make(map[string]bool, len(names))
 	for _, name := range names {
 		referenced[name] = true
 	}
 	viaSource := make(map[string]bool)
-	for _, src := range sources {
+	for _, src := range g.sources {
 		if referenced[src.Config.Get(credential.ConfigSecretSpec)] {
 			viaSource[src.Name] = true
 		}
 	}
 	var consumers []string
-	for _, spec := range specs {
+	for _, spec := range g.specs {
 		ref := spec.Config.Get(credential.ConfigSecretSpec)
 		if referenced[ref] || (ref == "" && viaSource[spec.Source]) {
 			consumers = append(consumers, spec.Name)
@@ -370,33 +415,53 @@ func chainedConsumers(specs []*credential.CredSpec, sources []*credential.CredSo
 	return consumers
 }
 
+// chainingShapeChanged reports whether an edit touches anything secretSpecRefRules
+// reads: the spec's own secret_spec, its subject_token_source, or its source.
+func chainingShapeChanged(old, updated *credential.CredSpec) bool {
+	return old.Source != updated.Source ||
+		old.Config.Get(credential.ConfigSecretSpec) != updated.Config.Get(credential.ConfigSecretSpec) ||
+		old.Config.Get(credential.ConfigSubjectTokenSource) != updated.Config.Get(credential.ConfigSubjectTokenSource)
+}
+
+// checkStillReferenceableLocked refuses an edit to a spec that something references
+// as its secret_spec, when the edited spec would no longer satisfy
+// secretSpecRefRules. The consumer is named, so the operator knows what to change.
+func (s *CredentialConfigStore) checkStillReferenceableLocked(g chainGraph, spec *credential.CredSpec) error {
+	refs := g.referrers(spec.Name)
+	if len(refs) == 0 {
+		return nil
+	}
+	src, err := s.graphSource(g, spec.Source)
+	if err != nil {
+		return fmt.Errorf("spec %q: failed to load its source %q: %w", spec.Name, spec.Source, err)
+	}
+	if err := secretSpecRefRules(spec.Name, spec, src); err != nil {
+		return logical.ErrBadRequestf("spec %q is the secret_spec of %s, and this update would break it: %s; update or delete the consumer first",
+			spec.Name, strings.Join(refs, ", "), err.Error())
+	}
+	return nil
+}
+
+// graphSource returns the named source as g holds it, or the built-in source,
+// which is never stored. It reads no store, so it is safe under s.mu.
+func (s *CredentialConfigStore) graphSource(g chainGraph, name string) (*credential.CredSource, error) {
+	if s.isBuiltinSource(name) {
+		return s.getBuiltinLocalSource(), nil
+	}
+	if src := g.source(name); src != nil {
+		return src, nil
+	}
+	return nil, ErrSourceNotFound
+}
+
 // checkSpecReferencesLocked returns the sources and specs that name this spec as
 // their credential-chaining secret source.
 func (s *CredentialConfigStore) checkSpecReferencesLocked(namespaceID, specName string) ([]string, error) {
-	sources, err := s.loadAllSources(namespaceID)
+	g, err := s.loadChainGraphLocked(namespaceID)
 	if err != nil {
 		return nil, err
 	}
-	specs, err := s.loadAllSpecs(namespaceID)
-	if err != nil {
-		return nil, err
-	}
-
-	var refs []string
-	for _, src := range sources {
-		if src.Config.Get(credential.ConfigSecretSpec) == specName {
-			refs = append(refs, "source/"+src.Name)
-		}
-	}
-	for _, spec := range specs {
-		if spec.Name == specName {
-			continue // a spec never references itself
-		}
-		if spec.Config.Get(credential.ConfigSecretSpec) == specName {
-			refs = append(refs, "spec/"+spec.Name)
-		}
-	}
-	return refs, nil
+	return g.referrers(specName), nil
 }
 
 // ============================================================================
@@ -718,14 +783,35 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 		return ErrConfigChanged
 	}
 
-	// The specs that mint from this one change with it. Listed before the write, so
-	// a listing that fails refuses the update rather than leaving them on what the
-	// old config yielded.
+	// Two things read the namespace's chaining references, both before the write so
+	// a listing that fails refuses the update: whether this spec may still be
+	// referenced, when the edit touches what the rules read, and the specs that mint
+	// from it, which change with it. A write that preserves the output and keeps its
+	// chaining shape — the refresh-token write-back — reads nothing.
+	shapeChanged := chainingShapeChanged(existing, spec)
 	var consumers []string
-	if !opt.PreservesMintedOutput {
-		if consumers, err = s.chainedConsumersLocked(ns.UUID, []string{spec.Name}); err != nil {
+	if shapeChanged || !opt.PreservesMintedOutput {
+		g, err := s.loadChainGraphLocked(ns.UUID)
+		if err != nil {
 			s.mu.Unlock()
-			return fmt.Errorf("failed to list the specs that mint from spec %q: %w", spec.Name, err)
+			return fmt.Errorf("failed to list the credential-chaining references to spec %q: %w", spec.Name, err)
+		}
+		// Moving the spec to another source: that source was checked before the lock,
+		// and could have been deleted since; the graph says whether it still exists.
+		if existing.Source != spec.Source {
+			if _, err := s.graphSource(g, spec.Source); err != nil {
+				s.mu.Unlock()
+				return logical.ErrBadRequestf("source %q not found", spec.Source)
+			}
+		}
+		if shapeChanged {
+			if err := s.checkStillReferenceableLocked(g, spec); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+		}
+		if !opt.PreservesMintedOutput {
+			consumers = g.consumers([]string{spec.Name})
 		}
 	}
 
@@ -1117,20 +1203,11 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// provider takes its fallback branch. Reject rather than let a source edit
 	// silently narrow credentials bound to it.
 	//
-	// The same list is what a config change re-keys below, so a listing that fails
+	// The same listing is what a config change re-keys below, so one that fails
 	// fails the update: going ahead would leave every bound spec serving
 	// credentials minted under the old config.
-	bound, err := s.checkSourceReferencesLocked(ns.UUID, source.Name)
-	if err != nil {
-		s.mu.Unlock()
-		return fmt.Errorf("failed to list the specs bound to source %q: %w", source.Name, err)
-	}
-	if err := s.checkBoundSpecsStillCarriedLocked(source, bound); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-
-	// Whether the driver has to be rebuilt is decided here, while the previous
+	//
+	// Whether the driver has to be rebuilt is decided here too, while the previous
 	// config is still known, but acted on after the unlock.
 	//
 	// Config is the only field a driver reads: Name keys it, Type is immutable
@@ -1141,19 +1218,56 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// for byte the same. That case stopped being hypothetical when the update path
 	// began accepting a rotation period on its own.
 	driverInputsChanged := !existing.Config.Equal(source.Config)
+	rekey := driverInputsChanged && !opt.PreservesMintedOutput
+	chainRef := source.Config.Get(credential.ConfigSecretSpec)
+
+	// Sources are read only when something below follows a reference: a rotation
+	// write lists the bound specs alone.
+	var g chainGraph
+	if rekey || chainRef != "" {
+		g, err = s.loadChainGraphLocked(ns.UUID)
+	} else {
+		g.specs, err = s.loadAllSpecs(ns.UUID)
+	}
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to list the specs bound to source %q: %w", source.Name, err)
+	}
+	bound := g.boundTo(source.Name)
+	if err := s.checkBoundSpecsStillCarriedLocked(source, bound); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
+	// A source with a secret_spec breaks chaining's one hop for a spec on it that
+	// something references — itself included, which would chain the spec from
+	// itself. (Becoming a consumer is otherwise validated above, with the source;
+	// that check reads the source as stored, so it cannot see this update.)
+	if chainRef != "" {
+		gaining := existing.Config.Get(credential.ConfigSecretSpec) == ""
+		for _, spec := range bound {
+			if spec.Name == chainRef {
+				s.mu.Unlock()
+				return logical.ErrBadRequestf("source %q cannot take its secret_spec from spec %q, which is bound to it; chaining is limited to one hop", source.Name, spec.Name)
+			}
+			if !gaining {
+				continue // the specs on a source that already chains cannot be referenced
+			}
+			if refs := g.referrers(spec.Name); len(refs) > 0 {
+				s.mu.Unlock()
+				return logical.ErrBadRequestf("spec %q on this source is the secret_spec of %s, and chaining is limited to one hop: a source with secret_spec cannot hold a referenced spec; move the spec or update its consumers first",
+					spec.Name, strings.Join(refs, ", "))
+			}
+		}
+	}
 
 	// A config change re-keys the bound specs and the specs that mint from them.
 	var rekeyed []string
-	if driverInputsChanged && !opt.PreservesMintedOutput {
+	if rekey {
 		for _, spec := range bound {
 			rekeyed = append(rekeyed, spec.Name)
 		}
-		consumers, err := s.chainedConsumersLocked(ns.UUID, rekeyed)
-		if err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("failed to list the specs that mint from source %q: %w", source.Name, err)
-		}
-		rekeyed = append(rekeyed, consumers...)
+		rekeyed = append(rekeyed, g.consumers(rekeyed)...)
 	}
 
 	if err := s.persistSource(ns.UUID, source); err != nil {
@@ -2245,42 +2359,8 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(source *creden
 	return nil
 }
 
-// CheckSpecReferences returns the names of sources and specs that reference the
-// given spec as their credential-chaining secret source (secret_spec). It scans
-// both sources (source-level secret_spec) and specs (spec-level secret_spec) so a
-// referenced secret-spec cannot be deleted while any consumer still points at it.
-func (s *CredentialConfigStore) CheckSpecReferences(ctx context.Context, specName string) ([]string, error) {
-	sources, err := s.ListSources(ctx)
-	if err != nil {
-		return nil, err
-	}
-	specs, err := s.ListSpecs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var refs []string
-	for _, src := range sources {
-		if src.Config.Get(credential.ConfigSecretSpec) == specName {
-			refs = append(refs, "source/"+src.Name)
-		}
-	}
-	for _, spec := range specs {
-		if spec.Name == specName {
-			continue // a spec never references itself
-		}
-		if spec.Config.Get(credential.ConfigSecretSpec) == specName {
-			refs = append(refs, "spec/"+spec.Name)
-		}
-	}
-
-	return refs, nil
-}
-
-// validateSecretSpecRef validates a credential-chaining reference: the named
-// secret-spec must exist, must not itself chain (one hop only), and must be minted
-// as the caller (subject_token_source set) so it federates per request rather than
-// degrading to the non-exchange path and failing late with an opaque backend error.
+// validateSecretSpecRef validates a credential-chaining reference when a consumer
+// is written: the named secret-spec must exist and satisfy secretSpecRefRules.
 //
 // It deliberately does NOT assert the referenced spec is leaseless here: that would
 // need per-type mint-method introspection this layer lacks, and the authoritative
@@ -2296,13 +2376,26 @@ func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref s
 		}
 		return fmt.Errorf("failed to validate secret_spec %q: %w", ref, err)
 	}
-
-	if refSpec.Config.Get(credential.ConfigSecretSpec) != "" {
-		return logical.ErrBadRequestf("secret_spec %q must not itself set secret_spec (chaining is limited to one hop)", ref)
-	}
 	refSource, err := s.GetSource(ctx, refSpec.Source)
 	if err != nil {
 		return fmt.Errorf("secret_spec %q: failed to load its source %q: %w", ref, refSpec.Source, err)
+	}
+	return secretSpecRefRules(ref, refSpec, refSource)
+}
+
+// secretSpecRefRules holds what a spec must be to be referenced as a secret_spec.
+// It is checked where a reference is made (validateSecretSpecRef) and again where
+// a referenced spec, or its source, is edited, so an edit cannot break a reference
+// that was valid when made.
+//
+//   - It must not itself set secret_spec, nor its source: chaining is one hop.
+//   - It must be minted as the session-pinned caller.
+//
+// An on_behalf_of spec needs no exception: it requires subject_token_source
+// user_identity, which the last rule refuses.
+func secretSpecRefRules(ref string, refSpec *credential.CredSpec, refSource *credential.CredSource) error {
+	if refSpec.Config.Get(credential.ConfigSecretSpec) != "" {
+		return logical.ErrBadRequestf("secret_spec %q must not itself set secret_spec (chaining is limited to one hop)", ref)
 	}
 	if refSource.Config.Get(credential.ConfigSecretSpec) != "" {
 		return logical.ErrBadRequestf("secret_spec %q's source must not set secret_spec (chaining is limited to one hop)", ref)

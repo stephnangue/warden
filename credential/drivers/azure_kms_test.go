@@ -22,6 +22,7 @@ import (
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/types"
+	"github.com/stephnangue/warden/logger"
 )
 
 // fakeKMS is a transit store holding one non-exportable RSA key, client-assertion:
@@ -326,6 +327,25 @@ func TestAzureKMS_Refusals(t *testing.T) {
 	})
 }
 
+// exchangingLocalFactory builds local drivers that take a caller's exchange inputs,
+// standing in for a signer source, which mints as the caller. The inputs are not
+// used: the local spec's config is the capability.
+type exchangingLocalFactory struct{ *LocalDriverFactory }
+
+func (f exchangingLocalFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
+	d, err := f.LocalDriverFactory.Create(config, log)
+	if err != nil {
+		return nil, err
+	}
+	return exchangingLocalDriver{d}, nil
+}
+
+type exchangingLocalDriver struct{ credential.SourceDriver }
+
+func (d exchangingLocalDriver) MintCredentialWithExchange(ctx context.Context, spec *credential.CredSpec, _ *credential.ExchangeInputs) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	return d.MintCredential(ctx, spec)
+}
+
 // TestAzureKMS_ThroughTheManager drives the chain the way a request does: the
 // credential manager fetches the signing capability through the source's secret_spec
 // and hands it to the azure driver. Delegated tokens are cached per user and never
@@ -340,10 +360,11 @@ func TestAzureKMS_ThroughTheManager(t *testing.T) {
 	require.NoError(t, typeRegistry.Register(types.NewAzureBearerTokenCredType()))
 	driverRegistry := credential.NewDriverRegistry(log)
 	require.NoError(t, driverRegistry.RegisterFactory(&AzureDriverFactory{}))
-	require.NoError(t, driverRegistry.RegisterFactory(&LocalDriverFactory{}))
+	require.NoError(t, driverRegistry.RegisterFactory(exchangingLocalFactory{&LocalDriverFactory{}}))
 
 	// The signer: a local spec whose credential is the capability itself, as a
-	// transit_signer spec would mint it.
+	// transit_signer spec would mint it — minted as the caller, as every referenced
+	// spec is.
 	store := newChainStore()
 	store.sources["signer-src"] = &credential.CredSource{Name: "signer-src", Type: credential.SourceTypeLocal, Config: credential.NewConfig(nil)}
 	store.specs["entra-signer"] = &credential.CredSpec{
@@ -369,10 +390,12 @@ func TestAzureKMS_ThroughTheManager(t *testing.T) {
 	manager, err := credential.NewManager(typeRegistry, driverRegistry, store, log)
 	require.NoError(t, err)
 
-	// The signer is minted as the calling agent; a local spec needs no inputs.
+	// The signer is minted as the calling agent.
 	agent := credential.Caller{
 		TokenID: "agent-token", TokenTTL: time.Hour,
-		ResolveInputs: func(context.Context, string) (*credential.ExchangeInputs, error) { return nil, nil },
+		ResolveInputs: func(context.Context, string) (*credential.ExchangeInputs, error) {
+			return &credential.ExchangeInputs{SubjectToken: "agent-assertion"}, nil
+		},
 	}
 	issueAs := func(user string) *credential.Credential {
 		t.Helper()
