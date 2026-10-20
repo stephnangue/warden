@@ -1,9 +1,7 @@
 package spiffe
 
 import (
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -74,10 +72,7 @@ func extractJWTFromRequest(req *logical.Request) string {
 
 // certFingerprint returns the hex SHA-256 of a certificate's DER bytes. This is
 // the ClientToken for an X.509-SVID login; it feeds the spiffe_role cache key.
-func certFingerprint(cert *x509.Certificate) string {
-	hash := sha256.Sum256(cert.Raw)
-	return hex.EncodeToString(hash[:])
-}
+func certFingerprint(cert *x509.Certificate) string { return helper.CertFingerprint(cert) }
 
 // resolveAudience returns the role's bound audiences (the source of truth for
 // JWT-SVID validation). Empty means the role does not permit JWT-SVID logins.

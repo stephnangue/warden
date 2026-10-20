@@ -2,33 +2,52 @@ package spiffe
 
 import (
 	"context"
+	"maps"
 	"net/http"
+	"slices"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
 
 func (b *spiffeAuthBackend) pathConfig() *framework.Path {
+	fields := map[string]*framework.FieldSchema{
+		"token_ttl": {
+			Type:        framework.TypeDurationSecond,
+			Description: "Default token TTL (default: 1h)",
+		},
+		"default_role": {
+			Type:        framework.TypeString,
+			Description: "Default role for transparent operations when no role is specified",
+		},
+		"bound_audiences": {
+			Type: framework.TypeCommaStringSlice,
+			Description: "Audiences a JWT-SVID must carry, any one of them. Stored for mount-level audience binding; " +
+				"logins do not use it yet (a role's bound_audiences still applies). " +
+				"No entry may be empty; an empty value clears the list.",
+		},
+	}
+	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
+
 	return &framework.Path{
 		Pattern: "config",
-		Fields: map[string]*framework.FieldSchema{
-			"token_ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Default token TTL (default: 1h)",
-			},
-			"default_role": {
-				Type:        framework.TypeString,
-				Description: "Default role for transparent operations when no role is specified",
-			},
-		},
+		Fields:  fields,
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation:   &framework.PathOperation{Callback: b.handleConfigRead, Summary: "Read SPIFFE auth configuration"},
 			logical.UpdateOperation: &framework.PathOperation{Callback: b.handleConfigWrite, Summary: "Configure SPIFFE authentication"},
 		},
-		HelpSynopsis:    "Configure SPIFFE authentication",
-		HelpDescription: "Mount-level defaults. Trust domains are managed under trust-domain/, and roles under role/.",
+		HelpSynopsis: "Configure SPIFFE authentication",
+		HelpDescription: `Mount-level defaults. Trust domains are managed under trust-domain/, and roles under role/.
+
+'entity_kind' (agent or human, default agent) names what the mount admits.
+'facts' maps SVID fields to the fact names the mount publishes beyond its
+built-in facts (aud, path, spiffe_id, svid, trust_domain; svid is x509 or jwt,
+and aud holds a JWT-SVID's audiences); a write replaces the whole map.
+'bound_audiences' is stored for mount-level audience binding and not used by
+logins yet.`,
 	}
 }
 
@@ -42,8 +61,11 @@ func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.R
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"token_ttl":    b.config.TokenTTL.String(),
-			"default_role": b.config.DefaultRole,
+			"token_ttl":       b.config.TokenTTL.String(),
+			"default_role":    b.config.DefaultRole,
+			"bound_audiences": slices.Clone(b.config.BoundAudiences),
+			"entity_kind":     b.config.EntityKind,
+			"facts":           maps.Clone(b.config.Facts),
 		},
 	}, nil
 }
@@ -58,10 +80,25 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 
 	conf := make(map[string]any)
 
+	_, factsSent := d.GetOk("facts")
+	_, kindSent := d.GetOk("entity_kind")
+	factsTouched := factsSent || kindSent
+
 	b.configMu.RLock()
 	if b.config != nil {
+		// Stored facts that do not compile would fail a write that leaves
+		// them in place, whatever else it changes; say how to replace them.
+		if !factsTouched {
+			if err := helper.FactsWriteError(&b.config.FactsConfig, false); err != nil {
+				b.configMu.RUnlock()
+				return &logical.Response{StatusCode: http.StatusBadRequest, Err: err}, nil
+			}
+		}
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["default_role"] = b.config.DefaultRole
+		conf["bound_audiences"] = b.config.BoundAudiences
+		conf["entity_kind"] = b.config.EntityKind
+		conf["facts"] = b.config.Facts
 	}
 	b.configMu.RUnlock()
 
@@ -71,8 +108,22 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 		}
 	}
 
+	// A facts write replaces the whole mapping; every name must be a string.
+	if raw, ok := d.GetOk("facts"); ok {
+		facts, err := helper.ParseFactsField(raw)
+		if err != nil {
+			return &logical.Response{StatusCode: http.StatusBadRequest, Err: err}, nil
+		}
+		conf["facts"] = facts
+	}
+
 	config, err := buildSPIFFEConfig(conf)
 	if err != nil {
+		return &logical.Response{StatusCode: http.StatusBadRequest, Err: err}, nil
+	}
+	// A write is the one place facts can be refused outright; storage and
+	// load only ever see a config that compiled here.
+	if err := helper.FactsWriteError(&config.FactsConfig, factsTouched); err != nil {
 		return &logical.Response{StatusCode: http.StatusBadRequest, Err: err}, nil
 	}
 
