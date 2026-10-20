@@ -18,6 +18,13 @@ func testMapping(t testing.TB, builtins []string, facts map[string]string) *sele
 	return m
 }
 
+func testNaming(t testing.TB, m *selector.Mapping, kind string) *MountNaming {
+	t.Helper()
+	n, err := NewMountNaming(m, kind)
+	require.NoError(t, err)
+	return n
+}
+
 func testClaims(t testing.TB, js string) *selector.Claims {
 	t.Helper()
 	var m map[string]any
@@ -38,14 +45,14 @@ func values(c selector.Cursor) []string {
 // through a JSON pointer, and identity-maps the built-in "sub".
 func jwtAdmission(t testing.TB) (*Admission, *MountNaming) {
 	t.Helper()
-	naming := NewMountNaming(testMapping(t, []string{"sub", "iss", "aud"}, map[string]string{
+	naming := testNaming(t, testMapping(t, []string{"sub", "iss", "aud"}, map[string]string{
 		"repository":      "repo",
 		"/deployment/env": "env",
 		"sub":             "sub",
 		"absent":          "gone",
 	}), "")
 	mf := &MountFacts{}
-	mf.Current.Store(naming)
+	mf.Publish(naming)
 	adm := &Admission{
 		MountPath: "auth/jwt/",
 		Facts: testClaims(t, `{
@@ -90,7 +97,7 @@ func TestAdmissionLookup(t *testing.T) {
 
 func TestAdmissionLookup_KindFromNaming(t *testing.T) {
 	adm, _ := jwtAdmission(t)
-	human := NewMountNaming(testMapping(t, []string{"sub"}, nil), EntityKindHuman)
+	human := testNaming(t, testMapping(t, []string{"sub"}, nil), EntityKindHuman)
 	assert.Equal(t, []string{"human"}, values(adm.Lookup(human, "kind")))
 	// The naming passed in decides what is visible, not the one the mount holds.
 	assert.Nil(t, values(adm.Lookup(human, "repo")))
@@ -105,7 +112,7 @@ func TestAdmissionLookup_Table(t *testing.T) {
 			selector.Field{Name: "groups", Values: []string{"system:serviceaccounts", "ci"}},
 		),
 	}
-	naming := NewMountNaming(testMapping(t, []string{"service_account_name", "groups"},
+	naming := testNaming(t, testMapping(t, []string{"service_account_name", "groups"},
 		map[string]string{"service_account_name": "workload"}), EntityKindAgent)
 	assert.Equal(t, []string{"deployer"}, values(adm.Lookup(naming, "workload")))
 	assert.Equal(t, []string{"system:serviceaccounts", "ci"}, values(adm.Lookup(naming, "groups")))
@@ -120,7 +127,7 @@ func TestAdmissionLookup_Empty(t *testing.T) {
 	assert.Nil(t, values(adm.Lookup(nil, "sub")), "nil naming")
 	assert.Nil(t, values((&Admission{}).Lookup(naming, "mount")), "no mount path")
 	assert.Nil(t, values((&Admission{}).Lookup(naming, "sub")), "no facts")
-	assert.Nil(t, values(adm.Lookup(&MountNaming{}, "kind")), "no kind")
+	assert.Nil(t, values(adm.Lookup(&MountNaming{}, "kind")), "no kind (only a hand-built naming)")
 	assert.Nil(t, values(adm.Lookup(&MountNaming{Kind: EntityKindAgent}, "sub")), "no mapping")
 }
 
@@ -138,27 +145,56 @@ func TestAdmissionLookup_DoesNotAllocate(t *testing.T) {
 	assert.Zero(t, allocs)
 }
 
-func TestNewMountNaming(t *testing.T) {
-	m := testMapping(t, []string{"sub"}, nil)
-	n := NewMountNaming(m, "")
-	assert.Same(t, m, n.Mapping)
-	assert.Equal(t, EntityKindAgent, n.Kind, "an empty kind is agent")
-	assert.Equal(t, EntityKindHuman, NewMountNaming(m, EntityKindHuman).Kind)
+func TestParseEntityKind(t *testing.T) {
+	for in, want := range map[string]string{"": EntityKindAgent, "agent": EntityKindAgent, "human": EntityKindHuman} {
+		got, err := ParseEntityKind(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, in := range []string{"Agent", "HUMAN", "service", " agent", "agent "} {
+		_, err := ParseEntityKind(in)
+		assert.Error(t, err, in)
+	}
 }
 
-func TestMountFactsLoad(t *testing.T) {
+func TestNewMountNaming(t *testing.T) {
+	m := testMapping(t, []string{"sub"}, nil)
+	n, err := NewMountNaming(m, "")
+	require.NoError(t, err)
+	assert.Same(t, m, n.Mapping)
+	assert.Equal(t, EntityKindAgent, n.Kind, "an empty kind is agent")
+	assert.Equal(t, EntityKindHuman, testNaming(t, m, EntityKindHuman).Kind)
+
+	n, err = NewMountNaming(m, "robot")
+	assert.Error(t, err, "an unknown kind is refused")
+	assert.Nil(t, n)
+}
+
+func TestMountFactsPublishLoad(t *testing.T) {
 	var nilMF *MountFacts
 	assert.Nil(t, nilMF.Load())
-	assert.Nil(t, (&MountFacts{}).Load(), "nothing published yet")
+	mf := &MountFacts{}
+	assert.Nil(t, mf.Load(), "nothing published yet")
+	n := testNaming(t, testMapping(t, []string{"sub"}, nil), "")
+	mf.Publish(n)
+	assert.Same(t, n, mf.Load())
+}
+
+func TestAdmissionSize(t *testing.T) {
+	var nilAdm *Admission
+	assert.Zero(t, nilAdm.Size())
+	assert.Zero(t, (&Admission{}).Size())
+	assert.Zero(t, (&Admission{Bytes: -5}).Size(), "a negative estimate counts as none")
+	assert.Equal(t, int64(1234), (&Admission{Bytes: 1234}).Size())
 }
 
 // A published naming is seen whole: a reader never pairs one configuration's
 // kind with another's mapping.
 func TestMountFacts_PublishSeenWhole(t *testing.T) {
-	agent := NewMountNaming(testMapping(t, nil, map[string]string{"a": "x"}), EntityKindAgent)
-	human := NewMountNaming(testMapping(t, nil, map[string]string{"h": "x"}), EntityKindHuman)
+	agent := testNaming(t, testMapping(t, nil, map[string]string{"a": "x"}), EntityKindAgent)
+	human := testNaming(t, testMapping(t, nil, map[string]string{"h": "x"}), EntityKindHuman)
 	mf := &MountFacts{}
-	mf.Current.Store(agent)
+	mf.Publish(agent)
 	adm := &Admission{
 		MountPath: "auth/jwt/",
 		Facts:     testClaims(t, `{"a": "agent", "h": "human"}`),
@@ -168,9 +204,7 @@ func TestMountFacts_PublishSeenWhole(t *testing.T) {
 	const readers, rounds = 8, 2000
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-stop:
@@ -178,18 +212,16 @@ func TestMountFacts_PublishSeenWhole(t *testing.T) {
 			default:
 			}
 			if i%2 == 0 {
-				mf.Current.Store(human)
+				mf.Publish(human)
 			} else {
-				mf.Current.Store(agent)
+				mf.Publish(agent)
 			}
 		}
-	}()
+	})
 	errs := make(chan error, readers)
 	var rwg sync.WaitGroup
 	for range readers {
-		rwg.Add(1)
-		go func() {
-			defer rwg.Done()
+		rwg.Go(func() {
 			for range rounds {
 				n := adm.Mount.Load()
 				kind, x := values(adm.Lookup(n, "kind")), values(adm.Lookup(n, "x"))
@@ -198,7 +230,7 @@ func TestMountFacts_PublishSeenWhole(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	rwg.Wait()
 	close(stop)
@@ -209,8 +241,8 @@ func TestMountFacts_PublishSeenWhole(t *testing.T) {
 	}
 }
 
-func TestRenderMetadata(t *testing.T) {
-	naming := NewMountNaming(testMapping(t, []string{"sub", "iss"}, map[string]string{
+func TestAdmissionRenderMetadata(t *testing.T) {
+	naming := testNaming(t, testMapping(t, []string{"sub", "iss"}, map[string]string{
 		"team":          "team",
 		"groups":        "groups",
 		"level":         "level",
@@ -254,17 +286,18 @@ func TestRenderMetadata(t *testing.T) {
 		"big":    "1e+21",
 		// "objects" yields no scalar and "absent" is not carried: both skipped.
 		// "iss" is a built-in that is not mapped: not metadata.
-	}, RenderMetadata(naming, adm))
+	}, adm.RenderMetadata(naming))
 }
 
-func TestRenderMetadata_Nil(t *testing.T) {
+func TestAdmissionRenderMetadata_Nil(t *testing.T) {
 	adm, naming := jwtAdmission(t)
-	assert.Nil(t, RenderMetadata(nil, adm))
-	assert.Nil(t, RenderMetadata(naming, nil))
-	builtinsOnly := NewMountNaming(testMapping(t, []string{"sub"}, nil), EntityKindAgent)
-	assert.Nil(t, RenderMetadata(builtinsOnly, adm), "no mapped names")
-	absentOnly := NewMountNaming(testMapping(t, nil, map[string]string{"absent": "gone"}), EntityKindAgent)
-	assert.Nil(t, RenderMetadata(absentOnly, adm), "nothing rendered")
+	var nilAdm *Admission
+	assert.Nil(t, adm.RenderMetadata(nil))
+	assert.Nil(t, nilAdm.RenderMetadata(naming))
+	builtinsOnly := testNaming(t, testMapping(t, []string{"sub"}, nil), EntityKindAgent)
+	assert.Nil(t, adm.RenderMetadata(builtinsOnly), "no mapped names")
+	absentOnly := testNaming(t, testMapping(t, nil, map[string]string{"absent": "gone"}), EntityKindAgent)
+	assert.Nil(t, adm.RenderMetadata(absentOnly), "nothing rendered")
 }
 
 // An admission never leaves memory: the structs that are serialized (the

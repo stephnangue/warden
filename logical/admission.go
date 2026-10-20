@@ -1,6 +1,7 @@
 package logical
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -13,9 +14,22 @@ const (
 	EntityKindHuman = "human"
 )
 
+// ParseEntityKind checks a mount's entity kind: "" is EntityKindAgent, the
+// default; EntityKindAgent and EntityKindHuman pass; anything else is an error.
+func ParseEntityKind(s string) (string, error) {
+	switch s {
+	case "":
+		return EntityKindAgent, nil
+	case EntityKindAgent, EntityKindHuman:
+		return s, nil
+	}
+	return "", fmt.Errorf("entity kind %q is not %q or %q", s, EntityKindAgent, EntityKindHuman)
+}
+
 // Admission is what an auth mount verified about one credential. The auth
-// method builds it at login and core completes it in LoginCreateToken (it sets
-// MountPath) before the token is stored; from then on it is never written.
+// method builds a fresh one for each login and core completes it in
+// LoginCreateToken (it sets MountPath) before the token is stored; from then on
+// it is never written.
 //
 // One *Admission is shared by pointer: the token store keeps it on the stored
 // TokenEntry, and every per-request copy of that entry holds the same pointer.
@@ -23,7 +37,8 @@ const (
 // changes after LoginCreateToken.
 type Admission struct {
 	// MountPath is the admitting mount's path relative to its namespace
-	// ("auth/jwt/", never "ns1/auth/jwt/"), answered as the fact "mount".
+	// ("auth/jwt/", never "ns1/auth/jwt/"), answered as the fact "mount". Only
+	// LoginCreateToken sets it; an auth method leaves it empty.
 	MountPath string
 
 	// Facts are the raw verified facts, keyed by the names the credential
@@ -38,15 +53,34 @@ type Admission struct {
 	// IssuedAt is when the credential was issued, when it says so; zero
 	// otherwise.
 	IssuedAt time.Time
+
+	// Bytes estimates the memory Facts retains (the decoded claims, or the
+	// strings of a table), set by the auth method that builds the admission.
+	// The token cache counts it in the cost of the entry that holds it.
+	Bytes int64
+}
+
+// Size returns the admission's byte estimate for cache accounting: Bytes,
+// or 0 for a nil admission or a negative estimate.
+func (a *Admission) Size() int64 {
+	if a == nil || a.Bytes < 0 {
+		return 0
+	}
+	return a.Bytes
 }
 
 // MountFacts is owned by one auth mount and shared by pointer with every
-// admission the mount produces. The mount stores a new *MountNaming in Current
-// whenever it installs a configuration (a config write, setup, load); readers
-// load it without a lock. A published MountNaming is never modified, so a
-// reader sees either the old naming or the new one, whole.
+// admission the mount produces. Readers load the naming in force without a
+// lock. A published MountNaming is never modified, so a reader sees either the
+// old naming or the new one, whole.
 type MountFacts struct {
-	Current atomic.Pointer[MountNaming]
+	current atomic.Pointer[MountNaming]
+}
+
+// Publish makes n the naming in force. Only the owning mount calls it, from the
+// one place it installs a configuration (a config write, setup, load).
+func (m *MountFacts) Publish(n *MountNaming) {
+	m.current.Store(n)
 }
 
 // Load returns the naming in force, or nil when m is nil or the mount has not
@@ -55,7 +89,7 @@ func (m *MountFacts) Load() *MountNaming {
 	if m == nil {
 		return nil
 	}
-	return m.Current.Load()
+	return m.current.Load()
 }
 
 // MountNaming is how one mount configuration names its facts: the canonical
@@ -65,21 +99,34 @@ type MountNaming struct {
 	Kind    string            // EntityKindAgent or EntityKindHuman
 }
 
-// NewMountNaming returns a naming for mapping and kind. An empty kind is
-// EntityKindAgent.
-func NewMountNaming(mapping *selector.Mapping, kind string) *MountNaming {
-	if kind == "" {
-		kind = EntityKindAgent
+// NewMountNaming returns a naming for mapping and kind, which ParseEntityKind
+// checks: an empty kind is EntityKindAgent and an unknown one is an error, so a
+// naming built here always has a valid Kind.
+func NewMountNaming(mapping *selector.Mapping, kind string) (*MountNaming, error) {
+	k, err := ParseEntityKind(kind)
+	if err != nil {
+		return nil, err
 	}
-	return &MountNaming{Mapping: mapping, Kind: kind}
+	return &MountNaming{Mapping: mapping, Kind: k}, nil
+}
+
+// FactsProvider is implemented by auth backends that admit credentials as
+// facts. Backends are reached through the router as logical.Backend, like
+// AuthorizationServerProvider. Core consults it only when a group is written
+// (to warn about a fact name no mount produces), never on the request path.
+type FactsProvider interface {
+	// FactNames returns every fact name the mount answers, built-in and
+	// mapped, under its current configuration.
+	FactNames() []string
 }
 
 // Lookup answers the canonical fact name against naming n: "mount" from the
 // admission, "kind" from n, and any other name through n's Mapping into Facts.
 // A name the mapping does not answer is invisible and yields an empty Cursor,
-// as does a nil admission or naming. Callers load n once (Mount.Load()) and
-// pass it to every lookup of one evaluation, so all of them see one naming.
-// Lookup does not allocate.
+// as does a nil admission or naming. An empty MountPath or Kind is absent too;
+// NewMountNaming never yields an empty Kind, so only a hand-built MountNaming
+// has one. Callers load n once (Mount.Load()) and pass it to every lookup of
+// one evaluation, so all of them see one naming. Lookup does not allocate.
 func (a *Admission) Lookup(n *MountNaming, name string) selector.Cursor {
 	if a == nil || n == nil {
 		return selector.Cursor{}
@@ -110,8 +157,8 @@ func (a *Admission) Lookup(n *MountNaming, name string) selector.Cursor {
 // themselves) as token metadata: each value through selector.FormatScalar, the
 // values of a multi-valued fact joined with commas. A fact the admission does
 // not carry is left out. It returns nil when nothing is rendered.
-func RenderMetadata(n *MountNaming, a *Admission) map[string]string {
-	if n == nil || a == nil {
+func (a *Admission) RenderMetadata(n *MountNaming) map[string]string {
+	if a == nil || n == nil {
 		return nil
 	}
 	var out map[string]string

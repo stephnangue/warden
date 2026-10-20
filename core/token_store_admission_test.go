@@ -19,6 +19,14 @@ func testAdmission() *logical.Admission {
 	}
 }
 
+// The cache counts the facts an admission retains in the cost of its entry.
+func TestEntryCost(t *testing.T) {
+	assert.Equal(t, baseEntryCost, entryCost(&TokenEntry{}), "no admission")
+	assert.Equal(t, baseEntryCost, entryCost(&TokenEntry{Admission: &logical.Admission{}}), "no estimate")
+	assert.Equal(t, baseEntryCost+4096, entryCost(&TokenEntry{Admission: &logical.Admission{Bytes: 4096}}))
+	assert.Equal(t, baseEntryCost, entryCost(&TokenEntry{Admission: &logical.Admission{Bytes: -1}}))
+}
+
 // Every copy the token store hands out shares the one *Admission of the cached
 // entry, so state an admission carries is seen by every request on the token.
 func TestTokenStore_AdmissionSharedAcrossTransparentCopies(t *testing.T) {
@@ -127,6 +135,39 @@ func TestLoginCreateToken_AdmissionMountPath(t *testing.T) {
 			entry, found := core.tokenStore.byID.Get(resp.Data["token_id"].(string))
 			require.True(t, found)
 			assert.Same(t, adm, entry.Admission)
+		})
+	}
+}
+
+// A mount that cannot be named relative to the namespace leaves MountPath
+// empty (the "mount" fact absent), and a MountPath already set is kept.
+func TestSetAdmissionMountPath(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	child := &namespace.Namespace{ID: "ns1id", UUID: "ns1-uuid", Path: "ns1/"}
+	inChild := namespace.ContextWithNamespace(context.Background(), child)
+	inRoot := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	cases := []struct {
+		name   string
+		ctx    context.Context
+		req    *logical.Request
+		preset string
+		want   string
+	}{
+		{"root", inRoot, &logical.Request{MountPoint: "auth/jwt/"}, "", "auth/jwt/"},
+		{"child", inChild, &logical.Request{MountPoint: "ns1/auth/jwt/"}, "", "auth/jwt/"},
+		{"outside the namespace", inChild, &logical.Request{MountPoint: "ns2/auth/jwt/"}, "", ""},
+		{"namespace itself", inChild, &logical.Request{MountPoint: "ns1/"}, "", ""},
+		{"no request", inRoot, nil, "", ""},
+		{"no namespace", context.Background(), &logical.Request{MountPoint: "auth/jwt/"}, "", ""},
+		{"already set", inRoot, &logical.Request{MountPoint: "auth/other/"}, "auth/jwt/", "auth/jwt/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adm := &logical.Admission{MountPath: tc.preset}
+			core.setAdmissionMountPath(tc.ctx, tc.req, adm)
+			assert.Equal(t, tc.want, adm.MountPath)
 		})
 	}
 }

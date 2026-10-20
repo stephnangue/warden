@@ -25,7 +25,7 @@ type JWTRole struct {
 
 	// MetadataClaims maps a source claim to the token metadata key it
 	// populates (source -> key, matching OpenBao's claim_mappings). The
-	// source is resolved by getClaim: a leading "/" is a JSON Pointer
+	// source is resolved by helper.GetClaim: a leading "/" is a JSON Pointer
 	// (RFC 6901) for nested claims, otherwise a literal top-level key.
 	// Resolved values must be strings; populated onto the token's Metadata
 	// and matched by token_metadata policy conditions.

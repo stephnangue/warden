@@ -770,15 +770,8 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		mountAccessor = req.MountAccessor
 	}
 
-	// An admission names its mount relative to the namespace, the form a
-	// selector pins; req.MountPoint carries the namespace prefix. The auth
-	// method built this admission for this login alone, and it is written here,
-	// before the token store shares it, and never again.
-	if adm := auth.Admission; adm != nil && req != nil {
-		adm.MountPath = req.MountPoint
-		if ns, nsErr := namespace.FromContext(ctx); nsErr == nil && ns != nil {
-			adm.MountPath = strings.TrimPrefix(req.MountPoint, ns.Path)
-		}
+	if auth.Admission != nil {
+		c.setAdmissionMountPath(ctx, req, auth.Admission)
 	}
 
 	now := time.Now()
@@ -839,6 +832,39 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 	resp.StatusCode = http.StatusCreated
 
 	return resp, nil
+}
+
+// setAdmissionMountPath names the admitting mount on adm relative to the
+// namespace, the form a selector pins: req.MountPoint carries the namespace
+// prefix, which is cut off. Only this function sets MountPath, once per login,
+// before the token store shares the admission; one that arrives already set is
+// kept. When the mount cannot be named (no request, no namespace, a mount point
+// outside the namespace) MountPath stays empty and the "mount" fact is absent,
+// so no rule pinning a mount matches.
+func (c *Core) setAdmissionMountPath(ctx context.Context, req *logical.Request, adm *logical.Admission) {
+	if adm.MountPath != "" {
+		c.logger.Warn("admission already names its mount; keeping it",
+			logger.String("mount_path", adm.MountPath))
+		return
+	}
+	var mountPoint string
+	if req != nil {
+		mountPoint = req.MountPoint
+	}
+	ns, err := namespace.FromContext(ctx)
+	if err != nil || ns == nil {
+		c.logger.Warn("admission mount left unnamed: no namespace in context",
+			logger.String("mount_point", mountPoint))
+		return
+	}
+	rel, ok := strings.CutPrefix(mountPoint, ns.Path)
+	if !ok || rel == "" {
+		c.logger.Warn("admission mount left unnamed: mount point is not inside the namespace",
+			logger.String("mount_point", mountPoint),
+			logger.String("namespace", ns.Path))
+		return
+	}
+	adm.MountPath = rel
 }
 
 func (c *Core) doRouting(ctx context.Context, req *logical.Request) (*logical.Response, error) {
