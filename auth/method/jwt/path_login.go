@@ -262,6 +262,10 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 		return logical.ErrorResponse(logical.ErrBadRequest(errAuthFailed.Error())), nil
 	}
 
+	// The admission adopts the claims map, so it is built after the last
+	// read of claims above and nothing reads them after this line.
+	admission := newAdmission(claims, jwtToken, b.mountFacts)
+
 	// Return auth response using role configuration.
 	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
 	// JWTRoleTokenType.Generate(), which hashes jwt+role to compute the
@@ -279,6 +283,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 			ClientToken:    jwtToken,
 			Actors:         actors,
 			Metadata:       metadata,
+			Admission:      admission,
 		},
 		Data: map[string]any{
 			"principal_id": principalID,

@@ -2,6 +2,7 @@ package jwt
 
 import (
 	"context"
+	"maps"
 	"net/http"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -73,6 +74,14 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Default role for transparent operations when no role is specified",
 			},
+			"entity_kind": {
+				Type:        framework.TypeString,
+				Description: "Kind of entity this mount admits: agent (default) or human.",
+			},
+			"facts": {
+				Type:        framework.TypeMap,
+				Description: "Map of source claim to the fact name it is published as. The source is a claim name, or a JSON Pointer (leading /) for a nested claim. sub, iss and aud are always published under their own names.",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
@@ -93,7 +102,11 @@ to configure how token signatures are verified.
 
 Use 'bound_issuer', 'bound_audiences', 'bound_subject', and 'bound_claims'
 to constrain which tokens are accepted. Per-role 'metadata_claims' copies
-JWT claims into token metadata for use in token_metadata policy conditions.`,
+JWT claims into token metadata for use in token_metadata policy conditions.
+
+'entity_kind' (agent or human, default agent) names what the mount admits.
+'facts' maps source claims to the fact names the mount publishes beyond its
+built-in facts (sub, iss, aud); a write replaces the whole map.`,
 	}
 }
 
@@ -126,6 +139,8 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"group_policy_prefix":    b.config.GroupPolicyPrefix,
 			"token_ttl":              b.config.TokenTTL.String(),
 			"default_role":           b.config.DefaultRole,
+			"entity_kind":            b.config.EntityKind,
+			"facts":                  maps.Clone(b.config.Facts),
 		},
 	}, nil
 }
@@ -160,6 +175,8 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["default_role"] = b.config.DefaultRole
+		conf["entity_kind"] = b.config.EntityKind
+		conf["facts"] = b.config.Facts
 	}
 	b.configMu.RUnlock()
 
@@ -170,12 +187,32 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		}
 	}
 
+	// A facts write replaces the whole mapping; every name must be a string.
+	if raw, ok := d.GetOk("facts"); ok {
+		facts, err := factsFromField(raw.(map[string]any))
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        err,
+			}, nil
+		}
+		conf["facts"] = facts
+	}
+
 	// Build new config
 	config, err := buildJWTConfig(ctx, conf)
 	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
+		}, nil
+	}
+	// A write is the one place facts can be refused outright; storage and
+	// load only ever see a config that compiled here.
+	if config.namingErr != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        config.namingErr,
 		}, nil
 	}
 

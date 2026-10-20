@@ -48,9 +48,23 @@ type JWTAuthConfig struct {
 	// Default role for transparent operations when no role is specified
 	DefaultRole string `json:"default_role,omitempty"`
 
+	// Facts: the kind of entity the mount admits, and the claims it publishes
+	// beyond its built-in facts, as source claim (a name or a JSON pointer)
+	// to canonical fact name.
+	EntityKind string            `json:"entity_kind,omitempty"`
+	Facts      map[string]string `json:"facts,omitempty"`
+
 	// Internal
 	validator *jwt.Validator `json:"-"`
 	keySet    jwt.KeySet     `json:"-"`
+
+	// naming is EntityKind and Facts compiled; when they do not compile it is
+	// nil and namingErr says why. A config write refuses such a config, so it
+	// is never stored. One that still fails at load (the mount table's, or
+	// storage written under looser rules) is installed with a nil naming: the
+	// mount answers no fact, so nothing that reads facts can match it.
+	naming    *logical.MountNaming `json:"-"`
+	namingErr error                `json:"-"`
 }
 
 // jwtAuthBackend is the framework-based JWT authentication backend
@@ -63,6 +77,13 @@ type jwtAuthBackend struct {
 	configWriteMu sync.Mutex
 	logger        *logger.GatedLogger
 	storageView   sdklogical.Storage
+
+	// mountFacts holds the naming in force and is shared by pointer with
+	// every admission this mount produces. installConfig publishes it under
+	// configMu together with the config it was compiled from, so a reader
+	// holding configMu sees the two agree; admissions and FactNames load it
+	// without a lock and see one published naming, whole.
+	mountFacts *logical.MountFacts
 }
 
 var _ logical.Factory = Factory
@@ -72,6 +93,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b := &jwtAuthBackend{
 		logger:      conf.Logger,
 		storageView: conf.StorageView,
+		mountFacts:  &logical.MountFacts{},
 	}
 
 	b.Backend = &framework.Backend{
@@ -108,20 +130,32 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// setupJWTConfig builds the JWT configuration and installs it.
+// setupJWTConfig builds the JWT configuration and installs it. It serves the
+// mount table's config when the mount is set up and the stored config when it
+// is loaded, which a failure here would turn into a failed mount (and, at
+// unseal, a failed unseal). Facts that do not compile are therefore logged and
+// installed as a nil naming, which answers no fact: closed for every reader of
+// facts, while the config stays readable and rewritable.
 func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any) error {
 	config, err := buildJWTConfig(ctx, conf)
 	if err != nil {
 		return err
 	}
+	if config.namingErr != nil {
+		b.logger.Error("JWT auth facts do not compile; the mount answers no fact until its config is rewritten",
+			logger.Err(config.namingErr))
+	}
 	b.installConfig(config)
 	return nil
 }
 
-// installConfig makes config the live configuration. It cannot fail.
+// installConfig makes config the live configuration and publishes its naming
+// (nil when it does not compile, which answers no fact) in the same critical
+// section. It cannot fail.
 func (b *jwtAuthBackend) installConfig(config *JWTAuthConfig) {
 	b.configMu.Lock()
 	b.config = config
+	b.mountFacts.Publish(config.naming)
 	b.configMu.Unlock()
 }
 
@@ -131,6 +165,13 @@ func buildJWTConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, e
 	config, err := mapToJWTAuthConfig(conf)
 	if err != nil {
 		return nil, err
+	}
+
+	// A naming that does not compile is kept on the config, not returned:
+	// the caller decides whether to refuse it or fail closed.
+	config.naming, config.namingErr = compileNaming(config.EntityKind, config.Facts)
+	if config.namingErr == nil {
+		config.EntityKind = config.naming.Kind
 	}
 
 	var keySet jwt.KeySet
@@ -226,6 +267,8 @@ func normalizedJWTConfig(config *JWTAuthConfig) map[string]any {
 		"group_policy_prefix":    config.GroupPolicyPrefix,
 		"token_ttl":              config.TokenTTL.String(),
 		"default_role":           config.DefaultRole,
+		"entity_kind":            config.EntityKind,
+		"facts":                  config.Facts,
 	}
 }
 
