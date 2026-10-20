@@ -52,6 +52,23 @@ func (c *FactsConfig) Compile(builtins []string) {
 	c.EntityKind = naming.Kind
 }
 
+// CompileFields is Compile for a method whose facts are a fixed set of fields
+// (a selector.Table): fields are its built-in names and the only sources Facts
+// may map, since a Table answers nothing else. A source outside fields fails
+// the compile, naming the fields that exist.
+func (c *FactsConfig) CompileFields(fields []string) {
+	sources := slices.Sorted(maps.Keys(c.Facts))
+	for _, source := range sources {
+		if !slices.Contains(fields, source) {
+			c.naming = nil
+			c.namingErr = fmt.Errorf("facts: source %q is not a field of this mount (one of %s)",
+				source, strings.Join(slices.Sorted(slices.Values(fields)), ", "))
+			return
+		}
+	}
+	c.Compile(fields)
+}
+
 // Naming returns the compiled naming, or nil when Compile failed or has not
 // run. A nil naming answers no fact.
 func (c *FactsConfig) Naming() *logical.MountNaming { return c.naming }

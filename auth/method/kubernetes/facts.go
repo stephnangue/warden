@@ -1,0 +1,94 @@
+package kubernetes
+
+import (
+	"github.com/stephnangue/warden/auth/helper"
+	"github.com/stephnangue/warden/helper/selector"
+	"github.com/stephnangue/warden/logical"
+)
+
+// Built-in fact names of a kubernetes mount: what the TokenReview asserted
+// about the service account (status.user) and the audiences it validated
+// (status.audiences). They are also the sources a mount's facts can rename.
+const (
+	factServiceAccountNamespace = "service_account_namespace"
+	factServiceAccountName      = "service_account_name"
+	factServiceAccountUID       = "service_account_uid"
+	factUsername                = "username"
+	factGroups                  = "groups"
+	factAudiences               = "aud"
+)
+
+// kubernetesBuiltinFacts returns the fact names every kubernetes mount
+// publishes under their own names. The slice is fresh on each call.
+func kubernetesBuiltinFacts() []string {
+	return []string{
+		factServiceAccountNamespace,
+		factServiceAccountName,
+		factServiceAccountUID,
+		factUsername,
+		factGroups,
+		factAudiences,
+	}
+}
+
+var _ logical.FactsProvider = (*kubernetesAuthBackend)(nil)
+
+// FactNames implements logical.FactsProvider (see helper.FactNames).
+func (b *kubernetesAuthBackend) FactNames() []string { return helper.FactNames(b.mountFacts) }
+
+// newAdmission returns what a successful TokenReview verified about a
+// service-account token: status is the review's result and namespace and name
+// the service account parsed from its username. claims are the token's
+// claims, parsed locally without checking the signature; the review verified
+// that same token, so its iat is the one the cluster issued, and it becomes
+// IssuedAt (zero when absent or not a number). claims are only read, never
+// retained.
+//
+// An empty value is not a fact: an empty uid is absent, and empty group or
+// audience entries are left out. The table copies every value, so status may
+// be reused. mount is the backend's live naming, so a later mapping edit
+// reaches this admission.
+func newAdmission(status *tokenReviewStatus, namespace, name string, claims map[string]any, mount *logical.MountFacts) *logical.Admission {
+	facts := selector.NewTable(
+		oneValue(factServiceAccountNamespace, namespace),
+		oneValue(factServiceAccountName, name),
+		oneValue(factServiceAccountUID, status.User.UID),
+		oneValue(factUsername, status.User.Username),
+		selector.Field{Name: factGroups, Values: nonEmpty(status.User.Groups)},
+		selector.Field{Name: factAudiences, Values: nonEmpty(status.Audiences)},
+	)
+	return &logical.Admission{
+		Facts:    facts,
+		Mount:    mount,
+		IssuedAt: helper.IssuedAt(claims),
+		Bytes:    facts.Bytes(),
+	}
+}
+
+// oneValue returns a single-valued field, or a field with no value when v is
+// empty.
+func oneValue(name, v string) selector.Field {
+	if v == "" {
+		return selector.Field{Name: name}
+	}
+	return selector.Field{Name: name, Values: []string{v}}
+}
+
+// nonEmpty returns vs without its empty entries. It returns vs itself when it
+// has none, which is the norm; NewTable copies either way.
+func nonEmpty(vs []string) []string {
+	for i, v := range vs {
+		if v != "" {
+			continue
+		}
+		out := make([]string, 0, len(vs)-1)
+		out = append(out, vs[:i]...)
+		for _, w := range vs[i+1:] {
+			if w != "" {
+				out = append(out, w)
+			}
+		}
+		return out
+	}
+	return vs
+}

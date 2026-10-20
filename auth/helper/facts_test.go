@@ -48,6 +48,33 @@ func TestFactsConfig_Compile(t *testing.T) {
 	assert.NotNil(t, badKind.Naming())
 }
 
+// A method whose facts are a fixed set of fields maps only those fields.
+func TestFactsConfig_CompileFields(t *testing.T) {
+	fields := []string{"username", "groups", "aud"}
+
+	ok := FactsConfig{Facts: map[string]string{"username": "workload", "groups": "groups"}}
+	ok.CompileFields(fields)
+	require.NoError(t, ok.Err())
+	assert.Equal(t, []string{"groups", "workload"}, ok.Naming().Mapping.Mapped())
+	assert.Equal(t, []string{"aud", "groups", "username", "workload"}, ok.Naming().Mapping.Names())
+
+	for _, source := range []string{"email", "/a/b", "Username"} {
+		c := FactsConfig{Facts: map[string]string{"username": "workload", source: "x"}}
+		c.CompileFields(fields)
+		assert.Nil(t, c.Naming(), "source %q", source)
+		assert.EqualError(t, c.Err(), `facts: source "`+source+`" is not a field of this mount (one of aud, groups, username)`)
+	}
+
+	// Compile's own refusals still apply, and a later success replaces a failure.
+	c := FactsConfig{Facts: map[string]string{"username": "aud"}}
+	c.CompileFields(fields)
+	assert.ErrorContains(t, c.Err(), "built-in")
+	c.Facts = nil
+	c.CompileFields(fields)
+	require.NoError(t, c.Err())
+	assert.NotNil(t, c.Naming())
+}
+
 // Embedded in a config struct, FactsConfig is flattened by encoding/json, and
 // its compiled state is neither written nor read.
 func TestFactsConfig_JSON(t *testing.T) {
