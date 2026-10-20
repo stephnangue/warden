@@ -128,5 +128,7 @@ func (s *RoleStore) readRole(ctx context.Context, nsUUID, name string) (*roleEnt
 	if hash == "" {
 		hash = stored.Role.Hash()
 	}
-	return &roleEntry{role: stored.Role, hash: hash}, nil
+	// Published like a written role: as a clone, with no spare capacity left
+	// behind by the decoder.
+	return &roleEntry{role: stored.Role.Clone(), hash: hash}, nil
 }

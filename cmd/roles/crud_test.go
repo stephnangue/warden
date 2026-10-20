@@ -36,17 +36,10 @@ type recorded struct {
 	body         map[string]any
 }
 
+// roleSchemaDoc mirrors what the server emits: one body under "post" that
+// serves both create and update, and no "put".
 const roleSchemaDoc = `{"data":{"openapi":{"paths":{"/sys/roles/{name}":{
 	"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{
-		"description":{"type":"string"},
-		"policies":{"type":"array"},
-		"cred_spec_name":{"type":"string"},
-		"skill":{"type":"string"},
-		"provider_path":{"type":"string"},
-		"metadata":{"type":"object"},
-		"expected_hash":{"type":"string"}
-	}}}}}},
-	"put":{"requestBody":{"content":{"application/json":{"schema":{"properties":{
 		"description":{"type":"string"},
 		"policies":{"type":"array"},
 		"cred_spec_name":{"type":"string"},
@@ -263,6 +256,28 @@ func TestUpdate_TypedFlagsClearAndCAS(t *testing.T) {
 	assert.Equal(t, true, decodeOut(t, stdout)["updated"])
 }
 
+// TestUpdate_DryRun: an update's body is documented under "post"; the dry run
+// must still find it and catch a misspelled field.
+func TestUpdate_DryRun(t *testing.T) {
+	f, stdout, _ := setupFake(t, http.StatusOK, cannedRole)
+	helpers.SetDryRun(true)
+
+	cmd := freshUpdateCmd()
+	updateJSON = `{"description": "x"}`
+	require.NoError(t, runUpdate(cmd, []string{"deploy"}))
+	out := decodeOut(t, stdout)
+	assert.Equal(t, true, out["validated"])
+	assert.Nil(t, out["note"], "the body schema was found, not soft-passed")
+
+	cmd = freshUpdateCmd()
+	updateJSON = `{"polices": ["deploy"]}`
+	err := runUpdate(cmd, []string{"deploy"})
+	require.Error(t, err)
+	assert.True(t, helpers.IsValidationError(err))
+	assert.Contains(t, err.Error(), `did you mean "policies"`)
+	assert.Zero(t, f.count(), "a dry run sends nothing to sys/roles")
+}
+
 func TestUpdate_NothingToUpdate(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusOK, cannedRole)
 	err := runUpdate(freshUpdateCmd(), []string{"deploy"})
@@ -319,7 +334,7 @@ func TestListAll(t *testing.T) {
 	f, stdout, _ := setupFake(t, http.StatusOK, `{"data":{
 		"keys":["deploy","read-secrets"],
 		"roles":[
-			{"name":"deploy","description":"Deploys from acme CI","policies":["deploy"],"provider_path":"aws/"},
+			{"name":"deploy","description":"Deploys from acme CI","policies":["deploy"],"provider_path":"aws/","metadata":{"team":"platform"}},
 			{"name":"read-secrets","policies":["read"],"provider_path":"vault/","skill":"vault"}
 		]
 	}}`)
@@ -336,6 +351,8 @@ func TestListAll(t *testing.T) {
 	require.Len(t, items, 2)
 	assert.Equal(t, "deploy", items[0]["name"])
 	assert.Equal(t, []any{"deploy"}, items[0]["policies"])
+	assert.Equal(t, map[string]any{"team": "platform"}, items[0]["metadata"])
+	assert.Equal(t, map[string]any{}, items[1]["metadata"], "a role without metadata lists an empty object")
 	assert.Equal(t, "vault", items[1]["skill"])
 }
 

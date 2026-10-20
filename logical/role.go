@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 	"time"
 )
@@ -13,23 +12,11 @@ import (
 // Bounds on a role's free-form fields. The number of roles is not bounded: a
 // role lookup is one map access however many there are.
 const (
-	MaxRoleDescriptionBytes = 1024
-	MaxRoleMetadataKeys     = 32
+	MaxRoleDescriptionBytes   = 1024
+	MaxRoleMetadataKeys       = 32
+	MaxRoleMetadataKeyBytes   = 128
+	MaxRoleMetadataValueBytes = 1024
 )
-
-// roleNameRegex is the name rule shared by every named object under sys/: a
-// word character, optionally followed by word characters, '-' and '.', ending
-// in a word character. It never admits '/'.
-var roleNameRegex = regexp.MustCompile(`^\w(([\w-.]+)?\w)?$`)
-
-// RoleNameRule is a human-readable statement of the rule enforced by
-// ValidRoleName, for error messages.
-const RoleNameRule = `letters, digits, "_", "-" and ".", starting and ending with a letter, digit or "_"`
-
-// ValidRoleName reports whether name is a valid role name.
-func ValidRoleName(name string) bool {
-	return roleNameRegex.MatchString(name)
-}
 
 // Role is a namespace role: what a caller running under it may do (Policies,
 // CredSpecName) and how discovery describes it (Description, Skill,
@@ -50,13 +37,15 @@ type Role struct {
 	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
-// Clone returns a deep copy of r, or nil for a nil role.
+// Clone returns a deep copy of r, or nil for a nil role. Its Policies has no
+// spare capacity, so an append to it always allocates and never writes into
+// memory another copy could see.
 func (r *Role) Clone() *Role {
 	if r == nil {
 		return nil
 	}
 	out := *r
-	out.Policies = slices.Clone(r.Policies)
+	out.Policies = slices.Clip(slices.Clone(r.Policies))
 	out.Metadata = maps.Clone(r.Metadata)
 	return &out
 }

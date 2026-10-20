@@ -137,7 +137,7 @@ func roleErrorResponse(name string, err error) *logical.Response {
 	case errors.Is(err, ErrRoleChanged):
 		return logical.ErrorResponse(logical.ErrConflictf(
 			"role %q changed since it was read (expected_hash no longer matches); read it again and retry", name))
-	case errors.Is(err, ErrRoleStoreNotLoaded), errors.Is(err, ErrRoleStoreClosed):
+	case errors.Is(err, ErrRoleStoreNotLoaded):
 		return logical.ErrorResponse(logical.ErrServiceUnavailable(err.Error()))
 	}
 	return logical.ErrorResponse(err)
@@ -146,6 +146,10 @@ func roleErrorResponse(name string, err error) *logical.Response {
 // handleRoleCreate handles POST sys/roles/<name>.
 func (b *SystemBackend) handleRoleCreate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
+	if d.Get("expected_hash").(string) != "" {
+		return logical.ErrorResponse(logical.ErrBadRequest(
+			"expected_hash applies to an update or a delete; a create has no earlier version")), nil
+	}
 	role := &logical.Role{
 		Name:         name,
 		Description:  d.Get("description").(string),
@@ -177,16 +181,41 @@ func (b *SystemBackend) handleRoleRead(ctx context.Context, req *logical.Request
 // replaces the stored value, including with an empty one; a field left out
 // keeps it. The write applies only to the version it was merged onto, and, when
 // expected_hash is set, only if that version is the one the caller read.
+//
+// Without expected_hash the caller asked for no particular version, so a write
+// that loses to a concurrent one is merged onto the new version and tried once
+// more before the conflict is reported.
 func (b *SystemBackend) handleRoleUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
-	role, hash, err := b.core.roleStore.Get(ctx, name)
-	if err != nil {
-		return roleErrorResponse(name, err), nil
-	}
-	if expected := d.Get("expected_hash").(string); expected != "" && expected != hash {
-		return roleErrorResponse(name, ErrRoleChanged), nil
-	}
+	expected := d.Get("expected_hash").(string)
 
+	for attempt := 1; ; attempt++ {
+		role, hash, err := b.core.roleStore.Get(ctx, name)
+		if err != nil {
+			return roleErrorResponse(name, err), nil
+		}
+		if expected != "" && expected != hash {
+			return roleErrorResponse(name, ErrRoleChanged), nil
+		}
+		mergeRoleFields(role, d)
+
+		warnings, err := b.core.roleStore.Update(ctx, role, hash)
+		if errors.Is(err, ErrRoleChanged) && expected == "" {
+			if attempt < 2 {
+				continue
+			}
+			return logical.ErrorResponse(logical.ErrConflictf(
+				"role %q changed concurrently; read it again and retry", name)), nil
+		}
+		if err != nil {
+			return roleErrorResponse(name, err), nil
+		}
+		return b.respondSuccess(roleResponseData(role, role.Hash(), warnings)), nil
+	}
+}
+
+// mergeRoleFields writes onto role every field present in the request.
+func mergeRoleFields(role *logical.Role, d *framework.FieldData) {
 	if v, ok := d.GetOk("description"); ok {
 		role.Description = v.(string)
 	}
@@ -205,12 +234,6 @@ func (b *SystemBackend) handleRoleUpdate(ctx context.Context, req *logical.Reque
 	if v, ok := d.GetOk("metadata"); ok {
 		role.Metadata = v.(map[string]string)
 	}
-
-	warnings, err := b.core.roleStore.Update(ctx, role, hash)
-	if err != nil {
-		return roleErrorResponse(name, err), nil
-	}
-	return b.respondSuccess(roleResponseData(role, role.Hash(), warnings)), nil
 }
 
 // handleRoleDelete handles DELETE sys/roles/<name>, conditional on

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -12,13 +14,13 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	authhelper "github.com/stephnangue/warden/auth/helper"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
 var (
-	ErrRoleStoreClosed    = errors.New("role store is closed")
 	ErrRoleStoreNotLoaded = errors.New("role store is not loaded")
 	ErrRoleNotFound       = errors.New("role not found")
 	ErrRoleAlreadyExists  = errors.New("role already exists")
@@ -40,7 +42,7 @@ var (
 // the namespace it touches (other namespaces are shared by pointer), and swaps
 // it in. A reader holding an older snapshot keeps seeing it whole.
 //
-// mu serializes writers and guards storage, loaded and closed. Each mutator
+// mu serializes writers and guards storage and loaded. Each mutator
 // validates holding no lock (validation reads the policy and credential stores),
 // then commits under mu: the existence and expected-hash checks, the storage
 // write and the publish. Nothing but logging happens after the unlock.
@@ -60,7 +62,11 @@ type RoleStore struct {
 	mu      sync.Mutex
 	storage sdklogical.Storage // barrier view at roleStorePath
 	loaded  bool
-	closed  bool
+
+	// beforeUpdate, when set, runs in Update after validation and before the
+	// commit. Nil outside tests: it lets a test land a concurrent write between
+	// an update's read and its commit.
+	beforeUpdate func()
 }
 
 // roleSnapshot is one published state of every namespace's roles, keyed by
@@ -148,9 +154,6 @@ func (s *RoleStore) Load(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
-		return ErrRoleStoreClosed
-	}
 	if s.storage == nil {
 		s.storage = NewBarrierView(s.core.barrier, roleStorePath)
 	}
@@ -173,22 +176,9 @@ func (s *RoleStore) Unload() {
 	s.loaded = false
 }
 
-// Close shuts the store down for good. Idempotent.
-func (s *RoleStore) Close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.closed = true
-	s.loaded = false
-	s.snapshot.Store(emptyRoleSnapshot)
-}
-
 // writableLocked reports why the store cannot take a write, or nil. Caller
 // holds mu.
 func (s *RoleStore) writableLocked() error {
-	if s.closed {
-		return ErrRoleStoreClosed
-	}
 	if !s.loaded || s.storage == nil {
 		return ErrRoleStoreNotLoaded
 	}
@@ -287,6 +277,9 @@ func (s *RoleStore) Update(ctx context.Context, role *logical.Role, expectedHash
 	if err != nil {
 		return nil, err
 	}
+	if s.beforeUpdate != nil {
+		s.beforeUpdate()
+	}
 
 	err = func() error {
 		s.mu.Lock()
@@ -375,9 +368,6 @@ func (s *RoleStore) ClearNamespace(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
-		return ErrRoleStoreClosed
-	}
 	if s.storage == nil {
 		return nil
 	}
@@ -412,8 +402,11 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 	if role == nil {
 		return nil, logical.ErrBadRequest("role is required")
 	}
-	if !logical.ValidRoleName(role.Name) {
-		return nil, logical.ErrBadRequestf("invalid role name %q: %s", role.Name, logical.RoleNameRule)
+	if !validSysName(role.Name) {
+		return nil, logical.ErrBadRequestf("invalid role name %q: %s", role.Name, sysNameRule)
+	}
+	if role.CredSpecName != "" && !validSysName(role.CredSpecName) {
+		return nil, logical.ErrBadRequestf("invalid cred_spec_name %q: %s", role.CredSpecName, sysNameRule)
 	}
 
 	policies, err := normalizeRolePolicies(role.Policies)
@@ -438,9 +431,14 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 		return nil, logical.ErrBadRequestf("metadata has %d keys; at most %d are allowed",
 			len(role.Metadata), logical.MaxRoleMetadataKeys)
 	}
-	for k := range role.Metadata {
-		if k == "" {
+	for _, k := range slices.Sorted(maps.Keys(role.Metadata)) {
+		switch {
+		case k == "":
 			return nil, logical.ErrBadRequest("metadata keys must not be empty")
+		case len(k) > logical.MaxRoleMetadataKeyBytes:
+			return nil, logical.ErrBadRequestf("metadata key starting %.32q exceeds %d bytes", k, logical.MaxRoleMetadataKeyBytes)
+		case len(role.Metadata[k]) > logical.MaxRoleMetadataValueBytes:
+			return nil, logical.ErrBadRequestf("metadata value of %q exceeds %d bytes", k, logical.MaxRoleMetadataValueBytes)
 		}
 	}
 	if len(role.Metadata) == 0 {
@@ -475,7 +473,21 @@ func normalizeRolePolicies(policies []string) ([]string, error) {
 		out = append(out, p)
 	}
 	slices.Sort(out)
-	return slices.Compact(out), nil
+	// Clipped, so no append through a published role's slice can reach past it.
+	return slices.Clip(slices.Compact(out)), nil
+}
+
+// sysNameRegex is the rule for the name of a sys/ object, taken from the path
+// pattern sys/roles/<name> and sys/cred/specs/<name> route on.
+var sysNameRegex = regexp.MustCompile("^" + framework.GenericNameRegex("name") + "$")
+
+// sysNameRule states sysNameRegex for error messages.
+const sysNameRule = `letters, digits, "_", "-" and ".", starting and ending with a letter, digit or "_"`
+
+// validSysName reports whether name can name a sys/ object (a role, a
+// credential spec).
+func validSysName(name string) bool {
+	return sysNameRegex.MatchString(name)
 }
 
 // setupRoleStore wires the role store to the unsealed barrier and, on the

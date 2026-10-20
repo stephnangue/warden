@@ -36,7 +36,8 @@ Usage: warden role list [options]
     table    one row per role (default for TTY)
     json     [{"name", "description", "auth_path"}, ...]
              with -all: [{"name", "description", "policies",
-             "cred_spec_name", "provider_path", "skill"}, ...]
+             "cred_spec_name", "provider_path", "skill",
+             "metadata"}, ...]
     ndjson   one role per line, agent-friendly for piping into jq
     text     key=value lines per role
 
@@ -169,6 +170,10 @@ func projectInventory(roles []*api.Role) []map[string]any {
 		if policies == nil {
 			policies = []string{}
 		}
+		metadata := make(map[string]any, len(r.Metadata))
+		for k, v := range r.Metadata {
+			metadata[k] = v
+		}
 		items = append(items, map[string]any{
 			"name":           r.Name,
 			"description":    r.Description,
@@ -176,6 +181,7 @@ func projectInventory(roles []*api.Role) []map[string]any {
 			"cred_spec_name": r.CredSpecName,
 			"provider_path":  r.ProviderPath,
 			"skill":          r.Skill,
+			"metadata":       metadata,
 		})
 	}
 	return items
@@ -195,9 +201,10 @@ func printInventoryTable(items []map[string]any) {
 			cell(it["cred_spec_name"]),
 			cell(it["provider_path"]),
 			cell(it["skill"]),
+			cell(it["metadata"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Description", "Policies", "Cred Spec", "Provider Path", "Skill"}, rows)
+	helpers.PrintTable([]string{"Name", "Description", "Policies", "Cred Spec", "Provider Path", "Skill", "Metadata"}, rows)
 }
 
 // projectRoles shapes the aggregator's raw roles for output, keeping only

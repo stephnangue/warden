@@ -8,15 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidRoleName(t *testing.T) {
-	for _, name := range []string{"a", "deploy", "deploy-prod", "deploy.v2", "x_1", "A9", "_x"} {
-		assert.True(t, ValidRoleName(name), name)
-	}
-	for _, name := range []string{"", "-a", "a-", ".a", "a.", "a/b", "a b", "a:b", "é", "a\n"} {
-		assert.False(t, ValidRoleName(name), "%q", name)
-	}
-}
-
 func TestValidateAssignablePolicies(t *testing.T) {
 	assert.NoError(t, ValidateAssignablePolicies(nil))
 	assert.NoError(t, ValidateAssignablePolicies([]string{"deploy", "default"}))
@@ -83,9 +74,11 @@ func TestRoleHash(t *testing.T) {
 func TestRoleClone(t *testing.T) {
 	assert.Nil(t, (*Role)(nil).Clone())
 
-	r := &Role{Name: "deploy", Policies: []string{"a"}, Metadata: map[string]string{"k": "v"}}
+	r := &Role{Name: "deploy", Policies: make([]string, 1, 8), Metadata: map[string]string{"k": "v"}}
+	r.Policies[0] = "a"
 	c := r.Clone()
 	require.Equal(t, r, c)
+	assert.Equal(t, len(c.Policies), cap(c.Policies), "a clone's policies leave no spare capacity")
 	c.Policies[0] = "changed"
 	c.Metadata["k"] = "changed"
 	assert.Equal(t, []string{"a"}, r.Policies)

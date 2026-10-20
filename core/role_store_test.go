@@ -1,12 +1,16 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -86,6 +90,26 @@ func TestRoles_CRUD(t *testing.T) {
 	assert.Equal(t, "aws/", resp.Data["provider_path"])
 	assert.Equal(t, created, resp.Data["created_at"], "an update keeps the creation time")
 	assert.NotEqual(t, createdHash, resp.Data["hash"])
+
+	// An empty list and an empty object clear policies and metadata.
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/deploy", map[string]any{
+		"policies": []any{},
+		"metadata": map[string]any{},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, []string{}, resp.Data["policies"])
+	assert.Equal(t, map[string]string{}, resp.Data["metadata"])
+	cleared, _, err := c.roleStore.Get(ctx, "deploy")
+	require.NoError(t, err)
+	assert.Empty(t, cleared.Policies)
+	assert.Nil(t, cleared.Metadata)
+	assert.Equal(t, "Deploys from acme CI", cleared.Description, "fields left out are kept")
+
+	// expected_hash means nothing on a create.
+	resp = roleRequest(t, c, ctx, logical.CreateOperation, "roles/fresh", map[string]any{"expected_hash": "abc"})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	_, _, err = c.roleStore.Get(ctx, "fresh")
+	assert.ErrorIs(t, err, ErrRoleNotFound)
 
 	resp = roleRequest(t, c, ctx, logical.CreateOperation, "roles/read-secrets", map[string]any{
 		"provider_path": "vault/",
@@ -174,6 +198,72 @@ func TestRoles_CAS(t *testing.T) {
 	assert.ErrorIs(t, err, ErrRoleChanged)
 }
 
+// concurrentWriter makes the role store land a competing write on name between
+// an update's read and its commit, for the first times calls of Update.
+func concurrentWriter(t *testing.T, c *Core, ctx context.Context, name string, times int) *int {
+	t.Helper()
+	landed := 0
+	inside := false
+	c.roleStore.beforeUpdate = func() {
+		if inside || landed >= times {
+			return
+		}
+		inside = true
+		defer func() { inside = false }()
+		landed++
+		_, err := c.roleStore.Update(ctx, &logical.Role{Name: name, Skill: fmt.Sprintf("s%d", landed)}, "")
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() { c.roleStore.beforeUpdate = nil })
+	return &landed
+}
+
+// TestRoles_UpdateRetriesOnceWithoutExpectedHash: an update that names no
+// version is merged onto the version that beat it and tried once more; a second
+// loss is a 409 that does not mention expected_hash.
+func TestRoles_UpdateRetriesOnceWithoutExpectedHash(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	_, err := c.roleStore.Create(ctx, &logical.Role{Name: "deploy", Description: "v1"})
+	require.NoError(t, err)
+
+	landed := concurrentWriter(t, c, ctx, "deploy", 1)
+	resp := roleRequest(t, c, ctx, logical.UpdateOperation, "roles/deploy", map[string]any{"description": "v2"})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, 1, *landed)
+	r, _, err := c.roleStore.Get(ctx, "deploy")
+	require.NoError(t, err)
+	assert.Equal(t, "v2", r.Description, "the retry applied the caller's field")
+	assert.Equal(t, "s1", r.Skill, "on top of the concurrent write, not over it")
+
+	landed = concurrentWriter(t, c, ctx, "deploy", 2)
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/deploy", map[string]any{"description": "v3"})
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	assert.Equal(t, 2, *landed, "one retry, no more")
+	assert.Contains(t, resp.Err.Error(), `role "deploy" changed concurrently; read it again and retry`)
+	assert.NotContains(t, resp.Err.Error(), "expected_hash")
+}
+
+// TestRoles_UpdateWithExpectedHashDoesNotRetry: a caller that named a version
+// gets the conflict at once, worded around expected_hash.
+func TestRoles_UpdateWithExpectedHashDoesNotRetry(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	_, err := c.roleStore.Create(ctx, &logical.Role{Name: "deploy", Description: "v1"})
+	require.NoError(t, err)
+	_, hash, err := c.roleStore.Get(ctx, "deploy")
+	require.NoError(t, err)
+
+	landed := concurrentWriter(t, c, ctx, "deploy", 5)
+	resp := roleRequest(t, c, ctx, logical.UpdateOperation, "roles/deploy", map[string]any{
+		"description":   "v2",
+		"expected_hash": hash,
+	})
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	assert.Equal(t, 1, *landed, "no retry")
+	assert.Contains(t, resp.Err.Error(), "expected_hash no longer matches")
+}
+
 func TestRoles_NameCharset(t *testing.T) {
 	c := createTestCore(t)
 	ctx := rootCtx()
@@ -188,8 +278,22 @@ func TestRoles_NameCharset(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), name)
 	}
 
+	// cred_spec_name follows the rule credential spec names are routed on.
+	_, err := c.roleStore.Create(ctx, &logical.Role{Name: "spec-ok", CredSpecName: "deploy-role.v2"})
+	assert.NoError(t, err)
+	for _, spec := range []string{"de/ploy", "-x", "x y", "../x"} {
+		_, err := c.roleStore.Create(ctx, &logical.Role{Name: "spec-bad", CredSpecName: spec})
+		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), "cred_spec_name %q", spec)
+	}
+	for _, name := range []string{"a", "deploy", "deploy-prod", "deploy.v2", "x_1", "A9", "_x"} {
+		assert.True(t, validSysName(name), name)
+	}
+	for _, name := range []string{"", "-a", "a-", ".a", "a.", "a/b", "a b", "a:b", "é", "a\n"} {
+		assert.False(t, validSysName(name), "%q", name)
+	}
+
 	// The path pattern refuses a name with a "/" before any handler runs.
-	_, err := c.systemBackend.HandleRequest(ctx, &logical.Request{
+	_, err = c.systemBackend.HandleRequest(ctx, &logical.Request{
 		Operation: logical.CreateOperation,
 		Path:      "roles/de/ploy",
 	})
@@ -345,6 +449,21 @@ func TestRoles_Caps(t *testing.T) {
 	assert.Error(t, err)
 	_, err = c.roleStore.Create(ctx, &logical.Role{Name: "m3", Metadata: map[string]string{"": "v"}})
 	assert.Error(t, err, "an empty metadata key is refused")
+
+	_, err = c.roleStore.Create(ctx, &logical.Role{Name: "mk", Metadata: map[string]string{
+		strings.Repeat("k", logical.MaxRoleMetadataKeyBytes): strings.Repeat("v", logical.MaxRoleMetadataValueBytes),
+	}})
+	assert.NoError(t, err, "a key and a value of exactly the caps are accepted")
+	_, err = c.roleStore.Create(ctx, &logical.Role{Name: "mk2", Metadata: map[string]string{
+		strings.Repeat("k", logical.MaxRoleMetadataKeyBytes+1): "v",
+	}})
+	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), "a metadata key over the cap is refused")
+	_, err = c.roleStore.Create(ctx, &logical.Role{Name: "mv2", Metadata: map[string]string{
+		"k": strings.Repeat("v", logical.MaxRoleMetadataValueBytes+1),
+	}})
+	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), "a metadata value over the cap is refused")
+	_, err = c.roleStore.Create(ctx, &logical.Role{Name: "d3", Description: strings.Repeat("x", logical.MaxRoleDescriptionBytes+1)})
+	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
 	_, err = c.roleStore.Create(ctx, &logical.Role{Name: "p", Policies: []string{"a", " "}})
 	assert.Error(t, err, "an empty policy name is refused")
 
@@ -403,6 +522,38 @@ func TestRoles_SnapshotImmutableAcrossPublish(t *testing.T) {
 	r3, _, err := c.roleStore.Get(ctx, "mine")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"p"}, r3.Policies)
+}
+
+// TestRoles_PublishedPoliciesHaveNoSpareCapacity: a published role's Policies
+// has cap == len, after a create, an update and a load, so an append through a
+// shared slice can never write where another reader looks.
+func TestRoles_PublishedPoliciesHaveNoSpareCapacity(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	check := func(when string) {
+		t.Helper()
+		e := c.roleStore.snapshot.Load().lookup(namespace.RootNamespaceID, "deploy")
+		require.NotNil(t, e, when)
+		assert.Equal(t, len(e.role.Policies), cap(e.role.Policies), "after %s", when)
+		r, _, err := c.roleStore.Get(ctx, "deploy")
+		require.NoError(t, err)
+		assert.Equal(t, len(r.Policies), cap(r.Policies), "a read after %s", when)
+	}
+
+	// Duplicates and spare capacity in the input leave room a naive copy would keep.
+	in := make([]string, 0, 16)
+	in = append(in, "c", "a", "b", "a", "c")
+	_, err := c.roleStore.Create(ctx, &logical.Role{Name: "deploy", Policies: in})
+	require.NoError(t, err)
+	check("a create")
+
+	_, err = c.roleStore.Update(ctx, &logical.Role{Name: "deploy", Policies: append(make([]string, 0, 9), "x", "x", "y")}, "")
+	require.NoError(t, err)
+	check("an update")
+
+	c.teardownRoleStore()
+	require.NoError(t, c.setupRoleStore(ctx, false))
+	check("a load")
 }
 
 // TestRoles_ConcurrentReadsDuringWrites runs lock-free readers against writers;
@@ -554,6 +705,80 @@ func TestRoles_ClearNamespace(t *testing.T) {
 
 	_, _, err = c.roleStore.Get(rootCtx(), "keep")
 	assert.NoError(t, err, "other namespaces keep their roles")
+}
+
+// roleHTTP sends one request through the core request path, as the HTTP layer
+// does: query parameters and the JSON body are parsed by core, and the token is
+// checked.
+func roleHTTP(t *testing.T, c *Core, token, method, target string, body map[string]any) *logical.Response {
+	t.Helper()
+	var rd io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		rd = bytes.NewReader(raw)
+	}
+	httpReq := httptest.NewRequest(method, target, rd)
+	if body != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
+	httpReq.Header.Set("X-Warden-Token", token)
+
+	op := map[string]logical.Operation{
+		http.MethodGet:    logical.ReadOperation,
+		http.MethodPost:   logical.CreateOperation,
+		http.MethodPut:    logical.UpdateOperation,
+		http.MethodDelete: logical.DeleteOperation,
+	}[method]
+	if httpReq.URL.Query().Get("warden-list") == "true" {
+		op = logical.ListOperation
+	}
+	resp, err := c.HandleRequest(rootCtx(), &logical.Request{
+		Path:        strings.TrimPrefix(httpReq.URL.Path, "/v1/"),
+		Operation:   op,
+		HTTPRequest: httpReq,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	return resp
+}
+
+// TestRoles_HTTP_QueryParameters: DELETE ?expected_hash= and LIST
+// ?provider_path= reach the handlers through the request path.
+func TestRoles_HTTP_QueryParameters(t *testing.T) {
+	c := createTestCore(t)
+	root, err := c.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+
+	resp := roleHTTP(t, c, root, http.MethodPost, "/v1/sys/roles/deploy", map[string]any{
+		"policies":      []string{"deploy"},
+		"provider_path": "aws/",
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
+	hash := resp.Data["hash"].(string)
+	resp = roleHTTP(t, c, root, http.MethodPost, "/v1/sys/roles/read-secrets", map[string]any{"provider_path": "vault/"})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
+
+	resp = roleHTTP(t, c, root, http.MethodGet, "/v1/sys/roles?warden-list=true&provider_path=vault/", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, []string{"read-secrets"}, resp.Data["keys"])
+	resp = roleHTTP(t, c, root, http.MethodGet, "/v1/sys/roles?warden-list=true", nil)
+	assert.Equal(t, []string{"deploy", "read-secrets"}, resp.Data["keys"])
+
+	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/roles/deploy?expected_hash=stale", nil)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a stale expected_hash in the query refuses the delete")
+	_, _, err = c.roleStore.Get(rootCtx(), "deploy")
+	require.NoError(t, err)
+
+	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/roles/deploy?expected_hash="+hash, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	_, _, err = c.roleStore.Get(rootCtx(), "deploy")
+	assert.ErrorIs(t, err, ErrRoleNotFound)
+
+	httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/roles?warden-list=true", nil)
+	httpReq.Header.Set("X-Warden-Token", "not-a-token")
+	_, err = c.HandleRequest(rootCtx(), &logical.Request{Path: "sys/roles", Operation: logical.ListOperation, HTTPRequest: httpReq})
+	assert.Error(t, err, "the request path checks the token")
 }
 
 // TestRoles_SudoRequired: every role path is a root path, so the policy check

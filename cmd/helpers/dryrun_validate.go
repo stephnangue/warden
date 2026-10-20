@@ -137,6 +137,14 @@ func extractBodySchema(doc map[string]any, method string) bodySchema {
 	}
 
 	op, _ := item[strings.ToLower(method)].(map[string]any)
+	// The server documents a path's create and update bodies once, under
+	// "post". A PUT finds its body there; the required list is not applied to
+	// it, since it is the create's and an update sends only what changes.
+	putFallback := false
+	if op == nil && strings.EqualFold(method, "PUT") {
+		op, _ = item["post"].(map[string]any)
+		putFallback = true
+	}
 	if op == nil {
 		return out
 	}
@@ -169,7 +177,7 @@ func extractBodySchema(doc map[string]any, method string) bodySchema {
 	out.notDocumented = false
 	out.properties = make(map[string]propertySchema, len(props))
 	out.required = map[string]bool{}
-	if reqd, ok := resolved["required"].([]any); ok {
+	if reqd, ok := resolved["required"].([]any); ok && !putFallback {
 		for _, r := range reqd {
 			if s, ok := r.(string); ok {
 				out.required[s] = true
