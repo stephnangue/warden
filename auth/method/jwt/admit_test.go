@@ -20,19 +20,23 @@ import (
 // internal as core marks it when internal is set.
 func admitRequest(t *testing.T, b *jwtAuthBackend, token string, internal bool) *logical.Response {
 	t.Helper()
+	resp, err := routeAdmit(b, token, internal)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	return resp
+}
+
+func routeAdmit(b *jwtAuthBackend, token string, internal bool) (*logical.Response, error) {
 	httpReq := httptest.NewRequest(http.MethodGet, "/v1/auth/jwt/introspect/admit", nil)
 	if token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+	return b.HandleRequest(context.Background(), &logical.Request{
 		Operation:   logical.ReadOperation,
 		Path:        helper.AdmitPattern,
 		HTTPRequest: httpReq,
 		Internal:    internal,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	return resp
 }
 
 // admitted returns the admission an admit response carries, or nil.
@@ -106,9 +110,14 @@ func deleteClaim(c map[string]any, name string) map[string]any {
 	return c
 }
 
+// An unconfigured mount cannot decide: an error, which discovery reports as the
+// mount's warning. Without a credential there is nothing to decide.
 func TestAdmit_Unconfigured(t *testing.T) {
 	b, _ := createTestBackendWithStorage(t)
-	assert.Nil(t, admitted(t, admitRequest(t, b, "eyJ.a.b", true)))
+	resp, err := routeAdmit(b, "eyJ.a.b", true)
+	assert.ErrorIs(t, err, errNotConfigured)
+	assert.Nil(t, resp)
+	assert.Nil(t, admitted(t, admitRequest(t, b, "", true)))
 }
 
 // The mount's max_age is enforced at admission: a stale token and one without

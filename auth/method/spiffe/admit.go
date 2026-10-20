@@ -5,7 +5,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/stephnangue/warden/auth/helper"
 	spiffelib "github.com/stephnangue/warden/auth/spiffe"
-	jwtparse "github.com/stephnangue/warden/helper"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -26,15 +24,21 @@ type admittedSVID struct {
 	claims map[string]any // the JWT-SVID's claims; nil for an X.509-SVID
 }
 
-// errNoBundles refuses admission while no trust bundle is loaded.
-var errNoBundles = errors.New("no SPIFFE trust bundles loaded")
+var (
+	// errNoBundles: with no trust bundle loaded the mount cannot decide.
+	errNoBundles = errors.New("no SPIFFE trust bundles loaded")
+	// errNoMountAudiences: with no bound_audiences the mount cannot decide on
+	// any JWT-SVID.
+	errNoMountAudiences = errors.New("bound_audiences is not set: no JWT-SVID can be admitted")
+)
 
 // admitX509SVID verifies cert as an X.509-SVID against the trust bundles in
 // set alone, with no role: go-spiffe's SVID rules and a chain to the X.509
 // authorities of the SVID's own trust domain. An X.509-SVID carries no
 // audience and no issue time, so neither bound_audiences nor max_age applies.
 // It returns what it verified as an admission of this mount, or why it is not
-// admitted.
+// admitted: errNoBundles when the mount cannot decide, any other error when the
+// SVID failed a check.
 func (b *spiffeAuthBackend) admitX509SVID(set *spiffebundle.Set, cert *x509.Certificate) (*admittedSVID, error) {
 	if set == nil || set.Len() == 0 {
 		return nil, errNoBundles
@@ -56,16 +60,16 @@ func (b *spiffeAuthBackend) admitX509SVID(set *spiffebundle.Set, cert *x509.Cert
 // mount's bound_audiences (a nil config, or one without bound_audiences,
 // admits no JWT-SVID), and the mount's max_age against its iat at now
 // (CheckSVIDMaxAge). It returns what it verified as an admission of this
-// mount, or why it is not admitted.
+// mount, or why it is not admitted: errNoBundles or errNoMountAudiences when
+// the mount cannot decide, any other error when the SVID failed a check.
 func (b *spiffeAuthBackend) admitJWTSVID(set *spiffebundle.Set, config *SPIFFEAuthConfig, token string, now time.Time) (*admittedSVID, error) {
 	if set == nil || set.Len() == 0 {
 		return nil, errNoBundles
 	}
-	var audiences []string
-	if config != nil {
-		audiences = config.BoundAudiences
+	if config == nil || len(config.BoundAudiences) == 0 {
+		return nil, errNoMountAudiences
 	}
-	svid, err := spiffelib.VerifyJWTSVIDToken(set, token, audiences)
+	svid, err := spiffelib.VerifyJWTSVIDToken(set, token, config.BoundAudiences)
 	if err != nil {
 		return nil, fmt.Errorf("JWT-SVID verification: %w", err)
 	}
@@ -76,32 +80,18 @@ func (b *spiffeAuthBackend) admitJWTSVID(set *spiffebundle.Set, config *SPIFFEAu
 	return &admittedSVID{adm: adm, id: svid.ID, expiry: svid.Expiry, claims: svid.Claims}, nil
 }
 
-// isJWTSVID reports whether token is a JWT whose unverified subject is a
-// SPIFFE ID: the bearer the gateway treats as a JWT-SVID, in preference to a
-// forwarded certificate. The signature is checked by admitJWTSVID.
-func isJWTSVID(token string) bool {
-	if !strings.HasPrefix(token, "eyJ") {
-		return false
-	}
-	claims, err := jwtparse.ParseJWTClaimsUnverified(token)
-	if err != nil {
-		return false
-	}
-	sub, _ := claims["sub"].(string)
-	return strings.HasPrefix(sub, "spiffe://")
-}
-
 // admit is the mount's helper.AdmitFunc. It picks the SVID as the gateway
-// does: a bearer JWT-SVID first (a mesh sidecar forwards a certificate on most
-// requests, which must not shadow it), else the forwarded X.509-SVID. Safe
-// for concurrent use: it takes the config under configMu and the bundle set
-// as a snapshot, and releases both before verifying.
-func (b *spiffeAuthBackend) admit(_ context.Context, req *logical.Request, now time.Time) *logical.Admission {
+// does (spiffelib.IsJWTSVID): a bearer JWT-SVID first, else the forwarded
+// X.509-SVID. A mount with no trust bundle, or asked about a JWT-SVID without
+// bound_audiences, cannot decide, which is an error; an SVID that fails a check
+// is not admitted. Safe for concurrent use: it takes the config under configMu
+// and the bundle set as a snapshot, and releases both before verifying.
+func (b *spiffeAuthBackend) admit(_ context.Context, req *logical.Request, now time.Time) (*logical.Admission, error) {
 	token := extractJWTFromRequest(req)
 	cert := extractClientCert(req)
-	useJWT := token != "" && isJWTSVID(token)
+	useJWT := token != "" && spiffelib.IsJWTSVID(token)
 	if !useJWT && cert == nil {
-		return nil
+		return nil, nil
 	}
 	b.configMu.RLock()
 	config := b.config
@@ -117,9 +107,12 @@ func (b *spiffeAuthBackend) admit(_ context.Context, req *logical.Request, now t
 	} else {
 		got, err = b.admitX509SVID(set, cert)
 	}
+	if errors.Is(err, errNoBundles) || errors.Is(err, errNoMountAudiences) {
+		return nil, err
+	}
 	if err != nil {
 		b.logger.Debug("introspect/admit: SVID not admitted", lgr.Err(err))
-		return nil
+		return nil, nil
 	}
-	return got.adm
+	return got.adm, nil
 }

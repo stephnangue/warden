@@ -41,7 +41,7 @@ type admitStub struct {
 type admitStubMount struct {
 	mf     *logical.MountFacts
 	claims map[string]any // nil: the credential is not admitted
-	err    error          // set: the mount fails
+	err    error          // set: the mount cannot decide
 	calls  atomic.Int64   // introspect/admit requests that reached the backend
 	admits atomic.Int64   // admission checks run (only for internal requests)
 
@@ -98,27 +98,27 @@ func (s *admitStub) factory() logical.Factory {
 func (b *admitStubBackend) HandleRequest(ctx context.Context, req *logical.Request) (*logical.Response, error) {
 	if m := b.stub.get(req.MountPoint); m != nil && req.Path == authhelper.AdmitPattern {
 		m.calls.Add(1)
-		if m.err != nil {
-			return nil, m.err
-		}
 	}
 	return b.Backend.HandleRequest(ctx, req)
 }
 
-func (b *admitStubBackend) admit(_ context.Context, req *logical.Request, _ time.Time) *logical.Admission {
+func (b *admitStubBackend) admit(_ context.Context, req *logical.Request, _ time.Time) (*logical.Admission, error) {
 	m := b.stub.get(req.MountPoint)
 	if m == nil {
-		return nil
+		return nil, nil
 	}
 	m.admits.Add(1)
+	if m.err != nil {
+		return nil, m.err
+	}
 	if m.claims == nil {
-		return nil
+		return nil, nil
 	}
 	adm := &logical.Admission{Facts: selector.NewClaims(maps.Clone(m.claims)), Mount: m.mf}
 	m.mu.Lock()
 	m.made = append(m.made, adm)
 	m.mu.Unlock()
-	return adm
+	return adm, nil
 }
 
 // discEnv is a core with admitStub auth mounts in one namespace.

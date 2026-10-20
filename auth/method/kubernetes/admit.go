@@ -31,8 +31,10 @@ type reviewed struct {
 // anything else is out of scope for this method). The review's bearer is the
 // configured token_reviewer_jwt, or the workload's own token (self-review).
 //
-// It returns what the review verified, or why the token is not admitted. It
-// reads cfg, a snapshot the caller took, and writes nothing.
+// It returns what the review verified, or why the token is not admitted: an
+// error wrapping errTokenReviewCall when the review itself could not be made,
+// any other when the token failed a check. It reads cfg, a snapshot the caller
+// took, and writes nothing.
 func reviewWorkload(ctx context.Context, cfg *KubernetesAuthConfig, token string, audiences []string) (*reviewed, error) {
 	claims, _ := helper.ParseJWTClaimsUnverified(token)
 	if cfg.Issuer != "" && !cfg.DisableIssValidation {
@@ -50,7 +52,7 @@ func reviewWorkload(ctx context.Context, cfg *KubernetesAuthConfig, token string
 	}
 	status, err := reviewToken(ctx, cfg.httpClient, cfg.KubernetesHost, bearer, token, audiences)
 	if err != nil {
-		return nil, fmt.Errorf("TokenReview call failed: %w", err)
+		return nil, fmt.Errorf("%w: %w", errTokenReviewCall, err)
 	}
 	if !status.Authenticated || status.Error != "" {
 		return nil, fmt.Errorf("TokenReview rejected token: %s", status.Error)
@@ -63,8 +65,13 @@ func reviewWorkload(ctx context.Context, cfg *KubernetesAuthConfig, token string
 	return &reviewed{status: status, namespace: namespace, name: name, claims: claims}, nil
 }
 
-// errNotConfigured refuses admission on a mount with no configuration.
-var errNotConfigured = errors.New("kubernetes auth method is not configured")
+var (
+	// errNotConfigured: a mount with no configuration cannot decide.
+	errNotConfigured = errors.New("kubernetes auth method is not configured")
+	// errTokenReviewCall: the TokenReview could not be made (transport, API
+	// server status), so the review decided nothing about the token.
+	errTokenReviewCall = errors.New("TokenReview call failed")
+)
 
 // admitToken verifies token against the mount's configuration alone, with no
 // role: reviewWorkload with the mount's bound_audiences as the review's
@@ -96,23 +103,27 @@ func admitToken(ctx context.Context, cfg *KubernetesAuthConfig, token string, no
 }
 
 // admit is the mount's authhelper.AdmitFunc: the bearer token admitted by
-// admitToken under the config in force, as an admission of this mount. A
-// TokenReview that fails is logged and not admitted, as discovery treated it
-// before. Safe for concurrent use: it takes the config under configMu and
-// releases it before the TokenReview round-trip, as login does.
-func (b *kubernetesAuthBackend) admit(ctx context.Context, req *logical.Request, now time.Time) *logical.Admission {
+// admitToken under the config in force, as an admission of this mount. An
+// unconfigured mount, or a TokenReview that could not be made, cannot decide,
+// which is an error; a token that fails a check is not admitted. Safe for
+// concurrent use: it takes the config under configMu and releases it before
+// the TokenReview round-trip, as login does.
+func (b *kubernetesAuthBackend) admit(ctx context.Context, req *logical.Request, now time.Time) (*logical.Admission, error) {
 	token := extractJWTFromRequest(req)
 	if token == "" {
-		return nil
+		return nil, nil
 	}
 	b.configMu.RLock()
 	cfg := b.config
 	b.configMu.RUnlock()
 
 	rv, err := admitToken(ctx, cfg, token, now)
+	if errors.Is(err, errNotConfigured) || errors.Is(err, errTokenReviewCall) {
+		return nil, err
+	}
 	if err != nil {
 		b.logger.Debug("introspect/admit: token not admitted", lgr.Err(err))
-		return nil
+		return nil, nil
 	}
-	return newAdmission(rv.status, rv.namespace, rv.name, rv.claims, b.mountFacts)
+	return newAdmission(rv.status, rv.namespace, rv.name, rv.claims, b.mountFacts), nil
 }

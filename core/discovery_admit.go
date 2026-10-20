@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strings"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
@@ -90,13 +89,7 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 
 	var roles []*logical.Role
 	if c.roleStore != nil {
-		if nr := c.roleStore.snapshot.Load().byNS[ns.ID]; nr != nil {
-			roles = make([]*logical.Role, 0, len(nr.byName))
-			for _, e := range nr.byName {
-				roles = append(roles, e.role)
-			}
-			slices.SortFunc(roles, func(a, b *logical.Role) int { return strings.Compare(a.Name, b.Name) })
-		}
+		roles = c.roleStore.snapshot.Load().roles(ns.ID)
 	}
 
 	providerPaths := make([]string, len(roles))
@@ -196,7 +189,9 @@ func (c *Core) namespaceAuthTarget(ctx context.Context, ns *namespace.Namespace)
 // auth mount at mount (relative to the namespace in ctx, without "auth/") with
 // parent's credential, and returns the admission it made with its
 // namespace-relative MountPath set, or nil when the mount did not admit the
-// credential or does not serve the path. An error is the mount failing.
+// credential or does not serve the path. An error is the mount failing or
+// unable to decide (unconfigured, no trust anchors, its verifier unreachable),
+// which discovery reports as the mount's warning.
 func (c *Core) admitAt(ctx context.Context, parent *logical.Request, mount string) (*logical.Admission, error) {
 	childReq := &logical.Request{
 		Operation:   logical.ReadOperation,

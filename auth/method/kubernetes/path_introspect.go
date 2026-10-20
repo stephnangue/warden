@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -66,7 +67,9 @@ func (b *kubernetesAuthBackend) handleIntrospectRoles(ctx context.Context, req *
 	// filtering.
 	rv, err := reviewWorkload(ctx, cfg, jwtToken, nil)
 	if err != nil {
-		b.logger.Debug("introspect: token not reviewed", lgr.Err(err))
+		if errors.Is(err, errTokenReviewCall) {
+			b.logger.Warn("introspect: TokenReview call failed", lgr.Err(err))
+		}
 		return introspectEmpty(), nil
 	}
 	status, saNamespace, saName := rv.status, rv.namespace, rv.name

@@ -39,15 +39,14 @@ var errNoTrustedCA = errors.New("no trusted CA certificates configured")
 // admitCert verifies cert against the mount's configuration alone, with no
 // role: the chain against the mount's trusted CAs, for client auth, and a
 // principal in the mount's principal_claim. It returns the verified chains, or
-// why the certificate is not admitted. Revocation is not checked here, as
-// discovery never checked it; a login checks it after this.
+// why the certificate is not admitted: errNoTrustedCA when the mount has no
+// trusted CA to decide with, any other error when the certificate failed a
+// check. Revocation is not checked here, as discovery never checked it; a
+// login checks it after this.
 //
 // It reads config, a snapshot the caller took, and writes nothing.
 func admitCert(config *CertAuthConfig, cert *x509.Certificate) ([][]*x509.Certificate, error) {
-	pool, err := getCAPool(config, nil)
-	if err != nil {
-		return nil, err
-	}
+	pool, _ := getCAPool(config, nil) // with no role, the mount's pool: never an error
 	if pool == nil {
 		return nil, errNoTrustedCA
 	}
@@ -63,22 +62,26 @@ func admitCert(config *CertAuthConfig, cert *x509.Certificate) ([][]*x509.Certif
 
 // admit is the mount's helper.AdmitFunc: the presented client certificate
 // admitted by admitCert under the config in force, as an admission of this
-// mount. A certificate carries no issue time, so now is unused. Safe for
-// concurrent use: it takes the config under configMu and releases it before
-// verifying, as login does.
-func (b *certAuthBackend) admit(_ context.Context, req *logical.Request, _ time.Time) *logical.Admission {
+// mount. A mount without a trusted CA cannot decide, which is an error; a
+// certificate that fails a check is not admitted. A certificate carries no
+// issue time, so now is unused. Safe for concurrent use: it takes the config
+// under configMu and releases it before verifying, as login does.
+func (b *certAuthBackend) admit(_ context.Context, req *logical.Request, _ time.Time) (*logical.Admission, error) {
 	cert := extractClientCert(req)
 	if cert == nil {
-		return nil
+		return nil, nil
 	}
 	b.configMu.RLock()
 	config := b.config
 	b.configMu.RUnlock()
 
 	chains, err := admitCert(config, cert)
+	if errors.Is(err, errNoTrustedCA) {
+		return nil, err
+	}
 	if err != nil {
 		b.logger.Debug("introspect/admit: certificate not admitted", lgr.Err(err))
-		return nil
+		return nil, nil
 	}
-	return newAdmission(cert, chains, b.mountFacts)
+	return newAdmission(cert, chains, b.mountFacts), nil
 }

@@ -125,7 +125,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	// Extract expiration time
 	jwtExpiration, err := tokenExpiry(claims)
 	if err != nil {
-		b.logger.Warn("login failed: "+err.Error(), lgr.String("role", roleName))
+		b.logger.Warn("login failed: no valid exp claim in JWT", lgr.String("role", roleName), lgr.Err(err))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
 			Err:        errAuthFailed,

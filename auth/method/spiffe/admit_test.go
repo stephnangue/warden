@@ -21,6 +21,13 @@ import (
 // (either may be empty), marked internal as core marks it when internal is set.
 func admitRequest(t *testing.T, b *spiffeAuthBackend, bearer string, cert *x509.Certificate, internal bool) *logical.Response {
 	t.Helper()
+	resp, err := routeAdmit(b, bearer, cert, internal)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	return resp
+}
+
+func routeAdmit(b *spiffeAuthBackend, bearer string, cert *x509.Certificate, internal bool) (*logical.Response, error) {
 	httpReq := httptest.NewRequest(http.MethodGet, "/v1/auth/spiffe/introspect/admit", nil)
 	if bearer != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+bearer)
@@ -28,15 +35,12 @@ func admitRequest(t *testing.T, b *spiffeAuthBackend, bearer string, cert *x509.
 	if cert != nil {
 		httpReq = httpReq.WithContext(listener.WithForwardedClientCert(httpReq.Context(), cert))
 	}
-	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+	return b.HandleRequest(context.Background(), &logical.Request{
 		Operation:   logical.ReadOperation,
 		Path:        helper.AdmitPattern,
 		HTTPRequest: httpReq,
 		Internal:    internal,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	return resp
 }
 
 func admitted(t *testing.T, resp *logical.Response) *logical.Admission {
@@ -108,8 +112,9 @@ func TestAdmit_JWTSVID(t *testing.T) {
 	assert.Equal(t, "core", got.claims["team"])
 }
 
-// Without bound_audiences on the mount (or with no config at all), no JWT-SVID
-// is admitted; X.509-SVIDs still are.
+// Without bound_audiences on the mount (or with no config at all), the mount
+// cannot decide on a JWT-SVID: an error, which discovery reports as the mount's
+// warning. X.509-SVIDs are still admitted.
 func TestAdmit_JWTSVIDNeedsMountAudiences(t *testing.T) {
 	for name, raw := range map[string]map[string]any{
 		"no config":          nil,
@@ -118,7 +123,9 @@ func TestAdmit_JWTSVIDNeedsMountAudiences(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFactsFixture(t, raw)
 			token := f.jwt.sign(t, admitID, []string{"warden"}, time.Now().Add(time.Hour), nil)
-			assert.Nil(t, admitted(t, admitRequest(t, f.b, token, nil, true)))
+			resp, err := routeAdmit(f.b, token, nil, true)
+			assert.ErrorIs(t, err, errNoMountAudiences)
+			assert.Nil(t, resp)
 			assert.NotNil(t, admitted(t, admitRequest(t, f.b, "", f.svid(t, admitID), true)))
 		})
 	}
@@ -156,8 +163,13 @@ func TestAdmit_SVIDChoice(t *testing.T) {
 	assert.Nil(t, admitted(t, admitRequest(t, f.b, "", nil, true)), "no credential")
 }
 
+// With no trust bundle loaded the mount cannot decide: an error, which
+// discovery reports as the mount's warning.
 func TestAdmit_NoBundles(t *testing.T) {
 	b, _ := createTestBackend(t)
 	ca, caKey, _ := testCA(t)
-	assert.Nil(t, admitted(t, admitRequest(t, b, "", testSVID(t, ca, caKey, admitID), true)))
+	resp, err := routeAdmit(b, "", testSVID(t, ca, caKey, admitID), true)
+	assert.ErrorIs(t, err, errNoBundles)
+	assert.Nil(t, resp)
+	assert.Nil(t, admitted(t, admitRequest(t, b, "", nil, true)), "no credential: nothing to decide")
 }

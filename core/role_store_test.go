@@ -155,6 +155,22 @@ func TestRoles_NamespaceIsolation(t *testing.T) {
 	assert.Equal(t, "", r.Description)
 }
 
+// The snapshot's roles accessor lists one namespace's published roles, sorted,
+// sharing the published values.
+func TestRoleSnapshot_Roles(t *testing.T) {
+	c := createTestCore(t)
+	for _, name := range []string{"zeta", "alpha", "mid"} {
+		_, err := c.roleStore.Create(rootCtx(), &logical.Role{Name: name})
+		require.NoError(t, err)
+	}
+	snap := c.roleStore.snapshot.Load()
+	roles := snap.roles(namespace.RootNamespace.ID)
+	require.Len(t, roles, 3)
+	assert.Equal(t, []string{"alpha", "mid", "zeta"}, []string{roles[0].Name, roles[1].Name, roles[2].Name})
+	assert.Same(t, snap.lookup(namespace.RootNamespace.ID, "mid").role, roles[1], "shared, not copied")
+	assert.Nil(t, snap.roles("no-such-ns"))
+}
+
 func TestRoles_CAS(t *testing.T) {
 	c := createTestCore(t)
 	ctx := rootCtx()

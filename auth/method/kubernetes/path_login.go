@@ -139,7 +139,7 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 	}
 	rv, err := reviewWorkload(ctx, cfg, jwtStr, audiences)
 	if err != nil {
-		b.logger.Warn("kubernetes login: "+err.Error(), lgr.String("role", roleStr))
+		b.logger.Warn("kubernetes login: token review failed", lgr.String("role", roleStr), lgr.Err(err))
 		return logical.ErrorResponse(errAuthFailed), nil
 	}
 	status, saNamespace, saName, claims := rv.status, rv.namespace, rv.name, rv.claims

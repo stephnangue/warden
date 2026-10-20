@@ -95,10 +95,18 @@ func TestAdmit_NotAdmitted(t *testing.T) {
 	}
 }
 
+// A mount without a trusted CA cannot decide: an error, which discovery reports
+// as the mount's warning. Without a certificate there is nothing to decide.
 func TestAdmit_NoTrustedCA(t *testing.T) {
 	b, _ := createTestBackend(t)
 	root := issueCA(t, "Root", newFixtureKey(t), nil)
-	assert.Nil(t, admitted(t, admitRequest(t, b, agentLeaf(t, root, nil), true)))
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Operation: logical.ReadOperation, Path: helper.AdmitPattern, Internal: true,
+		HTTPRequest: newCertHTTPRequest(t, agentLeaf(t, root, nil)),
+	})
+	assert.ErrorIs(t, err, errNoTrustedCA)
+	assert.Nil(t, resp)
+	assert.Nil(t, admitted(t, admitRequest(t, b, nil, true)))
 }
 
 // The mount's principal_claim decides which field must be present.

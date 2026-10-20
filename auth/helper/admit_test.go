@@ -3,6 +3,7 @@ package helper
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -17,10 +18,11 @@ import (
 func TestAdmitPath(t *testing.T) {
 	var calls int
 	var adm *logical.Admission
-	p := AdmitPath(func(_ context.Context, _ *logical.Request, now time.Time) *logical.Admission {
+	var admitErr error
+	p := AdmitPath(func(_ context.Context, _ *logical.Request, now time.Time) (*logical.Admission, error) {
 		calls++
 		assert.False(t, now.IsZero())
-		return adm
+		return adm, admitErr
 	})
 	require.Equal(t, AdmitPattern, p.Pattern)
 	cb := p.Operations[logical.ReadOperation].(*framework.PathOperation).Callback
@@ -38,6 +40,13 @@ func TestAdmitPath(t *testing.T) {
 		resp, err := cb(ctx, &logical.Request{Internal: true}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, map[string]any{AdmittedKey: false}, resp.Data)
+	})
+	t.Run("could not decide", func(t *testing.T) {
+		admitErr = errors.New("no trusted CA certificates configured")
+		defer func() { admitErr = nil }()
+		resp, err := cb(ctx, &logical.Request{Internal: true}, nil)
+		assert.Equal(t, admitErr, err)
+		assert.Nil(t, resp)
 	})
 	t.Run("admitted", func(t *testing.T) {
 		adm = &logical.Admission{}

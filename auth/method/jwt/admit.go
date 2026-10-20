@@ -95,22 +95,26 @@ func admitToken(ctx context.Context, config *JWTAuthConfig, token string, now ti
 }
 
 // admit is the mount's helper.AdmitFunc: the bearer JWT admitted by
-// admitToken under the config in force, as an admission of this mount.
-// Safe for concurrent use: it takes the config under configMu and releases
-// it before validating, as login does.
-func (b *jwtAuthBackend) admit(ctx context.Context, req *logical.Request, now time.Time) *logical.Admission {
+// admitToken under the config in force, as an admission of this mount. An
+// unconfigured mount cannot decide, which is an error; a token that fails a
+// check is not admitted. Safe for concurrent use: it takes the config under
+// configMu and releases it before validating, as login does.
+func (b *jwtAuthBackend) admit(ctx context.Context, req *logical.Request, now time.Time) (*logical.Admission, error) {
 	token := extractJWTFromRequest(req)
 	if token == "" {
-		return nil
+		return nil, nil
 	}
 	b.configMu.RLock()
 	config := b.config
 	b.configMu.RUnlock()
 
 	claims, err := admitToken(ctx, config, token, now)
+	if errors.Is(err, errNotConfigured) {
+		return nil, err
+	}
 	if err != nil {
 		b.logger.Debug("introspect/admit: JWT not admitted", lgr.Err(err))
-		return nil
+		return nil, nil
 	}
-	return newAdmission(claims, token, b.mountFacts)
+	return newAdmission(claims, token, b.mountFacts), nil
 }

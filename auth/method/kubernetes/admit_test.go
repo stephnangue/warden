@@ -19,19 +19,23 @@ import (
 // internal as core marks it when internal is set.
 func admitRequest(t *testing.T, b *kubernetesAuthBackend, token string, internal bool) *logical.Response {
 	t.Helper()
+	resp, err := routeAdmit(b, token, internal)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	return resp
+}
+
+func routeAdmit(b *kubernetesAuthBackend, token string, internal bool) (*logical.Response, error) {
 	httpReq := httptest.NewRequest(http.MethodGet, "/v1/auth/kubernetes/introspect/admit", nil)
 	if token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+	return b.HandleRequest(context.Background(), &logical.Request{
 		Operation:   logical.ReadOperation,
 		Path:        helper.AdmitPattern,
 		HTTPRequest: httpReq,
 		Internal:    internal,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	return resp
 }
 
 func admitted(t *testing.T, resp *logical.Response) *logical.Admission {
@@ -125,9 +129,25 @@ func TestAdmit_ReviewerAudiencesAndCalls(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&fake.Calls), "the issuer pre-filter refuses before the review")
 }
 
-func TestAdmit_Unconfigured(t *testing.T) {
-	b, _ := newTestBackend(t)
-	assert.Nil(t, admitted(t, admitRequest(t, b, mintK8sSAJWT("https://kube", "default", "myapp"), true)))
+// An unconfigured mount, or one whose TokenReview cannot be made, cannot
+// decide: an error, which discovery reports as the mount's warning. A review
+// that is made and rejects the token is not an error.
+func TestAdmit_CannotDecide(t *testing.T) {
+	token := mintK8sSAJWT("https://kube", "default", "myapp")
+
+	b, ctx := newTestBackend(t)
+	_, err := routeAdmit(b, token, true)
+	assert.ErrorIs(t, err, errNotConfigured)
+
+	failing := newFakeAPIServer(t, fakeAPIServerOpts{Failures: 100, FailWithStatus: http.StatusForbidden})
+	require.NoError(t, b.setupConfig(ctx, map[string]any{"kubernetes_host": failing.URL, "tls_skip_verify": true}))
+	_, err = routeAdmit(b, token, true)
+	assert.ErrorIs(t, err, errTokenReviewCall)
+	assert.NotContains(t, err.Error(), "myapp", "the error names the mount's condition, not the credential")
+
+	rejecting := newFakeAPIServer(t, fakeAPIServerOpts{Response: tokenReviewStatus{Error: "token rejected"}})
+	require.NoError(t, b.setupConfig(ctx, map[string]any{"kubernetes_host": rejecting.URL, "tls_skip_verify": true}))
+	assert.Nil(t, admitted(t, admitRequest(t, b, token, true)))
 }
 
 // The mount's max_age is enforced at admission: a stale token and one without

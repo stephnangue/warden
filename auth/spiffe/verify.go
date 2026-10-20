@@ -3,6 +3,7 @@ package spiffe
 import (
 	"crypto/x509"
 	"fmt"
+	"strings"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -10,6 +11,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 
 	"github.com/stephnangue/warden/auth/helper"
+	jwtparse "github.com/stephnangue/warden/helper"
 )
 
 // VerifyX509SVID validates that certs (leaf first, optional intermediates) form a
@@ -79,6 +81,23 @@ func VerifyJWTSVIDToken(set *spiffebundle.Set, token string, audience []string) 
 		return nil, fmt.Errorf("an audience is required to validate a JWT-SVID")
 	}
 	return jwtsvid.ParseAndValidate(token, set, audience)
+}
+
+// IsJWTSVID reports whether token is a JWT whose unverified subject is a
+// SPIFFE ID: the bearer that is taken as a JWT-SVID, in preference to a
+// forwarded certificate (a mesh sidecar forwards one on most requests, which
+// must not shadow an explicitly presented JWT-SVID). The signature is not
+// checked here; VerifyJWTSVIDToken checks it.
+func IsJWTSVID(token string) bool {
+	if !strings.HasPrefix(token, "eyJ") {
+		return false
+	}
+	claims, err := jwtparse.ParseJWTClaimsUnverified(token)
+	if err != nil {
+		return false
+	}
+	sub, _ := claims["sub"].(string)
+	return strings.HasPrefix(sub, "spiffe://")
 }
 
 // CheckRoleBinding requires a verified SPIFFE ID to be in expectedTD and, when

@@ -27,11 +27,15 @@ const (
 var errAdmitInternal = logical.ErrForbidden(AdmitPattern + " is internal to Warden")
 
 // AdmitFunc verifies the credential req presents against the mount's
-// configuration at now and returns what it verified, or nil when the mount
-// does not admit it (no credential, an unconfigured mount, or any check
-// failing; the method logs why). It never logs in, mints a token, writes
-// storage or records the caller; MountPath is left for core to set.
-type AdmitFunc func(ctx context.Context, req *logical.Request, now time.Time) *logical.Admission
+// configuration at now and returns what it verified. (nil, nil) means the
+// mount does not admit the credential (none presented, or a check on the
+// credential failing; the method may log why), which the caller does not
+// report. An error means the mount could not decide (no configuration, no
+// trust anchors, the verifier unreachable), which the caller reports per
+// mount; its text names the mount's condition only, never a fact, claim or
+// group. It never logs in, mints a token, writes storage or records the
+// caller; MountPath is left for core to set.
+type AdmitFunc func(ctx context.Context, req *logical.Request, now time.Time) (*logical.Admission, error)
 
 // AdmitPath returns the introspect/admit path of an auth method whose
 // admission check is admit. The path refuses every request without
@@ -39,7 +43,8 @@ type AdmitFunc func(ctx context.Context, req *logical.Request, now time.Time) *l
 // HTTP caller, root included, is refused before admit runs. A mount must not
 // list it among its unauthenticated paths.
 //
-// The response's Data holds AdmittedKey and, when admitted, AdmissionKey.
+// The response's Data holds AdmittedKey and, when admitted, AdmissionKey. An
+// error from admit is returned as the request's error.
 func AdmitPath(admit AdmitFunc) *framework.Path {
 	return &framework.Path{
 		Pattern: AdmitPattern,
@@ -49,7 +54,10 @@ func AdmitPath(admit AdmitFunc) *framework.Path {
 					if !req.Internal {
 						return logical.ErrorResponse(errAdmitInternal), nil
 					}
-					adm := admit(ctx, req, time.Now())
+					adm, err := admit(ctx, req, time.Now())
+					if err != nil {
+						return nil, err
+					}
 					if adm == nil {
 						return &logical.Response{
 							StatusCode: http.StatusOK,
