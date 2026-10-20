@@ -19,8 +19,8 @@ func testGroup() *Group {
 			{"mount": {"auth/jwt/"}, "repo": {"acme/*"}},
 			{"mount": {"auth/k8s/"}, "workload": {"a", "b"}},
 		},
-		MaxAge:   10 * time.Minute,
-		Metadata: map[string]string{"owner": "platform"},
+		ValidUntil: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+		Metadata:   map[string]string{"owner": "platform"},
 	}
 }
 
@@ -62,6 +62,10 @@ func TestGroup_Hash(t *testing.T) {
 	same.ID, same.CreatedAt, same.UpdatedAt = "other-id", time.Now(), time.Now()
 	assert.Equal(t, base, same.Hash(), "ID and timestamps are not content")
 
+	zoned := testGroup()
+	zoned.ValidUntil = zoned.ValidUntil.In(time.FixedZone("UTC+2", 2*60*60))
+	assert.Equal(t, base, zoned.Hash(), "valid_until hashes as an instant, whatever its zone")
+
 	for name, mutate := range map[string]func(*Group){
 		"name":        func(g *Group) { g.Name = "x" },
 		"type":        func(g *Group) { g.Type = GroupTypeInternal },
@@ -69,7 +73,8 @@ func TestGroup_Hash(t *testing.T) {
 		"roles":       func(g *Group) { g.Roles = []string{"deploy"} },
 		"selector":    func(g *Group) { g.Rules[0]["repo"] = []string{"acme/x"} },
 		"rule order":  func(g *Group) { g.Rules[0], g.Rules[1] = g.Rules[1], g.Rules[0] },
-		"max_age":     func(g *Group) { g.MaxAge = time.Minute },
+		"valid_until": func(g *Group) { g.ValidUntil = g.ValidUntil.Add(time.Nanosecond) },
+		"no end":      func(g *Group) { g.ValidUntil = time.Time{} },
 		"metadata":    func(g *Group) { g.Metadata["owner"] = "x" },
 		"split value": func(g *Group) { g.Rules[1]["workload"] = []string{"ab"} },
 	} {

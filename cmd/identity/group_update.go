@@ -52,6 +52,8 @@ Usage: warden identity group update <name> [options]
 
       $ warden identity group update ci-deployers -roles=deploy,read-secrets
       $ warden identity group update ci-deployers -roles=""
+      $ warden identity group update ci-deployers -valid-until=2026-12-31T23:59:59Z
+      $ warden identity group update ci-deployers -valid-until=""
       $ warden identity group update ci-deployers \
           -rule='{"mount": ["auth/kubernetes/"], "workload": ["ci"]}'
 

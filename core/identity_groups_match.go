@@ -33,15 +33,16 @@ var testHookRuleMatch func()
 
 // membership returns adm's membership under the namespace groups gs at now.
 // The cached one is returned while it was computed from gs's generation and
-// the mount's naming in force, and none of its groups has aged out; otherwise
-// a new one is computed and cached. The fast path takes one atomic load of the
-// naming and one of the cache, does not allocate, and matches nothing.
+// the mount's naming in force, and none of its groups has passed its
+// valid_until; otherwise a new one is computed and cached. The fast path takes
+// one atomic load of the naming and one of the cache, does not allocate, and
+// matches nothing.
 //
 // Safe for concurrent use: two requests that both find the cache stale and
 // compute from the same snapshot and naming produce equal memberships, and the
 // compare-and-swap keeps one; each returns what it computed. Two that straddle
-// a max_age boundary may compute different ones, but the one kept never
-// outlives the boundary: its ValidUntil makes the first request past it
+// a group's valid_until may compute different ones, but the one kept never
+// outlives that instant: its ValidUntil makes the first request past it
 // compute again.
 func membership(adm *logical.Admission, gs *nsGroups, now time.Time) *logical.Membership {
 	n := adm.Mount.Load()
@@ -91,17 +92,10 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsGroups, n
 		}
 		g := gs.selecting[idx]
 
-		// A group with max_age admits only a credential that says when it was
-		// issued, for max_age after that; the bound is inclusive.
-		var until time.Time
-		if g.MaxAge > 0 {
-			if adm.IssuedAt.IsZero() {
-				continue
-			}
-			until = adm.IssuedAt.Add(g.MaxAge)
-			if now.After(until) {
-				continue
-			}
+		// A group grants through its valid_until, inclusive, and nothing after.
+		until := g.Group.ValidUntil
+		if !until.IsZero() && now.After(until) {
+			continue
 		}
 		if !matchesAny(g, mc) {
 			continue

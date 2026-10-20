@@ -27,7 +27,7 @@ Usage: warden identity group list [options]
   Output honors the global -output flag:
     table    one row per group (default for TTY)
     json     [{"name", "type", "description", "roles", "rules",
-             "rule_count", "selector_count", "max_age", "metadata",
+             "rule_count", "selector_count", "valid_until", "metadata",
              "hash"}, ...]
     ndjson   one group per line
 
@@ -93,7 +93,7 @@ func projectGroups(groups []*api.Group) []map[string]any {
 			"rules":          rules,
 			"rule_count":     g.RuleCount,
 			"selector_count": g.SelectorCount,
-			"max_age":        g.MaxAge,
+			"valid_until":    g.ValidUntil,
 			"metadata":       metadata,
 			"hash":           g.Hash,
 		})
@@ -114,9 +114,9 @@ func printGroupsTable(items []map[string]any) {
 			cell(it["roles"]),
 			cell(it["rule_count"]),
 			cell(it["selector_count"]),
-			cell(it["max_age"]),
+			cell(it["valid_until"]),
 			cell(it["description"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Type", "Roles", "Rules", "Selectors", "Max Age", "Description"}, rows)
+	helpers.PrintTable([]string{"Name", "Type", "Roles", "Rules", "Selectors", "Valid Until", "Description"}, rows)
 }

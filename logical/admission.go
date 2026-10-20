@@ -80,10 +80,10 @@ func (a *Admission) LoadMembership() *Membership {
 // CompareAndSwapMembership caches next if the cached membership is still old,
 // and reports whether it did. Two requests that computed a membership from the
 // same snapshot and naming race benignly: their results are equal, and either
-// may win. Two that straddled a max_age boundary may differ, one still holding
-// a group the other dropped; whichever is kept, its ValidUntil is no later than
-// that boundary, so the first request past it computes again: the race heals
-// itself.
+// may win. Two that straddled a group's valid_until may differ, one still
+// holding the group the other dropped; whichever is kept, its ValidUntil is no
+// later than that instant, so the first request past it computes again: the
+// race heals itself.
 func (a *Admission) CompareAndSwapMembership(old, next *Membership) bool {
 	if a == nil {
 		return false
@@ -105,9 +105,9 @@ type Membership struct {
 	// mapping generation.
 	Naming *MountNaming
 
-	// ValidUntil is the earliest IssuedAt+max_age among the matched groups
-	// that set max_age, after which one of them stops matching; zero when
-	// none does.
+	// ValidUntil is the earliest valid_until among the matched groups that set
+	// one, after which that group stops granting; zero when none does. The
+	// membership holds while now <= ValidUntil.
 	ValidUntil time.Time
 
 	// Groups are the names of the matched groups, sorted. Never nil, and shared:

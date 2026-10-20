@@ -615,8 +615,9 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 	if len(g.Metadata) == 0 {
 		g.Metadata = nil
 	}
-	if g.MaxAge < 0 {
-		return nil, nil, logical.ErrBadRequest("max_age must not be negative")
+	// Stored as an instant in UTC, as it renders.
+	if !g.ValidUntil.IsZero() {
+		g.ValidUntil = g.ValidUntil.Round(0).UTC()
 	}
 
 	roles, err := normalizeGroupRoles(g.Roles)
@@ -638,6 +639,9 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 	}
 
 	var warnings []string
+	if !g.ValidUntil.IsZero() && time.Now().After(g.ValidUntil) {
+		warnings = append(warnings, "valid_until is in the past; the group grants nothing")
+	}
 	if s.core.roleStore != nil {
 		roleSnap := s.core.roleStore.snapshot.Load()
 		for _, r := range g.Roles {
@@ -672,37 +676,31 @@ func normalizeGroupRoles(roles []string) ([]string, error) {
 // its namespace.
 type authMountFacts struct {
 	path  string   // namespace-relative, "auth/<path>/": what "mount" answers
-	typ   string   // the auth method
 	names []string // the fact names the mount answers; nil when it publishes none
 }
-
-// noIssuedAtMethods are the auth methods whose admissions never carry an issue
-// time, so a group max_age never admits through them.
-var noIssuedAtMethods = map[string]bool{"cert": true}
 
 // namespaceAuthMountFacts lists the auth mounts of the namespace in ctx with
 // the fact names each answers (logical.FactsProvider, reached through the
 // router). Called at group write only, never on the request path.
 func (c *Core) namespaceAuthMountFacts(ctx context.Context) []authMountFacts {
-	type mountRef struct{ path, typ string }
-	var refs []mountRef
+	var paths []string
 	c.authLock.RLock()
 	if c.auth != nil {
 		if entries, err := c.auth.findAllNamespaceMounts(ctx); err == nil {
 			for _, e := range entries {
 				if !e.Tainted {
-					refs = append(refs, mountRef{path: authRoutePrefix + e.Path, typ: e.Type})
+					paths = append(paths, authRoutePrefix+e.Path)
 				}
 			}
 		}
 	}
 	c.authLock.RUnlock()
 
-	out := make([]authMountFacts, 0, len(refs))
-	for _, r := range refs {
-		m := authMountFacts{path: r.path, typ: r.typ}
+	out := make([]authMountFacts, 0, len(paths))
+	for _, path := range paths {
+		m := authMountFacts{path: path}
 		if c.router != nil {
-			if fp, ok := c.router.MatchingBackend(ctx, r.path).(logical.FactsProvider); ok {
+			if fp, ok := c.router.MatchingBackend(ctx, path).(logical.FactsProvider); ok {
 				m.names = fp.FactNames()
 			}
 		}
@@ -785,23 +783,6 @@ func ruleWarnings(g *logical.Group, mounts []authMountFacts) []string {
 			if !produced {
 				warnings = append(warnings, fmt.Sprintf(
 					"rules[%d]: no auth mount the rule lists produces fact %q; its selector cannot match until one maps it", i, name))
-			}
-		}
-
-		if g.MaxAge > 0 {
-			allNoIssuedAt := true
-			var paths []string
-			for j := range listed {
-				paths = append(paths, mounts[j].path)
-				if !noIssuedAtMethods[mounts[j].typ] {
-					allNoIssuedAt = false
-				}
-			}
-			if allNoIssuedAt {
-				slices.Sort(paths)
-				warnings = append(warnings, fmt.Sprintf(
-					"rules[%d]: max_age never matches this rule: its mounts (%s) admit credentials that carry no issue time",
-					i, strings.Join(paths, ", ")))
 			}
 		}
 	}

@@ -41,7 +41,7 @@ const groupSchemaDoc = `{"data":{"openapi":{"paths":{"/sys/identity/group/{name}
 		"description":{"type":"string"},
 		"roles":{"type":"array"},
 		"rules":{"type":"array"},
-		"max_age":{"type":"integer","format":"seconds"},
+		"valid_until":{"type":"string"},
 		"metadata":{"type":"object"},
 		"members":{"type":"array"},
 		"link":{"type":"object"},
@@ -61,7 +61,7 @@ const cannedGroup = `{"data":{
 	],
 	"rule_count":2,
 	"selector_count":5,
-	"max_age":"10m0s",
+	"valid_until":"2026-12-31T23:59:59Z",
 	"metadata":{},
 	"hash":"h1",
 	"created_at":"2026-10-20T10:00:00Z",
@@ -167,7 +167,7 @@ func TestGroupCreate_JSON(t *testing.T) {
 				"repo": ["acme/*"]
 			}
 		],
-		"max_age": "10m"
+		"valid_until": "2026-12-31T23:59:59Z"
 	}`
 
 	require.NoError(t, runGroupCreate(cmd, []string{"ci-deployers"}))
@@ -175,10 +175,10 @@ func TestGroupCreate_JSON(t *testing.T) {
 	assert.Equal(t, http.MethodPost, req.method)
 	assert.Equal(t, "/v1/sys/identity/group/ci-deployers", req.path)
 	assert.Equal(t, map[string]any{
-		"type":    "virtual",
-		"roles":   []any{"deploy"},
-		"rules":   []any{map[string]any{"mount": []any{"auth/github-oidc/"}, "repo": []any{"acme/*"}}},
-		"max_age": "10m",
+		"type":        "virtual",
+		"roles":       []any{"deploy"},
+		"rules":       []any{map[string]any{"mount": []any{"auth/github-oidc/"}, "repo": []any{"acme/*"}}},
+		"valid_until": "2026-12-31T23:59:59Z",
 	}, req.body)
 
 	out := decodeOut(t, stdout)
@@ -196,7 +196,7 @@ func TestGroupCreate_TypedFlags(t *testing.T) {
 	require.NoError(t, cmd.Flags().Set("roles", "deploy,read"))
 	require.NoError(t, cmd.Flags().Set("rule", `{"mount": ["auth/k8s/"], "workload": ["a"]}`))
 	require.NoError(t, cmd.Flags().Set("rule", `{"mount": ["auth/cert/"], "cn": ["x,y"]}`))
-	require.NoError(t, cmd.Flags().Set("max-age", "5m"))
+	require.NoError(t, cmd.Flags().Set("valid-until", "2026-12-31T23:59:59Z"))
 	require.NoError(t, cmd.Flags().Set("metadata", "owner=platform"))
 
 	require.NoError(t, runGroupCreate(cmd, []string{"g"}))
@@ -207,10 +207,20 @@ func TestGroupCreate_TypedFlags(t *testing.T) {
 			map[string]any{"mount": []any{"auth/k8s/"}, "workload": []any{"a"}},
 			map[string]any{"mount": []any{"auth/cert/"}, "cn": []any{"x,y"}},
 		},
-		"max_age":  "5m",
-		"metadata": map[string]any{"owner": "platform"},
+		"valid_until": "2026-12-31T23:59:59Z",
+		"metadata":    map[string]any{"owner": "platform"},
 	}, f.last(t).body, "each -rule is one rule; a comma inside a value stays")
 	assert.Nil(t, cmd.Flags().Lookup("selector"), "the flag is -rule; -selector is gone")
+	assert.Nil(t, cmd.Flags().Lookup("max-age"), "-max-age is gone")
+}
+
+// TestGroupUpdate_ClearValidUntil: an empty -valid-until is sent, to clear it.
+func TestGroupUpdate_ClearValidUntil(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusOK, cannedGroup)
+	cmd := freshUpdateCmd()
+	require.NoError(t, cmd.Flags().Set("valid-until", ""))
+	require.NoError(t, runGroupUpdate(cmd, []string{"g"}))
+	assert.Equal(t, map[string]any{"valid_until": ""}, f.last(t).body)
 }
 
 // TestGroupRuleFlag_ScalarValue: a -rule selector value written as one string
@@ -265,15 +275,24 @@ func TestGroupCreate_DryRun(t *testing.T) {
 	helpers.SetDryRun(true)
 
 	cmd := freshCreateCmd()
-	createJSON = `{"type": "virtual", "roles": ["deploy"], "max_age": "10m"}`
-	require.NoError(t, runGroupCreate(cmd, []string{"g"}), "a duration string passes as the server takes it")
+	createJSON = `{"type": "virtual", "roles": ["deploy"], "valid_until": "2026-12-31T23:59:59Z"}`
+	require.NoError(t, runGroupCreate(cmd, []string{"g"}))
 	out := decodeOut(t, stdout)
 	assert.Equal(t, true, out["validated"])
 	assert.Zero(t, f.count())
 
+	// max_age is no field of the group: a dry run flags it.
+	cmd = freshCreateCmd()
+	createJSON = `{"type": "virtual", "max_age": "10m"}`
+	err := runGroupCreate(cmd, []string{"g"})
+	require.Error(t, err)
+	assert.True(t, helpers.IsValidationError(err))
+	assert.Contains(t, err.Error(), `"max_age"`)
+	assert.Zero(t, f.count())
+
 	cmd = freshCreateCmd()
 	createJSON = `{"type": "virtual", "rule": []}`
-	err := runGroupCreate(cmd, []string{"g"})
+	err = runGroupCreate(cmd, []string{"g"})
 	require.Error(t, err)
 	assert.True(t, helpers.IsValidationError(err))
 	assert.Contains(t, err.Error(), `did you mean "rules"`)
@@ -356,7 +375,7 @@ const listedGroups = `{"data":{
 	"keys":["ci-deployers"],
 	"groups":[{"name":"ci-deployers","type":"virtual","roles":["deploy"],
 		"rules":[{"mount":["auth/k8s/"],"workload":["a"]}],"rule_count":1,"selector_count":2,
-		"max_age":"","hash":"h1"}]
+		"valid_until":"2026-12-31T23:59:59Z","hash":"h1"}]
 }}`
 
 // TestGroupList_JSON: -o json is a plain array of groups; -role filters.
@@ -373,6 +392,8 @@ func TestGroupList_JSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &items), "an array: %s", stdout.String())
 	require.Len(t, items, 1)
 	assert.Equal(t, "ci-deployers", items[0]["name"])
+	assert.Equal(t, "2026-12-31T23:59:59Z", items[0]["valid_until"])
+	assert.NotContains(t, items[0], "max_age")
 	assert.Equal(t, []any{map[string]any{"mount": []any{"auth/k8s/"}, "workload": []any{"a"}}}, items[0]["rules"])
 	assert.Equal(t, float64(1), items[0]["rule_count"])
 	assert.Equal(t, float64(2), items[0]["selector_count"])
@@ -411,8 +432,10 @@ func TestGroupList_Table(t *testing.T) {
 	helpers.SetOutputFormat("table")
 	out := captureStdout(t, func() { require.NoError(t, runGroupList(GroupListCmd, nil)) })
 	assert.Contains(t, out, "ci-deployers")
+	assert.Contains(t, strings.ToUpper(out), "VALID UNTIL")
+	assert.Contains(t, out, "2026-12-31T23:59:59Z")
+	assert.NotContains(t, strings.ToUpper(out), "MAX AGE")
 	assert.NotContains(t, out, "groups ")
-	assert.NotContains(t, out, "/")
 }
 
 const usageJSON = `{"data":{
@@ -472,7 +495,7 @@ func TestPrintGroupTable(t *testing.T) {
 			},
 			"rule_count":     float64(2),
 			"selector_count": float64(5),
-			"max_age":        "10m0s",
+			"valid_until":    "2026-12-31T23:59:59Z",
 		})
 	})
 
@@ -480,6 +503,7 @@ func TestPrintGroupTable(t *testing.T) {
 	assert.Contains(t, out, "#1  mount=auth/k8s/|auth/spiffe/  workload=a|b")
 	assert.Contains(t, out, "Rule Count")
 	assert.Contains(t, out, "Selector Count")
-	assert.Contains(t, out, "10m0s")
+	assert.Contains(t, out, "Valid Until")
+	assert.Contains(t, out, "2026-12-31T23:59:59Z")
 	assert.NotContains(t, out, "Description")
 }

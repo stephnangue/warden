@@ -71,8 +71,8 @@ func deployersBody() map[string]any {
 				"repo":  []any{"acme/*"},
 			},
 		},
-		"max_age":  "10m",
-		"metadata": map[string]any{"owner": "platform"},
+		"valid_until": "2099-12-31T23:59:59+02:00",
+		"metadata":    map[string]any{"owner": "platform"},
 	}
 }
 
@@ -99,7 +99,8 @@ func TestGroups_CRUD(t *testing.T) {
 		"rules render as written")
 	assert.Equal(t, 1, resp.Data["rule_count"])
 	assert.Equal(t, 2, resp.Data["selector_count"], "mount and repo")
-	assert.Equal(t, "10m0s", resp.Data["max_age"])
+	assert.Equal(t, "2099-12-31T21:59:59Z", resp.Data["valid_until"], "stored and rendered as the same instant in UTC")
+	assert.NotContains(t, resp.Data, "max_age")
 	assert.Equal(t, map[string]string{"owner": "platform"}, resp.Data["metadata"])
 	assert.NotEmpty(t, resp.Data["id"])
 	h1, _ := resp.Data["hash"].(string)
@@ -117,12 +118,12 @@ func TestGroups_CRUD(t *testing.T) {
 
 	// An update replaces what it names and keeps the rest, type included.
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/deployers", map[string]any{
-		"roles":   []any{},
-		"max_age": 0,
+		"roles":       []any{},
+		"valid_until": "",
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	assert.Equal(t, []string{}, resp.Data["roles"])
-	assert.Equal(t, "", resp.Data["max_age"])
+	assert.Equal(t, "", resp.Data["valid_until"], "an empty valid_until clears it")
 	assert.Equal(t, "virtual", resp.Data["type"])
 	assert.Equal(t, "CI deployers", resp.Data["description"])
 	assert.Equal(t, id, resp.Data["id"], "the ID never changes")
@@ -459,17 +460,6 @@ func TestGroups_FactNameWarnings(t *testing.T) {
 		{"mount": {"auth/k8s/"}, "kind": {"robot"}},
 	}}), `rules[0]: the "kind" selector's value "robot" is neither "agent" nor "human" and never matches`)
 
-	// max_age on a rule that lists only cert mounts warns; with a mount that
-	// carries an issue time it does not.
-	assert.Equal(t, []string{
-		`rules[0]: max_age never matches this rule: its mounts (auth/cert/) admit credentials that carry no issue time`,
-	}, warn(&logical.Group{MaxAge: time.Minute, Rules: []logical.GroupRule{
-		{"mount": {"auth/cert/"}, "cn": {"x"}},
-	}}))
-	assert.Empty(t, warn(&logical.Group{MaxAge: time.Minute, Rules: []logical.GroupRule{
-		{"mount": {"auth/cert/", "auth/k8s/"}, "workload": {"x"}},
-	}}))
-
 	// Warnings are indexed by rule.
 	w := warn(&logical.Group{Rules: []logical.GroupRule{
 		{"mount": {"auth/k8s/"}, "workload": {"x"}},
@@ -478,6 +468,93 @@ func TestGroups_FactNameWarnings(t *testing.T) {
 	assert.Equal(t, []string{
 		`rules[1]: no auth mount the rule lists produces fact "repo"; its selector cannot match until one maps it`,
 	}, w)
+}
+
+// TestGroups_ValidUntil: valid_until is an RFC 3339 instant, stored in UTC; a
+// past one is stored with a warning; an empty one clears it; anything else is
+// refused; max_age is no field any more.
+func TestGroups_ValidUntil(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	pastWarning := "valid_until is in the past; the group grants nothing"
+
+	future := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	body := deployersBody()
+	body["valid_until"] = future.Format(time.RFC3339)
+	resp := groupRequest(t, c, logical.CreateOperation, "group/g", body)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
+	assert.NotContains(t, respWarnings(resp), pastWarning)
+	g, _, err := c.identityStore.GetGroup(ctx, "g")
+	require.NoError(t, err)
+	assert.True(t, future.Equal(g.ValidUntil))
+	assert.Equal(t, time.UTC, g.ValidUntil.Location())
+
+	// A past value is stored, with a warning.
+	past := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": past.Format(time.RFC3339)})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Contains(t, respWarnings(resp), pastWarning)
+	assert.Equal(t, past.Format(time.RFC3339), resp.Data["valid_until"])
+
+	// Sub-second precision survives a round trip.
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": "2099-01-02T03:04:05.123456789Z"})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, "2099-01-02T03:04:05.123456789Z", resp.Data["valid_until"])
+
+	// Clearing it.
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": ""})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	g, _, err = c.identityStore.GetGroup(ctx, "g")
+	require.NoError(t, err)
+	assert.True(t, g.ValidUntil.IsZero())
+
+	for _, bad := range []string{"tomorrow", "2026-12-31", "10m", "1767225599"} {
+		resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": bad})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, bad)
+		assert.Contains(t, resp.Err.Error(), "valid_until must be an RFC 3339 timestamp", bad)
+	}
+
+	// max_age is ignored as an unrecognised field, and changes nothing.
+	_, hash, err := c.identityStore.GetGroup(ctx, "g")
+	require.NoError(t, err)
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"max_age": "10m"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Warnings, "Endpoint ignored these unrecognized parameters: [max_age]")
+	_, hash2, err := c.identityStore.GetGroup(ctx, "g")
+	require.NoError(t, err)
+	assert.Equal(t, hash, hash2)
+
+	// The value survives a reload.
+	at := time.Date(2099, 6, 1, 12, 0, 0, 0, time.UTC)
+	_, err = c.identityStore.UpdateGroup(ctx, &logical.Group{Name: "g", Type: logical.GroupTypeVirtual,
+		Rules: []logical.GroupRule{{"mount": {"auth/jwt/"}}}, ValidUntil: at}, "")
+	require.NoError(t, err)
+	c.teardownIdentityStore()
+	require.NoError(t, c.setupIdentityStore(ctx, false))
+	g, _, err = c.identityStore.GetGroup(ctx, "g")
+	require.NoError(t, err)
+	assert.True(t, at.Equal(g.ValidUntil))
+	assert.True(t, at.Equal(c.identityStore.namespaceGroups(namespace.RootNamespaceID).byName["g"].ValidUntil),
+		"the compiled group carries it")
+}
+
+// TestGroups_ValidUntilThroughMembership: a stored group grants through its
+// valid_until and not a nanosecond after, to a cached admission.
+func TestGroups_ValidUntilThroughMembership(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	end := time.Now().Add(time.Hour).UTC().Round(0)
+	_, err := c.identityStore.CreateGroup(ctx, &logical.Group{Name: "g", Type: logical.GroupTypeVirtual,
+		Roles: []string{"deploy"}, Rules: []logical.GroupRule{{"mount": {"auth/jwt/"}, "sub": {"a"}}}, ValidUntil: end})
+	require.NoError(t, err)
+	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a"}, time.Time{})
+	gs := c.identityStore.namespaceGroups(namespace.RootNamespaceID)
+
+	m := membership(adm, gs, end)
+	assert.Contains(t, m.Roles, "deploy", "granted at valid_until")
+	m = membership(adm, gs, end.Add(time.Nanosecond))
+	assert.NotContains(t, m.Roles, "deploy", "refused a nanosecond after")
+	assert.Empty(t, m.Groups)
 }
 
 func TestGroups_Caps(t *testing.T) {
@@ -495,10 +572,6 @@ func TestGroups_Caps(t *testing.T) {
 
 	g = virtualGroup("m")
 	g.Metadata = map[string]string{"": "v"}
-	_, err = c.identityStore.CreateGroup(ctx, g)
-	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
-	g = virtualGroup("m")
-	g.MaxAge = -time.Second
 	_, err = c.identityStore.CreateGroup(ctx, g)
 	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
 

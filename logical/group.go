@@ -100,8 +100,8 @@ func (g *Group) SelectorCount() int {
 // Group grants namespace roles to its members. Roles lists the roles membership
 // grants, by bare name; a name with no role behind it grants nothing until the
 // role exists. How a caller becomes a member depends on Type: a virtual group
-// matches the caller's verified facts against its Rules and, when MaxAge is
-// set, requires a credential issued no longer than MaxAge ago.
+// matches the caller's verified facts against its Rules. A group with a
+// ValidUntil grants while now <= ValidUntil, and nothing after.
 //
 // A *Group published by the group store is never written again: a write builds
 // a new value and publishes it, so any number of readers share one without a
@@ -113,7 +113,7 @@ type Group struct {
 	Description string            `json:"description,omitempty"`
 	Roles       []string          `json:"roles"` // sorted, deduplicated
 	Rules       []GroupRule       `json:"rules,omitempty"`
-	MaxAge      time.Duration     `json:"max_age,omitempty"`
+	ValidUntil  time.Time         `json:"valid_until,omitzero"` // zero: no end
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
@@ -139,7 +139,7 @@ func (g *Group) Clone() *Group {
 }
 
 // Hash identifies the group's content: two groups with the same name, type,
-// roles, rules, max_age and metadata hash alike, whenever they were
+// roles, rules, valid_until and metadata hash alike, whenever they were
 // written. A writer that read a group passes its hash back to make the write
 // conditional on nothing having changed since. The ID and the timestamps are
 // not part of it.
@@ -167,7 +167,12 @@ func (g *Group) Hash() string {
 			list(r[name])
 		}
 	}
-	fmt.Fprintf(h, "%d;", int64(g.MaxAge))
+	// The instant only, whatever the zone it was written in.
+	if g.ValidUntil.IsZero() {
+		field("")
+	} else {
+		field(g.ValidUntil.UTC().Format(time.RFC3339Nano))
+	}
 	keys := slices.Sorted(maps.Keys(g.Metadata))
 	fmt.Fprintf(h, "%d:", len(keys))
 	for _, k := range keys {

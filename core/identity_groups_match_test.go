@@ -44,8 +44,11 @@ func rule(kv ...any) logical.GroupRule {
 	return s
 }
 
-func group(name string, roles []string, maxAge time.Duration, rules ...logical.GroupRule) *logical.Group {
-	return &logical.Group{Name: name, Roles: roles, MaxAge: maxAge, Rules: rules}
+// noEnd is a group's valid_until when it has none.
+var noEnd time.Time
+
+func group(name string, roles []string, validUntil time.Time, rules ...logical.GroupRule) *logical.Group {
+	return &logical.Group{Name: name, Roles: roles, ValidUntil: validUntil, Rules: rules}
 }
 
 // groupAdmission admits claims through a jwt-like mount at mountPath that maps
@@ -95,53 +98,53 @@ func TestCompute_Rules(t *testing.T) {
 		want   []string
 	}{
 		{"exact match", jwt, "", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "repo", []string{"acme/infra"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "repo", []string{"acme/infra"})),
 		}, []string{"g"}},
 		{"glob value", jwt, "", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "repo", []string{"acme/*"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "repo", []string{"acme/*"})),
 		}, []string{"g"}},
 		{"AND across names fails on one", jwt, "", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "repo", []string{"acme/infra"}, "sub", []string{"other"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "repo", []string{"acme/infra"}, "sub", []string{"other"})),
 		}, nil},
 		{"any-of within a name", jwt, "", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "sub", []string{"other", "agent-1"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "sub", []string{"other", "agent-1"})),
 		}, []string{"g"}},
 		{"OR across rules", jwt, "", iat, []*logical.Group{
-			group("g", nil, 0,
+			group("g", nil, noEnd,
 				rule("mount", []string{jwt}, "sub", []string{"nope"}),
 				rule("mount", []string{jwt}, "repo", []string{"acme/infra"})),
 		}, []string{"g"}},
 		{"mount pin excludes another mount", "auth/other/", "", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
 		}, nil},
 		{"mount pin lists several", "auth/other/", "", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt, "auth/other/"}, "sub", []string{"agent-1"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt, "auth/other/"}, "sub", []string{"agent-1"})),
 		}, []string{"g"}},
 		{"unmapped claim is invisible", jwt, "", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "unmapped", []string{"x"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "unmapped", []string{"x"})),
 		}, nil},
 		{"kind agent", jwt, "agent", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "kind", []string{"agent"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "kind", []string{"agent"})),
 		}, []string{"g"}},
 		{"kind human excluded", jwt, "human", iat, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "kind", []string{"agent"})),
+			group("g", nil, noEnd, rule("mount", []string{jwt}, "kind", []string{"agent"})),
 		}, nil},
-		{"max_age exactly reached passes", jwt, "", iat, []*logical.Group{
-			group("g", nil, 10*time.Minute, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
+		{"valid_until exactly now grants", jwt, "", iat, []*logical.Group{
+			group("g", nil, now, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
 		}, []string{"g"}},
-		{"max_age exceeded by 1ns fails", jwt, "", iat.Add(-time.Nanosecond), []*logical.Group{
-			group("g", nil, 10*time.Minute, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
+		{"valid_until 1ns past refuses", jwt, "", iat, []*logical.Group{
+			group("g", nil, now.Add(-time.Nanosecond), rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
 		}, nil},
-		{"max_age with no issue time fails", jwt, "", time.Time{}, []*logical.Group{
-			group("g", nil, time.Hour, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
-		}, nil},
-		{"no max_age with no issue time passes", jwt, "", time.Time{}, []*logical.Group{
-			group("g", nil, 0, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
+		{"valid_until ahead grants", jwt, "", iat, []*logical.Group{
+			group("g", nil, now.Add(time.Hour), rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
+		}, []string{"g"}},
+		{"no issue time is no concern of groups", jwt, "", time.Time{}, []*logical.Group{
+			group("g", nil, now.Add(time.Hour), rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
 		}, []string{"g"}},
 		{"groups come out sorted", jwt, "", iat, []*logical.Group{
-			group("zeta", nil, 0, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
-			group("alpha", nil, 0, rule("mount", []string{"**"}, "sub", []string{"agent-1"})),
-			group("mid", nil, 0, rule("mount", []string{"auth/*/"}, "sub", []string{"agent-1"})),
+			group("zeta", nil, noEnd, rule("mount", []string{jwt}, "sub", []string{"agent-1"})),
+			group("alpha", nil, noEnd, rule("mount", []string{"**"}, "sub", []string{"agent-1"})),
+			group("mid", nil, noEnd, rule("mount", []string{"auth/*/"}, "sub", []string{"agent-1"})),
 		}, []string{"alpha", "mid", "zeta"}},
 	}
 	for _, tc := range cases {
@@ -166,19 +169,21 @@ func TestCompute_Rules(t *testing.T) {
 
 func TestCompute_GrantsAndValidUntil(t *testing.T) {
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	iat := now.Add(-time.Minute)
-	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a"}, iat)
+	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a"}, time.Time{})
 	match := rule("mount", []string{"auth/jwt/"}, "sub", []string{"a"})
 	gs := testNS(t, 1,
-		group("b-ten", []string{"deploy", "read"}, 10*time.Minute, match),
-		group("a-five", []string{"read"}, 5*time.Minute, match),
-		group("c-none", []string{"write"}, 0, match),
-		group("d-miss", []string{"admin"}, 0, rule("mount", []string{"auth/jwt/"}, "sub", []string{"z"})),
+		group("b-ten", []string{"deploy", "read"}, now.Add(10*time.Minute), match),
+		group("a-five", []string{"read"}, now.Add(5*time.Minute), match),
+		group("c-none", []string{"write"}, noEnd, match),
+		group("d-miss", []string{"admin"}, now.Add(time.Minute), rule("mount", []string{"auth/jwt/"}, "sub", []string{"z"})),
+		group("e-past", []string{"old"}, now.Add(-time.Minute), match),
 	)
 	m := compute(adm, adm.Mount.Load(), gs, now)
 
-	assert.Equal(t, []string{"a-five", "b-ten", "c-none"}, m.Groups)
-	assert.Equal(t, iat.Add(5*time.Minute), m.ValidUntil, "the earliest bound among matched groups with max_age")
+	assert.Equal(t, []string{"a-five", "b-ten", "c-none"}, m.Groups, "a group past its valid_until is not matched")
+	assert.Equal(t, now.Add(5*time.Minute), m.ValidUntil,
+		"the earliest valid_until among matched groups; an unmatched group's does not count")
+	assert.NotContains(t, m.Roles, "old")
 	require.Len(t, m.Roles, 3)
 	assert.Equal(t, logical.GroupGrant{Group: "a-five", Label: "group:a-five"}, m.Roles["read"],
 		"a role two groups grant is credited to the first by name")
@@ -190,8 +195,8 @@ func TestCompute_GrantsAndValidUntil(t *testing.T) {
 	cg := gs.byName["b-ten"]
 	assert.Equal(t, unsafe.StringData(cg.grants[0].grant.Label), unsafe.StringData(m.Roles["deploy"].Label))
 
-	// No max_age among the matched groups: no bound.
-	m = compute(adm, adm.Mount.Load(), testNS(t, 1, group("c", nil, 0, match)), now)
+	// No valid_until among the matched groups: no bound.
+	m = compute(adm, adm.Mount.Load(), testNS(t, 1, group("c", nil, noEnd, match)), now)
 	assert.True(t, m.ValidUntil.IsZero())
 	assert.Nil(t, m.Roles)
 }
@@ -216,7 +221,7 @@ func TestCompute_AllocationsDoNotGrowWithRules(t *testing.T) {
 	miss := func(count int) *nsGroups {
 		groups := make([]*logical.Group, count)
 		for i := range groups {
-			groups[i] = group(fmt.Sprintf("g%03d", i), nil, 0, rule("mount", []string{"auth/jwt/"}, "sub", []string{"nope"}))
+			groups[i] = group(fmt.Sprintf("g%03d", i), nil, noEnd, rule("mount", []string{"auth/jwt/"}, "sub", []string{"nope"}))
 		}
 		return testNS(t, 1, groups...)
 	}
@@ -230,13 +235,13 @@ func TestCompute_AllocationsDoNotGrowWithRules(t *testing.T) {
 func TestMountIndex(t *testing.T) {
 	now := time.Now()
 	gs := testNS(t, 1,
-		group("exact", nil, 0, rule("mount", []string{"auth/k8s/"}, "sub", []string{"a"})),
-		group("glob", nil, 0, rule("mount", []string{"auth/k8s-*/"}, "sub", []string{"a"})),
-		group("any", nil, 0, rule("mount", []string{"**"}, "sub", []string{"a"})),
-		group("two-rules", nil, 0,
+		group("exact", nil, noEnd, rule("mount", []string{"auth/k8s/"}, "sub", []string{"a"})),
+		group("glob", nil, noEnd, rule("mount", []string{"auth/k8s-*/"}, "sub", []string{"a"})),
+		group("any", nil, noEnd, rule("mount", []string{"**"}, "sub", []string{"a"})),
+		group("two-rules", nil, noEnd,
 			rule("mount", []string{"auth/jwt/"}, "sub", []string{"a"}),
 			rule("mount", []string{"auth/k8s/", "auth/k8s/"}, "sub", []string{"a"})),
-		group("escaped", nil, 0, rule("mount", []string{`auth/we\*ird/`}, "sub", []string{"a"})),
+		group("escaped", nil, noEnd, rule("mount", []string{`auth/we\*ird/`}, "sub", []string{"a"})),
 	)
 	names := func(mount string) []string {
 		var out []string
@@ -264,7 +269,7 @@ func TestMountIndex(t *testing.T) {
 	assert.Equal(t, []string{"any", "two-rules"}, m.Groups)
 
 	// The index's own slice is returned when no pattern adds to it.
-	plain := testNS(t, 1, group("e", nil, 0, rule("mount", []string{"auth/k8s/"}, "sub", []string{"a"})))
+	plain := testNS(t, 1, group("e", nil, noEnd, rule("mount", []string{"auth/k8s/"}, "sub", []string{"a"})))
 	assert.Equal(t, unsafe.SliceData(plain.byMount["auth/k8s/"]), unsafe.SliceData(plain.candidates("auth/k8s/")))
 	assert.Empty(t, plain.candidates("auth/none/"))
 }
@@ -276,7 +281,7 @@ func TestMountIndex_AgreesWithFullScan(t *testing.T) {
 	patterns := [][]string{{"auth/a/"}, {"auth/b/", "auth/a/"}, {"auth/c-*/"}, {"auth/*/"}, {"**"}, {"auth/d/**"}, {"auth/?/"}}
 	var groups []*logical.Group
 	for i := range 60 {
-		groups = append(groups, group(fmt.Sprintf("g%02d", i), []string{"r"}, 0,
+		groups = append(groups, group(fmt.Sprintf("g%02d", i), []string{"r"}, noEnd,
 			rule("mount", patterns[i%len(patterns)], "sub", []string{fmt.Sprint(i % 3)})))
 	}
 	gs := testNS(t, 1, groups...)
@@ -292,11 +297,13 @@ func TestMountIndex_AgreesWithFullScan(t *testing.T) {
 
 func TestMembership_SteadyState(t *testing.T) {
 	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a", "repository": "acme/x"}, time.Now())
-	gs := testNS(t, 3, group("g", []string{"deploy"}, time.Hour, rule("mount", []string{"auth/jwt/"}, "sub", []string{"a"})))
 	now := time.Now()
+	// A valid_until ahead, so the fast path compares it too.
+	gs := testNS(t, 3, group("g", []string{"deploy"}, now.Add(time.Hour), rule("mount", []string{"auth/jwt/"}, "sub", []string{"a"})))
 
 	first := membership(adm, gs, now)
 	assert.Equal(t, []string{"g"}, first.Groups)
+	require.False(t, first.ValidUntil.IsZero())
 	assert.Same(t, first, adm.LoadMembership(), "the result is cached on the admission")
 
 	matches := countMatches(t)
@@ -311,15 +318,14 @@ func TestMembership_SteadyState(t *testing.T) {
 
 func TestMembership_Recompute(t *testing.T) {
 	now := time.Now()
-	iat := now.Add(-time.Minute)
-	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a", "repository": "acme/x"}, iat)
+	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a", "repository": "acme/x"}, time.Time{})
 	match := rule("mount", []string{"auth/jwt/"}, "sub", []string{"a"})
-	gs := testNS(t, 3, group("g", []string{"deploy"}, 0, match))
+	gs := testNS(t, 3, group("g", []string{"deploy"}, noEnd, match))
 	m1 := membership(adm, gs, now)
 	matches := countMatches(t)
 
 	// A new generation recomputes.
-	gs2 := testNS(t, 4, group("g", []string{"deploy", "read"}, 0, match))
+	gs2 := testNS(t, 4, group("g", []string{"deploy", "read"}, noEnd, match))
 	m2 := membership(adm, gs2, now)
 	assert.NotSame(t, m1, m2)
 	assert.Contains(t, m2.Roles, "read")
@@ -332,23 +338,31 @@ func TestMembership_Recompute(t *testing.T) {
 	assert.Equal(t, map[string]string{"project": "acme/x"}, m3.Metadata)
 	assert.Same(t, m3, membership(adm, gs2, now))
 
-	// A group with max_age holds until ValidUntil inclusive, then drops.
-	gs3 := testNS(t, 5, group("g", []string{"deploy"}, 2*time.Minute, match))
+	// A cached membership holds through the earliest valid_until of its
+	// groups, inclusive; the first request past it recomputes, and the group
+	// that ended drops while the others stay.
+	end := now.Add(2 * time.Minute)
+	gs3 := testNS(t, 5,
+		group("g", []string{"deploy"}, end, match),
+		group("h", []string{"read"}, now.Add(time.Hour), match))
 	m4 := membership(adm, gs3, now)
-	require.Equal(t, iat.Add(2*time.Minute), m4.ValidUntil)
-	assert.Same(t, m4, membership(adm, gs3, m4.ValidUntil), "valid through ValidUntil")
-	m5 := membership(adm, gs3, m4.ValidUntil.Add(time.Nanosecond))
-	assert.NotSame(t, m4, m5)
-	assert.Empty(t, m5.Groups, "the group aged out")
-	assert.True(t, m5.ValidUntil.IsZero())
-	assert.Same(t, m5, membership(adm, gs3, m4.ValidUntil.Add(time.Hour)), "and stays out without recomputing")
+	require.Equal(t, end, m4.ValidUntil, "the earliest of several")
+	before := matches.Load()
+	assert.Same(t, m4, membership(adm, gs3, end), "still valid at valid_until")
+	assert.Equal(t, before, matches.Load(), "without matching")
+	m5 := membership(adm, gs3, end.Add(time.Nanosecond))
+	assert.NotSame(t, m4, m5, "the first request past it recomputes")
+	assert.Equal(t, []string{"h"}, m5.Groups, "the ended group dropped")
+	assert.NotContains(t, m5.Roles, "deploy")
+	assert.Equal(t, now.Add(time.Hour), m5.ValidUntil, "the next end now bounds it")
+	assert.Same(t, m5, membership(adm, gs3, end.Add(time.Minute)), "and it is cached again")
 }
 
 // TestMembership_ConcurrentRecompute: many requests finding no membership
 // compute at once; the race is benign. Run with -race.
 func TestMembership_ConcurrentRecompute(t *testing.T) {
 	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a"}, time.Time{})
-	gs := testNS(t, 9, group("g", []string{"deploy"}, 0, rule("mount", []string{"auth/jwt/"}, "sub", []string{"a"})))
+	gs := testNS(t, 9, group("g", []string{"deploy"}, noEnd, rule("mount", []string{"auth/jwt/"}, "sub", []string{"a"})))
 	now := time.Now()
 
 	const n = 32

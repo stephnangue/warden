@@ -45,9 +45,10 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 						`Every rule must include a "mount" selector listing the auth mounts it trusts (e.g. "auth/kubernetes/"). ` +
 						`A value holding an unescaped "*" or "?" is a glob.`,
 				},
-				"max_age": {
-					Type:        framework.TypeDurationSecond,
-					Description: "Longest time since the credential was issued for its holder to be a member (e.g. 10m); 0 for no bound",
+				"valid_until": {
+					Type: framework.TypeString,
+					Description: "RFC 3339 instant after which the group grants nothing (e.g. 2026-12-31T23:59:59Z); " +
+						"it still grants at that instant. Empty for no end.",
 				},
 				"metadata": {
 					Type:        framework.TypeKVPairs,
@@ -141,9 +142,9 @@ func groupToMap(g *logical.Group) map[string]any {
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
-	maxAge := ""
-	if g.MaxAge > 0 {
-		maxAge = g.MaxAge.String()
+	validUntil := ""
+	if !g.ValidUntil.IsZero() {
+		validUntil = g.ValidUntil.UTC().Format(time.RFC3339Nano)
 	}
 	return map[string]any{
 		"id":             g.ID,
@@ -154,7 +155,7 @@ func groupToMap(g *logical.Group) map[string]any {
 		"rules":          rules,
 		"rule_count":     len(g.Rules),
 		"selector_count": g.SelectorCount(),
-		"max_age":        maxAge,
+		"valid_until":    validUntil,
 		"metadata":       metadata,
 		"created_at":     g.CreatedAt,
 		"updated_at":     g.UpdatedAt,
@@ -240,8 +241,22 @@ func stringList(v any) ([]string, error) {
 	return nil, fmt.Errorf("must be a string or a list of strings, got %T", v)
 }
 
+// parseValidUntil reads a valid_until value: an RFC 3339 instant, or "" for
+// no end.
+func parseValidUntil(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, logical.ErrBadRequestf(
+			"valid_until must be an RFC 3339 timestamp (e.g. 2026-12-31T23:59:59Z), got %q", s)
+	}
+	return t.UTC(), nil
+}
+
 // mergeGroupFields writes onto g every field present in the request. An empty
-// type counts as left out.
+// type counts as left out; an empty valid_until clears it.
 func mergeGroupFields(g *logical.Group, d *framework.FieldData) error {
 	if v, ok := d.GetOk("type"); ok && v.(string) != "" {
 		g.Type = logical.GroupType(v.(string))
@@ -259,8 +274,12 @@ func mergeGroupFields(g *logical.Group, d *framework.FieldData) error {
 		}
 		g.Rules = rules
 	}
-	if v, ok := d.GetOk("max_age"); ok {
-		g.MaxAge = time.Duration(v.(int)) * time.Second
+	if v, ok := d.GetOk("valid_until"); ok {
+		t, err := parseValidUntil(v.(string))
+		if err != nil {
+			return err
+		}
+		g.ValidUntil = t
 	}
 	if v, ok := d.GetOk("metadata"); ok {
 		g.Metadata = v.(map[string]string)

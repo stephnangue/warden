@@ -63,8 +63,7 @@ Usage: warden identity group <subcommand> [options]
               "mount": ["auth/kubernetes/"],
               "workload": ["system:serviceaccount:ci:deployer"]
             }
-          ],
-          "max_age": "10m"
+          ]
         }'
 
       $ warden identity group list -role deploy

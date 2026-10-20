@@ -12,7 +12,8 @@ import (
 // Group is a namespace group as the server returns it. Rules are the group's
 // rules as written, each a set of selectors (fact name to the values it may
 // take); RuleCount and SelectorCount are what the group adds to the
-// namespace's usage. MaxAge is a duration string ("10m0s"), empty when unset.
+// namespace's usage. ValidUntil is an RFC 3339 instant in UTC after which the
+// group grants nothing, empty for no end.
 // Hash is what a conditional update or delete passes back as
 // GroupInput.ExpectedHash; Warnings carries non-fatal notices about a write (a
 // role that does not exist yet, a fact no listed auth mount produces).
@@ -25,7 +26,7 @@ type Group struct {
 	Rules         []map[string][]string `json:"rules"`
 	RuleCount     int                   `json:"rule_count"`
 	SelectorCount int                   `json:"selector_count"`
-	MaxAge        string                `json:"max_age"`
+	ValidUntil    string                `json:"valid_until"`
 	Metadata      map[string]string     `json:"metadata"`
 	Hash          string                `json:"hash,omitempty"`
 	CreatedAt     time.Time             `json:"created_at"`
@@ -65,7 +66,7 @@ type GroupInput struct {
 	Description *string
 	Roles       []string
 	Rules       []map[string][]string
-	MaxAge      *string
+	ValidUntil  *string // RFC 3339; "" clears it on update
 	Metadata    map[string]string
 
 	// ExpectedHash, on update, applies the write only if the group still has
@@ -90,8 +91,8 @@ func (in *GroupInput) body() map[string]any {
 	if in.Rules != nil {
 		out["rules"] = in.Rules
 	}
-	if in.MaxAge != nil {
-		out["max_age"] = *in.MaxAge
+	if in.ValidUntil != nil {
+		out["valid_until"] = *in.ValidUntil
 	}
 	if in.Metadata != nil {
 		out["metadata"] = in.Metadata

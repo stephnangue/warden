@@ -37,13 +37,12 @@ Usage: warden identity group create <name> [options]
   ("mount" included), are capped; a write past either cap is refused with
   the current usage. 'warden identity usage' shows the usage and the caps.
 
-  "max_age" bounds how old the caller's credential may be, counted from
-  when it was issued (its "iat"), on every request. With "max_age": "10m",
-  a CI token issued at 12:00:00 is a member through 12:10:00 and stops
-  being one right after, even while Warden still holds its admission;
-  another group without max_age may still grant the same role. A
-  credential that carries no issue time (a client certificate, an
-  X.509-SVID) never satisfies a group with max_age.
+  "valid_until" (RFC 3339) ends the group: it grants through that instant
+  and nothing after, on the first request past it, even for callers whose
+  admission Warden still holds; another group may still grant the same
+  role. A time in the past is accepted with a warning. How old a caller's
+  credential may be is not the group's to say: it is an admission bound
+  of the auth mount.
 
   Two input modes (mutually exclusive):
 
@@ -67,7 +66,7 @@ Usage: warden identity group create <name> [options]
               ]
             }
           ],
-          "max_age": "10m",
+          "valid_until": "2026-12-31T23:59:59Z",
           "metadata": {
             "owner": "platform"
           }
@@ -82,7 +81,7 @@ Usage: warden identity group create <name> [options]
           -type=virtual \
           -roles=deploy \
           -rule='{"mount": ["auth/kubernetes/"], "service_account_namespace": ["ci"]}' \
-          -max-age=10m
+          -valid-until=2026-12-31T23:59:59Z
 
   Combine with -dry-run to validate the payload locally without creating
   the group.

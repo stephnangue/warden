@@ -19,7 +19,7 @@ type groupFlags struct {
 	description string
 	roles       []string
 	rules       []string
-	maxAge      string
+	validUntil  string
 	metadata    map[string]string
 }
 
@@ -29,7 +29,7 @@ var groupFlagNames = []struct{ flag, key string }{
 	{"description", "description"},
 	{"roles", "roles"},
 	{"rule", "rules"},
-	{"max-age", "max_age"},
+	{"valid-until", "valid_until"},
 	{"metadata", "metadata"},
 }
 
@@ -41,7 +41,8 @@ func (f *groupFlags) bind(cmd *cobra.Command) {
 	fs.StringArrayVar(&f.rules, "rule", nil,
 		`One rule as a JSON object of selectors, each a fact name with its values (a list, or one string), `+
 			`including "mount", e.g. '{"mount": "auth/kubernetes/", "workload": ["ci", "cd"]}' (repeatable; any one rule matching makes a member)`)
-	fs.StringVar(&f.maxAge, "max-age", "", "Longest time since the credential was issued for its holder to be a member (e.g. 10m)")
+	fs.StringVar(&f.validUntil, "valid-until", "",
+		`RFC 3339 instant after which the group grants nothing, e.g. 2026-12-31T23:59:59Z (on update, "" clears it)`)
 	fs.StringToStringVar(&f.metadata, "metadata", nil, "Free-form label (key=value, repeatable)")
 }
 
@@ -68,7 +69,7 @@ func (f *groupFlags) payload(cmd *cobra.Command) (map[string]any, error) {
 	set("type", "type", f.typ)
 	set("description", "description", f.description)
 	set("roles", "roles", stringsToAny(f.roles))
-	set("max-age", "max_age", f.maxAge)
+	set("valid-until", "valid_until", f.validUntil)
 	if cmd.Flags().Changed("metadata") {
 		md := make(map[string]any, len(f.metadata))
 		for k, v := range f.metadata {
@@ -184,7 +185,7 @@ func printGroupTable(data map[string]any) {
 	}
 	add("Rule Count", data["rule_count"])
 	add("Selector Count", data["selector_count"])
-	add("Max Age", data["max_age"])
+	add("Valid Until", data["valid_until"])
 	add("Metadata", data["metadata"])
 	add("Hash", data["hash"])
 	add("Created At", data["created_at"])
