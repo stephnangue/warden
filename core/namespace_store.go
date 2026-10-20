@@ -49,6 +49,7 @@ const (
 		1 + /* expiration (sync.Map) */
 		1 + /* tokens (ristretto + storage) */
 		1 + /* credential configs (RLock) */
+		1 + /* roles */
 		1 + /* policies */
 		2 /* auth + provider */
 )
@@ -990,6 +991,13 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 	if ns.core.credConfigStore != nil {
 		if err := ns.core.credConfigStore.ClearNamespace(nsCtx); err != nil {
 			return fmt.Errorf("failed to clear credential configs: %w", err)
+		}
+	}
+
+	// clear roles
+	if ns.core.roleStore != nil {
+		if err := ns.core.roleStore.ClearNamespace(nsCtx); err != nil {
+			return fmt.Errorf("failed to clear roles: %w", err)
 		}
 	}
 

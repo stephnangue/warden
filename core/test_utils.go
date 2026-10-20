@@ -590,6 +590,10 @@ func createTestCore(t *testing.T) *Core {
 	// Setup the mounts (this will create and mount the system backend)
 	_ = core.setupMounts(ctx)
 
+	// Initialize and load the role store, as the active node does at unseal.
+	core.roleStore = NewRoleStore(core)
+	_ = core.setupRoleStore(ctx, false)
+
 	return core
 }
 

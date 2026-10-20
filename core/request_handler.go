@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -751,13 +750,8 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 	auth := resp.Auth
 
 	// Prevent internal policies from being assigned to tokens.
-	for _, policy := range auth.Policies {
-		if policy == "root" {
-			return logical.ErrorResponse(logical.ErrForbidden("auth methods cannot create root tokens")), sdklogical.ErrInvalidRequest
-		}
-		if slices.Contains(nonAssignablePolicies, policy) {
-			return logical.ErrorResponse(logical.ErrForbiddenf("cannot assign policy %q", policy)), sdklogical.ErrInvalidRequest
-		}
+	if err := logical.ValidateAssignablePolicies(auth.Policies); err != nil {
+		return logical.ErrorResponse(logical.ErrForbidden(err.Error())), sdklogical.ErrInvalidRequest
 	}
 
 	// req.MountAccessor is populated by handleLoginRequest from the routed
