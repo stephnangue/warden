@@ -50,6 +50,7 @@ const (
 		1 + /* tokens (ristretto + storage) */
 		1 + /* credential configs (RLock) */
 		1 + /* roles */
+		1 + /* identity (groups) */
 		1 + /* policies */
 		2 /* auth + provider */
 )
@@ -998,6 +999,13 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 	if ns.core.roleStore != nil {
 		if err := ns.core.roleStore.ClearNamespace(nsCtx); err != nil {
 			return fmt.Errorf("failed to clear roles: %w", err)
+		}
+	}
+
+	// clear groups
+	if ns.core.identityStore != nil {
+		if err := ns.core.identityStore.ClearNamespace(nsCtx); err != nil {
+			return fmt.Errorf("failed to clear groups: %w", err)
 		}
 	}
 

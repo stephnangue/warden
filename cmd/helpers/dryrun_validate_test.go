@@ -107,6 +107,27 @@ func TestValidatePayload_AcceptsJSONNumberShapes(t *testing.T) {
 	}
 }
 
+// TestValidatePayload_DurationSeconds: a duration the server documents as
+// integer seconds also takes a duration string, as the server parses it; a
+// plain integer field still refuses a string.
+func TestValidatePayload_DurationSeconds(t *testing.T) {
+	bs := makeSchema(map[string]propertySchema{
+		"max_age": {typ: "integer", format: "seconds"},
+		"count":   {typ: "integer"},
+	})
+	for _, v := range []any{"10m", float64(600)} {
+		if got := validatePayload(map[string]any{"max_age": v}, bs); len(got) != 0 {
+			t.Errorf("expected max_age %v to validate; got %v", v, got)
+		}
+	}
+	if got := validatePayload(map[string]any{"count": "10m"}, bs); len(got) != 1 {
+		t.Errorf("expected a string for a plain integer to be refused; got %v", got)
+	}
+	if got := validatePayload(map[string]any{"max_age": true}, bs); len(got) != 1 {
+		t.Errorf("expected a bool for a duration to be refused; got %v", got)
+	}
+}
+
 func TestValidatePayload_AcceptsObjectField(t *testing.T) {
 	bs := makeSchema(map[string]propertySchema{
 		"config": {typ: "object"},

@@ -212,6 +212,11 @@ type Core struct {
 	// node only; reads are lock-free against its snapshot.
 	roleStore *RoleStore
 
+	// identityStore holds the namespace groups (sys/identity/group). Loaded on
+	// the active node only; reads and membership computations are lock-free
+	// against its snapshot.
+	identityStore *IdentityStore
+
 	// skillRenders memoises each skill's SKILL.md as the discovery server
 	// serves it, with its digest (Skills extension listings carry one).
 	skillRenders skillRenderCache
@@ -705,6 +710,9 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 
 	// Create RoleStore (storage view is wired up and loaded at unseal time).
 	c.roleStore = NewRoleStore(c)
+
+	// Create IdentityStore (storage view is wired up and loaded at unseal time).
+	c.identityStore = NewIdentityStore(c)
 
 	// Initialize global credential type, driver and assertion-profile registries
 	c.credentialTypeRegistry = credential.NewTypeRegistry()
@@ -2018,6 +2026,9 @@ func (c *Core) preSeal() error {
 	// loads them).
 	c.teardownRoleStore()
 
+	// Drop the group snapshot likewise.
+	c.teardownIdentityStore()
+
 	// Stop all credential managers
 	if err := c.teardownCredentialManager(); err != nil {
 		c.logger.Warn("error tearing down credential managers", logger.Err(err))
@@ -2129,6 +2140,11 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 	// Roles load once the namespaces and mounts are in place, on the active
 	// node only.
 	if err := c.setupRoleStore(ctx, standby); err != nil {
+		return err
+	}
+
+	// Groups too: their write-time checks ask the auth mounts for their facts.
+	if err := c.setupIdentityStore(ctx, standby); err != nil {
 		return err
 	}
 

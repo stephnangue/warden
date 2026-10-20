@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -237,16 +238,25 @@ func mergeRoleFields(role *logical.Role, d *framework.FieldData) {
 }
 
 // handleRoleDelete handles DELETE sys/roles/<name>, conditional on
-// expected_hash (a query parameter) when set.
+// expected_hash (a query parameter) when set. Groups that still list the role
+// keep it and are named in a warning: they grant nothing through it until a
+// role of that name exists again.
 func (b *SystemBackend) handleRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 	if err := b.core.roleStore.Delete(ctx, name, d.Get("expected_hash").(string)); err != nil {
 		return roleErrorResponse(name, err), nil
 	}
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"name":    name,
 		"message": fmt.Sprintf("Successfully deleted role %s", name),
-	}), nil
+	}
+	if ns, err := namespace.FromContext(ctx); err == nil && b.core.identityStore != nil {
+		if groups := b.core.identityStore.GroupsListingRole(ns.ID, name); len(groups) > 0 {
+			appendWarnings(data, fmt.Sprintf("groups still list %q: %s (they grant nothing until the role is re-created)",
+				name, strings.Join(groups, ", ")))
+		}
+	}
+	return b.respondSuccess(data), nil
 }
 
 // handleRoleList handles LIST sys/roles. It returns the names under "keys" and

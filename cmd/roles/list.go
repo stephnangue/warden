@@ -29,14 +29,16 @@ Usage: warden role list [options]
   to be distributed out-of-band.
 
   With -all, lists instead every role defined in the current namespace
-  (the operator inventory). It requires a token with sudo on sys/roles,
+  (the operator inventory), each with the groups that grant it
+  ("granted_by", from one listing of sys/identity/group). It requires a
+  token with sudo on sys/roles (and on sys/identity/group for granted_by),
   and -provider-path narrows it to the roles used with one provider.
 
   Output honors the global -output flag:
     table    one row per role (default for TTY)
     json     [{"name", "description", "auth_path"}, ...]
-             with -all: [{"name", "description", "policies",
-             "cred_spec_name", "provider_path", "skill",
+             with -all: [{"name", "description", "granted_by",
+             "policies", "cred_spec_name", "provider_path", "skill",
              "metadata"}, ...]
     ndjson   one role per line, agent-friendly for piping into jq
     text     key=value lines per role
@@ -155,15 +157,21 @@ func runListAll() error {
 	if err != nil {
 		return fmt.Errorf("failed to list roles: %w", err)
 	}
+	grants, err := grantingGroups(c, "")
+	if err != nil {
+		helpers.PrintWarnings([]string{fmt.Sprintf("cannot list groups to fill granted_by: %v", err)})
+	}
 
-	items := projectInventory(roles)
+	items := projectInventory(roles, grants)
 	return helpers.RenderList(items, func() {
 		printInventoryTable(items)
 	})
 }
 
-// projectInventory shapes the namespace's roles for output.
-func projectInventory(roles []*api.Role) []map[string]any {
+// projectInventory shapes the namespace's roles for output. grants maps a role
+// to the groups granting it; when it is nil (the groups could not be listed)
+// granted_by is left out rather than shown empty.
+func projectInventory(roles []*api.Role, grants map[string][]string) []map[string]any {
 	items := make([]map[string]any, 0, len(roles))
 	for _, r := range roles {
 		policies := r.Policies
@@ -174,7 +182,7 @@ func projectInventory(roles []*api.Role) []map[string]any {
 		for k, v := range r.Metadata {
 			metadata[k] = v
 		}
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"name":           r.Name,
 			"description":    r.Description,
 			"policies":       policies,
@@ -182,7 +190,11 @@ func projectInventory(roles []*api.Role) []map[string]any {
 			"provider_path":  r.ProviderPath,
 			"skill":          r.Skill,
 			"metadata":       metadata,
-		})
+		}
+		if grants != nil {
+			item["granted_by"] = stringsToAny(grants[r.Name])
+		}
+		items = append(items, item)
 	}
 	return items
 }
@@ -197,6 +209,7 @@ func printInventoryTable(items []map[string]any) {
 		rows[i] = []any{
 			cell(it["name"]),
 			cell(it["description"]),
+			cell(it["granted_by"]),
 			cell(it["policies"]),
 			cell(it["cred_spec_name"]),
 			cell(it["provider_path"]),
@@ -204,7 +217,7 @@ func printInventoryTable(items []map[string]any) {
 			cell(it["metadata"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Description", "Policies", "Cred Spec", "Provider Path", "Skill", "Metadata"}, rows)
+	helpers.PrintTable([]string{"Name", "Description", "Granted By", "Policies", "Cred Spec", "Provider Path", "Skill", "Metadata"}, rows)
 }
 
 // projectRoles shapes the aggregator's raw roles for output, keeping only

@@ -142,13 +142,26 @@ func TestSys_UpdateRole_Conflict(t *testing.T) {
 func TestSys_DeleteRole(t *testing.T) {
 	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"deploy"}}`)
 
-	require.NoError(t, client.Sys().DeleteRole("deploy", ""))
+	warnings, err := client.Sys().DeleteRole("deploy", "")
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
 	assert.Equal(t, http.MethodDelete, rec.method)
 	assert.Equal(t, "/v1/sys/roles/deploy", rec.path)
 	assert.Empty(t, rec.query.Get("expected_hash"))
 
-	require.NoError(t, client.Sys().DeleteRole("deploy", "abc123"))
+	_, err = client.Sys().DeleteRole("deploy", "abc123")
+	require.NoError(t, err)
 	assert.Equal(t, "abc123", rec.query.Get("expected_hash"))
+}
+
+func TestSys_DeleteRole_WarningsNameGroups(t *testing.T) {
+	client, _ := newRoleServer(t, http.StatusOK, `{"data":{"name":"deploy","warnings":[
+		"groups still list \"deploy\": ci (they grant nothing until the role is re-created)"
+	]}}`)
+
+	warnings, err := client.Sys().DeleteRole("deploy", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{`groups still list "deploy": ci (they grant nothing until the role is re-created)`}, warnings)
 }
 
 func TestSys_ListRoles(t *testing.T) {

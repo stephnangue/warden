@@ -32,6 +32,7 @@ type bodySchema struct {
 
 type propertySchema struct {
 	typ           string // "string" | "integer" | "number" | "boolean" | "array" | "object"
+	format        string // e.g. "seconds" for a duration the server also takes as "10m"
 	allowedValues []any
 	description   string
 }
@@ -193,6 +194,7 @@ func extractBodySchema(doc map[string]any, method string) bodySchema {
 		pm = resolveSchemaRef(pm, componentSchemas)
 		ps := propertySchema{}
 		ps.typ, _ = pm["type"].(string)
+		ps.format, _ = pm["format"].(string)
 		ps.description, _ = pm["description"].(string)
 		if enum, ok := pm["enum"].([]any); ok {
 			ps.allowedValues = enum
@@ -288,6 +290,11 @@ func checkType(name string, value any, ps propertySchema) string {
 	case "integer", "number":
 		switch value.(type) {
 		case int, int64, float64:
+		case string:
+			// A duration in seconds is also taken as a duration string ("10m").
+			if ps.format != "seconds" {
+				return fmt.Sprintf("field %q expects %s; got %T", name, ps.typ, value)
+			}
 		default:
 			return fmt.Sprintf("field %q expects %s; got %T", name, ps.typ, value)
 		}
