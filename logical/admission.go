@@ -78,8 +78,12 @@ func (a *Admission) LoadMembership() *Membership {
 }
 
 // CompareAndSwapMembership caches next if the cached membership is still old,
-// and reports whether it did. Two requests that both computed a membership from
-// the same inputs race benignly: their results are equal, and either may win.
+// and reports whether it did. Two requests that computed a membership from the
+// same snapshot and naming race benignly: their results are equal, and either
+// may win. Two that straddled a max_age boundary may differ, one still holding
+// a group the other dropped; whichever is kept, its ValidUntil is no later than
+// that boundary, so the first request past it computes again: the race heals
+// itself.
 func (a *Admission) CompareAndSwapMembership(old, next *Membership) bool {
 	if a == nil {
 		return false

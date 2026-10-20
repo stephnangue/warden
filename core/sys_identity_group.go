@@ -40,7 +40,7 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 				"selectors": {
 					Type: framework.TypeSlice,
 					Description: "Rules a caller's verified facts must satisfy, any one of them (virtual groups). " +
-						"Each rule maps a fact name to the values it may take: every name must match one of its values. " +
+						"Each rule maps a fact name to the values it may take (a list, or one string): every name must match one of its values. " +
 						`Every rule must name "mount", the auth mounts it trusts (e.g. "auth/kubernetes/"). ` +
 						`A value holding an unescaped "*" or "?" is a glob.`,
 				},
@@ -159,7 +159,7 @@ func groupErrorResponse(name string, err error) *logical.Response {
 	case errors.Is(err, ErrGroupChanged):
 		return logical.ErrorResponse(logical.ErrConflictf(
 			"group %q changed since it was read (expected_hash no longer matches); read it again and retry", name))
-	case errors.Is(err, ErrTooManyGroups), errors.Is(err, ErrTooManySelectors):
+	case errors.Is(err, ErrTooManyGroups), errors.Is(err, ErrTooManySelectorNames):
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error()))
 	case errors.Is(err, ErrIdentityStoreNotLoaded):
 		return logical.ErrorResponse(logical.ErrServiceUnavailable(err.Error()))
@@ -179,7 +179,8 @@ func refuseOtherTypeFields(d *framework.FieldData, t logical.GroupType) error {
 }
 
 // parseSelectors converts the selectors field of a write: a list of objects,
-// each mapping a fact name to a list of strings.
+// each mapping a fact name to a list of strings, or to one string standing for
+// a one-element list.
 func parseSelectors(raw []any) ([]logical.Selector, error) {
 	out := make([]logical.Selector, 0, len(raw))
 	for i, item := range raw {
@@ -202,6 +203,8 @@ func parseSelectors(raw []any) ([]logical.Selector, error) {
 
 func stringList(v any) ([]string, error) {
 	switch t := v.(type) {
+	case string:
+		return []string{t}, nil
 	case []string:
 		return t, nil
 	case []any:
@@ -215,12 +218,13 @@ func stringList(v any) ([]string, error) {
 		}
 		return out, nil
 	}
-	return nil, fmt.Errorf("must be a list of strings, got %T", v)
+	return nil, fmt.Errorf("must be a string or a list of strings, got %T", v)
 }
 
-// mergeGroupFields writes onto g every field present in the request.
+// mergeGroupFields writes onto g every field present in the request. An empty
+// type counts as left out.
 func mergeGroupFields(g *logical.Group, d *framework.FieldData) error {
-	if v, ok := d.GetOk("type"); ok {
+	if v, ok := d.GetOk("type"); ok && v.(string) != "" {
 		g.Type = logical.GroupType(v.(string))
 	}
 	if v, ok := d.GetOk("description"); ok {

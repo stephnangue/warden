@@ -66,8 +66,9 @@ type nsGroups struct {
 
 	byName map[string]*compiledGroup
 
-	// selectors is the number of selectors across every group.
-	selectors int
+	// names is the number of fact names across every rule of every group,
+	// "mount" included: what a worst-case recompute evaluates.
+	names int
 
 	// selecting are the virtual groups, sorted by name.
 	selecting []*compiledGroup
@@ -94,6 +95,9 @@ type compiledGroup struct {
 
 	// rules are compiled from Group.Selectors, index-aligned.
 	rules []*selector.Rule
+
+	// names is the number of fact names across rules.
+	names int
 
 	// grants are the roles the group grants, each with its label built once.
 	grants []groupGrant
@@ -131,6 +135,7 @@ func compileGroup(g *logical.Group) (*compiledGroup, error) {
 			return nil, fmt.Errorf("selectors[%d]: %w", i, err)
 		}
 		cg.rules[i] = r
+		cg.names += len(r.Names())
 		for _, v := range mounts {
 			if selector.IsPattern(v) {
 				gl, err := selector.CompileGlob(v)
@@ -162,7 +167,7 @@ func buildNSGroups(byName map[string]*compiledGroup, gen uint64) *nsGroups {
 	g := &nsGroups{gen: gen, byName: byName, byMount: map[string][]int32{}}
 	g.selecting = make([]*compiledGroup, 0, len(byName))
 	for _, cg := range byName {
-		g.selectors += len(cg.rules)
+		g.names += cg.names
 		if cg.Type == logical.GroupTypeVirtual {
 			g.selecting = append(g.selecting, cg)
 		}

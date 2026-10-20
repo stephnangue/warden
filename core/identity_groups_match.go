@@ -37,9 +37,12 @@ var testHookRuleMatch func()
 // a new one is computed and cached. The fast path takes one atomic load of the
 // naming and one of the cache, does not allocate, and matches nothing.
 //
-// Safe for concurrent use: two requests that both find the cache stale compute
-// equal memberships from the same inputs, and the compare-and-swap keeps one;
-// each returns what it computed.
+// Safe for concurrent use: two requests that both find the cache stale and
+// compute from the same snapshot and naming produce equal memberships, and the
+// compare-and-swap keeps one; each returns what it computed. Two that straddle
+// a max_age boundary may compute different ones, but the one kept never
+// outlives the boundary: its ValidUntil makes the first request past it
+// compute again.
 func membership(adm *logical.Admission, gs *nsGroups, now time.Time) *logical.Membership {
 	n := adm.Mount.Load()
 	m := adm.LoadMembership()
@@ -79,7 +82,8 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsGroups, n
 	}
 
 	mc := &matchCtx{adm: adm, n: n}
-	var groups []string
+	var matched []*compiledGroup
+	grants := 0
 	for i := range count {
 		idx := i
 		if !all {
@@ -103,22 +107,28 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsGroups, n
 			continue
 		}
 
-		groups = append(groups, g.Name)
+		matched = append(matched, g)
+		grants += len(g.grants)
 		if !until.IsZero() && (m.ValidUntil.IsZero() || until.Before(m.ValidUntil)) {
 			m.ValidUntil = until
 		}
-		for _, gr := range g.grants {
-			if _, ok := m.Roles[gr.role]; ok {
-				continue
-			}
-			if m.Roles == nil {
-				m.Roles = make(map[string]logical.GroupGrant, len(g.grants))
-			}
-			m.Roles[gr.role] = gr.grant
-		}
 	}
-	if groups != nil {
-		m.Groups = groups
+	if len(matched) == 0 {
+		return m
+	}
+
+	// Sized once the matches are known, so neither grows while filling.
+	m.Groups = make([]string, len(matched))
+	if grants > 0 {
+		m.Roles = make(map[string]logical.GroupGrant, grants)
+	}
+	for i, g := range matched {
+		m.Groups[i] = g.Name
+		for _, gr := range g.grants {
+			if _, ok := m.Roles[gr.role]; !ok {
+				m.Roles[gr.role] = gr.grant
+			}
+		}
 	}
 	return m
 }

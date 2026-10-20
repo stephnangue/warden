@@ -39,7 +39,7 @@ func (f *groupFlags) bind(cmd *cobra.Command) {
 	fs.StringVar(&f.description, "description", "", "What the group is for")
 	fs.StringSliceVar(&f.roles, "roles", nil, "Roles membership grants (repeat or comma-separated)")
 	fs.StringArrayVar(&f.selectors, "selector", nil,
-		`One selector as a JSON object of fact name to values, e.g. '{"mount": ["auth/kubernetes/"], "workload": ["ci"]}' (repeatable; any one matching makes a member)`)
+		`One selector as a JSON object of fact name to values (a list, or one string), e.g. '{"mount": "auth/kubernetes/", "workload": ["ci", "cd"]}' (repeatable; any one matching makes a member)`)
 	fs.StringVar(&f.maxAge, "max-age", "", "Longest time since the credential was issued for its holder to be a member (e.g. 10m)")
 	fs.StringToStringVar(&f.metadata, "metadata", nil, "Free-form label (key=value, repeatable)")
 }

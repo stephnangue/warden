@@ -207,6 +207,24 @@ func TestGroupCreate_TypedFlags(t *testing.T) {
 	}, f.last(t).body, "each -selector is one rule; a comma inside a value stays")
 }
 
+// TestGroupSelectorFlag_ScalarValue: a -selector value written as one string
+// is sent as written, which the server takes as a one-element list, on create
+// and on update.
+func TestGroupSelectorFlag_ScalarValue(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusCreated, cannedGroup)
+	cmd := freshCreateCmd()
+	require.NoError(t, cmd.Flags().Set("type", "virtual"))
+	require.NoError(t, cmd.Flags().Set("selector", `{"mount": "auth/k8s/", "workload": ["a", "b"]}`))
+	require.NoError(t, runGroupCreate(cmd, []string{"g"}))
+	assert.Equal(t, []any{map[string]any{"mount": "auth/k8s/", "workload": []any{"a", "b"}}},
+		f.last(t).body["selectors"])
+
+	cmd = freshUpdateCmd()
+	require.NoError(t, cmd.Flags().Set("selector", `{"mount": "auth/jwt/", "sub": "x"}`))
+	require.NoError(t, runGroupUpdate(cmd, []string{"g"}))
+	assert.Equal(t, []any{map[string]any{"mount": "auth/jwt/", "sub": "x"}}, f.last(t).body["selectors"])
+}
+
 func TestGroupCreate_BadSelectorFlag(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusCreated, cannedGroup)
 	cmd := freshCreateCmd()

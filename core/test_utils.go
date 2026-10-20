@@ -513,7 +513,7 @@ func newMockProvider() *mockProvider {
 }
 
 // Helper function to create a test core with all dependencies
-func createTestCore(t *testing.T) *Core {
+func createTestCore(t testing.TB) *Core {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	router := NewRouter(log)
 

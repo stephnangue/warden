@@ -47,20 +47,24 @@ const (
 	MaxGroupSelectors        = 16
 
 	// MaxGroupsPerNamespace bounds the groups of one namespace. Each group write
-	// rebuilds the namespace's index, and a group change makes every cached
-	// admission of the namespace recompute its membership on its next request,
-	// which in the worst case (every group's rules list the admission's mount)
-	// evaluates every group. Measured (core/identity_groups_bench_test.go,
-	// Apple M4 Pro): a rule evaluated to its last fact costs about 110 ns, so
-	// 8000 one-rule groups recompute in about 0.9 ms, and a group write at that
-	// size takes about 1.2 ms.
+	// rebuilds the namespace's index, and a recompute in which every group
+	// matches lists every group and fills a role map. Measured
+	// (core/identity_groups_bench_test.go, Apple M4 Pro): a group write at
+	// 8000 groups takes about 1.2 ms; 8000 groups all matching, with the two
+	// facts per rule MaxSelectorNamesPerNamespace then allows, recompute in
+	// about 0.8 ms (1.3 MB, 56 allocations).
 	MaxGroupsPerNamespace = 8000
 
-	// MaxSelectorsPerNamespace bounds the selectors of all the groups of one
-	// namespace together. A recompute's worst case is proportional to the rules
-	// it evaluates, not to the groups, so this, not MaxGroupsPerNamespace, holds
-	// it under about a millisecond when groups carry several rules.
-	MaxSelectorsPerNamespace = 8000
+	// MaxSelectorNamesPerNamespace bounds the fact names ("mount" included)
+	// across every rule of every group of one namespace. A group change makes
+	// every cached admission of the namespace recompute its membership on its
+	// next request, and the worst case (every rule lists the admission's mount
+	// and fails only on its last fact) looks up and compares every name once:
+	// about 60 ns a name when each matches after an exact value and a glob,
+	// so 16000 names recompute in about 0.96 ms. That assumes a name's values
+	// short-circuit on the first match, as any-of values do; a name whose every
+	// one of up to selector.MaxRuleValues globs must be tried costs more.
+	MaxSelectorNamesPerNamespace = 16000
 )
 
 // Selector is one rule of a virtual group: a fact name mapped to the values it
