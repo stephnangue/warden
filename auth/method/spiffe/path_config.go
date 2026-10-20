@@ -51,21 +51,30 @@ logins yet.`,
 	}
 }
 
+// unconfigured is what a mount with no config runs with, as a config read
+// renders it: the agent kind with the built-in facts only (the naming Factory
+// publishes), no audiences, no default role, and a token_ttl of zero, which
+// calculateTTL reads as no cap from the mount (the role's TTL and the SVID's
+// lifetime still apply). It is never written, so reads share it without a
+// lock.
+var unconfigured = &SPIFFEAuthConfig{FactsConfig: helper.FactsConfig{EntityKind: logical.EntityKindAgent}}
+
 func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	b.configMu.RLock()
 	defer b.configMu.RUnlock()
 
-	if b.config == nil {
-		return &logical.Response{StatusCode: http.StatusOK, Data: map[string]any{}}, nil
+	config := b.config
+	if config == nil {
+		config = unconfigured
 	}
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"token_ttl":       b.config.TokenTTL.String(),
-			"default_role":    b.config.DefaultRole,
-			"bound_audiences": slices.Clone(b.config.BoundAudiences),
-			"entity_kind":     b.config.EntityKind,
-			"facts":           maps.Clone(b.config.Facts),
+			"token_ttl":       config.TokenTTL.String(),
+			"default_role":    config.DefaultRole,
+			"bound_audiences": slices.Clone(config.BoundAudiences),
+			"entity_kind":     config.EntityKind,
+			"facts":           maps.Clone(config.Facts),
 		},
 	}, nil
 }

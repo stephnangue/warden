@@ -440,9 +440,9 @@ func TestConfigWrite_FactsAndAudiences(t *testing.T) {
 	assert.Equal(t, "human", stored["entity_kind"])
 	assert.Equal(t, map[string]any{"spiffe_id": "workload", "path": "where"}, stored["facts"])
 	assert.Equal(t, []any{"warden", "api"}, stored["bound_audiences"])
-	reloaded, _ := createTestBackend(t)
-	reloaded.storageView = b.storageView
-	reloaded.spiffe = spiffelib.NewManager(b.storageView, testLogger())
+	backend, err := Factory(ctx, &logical.BackendConfig{Logger: testLogger(), StorageView: b.storageView})
+	require.NoError(t, err)
+	reloaded := backend.(*spiffeAuthBackend)
 	require.NoError(t, reloaded.Initialize(ctx))
 	t.Cleanup(reloaded.spiffe.Stop)
 	assert.Equal(t, b.mountFacts.Load().Kind, reloaded.mountFacts.Load().Kind)
@@ -462,9 +462,42 @@ func TestConfigWrite_FactsAndAudiences(t *testing.T) {
 	assert.Len(t, b.FactNames(), len(spiffeBuiltinFacts()))
 
 	// A mount table config may give bound_audiences as a string.
-	backend, err := Factory(ctx, &logical.BackendConfig{Logger: testLogger(), Config: map[string]any{"bound_audiences": "warden,api"}})
+	fromTable, err := Factory(ctx, &logical.BackendConfig{Logger: testLogger(), Config: map[string]any{"bound_audiences": "warden,api"}})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"warden", "api"}, backend.(*spiffeAuthBackend).config.BoundAudiences)
+	assert.Equal(t, []string{"warden", "api"}, fromTable.(*spiffeAuthBackend).config.BoundAudiences)
+}
+
+// A mount with no config reads back what it runs with: the agent kind and the
+// built-in facts it answers, no audiences or default role, and a token_ttl of
+// zero, meaning no cap from the mount, which logins honour.
+func TestConfigRead_UnconfiguredRendersDefaults(t *testing.T) {
+	b, ctx := createTestBackend(t)
+	require.Nil(t, b.config)
+
+	resp, err := b.handleConfigRead(ctx, &logical.Request{}, &framework.FieldData{})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, map[string]any{
+		"token_ttl":       "0s",
+		"default_role":    "",
+		"bound_audiences": []string(nil),
+		"entity_kind":     logical.EntityKindAgent,
+		"facts":           map[string]string(nil),
+	}, resp.Data)
+	assert.Equal(t, resp.Data["entity_kind"], b.mountFacts.Load().Kind)
+	assert.Equal(t, slices.Sorted(slices.Values(spiffeBuiltinFacts())), b.FactNames(), "it answers the built-ins")
+
+	// No mount cap: a role TTL above an hour applies in full, under the SVID's
+	// lifetime.
+	ca, caKey, caPEM := testCA(t)
+	registerTD(t, b, ctx, &spiffelib.TrustDomain{Name: testTD, BundlePEM: caPEM})
+	require.NoError(t, b.setRole(ctx, &SPIFFERole{Name: "long", TrustDomain: testTD, TokenTTL: "2h"}))
+	svid := testSVID(t, ca, caKey, "spiffe://"+testTD+"/sa/api", func(c *x509.Certificate) {
+		c.NotAfter = time.Now().Add(3 * time.Hour)
+	})
+	login := x509Login(t, b, ctx, "long", svid)
+	require.Equal(t, http.StatusOK, login.StatusCode, "login: %v", login.Err)
+	assert.Equal(t, 2*time.Hour, login.Auth.TokenTTL)
 }
 
 // bound_audiences is stored but not used by logins yet: the role's audience
