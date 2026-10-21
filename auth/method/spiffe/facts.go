@@ -55,6 +55,9 @@ var _ logical.FactsProvider = (*spiffeAuthBackend)(nil)
 // FactNames implements logical.FactsProvider (see helper.FactNames).
 func (b *spiffeAuthBackend) FactNames() []string { return helper.FactNames(b.mountFacts) }
 
+// EntityKind implements logical.FactsProvider (see helper.EntityKind).
+func (b *spiffeAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
+
 // newAdmission returns what a successful login verified: id is the SVID's
 // verified SPIFFE ID, svid the kind that carried it (svidX509 or svidJWT),
 // audiences a JWT-SVID's 'aud' (nil for an X.509-SVID, which has none) and

@@ -41,11 +41,9 @@ func TestIntrospectRoles_AggregatorReturnsCallerJWTRoles(t *testing.T) {
 	for _, r := range resp.Data.Roles {
 		if r["name"] == "e2e-reader" {
 			found = true
-			// auth_path matches `warden auth list`'s convention: the
-			// mount-table path relative to the auth route prefix (e.g.
-			// "jwt/"), NOT the router-visible "auth/jwt/".
-			if r["auth_path"] != "jwt/" {
-				t.Errorf("auth_path = %v; want jwt/", r["auth_path"])
+			// Discovery names roles only, never the auth mount.
+			if _, ok := r["auth_path"]; ok {
+				t.Errorf("discovery leaked auth_path: %#v", r)
 			}
 		}
 	}
@@ -97,32 +95,5 @@ func TestRolesCLI_JWTPromotesToBearer(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected e2e-reader in CLI roles; got: %s", out)
-	}
-}
-
-// TestRolesCLI_AuthPathFilter verifies the --auth-path filter narrows the
-// CLI output to roles on the specified mount.
-func TestRolesCLI_AuthPathFilter(t *testing.T) {
-	port := h.GetLeaderPort(t)
-	jwt := h.GetDefaultJWT(t)
-
-	out, err := h.WardenCLIWithPort(t, port, map[string]string{
-		"WARDEN_TOKEN": jwt,
-	}, "role", "list", "-o", "json", "--auth-path", "jwt/")
-	if err != nil {
-		t.Fatalf("warden role list --auth-path failed: %v\nOutput:\n%s", err, out)
-	}
-
-	var roles []map[string]any
-	if err := json.Unmarshal([]byte(out), &roles); err != nil {
-		t.Fatalf("output not JSON: %v\n%s", err, out)
-	}
-	if len(roles) == 0 {
-		t.Fatalf("filter excluded everything; expected at least one role")
-	}
-	for _, r := range roles {
-		if got := fmt.Sprintf("%v", r["auth_path"]); got != "jwt/" {
-			t.Errorf("filter leaked: auth_path = %q; want jwt/", got)
-		}
 	}
 }

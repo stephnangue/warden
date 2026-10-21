@@ -199,12 +199,18 @@ func NewMountNaming(mapping *selector.Mapping, kind string) (*MountNaming, error
 
 // FactsProvider is implemented by auth backends that admit credentials as
 // facts. Backends are reached through the router as logical.Backend, like
-// AuthorizationServerProvider. Core consults it only when a group is written
-// (to warn about a fact name no mount produces), never on the request path.
+// AuthorizationServerProvider. Core consults it only to warn: when a group is
+// written (about a fact name no mount produces) and when a provider
+// configuration is read (about an auth path naming a mount of the wrong
+// kind), never on the request path.
 type FactsProvider interface {
 	// FactNames returns every fact name the mount answers, built-in and
 	// mapped, under its current configuration.
 	FactNames() []string
+	// EntityKind returns the kind of entity the mount admits under its
+	// current configuration (EntityKindAgent or EntityKindHuman), or "" when
+	// it publishes no naming.
+	EntityKind() string
 }
 
 // Lookup answers the canonical fact name against naming n: "mount" from the

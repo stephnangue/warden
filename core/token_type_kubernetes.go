@@ -87,12 +87,9 @@ func (t *KubernetesRoleTokenType) LookupValue(jwt, mountAccessor string) string 
 func (t *KubernetesRoleTokenType) IsTransparent() bool { return true }
 
 // CredentialFormat reports "k8s_sa_jwt" — same wire shape as a generic JWT
-// (Authorization: Bearer eyJ...), but a distinct discovery-level kind so
-// the introspect aggregator only fans K8s SA tokens out to kubernetes
-// mounts (avoiding TokenReview round-trips against spokes that cannot
-// authenticate the token). performImplicitAuth groups "jwt" and
-// "k8s_sa_jwt" into a shared extraction case since the wire-level parse
-// is identical.
+// (Authorization: Bearer eyJ...), validated by TokenReview rather than by a
+// key set. performImplicitAuth groups "jwt" and "k8s_sa_jwt" into a shared
+// extraction case since the wire-level parse is identical.
 func (t *KubernetesRoleTokenType) CredentialFormat() string { return "k8s_sa_jwt" }
 
 var _ TransparentTokenType = (*KubernetesRoleTokenType)(nil)

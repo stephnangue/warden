@@ -1288,11 +1288,12 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	resp, routeErr := c.doRouting(ctx, req)
 
 	// A provider's config read also says, ahead of time, when its user leg
-	// would refuse every user credential: only core sees the user auth mount
-	// and the protected-resource configuration that decide it.
+	// would refuse every user credential, or an auth path names a mount of the
+	// wrong kind: only core sees the auth mounts and the protected-resource
+	// configuration that decide it.
 	if entry != nil && entry.Class == mountClassProvider && !req.Streamed &&
 		req.Operation == logical.ReadOperation && req.Path == "config" && resp != nil && resp.Err == nil {
-		if warnings := c.userLegConfigWarnings(ctx, entry); len(warnings) > 0 {
+		if warnings := c.providerConfigWarnings(ctx, entry); len(warnings) > 0 {
 			if resp.Data == nil {
 				resp.Data = map[string]any{}
 			}
@@ -2669,6 +2670,49 @@ func (c *Core) resolveUserAuthConfig(_ context.Context, backend logical.Backend)
 		refusal = p.UserAuthRefusal()
 	}
 	return userAuthPath, refusal
+}
+
+// providerConfigWarnings returns what the config read of the provider mounted
+// at entry warns about: its user leg (userLegConfigWarnings), and an auth path
+// naming a mount of the wrong kind (authMountKindWarnings).
+func (c *Core) providerConfigWarnings(ctx context.Context, entry *MountEntry) []string {
+	warnings := c.userLegConfigWarnings(ctx, entry)
+	return append(warnings, c.authMountKindWarnings(ctx, c.router.MatchingBackend(ctx, entry.Path))...)
+}
+
+// authMountKindWarnings returns a warning when the provider backend's
+// auto_auth_path names a human auth mount (the agent leg never admits through
+// one, so every gateway request is refused), and one when its user_auth_path
+// names an agent auth mount. Each path is resolved as the request path
+// resolves it; a path naming no mount, or a mount that publishes no naming, is
+// not warned about here.
+func (c *Core) authMountKindWarnings(ctx context.Context, backend logical.Backend) []string {
+	var warnings []string
+	if tmp, ok := backend.(logical.TransparentModeProvider); ok {
+		if path := tmp.GetAutoAuthPath(); path != "" && c.authMountKind(ctx, path) == logical.EntityKindHuman {
+			warnings = append(warnings, fmt.Sprintf("auto_auth_path %q names a human auth mount: "+
+				"agent credentials are never admitted through it, so every gateway request is refused", path))
+		}
+	}
+	if path, _ := c.resolveUserAuthConfig(ctx, backend); path != "" &&
+		c.authMountKind(ctx, normalizeAuthPath(path)) == logical.EntityKindAgent {
+		warnings = append(warnings, fmt.Sprintf("user_auth_path %q names an agent auth mount: "+
+			"user credentials are expected through a human auth mount", path))
+	}
+	return warnings
+}
+
+// authMountKind returns the entity kind the auth mount at path admits under
+// its current configuration, or "" when path names no auth mount or the mount
+// publishes no naming.
+func (c *Core) authMountKind(ctx context.Context, path string) string {
+	if e := c.router.MatchingMountEntry(ctx, path); e == nil || e.Class != mountClassAuth {
+		return ""
+	}
+	if fp, ok := c.router.MatchingBackend(ctx, path).(logical.FactsProvider); ok {
+		return fp.EntityKind()
+	}
+	return ""
 }
 
 // userLegConfigWarnings returns what the config read of the provider mounted

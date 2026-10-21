@@ -74,7 +74,9 @@ type skillsGetResult struct {
 
 // visibleSkills returns the skills the presented identity may read, keyed by
 // name: the skill of every role it can assume, the foundation skills, and
-// every skill those name in requires, transitively.
+// every skill those name in requires, transitively. The roles come from the
+// request's one discovery (requestDiscovery), so every skill call a request
+// carries shares one admission per target mount.
 func (c *Core) visibleSkills(ctx context.Context) (map[string]*Skill, error) {
 	if c.skillStore == nil {
 		return nil, fmt.Errorf("skill store not initialized")

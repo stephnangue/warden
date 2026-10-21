@@ -15,8 +15,7 @@ import (
 
 // The auth roles of the role era: their storage, handlers and checks. Nothing
 // routes to the handlers any more (role/ answers 410, path_role.go), and only
-// the old discovery endpoint and tests still call the rest; all of it is
-// deleted with them.
+// tests still call the rest; all of it is deleted with them.
 
 const rolePrefix = helper.RolePrefix
 

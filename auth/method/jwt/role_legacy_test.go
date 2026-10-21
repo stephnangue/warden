@@ -20,6 +20,14 @@ import (
 // Role Management Tests
 // =============================================================================
 
+func TestMatchRole(t *testing.T) {
+	claims := map[string]any{"sub": "alice", "dept": "eng"}
+	assert.NoError(t, matchRole(claims, nil, &JWTRole{Name: "any"}), "empty constraints match any claims")
+	assert.Error(t, matchRole(claims, map[string]any{"dept": "sales"}, &JWTRole{Name: "r"}), "config bound claim mismatch")
+	assert.Error(t, matchRole(claims, nil, &JWTRole{Name: "r", BoundClaims: map[string]any{"dept": "sales"}}), "role bound claim mismatch")
+	assert.NoError(t, matchRole(claims, nil, &JWTRole{Name: "r", BoundClaims: map[string]any{"dept": "eng"}}))
+}
+
 func TestPathRole_Create(t *testing.T) {
 	b, ctx := createTestBackendWithStorage(t)
 

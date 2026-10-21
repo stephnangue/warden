@@ -16,6 +16,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stephnangue/warden/logical"
 )
 
 // connectSkillsClient dials the discovery endpoint with a client that can send
@@ -64,14 +66,16 @@ func skillNames(res *skillsListResult) []string {
 	return names
 }
 
-// setupSkillsDiscovery mounts jwt/ and the vault provider, gives the identity
-// two roles, and seeds a provider skill, a custom skill with a requires cycle,
-// a foundation skill and a skill no role references. The mock serves the same
-// roles to every bearer, so tests change the identity's roles by editing the
-// returned mock.
-func setupSkillsDiscovery(t *testing.T) (*Core, *introspectMock) {
+// setupSkillsDiscovery mounts jwt/ and the vault provider in the root
+// namespace, grants every credential two roles through the group "skills",
+// and seeds a provider skill, a custom skill with a requires cycle, a
+// foundation skill and a skill no granted role references. The mount admits
+// every bearer, so tests change the identity's roles by editing the group.
+func setupSkillsDiscovery(t *testing.T) (*Core, *discEnv) {
 	t.Helper()
-	c, ctx, ctrl := setupDiscovery(t)
+	e := newDiscEnv(t, "", "")
+	e.mountAuth("jwt/")
+	c, ctx := e.c, e.ctx
 	mountDiscoveryProvider(t, c, ctx, "vault", "vault/", "auth/jwt/", "")
 	seedTestSkill(t, c, ctx, "vault")
 	seedTestSkill(t, c, ctx, "slack")
@@ -82,11 +86,12 @@ func setupSkillsDiscovery(t *testing.T) (*Core, *introspectMock) {
 	} {
 		require.NoError(t, c.skillStore.Create(ctx, s))
 	}
-	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{
-		{"name": "read-secret", "provider_path": "vault/"},
-		{"name": "on-call", "skill": "runbook"},
-	}
-	return c, ctrl
+	e.grant("skills", []string{"auth/jwt/"},
+		&logical.Role{Name: "read-secret", ProviderPath: "vault/"},
+		&logical.Role{Name: "on-call", ProviderPath: "vault/", Skill: "runbook"},
+	)
+	e.createRole(&logical.Role{Name: "slacker", ProviderPath: "vault/", Skill: "slack"})
+	return c, e
 }
 
 func TestSkillsExtension_DeclaredCapability(t *testing.T) {
@@ -239,13 +244,17 @@ func TestSkillsList_LegacyProtocolClient(t *testing.T) {
 
 // Changing the identity's roles changes what it sees.
 func TestSkills_VisibilityFollowsRoles(t *testing.T) {
-	c, ctrl := setupSkillsDiscovery(t)
+	c, e := setupSkillsDiscovery(t)
 	srv := startMCPTestServer(t, c, nil)
-	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{{"name": "slacker", "skill": "slack"}}
+	_, err := c.identityStore.UpdateGroup(e.ctx, &logical.Group{
+		Name: "skills", Type: logical.GroupTypeVirtual, Roles: []string{"slacker"},
+		Rules: []logical.GroupRule{discRule([]string{"auth/jwt/"})},
+	}, "")
+	require.NoError(t, err)
 	session := connectSkillsClient(t, srv, "eyJ.any.token")
 
 	assert.Equal(t, []string{"slack", "troubleshooting"}, skillNames(listSkills(t, session)))
-	_, err := getSkill(session, "skill://vault/SKILL.md")
+	_, err = getSkill(session, "skill://vault/SKILL.md")
 	var rpcErr *jsonrpc.Error
 	require.True(t, errors.As(err, &rpcErr), "vault is no longer reachable from this identity's roles; got %v", err)
 	assert.Equal(t, int64(jsonrpc.CodeInvalidParams), rpcErr.Code)
@@ -271,7 +280,7 @@ func TestSkills_NoCredential(t *testing.T) {
 // the new content — including for a skill deleted and recreated under the
 // same name, which restarts at version 1 — and Delete drops the entry.
 func TestSkillRenderCache_FollowsWrites(t *testing.T) {
-	c, ctx, _ := setupDiscovery(t)
+	c, ctx := createTestCore(t), rootCtx()
 	require.NoError(t, c.skillStore.Create(ctx, &Skill{Name: "x", Description: "d", Category: SkillCategoryCustom, Body: "one"}))
 	get := func() *renderedSkill {
 		s, err := c.skillStore.Get(ctx, "x")

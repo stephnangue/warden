@@ -35,8 +35,7 @@ func TestKubernetesRoleTokenType_ImplementsTransparentTokenType(t *testing.T) {
 	assert.True(t, tt.IsTransparent(),
 		"KubernetesRoleTokenType must opt into transparent-family behaviors via IsTransparent()")
 	assert.Equal(t, "k8s_sa_jwt", tt.CredentialFormat(),
-		"CredentialFormat must be 'k8s_sa_jwt' (distinct from generic 'jwt') so the "+
-			"introspect aggregator only fans K8s SA tokens out to kubernetes mounts")
+		"CredentialFormat must be 'k8s_sa_jwt' (distinct from generic 'jwt')")
 }
 
 func TestKubernetesRoleTokenType_ValidateValue(t *testing.T) {

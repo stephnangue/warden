@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	authhelper "github.com/stephnangue/warden/auth/helper"
@@ -125,6 +126,18 @@ func (b *kubernetesAuthBackend) BindsAudience() bool {
 	b.configMu.RLock()
 	defer b.configMu.RUnlock()
 	return b.config != nil && len(b.config.BoundAudiences) > 0
+}
+
+// extractJWTFromRequest returns the bearer token of an introspect/admit
+// request: the Authorization header of the request discovery forwards, else
+// req.ClientToken.
+func extractJWTFromRequest(req *logical.Request) string {
+	if req.HTTPRequest != nil {
+		if auth := req.HTTPRequest.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			return strings.TrimPrefix(auth, "Bearer ")
+		}
+	}
+	return req.ClientToken
 }
 
 // admit is the mount's authhelper.AdmitFunc: the bearer token admitted by

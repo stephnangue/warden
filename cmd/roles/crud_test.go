@@ -140,7 +140,7 @@ func setupFake(t *testing.T, status int, body string) (*fakeWarden, *bytes.Buffe
 		createFlags.reset()
 		updateFlags.reset()
 		deleteForce, deleteExpectedHash = false, ""
-		listAll, providerPathFilter, authPathFilter = false, "", ""
+		listAll, providerPathFilter = false, ""
 	})
 	return f, stdout, stderr
 }
@@ -443,12 +443,8 @@ func TestDelete_WarnsNamingGroups(t *testing.T) {
 func TestListAll_FlagCombinations(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusOK, `{"data":{}}`)
 
-	listAll, authPathFilter = true, "auth/jwt/"
+	listAll, providerPathFilter = false, "aws/"
 	err := runList(ListCmd, nil)
-	assert.True(t, errors.Is(err, helpers.ErrUsage), "-auth-path does not apply to the inventory")
-
-	listAll, authPathFilter, providerPathFilter = false, "", "aws/"
-	err = runList(ListCmd, nil)
 	assert.True(t, errors.Is(err, helpers.ErrUsage), "-provider-path needs -all")
 	assert.Zero(t, f.count())
 }

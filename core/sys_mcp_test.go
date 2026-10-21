@@ -21,6 +21,7 @@ import (
 
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
+	"github.com/stephnangue/warden/logical"
 )
 
 // mcpHeaderRoundTripper injects a fixed set of headers on every outbound
@@ -104,23 +105,21 @@ func decodeListRoles(t *testing.T, res *mcp.CallToolResult) listRolesOutput {
 	return out
 }
 
-// TestMCPServer_ListRoles_JWTFanOut drives the full transport with a Bearer
-// JWT: the handshake negotiates the latest protocol revision, tools/list
-// advertises list_roles, and the tool result matches what the introspection
-// aggregator returns for a JWT identity.
-func TestMCPServer_ListRoles_JWTFanOut(t *testing.T) {
-	_, ctx, c := setupTestSystemBackend(t)
-	ctrl := newIntrospectMock()
-
-	c.authMethods["jwt"] = ctrl.factory()
-	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-a/"}))
-	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-b/"}))
-	ctrl.rolesByMount["auth/jwt-a/"] = []map[string]any{
-		{"name": "reader", "description": "search & read any repo"},
-	}
-	ctrl.rolesByMount["auth/jwt-b/"] = []map[string]any{
-		{"name": "writer", "description": "write staging"},
-	}
+// TestMCPServer_ListRoles_JWT drives the full transport with a Bearer JWT:
+// the handshake negotiates the latest protocol revision, tools/list advertises
+// list_roles, and the tool result lists the roles granted at each role's
+// provider's auth mount.
+func TestMCPServer_ListRoles_JWT(t *testing.T) {
+	e := newDiscEnv(t, "", "")
+	e.mountAuth("jwt-a/")
+	e.mountAuth("jwt-b/")
+	e.provider("vault", "vault/", "auth/jwt-a/")
+	e.provider("github", "github/", "auth/jwt-b/")
+	e.grant("readers", []string{"auth/jwt-a/"},
+		&logical.Role{Name: "reader", Description: "search & read any repo", ProviderPath: "vault/"})
+	e.grant("writers", []string{"auth/jwt-b/"},
+		&logical.Role{Name: "writer", Description: "write staging", ProviderPath: "github/"})
+	c := e.c
 
 	srv := startMCPTestServer(t, c, nil)
 	session := connectMCP(t, srv, "eyJ.any.token")
@@ -143,8 +142,7 @@ func TestMCPServer_ListRoles_JWTFanOut(t *testing.T) {
 	require.NoError(t, err)
 	out := decodeListRoles(t, res)
 
-	// Sorted by auth_path then name: jwt-a/reader, jwt-b/writer. auth_path is
-	// dropped from the projection.
+	// Sorted by name.
 	require.Len(t, out.Roles, 2)
 	assert.Equal(t, "reader", out.Roles[0].Name)
 	assert.Equal(t, "search & read any repo", out.Roles[0].Description)
@@ -155,16 +153,14 @@ func TestMCPServer_ListRoles_JWTFanOut(t *testing.T) {
 // TestMCPServer_ListRoles_CertPath exercises the X.509 credential path: no
 // Authorization header is sent, only a forwarded client certificate. This
 // proves the capturing middleware threads the cert (which the SDK does not
-// surface to tool handlers) through to detectIntrospectCredentialFormat.
+// surface to tool handlers) through to the auth mount that admits it.
 func TestMCPServer_ListRoles_CertPath(t *testing.T) {
-	_, ctx, c := setupTestSystemBackend(t)
-	ctrl := newIntrospectMock()
-
-	c.authMethods["cert"] = ctrl.factory()
-	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "cert", Path: "cert-mount/"}))
-	ctrl.rolesByMount["auth/cert-mount/"] = []map[string]any{
-		{"name": "cert-role", "description": "clone via Git"},
-	}
+	e := newDiscEnv(t, "", "")
+	e.mountAuth("cert-mount/").needCert = true
+	e.provider("git", "git/", "auth/cert-mount/")
+	e.grant("cloners", []string{"auth/cert-mount/"},
+		&logical.Role{Name: "cert-role", Description: "clone via Git", ProviderPath: "git/"})
+	c := e.c
 
 	cert := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "agent"}}
 	srv := startMCPTestServer(t, c, cert)
@@ -266,6 +262,17 @@ func seedTestSkill(t *testing.T, c *Core, ctx context.Context, name string) {
 	}))
 }
 
+// skillRoleEnv seeds the skill "mcp" and grants every credential the role
+// "agent" naming it, a role without a provider reached at the namespace's
+// auto_auth_path.
+func skillRoleEnv(t *testing.T) *discEnv {
+	t.Helper()
+	e := setupDiscovery(t)
+	seedTestSkill(t, e.c, rootCtx(), "mcp")
+	e.grant("agents", []string{"auth/jwt/"}, &logical.Role{Name: "agent", Skill: "mcp"})
+	return e
+}
+
 // callReadSkill invokes the read_skill tool and returns the raw result.
 func callReadSkill(t *testing.T, session *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
@@ -278,14 +285,11 @@ func callReadSkill(t *testing.T, session *mcp.ClientSession, args map[string]any
 // text content is the rendered SKILL.md, and the structured output carries its
 // frontmatter and the same SKILL.md, so a client reading either gets the body.
 func TestMCPServer_ReadSkill_ByURI(t *testing.T) {
-	c, ctx, ctrl := setupDiscovery(t)
-	seedTestSkill(t, c, ctx, "mcp")
-	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{{"name": "agent", "skill": "mcp"}}
-	stored, err := c.skillStore.Get(ctx, "mcp")
+	e := skillRoleEnv(t)
+	stored, err := e.c.skillStore.Get(rootCtx(), "mcp")
 	require.NoError(t, err)
 
-	srv := startMCPTestServer(t, c, nil)
-	session := connectMCP(t, srv, "eyJ.any.token")
+	session := connectMCPWithHeaders(t, e.server(), e.headers("eyJ.any.token"))
 
 	res := callReadSkill(t, session, map[string]any{"uri": "skill://mcp/SKILL.md"})
 	require.False(t, res.IsError, "unexpected tool error: %v", res.Content)
@@ -309,12 +313,8 @@ func TestMCPServer_ReadSkill_ByURI(t *testing.T) {
 // TestMCPServer_ReadSkill_Errors covers the tool-error paths: a missing,
 // malformed or bare-name URI, and an unknown skill.
 func TestMCPServer_ReadSkill_Errors(t *testing.T) {
-	c, ctx, ctrl := setupDiscovery(t)
-	seedTestSkill(t, c, ctx, "mcp")
-	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{{"name": "agent", "skill": "mcp"}}
-
-	srv := startMCPTestServer(t, c, nil)
-	session := connectMCP(t, srv, "eyJ.any.token")
+	e := skillRoleEnv(t)
+	session := connectMCPWithHeaders(t, e.server(), e.headers("eyJ.any.token"))
 
 	cases := []struct {
 		name string

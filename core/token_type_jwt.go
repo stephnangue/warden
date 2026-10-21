@@ -88,8 +88,7 @@ func (t *JWTRoleTokenType) IsTransparent() bool { return true }
 
 // CredentialFormat reports "jwt" — generic JWT bearer tokens validated
 // by JWKS/OIDC discovery. Kubernetes SA JWTs use the distinct
-// "k8s_sa_jwt" subtype so the introspect aggregator can route them only
-// to kubernetes mounts.
+// "k8s_sa_jwt" kind.
 func (t *JWTRoleTokenType) CredentialFormat() string { return "jwt" }
 
 var _ TransparentTokenType = (*JWTRoleTokenType)(nil)

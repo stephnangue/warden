@@ -47,8 +47,8 @@ type KubernetesAuthConfig struct {
 
 	// Issuer, if set, gates login on the workload JWT's `iss` claim
 	// matching this value (cheap unverified parse, before the TokenReview
-	// round-trip). Per-mount issuer pinning is the right place to do this
-	// — the introspect aggregator stays config-agnostic.
+	// round-trip). It also bounds what discovery costs: without it, any
+	// JWT-shaped bearer costs one TokenReview per kubernetes target mount.
 	Issuer string `json:"issuer,omitempty"`
 
 	// DisableIssValidation lets operators opt out of the `iss` pre-filter
@@ -122,13 +122,11 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
 				"login",
-				"introspect/roles",
 			},
 		},
 		Paths: append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathIntrospect(),
 			helper.AdmitPath(b.admit),
 		}, pathRoles()...),
 	}

@@ -11,11 +11,9 @@ import (
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-// TestIntrospectRoles_PerMountEndpoint covers GET
-// /v1/auth/jwt/introspect/roles directly. The aggregator at sys/introspect/
-// roles fans out to this same path internally, so per-mount coverage pins
-// the contract the aggregator depends on.
-func TestIntrospectRoles_PerMountEndpoint(t *testing.T) {
+// TestIntrospectRoles_PerMountEndpointGone verifies that an auth mount no
+// longer serves introspect/roles: discovery runs at sys/introspect/roles.
+func TestIntrospectRoles_PerMountEndpointGone(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)
 
@@ -23,29 +21,8 @@ func TestIntrospectRoles_PerMountEndpoint(t *testing.T) {
 	headers := map[string]string{"Authorization": "Bearer " + jwt}
 
 	status, body := h.DoRequest(t, "GET", u, headers, "")
-	if status != 200 {
-		t.Fatalf("expected 200; got %d. Body: %s", status, string(body))
-	}
-
-	var resp struct {
-		Data struct {
-			Roles []map[string]any `json:"roles"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, string(body))
-	}
-	if len(resp.Data.Roles) == 0 {
-		t.Fatalf("expected at least one role from auth/jwt/; got 0\n%s", string(body))
-	}
-	// Per-mount results don't carry auth_path — the aggregator adds it.
-	for _, r := range resp.Data.Roles {
-		if _, ok := r["auth_path"]; ok {
-			t.Errorf("per-mount response leaked auth_path; got %#v", r)
-		}
-		if _, ok := r["name"].(string); !ok {
-			t.Errorf("per-mount role missing name; got %#v", r)
-		}
+	if status == 200 {
+		t.Fatalf("expected the per-mount endpoint to be gone; got 200. Body: %s", string(body))
 	}
 }
 

@@ -178,3 +178,22 @@ func TestExpectedClaims(t *testing.T) {
 	assert.Nil(t, e.Audiences, "an empty list leaves the audience unchecked")
 	assert.NotEmpty(t, e.SigningAlgorithms)
 }
+
+func TestExtractJWTFromRequest(t *testing.T) {
+	t.Run("from Authorization header", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+		httpReq.Header.Set("Authorization", "Bearer eyJ.payload.sig")
+		assert.Equal(t, "eyJ.payload.sig", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}))
+	})
+	t.Run("no Bearer prefix → empty", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+		httpReq.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+		assert.Equal(t, "", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}))
+	})
+	t.Run("falls back to ClientToken when no HTTP request", func(t *testing.T) {
+		assert.Equal(t, "eyJ.client.token", extractJWTFromRequest(&logical.Request{ClientToken: "eyJ.client.token"}))
+	})
+	t.Run("empty when neither present", func(t *testing.T) {
+		assert.Equal(t, "", extractJWTFromRequest(&logical.Request{}))
+	})
+}

@@ -14,8 +14,7 @@ import (
 
 // The auth roles of the role era: their storage, handlers and checks. Nothing
 // routes to the handlers any more (role/ answers 410, path_role.go), and only
-// the old discovery endpoint and tests still call the rest; all of it is
-// deleted with them.
+// tests still call the rest; all of it is deleted with them.
 
 const rolePrefix = helper.RolePrefix
 
@@ -437,4 +436,23 @@ func (b *jwtAuthBackend) listRoles(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+// validateJWTForRole runs the mount's validator with role-specific
+// constraints (issuer, subject, audiences), the same construction as the old
+// role login. Returns claims on success.
+func validateJWTForRole(ctx context.Context, config *JWTAuthConfig, role *JWTRole, jwtToken string) (map[string]any, error) {
+	return config.validator.Validate(ctx, jwtToken, expectedClaims(config, role))
+}
+
+// matchRole runs the post-Validate claim checks of the old role login:
+// config-level bound claims and role-level bound claims.
+func matchRole(claims map[string]any, configBoundClaims map[string]any, role *JWTRole) error {
+	if err := validateBoundClaims(claims, configBoundClaims); err != nil {
+		return err
+	}
+	if err := validateBoundClaims(claims, role.BoundClaims); err != nil {
+		return err
+	}
+	return nil
 }

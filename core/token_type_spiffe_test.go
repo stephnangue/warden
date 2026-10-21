@@ -80,7 +80,7 @@ func TestSpiffeRoleTokenType_ImplementsTransparentTokenType(t *testing.T) {
 }
 
 // The registry must resolve the "spiffe" mount type to spiffe_role so the
-// implicit-auth dispatcher and the introspect aggregator find it.
+// implicit-auth dispatcher finds it.
 func TestSpiffeRoleTokenType_RegistryWiring(t *testing.T) {
 	reg := NewTokenTypeRegistry()
 	if err := reg.Register(&SpiffeRoleTokenType{}); err != nil {

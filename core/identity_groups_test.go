@@ -22,11 +22,18 @@ import (
 type factsBackend struct {
 	typ   string
 	names []string
+	kind  string // "" answers agent
 }
 
 var _ logical.FactsProvider = (*factsBackend)(nil)
 
 func (b *factsBackend) FactNames() []string { return b.names }
+func (b *factsBackend) EntityKind() string {
+	if b.kind == "" {
+		return logical.EntityKindAgent
+	}
+	return b.kind
+}
 func (b *factsBackend) HandleRequest(context.Context, *logical.Request) (*logical.Response, error) {
 	return nil, nil
 }

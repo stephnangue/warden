@@ -45,6 +45,9 @@ var _ logical.FactsProvider = (*certAuthBackend)(nil)
 // FactNames implements logical.FactsProvider (see helper.FactNames).
 func (b *certAuthBackend) FactNames() []string { return helper.FactNames(b.mountFacts) }
 
+// EntityKind implements logical.FactsProvider (see helper.EntityKind).
+func (b *certAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
+
 // newAdmission returns what a successful login verified about cert: its
 // subject and SAN fields, and as "ca" the SHA-256 fingerprint (lowercase hex
 // of the DER) of the anchor of every chain in chains, the chains cert was

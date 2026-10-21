@@ -2,6 +2,7 @@ package cert
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"path"
@@ -15,8 +16,7 @@ import (
 
 // The auth roles of the role era: their storage, handlers and checks. Nothing
 // routes to the handlers any more (role/ answers 410, path_role.go), and only
-// the old discovery endpoint and tests still call the rest; all of it is
-// deleted with them.
+// tests still call the rest; all of it is deleted with them.
 
 const rolePrefix = helper.RolePrefix
 
@@ -490,4 +490,29 @@ func (b *certAuthBackend) listRoles(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+// verifyCertForRole performs the chain-of-trust check the old role login did
+// before validateCertConstraints: the certificate must verify against the
+// role's effective CA pool. Revocation is not checked.
+func verifyCertForRole(config *CertAuthConfig, cert *x509.Certificate, role *CertRole) error {
+	caPool, err := getCAPool(config, role)
+	if err != nil {
+		return err
+	}
+	if caPool == nil {
+		return errCertAuthFailed
+	}
+	_, err = verifyChain(caPool, cert)
+	return err
+}
+
+// certSatisfiesRole reports whether the old role login would have accepted the
+// certificate for the role, minus the revocation check: the x509 chain check
+// plus the role constraints.
+func certSatisfiesRole(config *CertAuthConfig, cert *x509.Certificate, role *CertRole) bool {
+	if err := verifyCertForRole(config, cert, role); err != nil {
+		return false
+	}
+	return validateCertConstraints(cert, role) == nil
 }

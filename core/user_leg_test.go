@@ -418,6 +418,54 @@ func TestUserLegConfigWarnings(t *testing.T) {
 	assert.Len(t, c.userLegConfigWarnings(ctx, refused), 1, "a stored user_auth_role refuses whatever binds")
 }
 
+// A provider config read warns when its auto_auth_path names a human auth
+// mount, or its user_auth_path an agent one; a path naming no auth mount, or
+// a mount that publishes no kind, is not a kind warning.
+func TestAuthMountKindWarnings(t *testing.T) {
+	c := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	for path, kind := range map[string]string{"agents/": logical.EntityKindAgent, "humans/": logical.EntityKindHuman} {
+		typ := "kind-" + strings.TrimSuffix(path, "/")
+		c.authMethods[typ] = func(context.Context, *logical.BackendConfig) (logical.Backend, error) {
+			return &factsBackend{typ: typ, kind: kind}, nil
+		}
+		require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: typ, Path: path}))
+	}
+	mountStubAuthMethod(t, c, "stub/", "jwt") // publishes no kind
+
+	mountProvider := func(path, autoAuthPath, userAuthPath string) *MountEntry {
+		entry := &MountEntry{
+			Path: path, Type: "mcp", Class: mountClassProvider,
+			UUID: "prov-" + path, Accessor: "acc-" + path,
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		}
+		backend := &mockUnauthPathBackend{userAuthPath: userAuthPath}
+		backend.transparentMode, backend.autoAuthPath = autoAuthPath != "", autoAuthPath
+		require.NoError(t, c.router.Mount(path, backend, entry, &mockBarrierView{prefix: "provider/" + path}))
+		return entry
+	}
+	kindWarnings := func(entry *MountEntry) []string {
+		return c.authMountKindWarnings(ctx, c.router.MatchingBackend(ctx, entry.Path))
+	}
+
+	humanAgentLeg := mountProvider("human-agent-leg/", "auth/humans/", "")
+	assert.Equal(t, []string{`auto_auth_path "auth/humans/" names a human auth mount: ` +
+		"agent credentials are never admitted through it, so every gateway request is refused"}, kindWarnings(humanAgentLeg))
+	assert.Equal(t, kindWarnings(humanAgentLeg), c.providerConfigWarnings(ctx, humanAgentLeg), "no user leg")
+
+	agentUserLeg := mountProvider("agent-user-leg/", "auth/agents/", "auth/agents")
+	assert.Equal(t, []string{`user_auth_path "auth/agents" names an agent auth mount: ` +
+		"user credentials are expected through a human auth mount"}, kindWarnings(agentUserLeg))
+	assert.Contains(t, c.providerConfigWarnings(ctx, agentUserLeg), kindWarnings(agentUserLeg)[0],
+		"the config read carries it with the user-leg warnings")
+
+	assert.Empty(t, kindWarnings(mountProvider("right-kinds/", "auth/agents/", "auth/humans/")))
+	assert.Empty(t, kindWarnings(mountProvider("no-mounts/", "auth/nowhere/", "auth/nobody/")))
+	assert.Empty(t, kindWarnings(mountProvider("no-kind/", "auth/stub/", "auth/stub/")))
+	assert.Empty(t, kindWarnings(mountProvider("no-paths/", "", "")))
+}
+
 // Enabling a provider with the removed user_auth_role is refused.
 func TestProviderCreate_RefusesUserAuthRole(t *testing.T) {
 	backend, ctx, c := setupTestSystemBackend(t)

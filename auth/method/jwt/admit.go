@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
@@ -101,6 +102,18 @@ func admitToken(ctx context.Context, config *JWTAuthConfig, token string, now ti
 		return nil, fmt.Errorf("max_age: %w", err)
 	}
 	return claims, nil
+}
+
+// extractJWTFromRequest returns the bearer JWT of an introspect/admit
+// request: the Authorization header of the request discovery forwards, else
+// req.ClientToken.
+func extractJWTFromRequest(req *logical.Request) string {
+	if req.HTTPRequest != nil {
+		if auth := req.HTTPRequest.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			return strings.TrimPrefix(auth, "Bearer ")
+		}
+	}
+	return req.ClientToken
 }
 
 // admit is the mount's helper.AdmitFunc: the bearer JWT admitted by

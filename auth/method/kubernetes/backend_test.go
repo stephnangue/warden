@@ -39,8 +39,7 @@ func TestFactory_SpecialPathsUnauthenticated(t *testing.T) {
 	require.NoError(t, err)
 	paths := be.SpecialPaths()
 	require.NotNil(t, paths)
-	assert.Contains(t, paths.Unauthenticated, "login")
-	assert.Contains(t, paths.Unauthenticated, "introspect/roles")
+	assert.Equal(t, []string{"login"}, paths.Unauthenticated)
 }
 
 func TestFactory_SensitiveConfigFields(t *testing.T) {

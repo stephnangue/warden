@@ -2,22 +2,24 @@ package spiffe
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
 	"github.com/stephnangue/warden/auth/helper"
+	spiffelib "github.com/stephnangue/warden/auth/spiffe"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
 
 // The auth roles of the role era: their storage, handlers and checks. Nothing
 // routes to the handlers any more (role/ answers 410, path_role.go), and only
-// the old discovery endpoint and tests still call the rest; all of it is
-// deleted with them.
+// tests still call the rest; all of it is deleted with them.
 
 const rolePrefix = helper.RolePrefix
 
@@ -357,4 +359,27 @@ func (b *spiffeAuthBackend) deleteRole(ctx context.Context, name string) error {
 
 func (b *spiffeAuthBackend) listRoles(ctx context.Context) ([]string, error) {
 	return b.storageView.List(ctx, rolePrefix)
+}
+
+// roleAcceptsSVID reports whether the old role login would have accepted the
+// presented cert or JWT-SVID for the role. Every verification error is a
+// "no".
+func (b *spiffeAuthBackend) roleAcceptsSVID(set *spiffebundle.Set, role *SPIFFERole, cert *x509.Certificate, jwtToken string) bool {
+	expectedTD, err := spiffeid.TrustDomainFromString(role.TrustDomain)
+	if err != nil {
+		return false
+	}
+	if cert != nil {
+		if _, _, err := spiffelib.VerifyX509SVID(set, []*x509.Certificate{cert}, expectedTD, role.AllowedSPIFFEIDs); err == nil {
+			return true
+		}
+	}
+	if jwtToken != "" {
+		if audience := resolveAudience(role); len(audience) > 0 {
+			if _, err := spiffelib.VerifyJWTSVID(set, jwtToken, audience, expectedTD, role.AllowedSPIFFEIDs); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }

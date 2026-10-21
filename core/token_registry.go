@@ -52,9 +52,8 @@ func (r *TokenTypeRegistry) Register(tokenType TokenType) error {
 	}
 
 	// Index transparent token types by AuthMethodType so callers (the
-	// implicit-auth dispatcher, the system-introspect aggregator, the
-	// explicit-login guard) can ask "what TokenType serves mounts of
-	// type X?" without a hardcoded switch.
+	// implicit-auth dispatcher, the explicit-login guard) can ask "what
+	// TokenType serves mounts of type X?" without a hardcoded switch.
 	if meta.AuthMethodType != "" {
 		if tt, ok := tokenType.(TransparentTokenType); ok {
 			r.authMethod[meta.AuthMethodType] = tt
