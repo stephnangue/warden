@@ -298,3 +298,30 @@ func TestConfigRead_WarnsWithoutBoundAudiences(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, resp.Data, "warnings")
 }
+
+// A config write that leaves bound_audiences empty warns as the read does; one
+// that sets them, or keeps them set, does not.
+func TestConfigWrite_WarnsWithoutBoundAudiences(t *testing.T) {
+	b, ctx := newTestBackend(t)
+	write := func(raw map[string]any) *logical.Response {
+		t.Helper()
+		resp, err := b.handleConfigWrite(ctx, nil, &framework.FieldData{Raw: raw, Schema: b.pathConfig().Fields})
+		require.NoError(t, err)
+		require.NoError(t, resp.Err)
+		assert.Equal(t, "configuration updated", resp.Data["message"])
+		return resp
+	}
+
+	resp := write(map[string]any{"kubernetes_host": "https://kube", "tls_skip_verify": true})
+	// In the data, the one place an HTTP client sees it.
+	assert.Equal(t, []string{noAudiencesWarning}, resp.Data["warnings"])
+
+	resp = write(map[string]any{"bound_audiences": []string{"warden"}})
+	assert.NotContains(t, resp.Data, "warnings")
+
+	resp = write(map[string]any{"issuer": "https://kube"})
+	assert.NotContains(t, resp.Data, "warnings", "audiences kept from the stored config")
+
+	resp = write(map[string]any{"bound_audiences": ""})
+	assert.Equal(t, []string{noAudiencesWarning}, resp.Data["warnings"], "an empty value clears the list")
+}

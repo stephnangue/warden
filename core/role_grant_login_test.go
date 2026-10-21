@@ -394,6 +394,42 @@ func TestAdmissionLogin_NoRoleSelected(t *testing.T) {
 	assert.EqualValues(t, 1, b.logins.Load())
 }
 
+// On transparent operations a ?role= that is present but empty selects
+// nothing, so X-Warden-Role stays in force; a non-empty ?role= wins over it.
+func TestAdmissionLogin_OperationsEmptyRoleQuery(t *testing.T) {
+	e := newJWTEnv(t, "")
+	b := e.mount("jwt/", nil)
+	grantRole(t, e.c, e.ctx, testGrant{Role: "reader", Policies: []string{"read"}, Mount: "auth/jwt/"})
+	token := e.token("agent-1", "")
+	withAuth := &namespace.Namespace{
+		ID: namespace.RootNamespaceID, Path: "",
+		CustomMetadata: map[string]string{"auto_auth_path": "auth/jwt/"},
+	}
+	ctx := namespace.ContextWithNamespace(context.Background(), withAuth)
+
+	operate := func(target, headerRole string) *logical.Request {
+		t.Helper()
+		hr := httptest.NewRequest(http.MethodGet, target, nil)
+		hr.Header.Set("Authorization", "Bearer "+token)
+		if headerRole != "" {
+			hr.Header.Set("X-Warden-Role", headerRole)
+		}
+		req := &logical.Request{Path: "sys/cred/sources", Operation: logical.ReadOperation, HTTPRequest: hr}
+		resp, _, _ := e.c.handleNonLoginRequest(ctx, req)
+		if resp != nil && resp.Err != nil {
+			assert.NotContains(t, resp.Err.Error(), noRoleSelectedOperations, "%s with X-Warden-Role %q", target, headerRole)
+		}
+		return req
+	}
+
+	req := operate("/v1/sys/cred/sources?role=", "reader")
+	assert.Equal(t, "reader", req.RequestedRole, "the header selects the role")
+	assert.EqualValues(t, 1, b.logins.Load(), "the credential was admitted")
+
+	req = operate("/v1/sys/cred/sources?role=reader", "other")
+	assert.Equal(t, "reader", req.RequestedRole, "a non-empty ?role= wins")
+}
+
 // The agent leg never admits through a human mount, on either path, before
 // any policy runs; flipping the mount to agent admits on the next request.
 func TestAdmissionLogin_HumanMountRefusedOnAgentLeg(t *testing.T) {

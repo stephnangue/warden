@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/stephnangue/warden/auth/helper"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -34,7 +35,7 @@ func principalClaimOf(config *CertAuthConfig, role *CertRole) string {
 }
 
 // errNoTrustedCA refuses admission on a mount with no trusted CA.
-var errNoTrustedCA = errors.New("no trusted CA certificates configured")
+var errNoTrustedCA = helper.AdmitError(helper.ErrAdmitNoTrustedCA, "no trusted CA certificates configured")
 
 // admitCert verifies cert against the mount's configuration alone, with no
 // role: the chain against the mount's trusted CAs, for client auth, and a

@@ -74,6 +74,9 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 	if errors.Is(err, errDiscoveryNoCredential) {
 		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: err}, nil
 	}
+	if err == nil && d == nil {
+		err = errDiscoveryFailed
+	}
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}

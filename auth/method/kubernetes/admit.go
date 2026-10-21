@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	authhelper "github.com/stephnangue/warden/auth/helper"
@@ -79,10 +78,10 @@ func reviewWorkload(ctx context.Context, cfg *KubernetesAuthConfig, token string
 
 var (
 	// errNotConfigured: a mount with no configuration cannot decide.
-	errNotConfigured = errors.New("kubernetes auth method is not configured")
+	errNotConfigured = authhelper.AdmitError(authhelper.ErrAdmitNotConfigured, "kubernetes auth method is not configured")
 	// errTokenReviewCall: the TokenReview could not be made (transport, API
 	// server status), so the review decided nothing about the token.
-	errTokenReviewCall = errors.New("TokenReview call failed")
+	errTokenReviewCall = authhelper.AdmitError(authhelper.ErrAdmitUnverified, "TokenReview call failed")
 )
 
 // admitToken verifies token against the mount's configuration alone, with no
@@ -129,12 +128,13 @@ func (b *kubernetesAuthBackend) BindsAudience() bool {
 }
 
 // extractJWTFromRequest returns the bearer token of an introspect/admit
-// request: the Authorization header of the request discovery forwards, else
+// request: the Authorization bearer of the request discovery forwards, its
+// scheme matched case-insensitively as the gateway matches it, else
 // req.ClientToken.
 func extractJWTFromRequest(req *logical.Request) string {
 	if req.HTTPRequest != nil {
-		if auth := req.HTTPRequest.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			return strings.TrimPrefix(auth, "Bearer ")
+		if token := logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")); token != "" {
+			return token
 		}
 	}
 	return req.ClientToken

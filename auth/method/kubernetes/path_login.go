@@ -12,7 +12,7 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// noAudiencesWarning is the config-read warning of a mount without
+// noAudiencesWarning is the config read and write warning of a mount without
 // bound_audiences: its reviews check the API server's own audience, which a
 // default service-account token for the Kubernetes API carries too.
 const noAudiencesWarning = "bound_audiences is empty: TokenReview checks the API server's own audience, " +

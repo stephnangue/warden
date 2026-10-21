@@ -105,6 +105,7 @@ func TestAdmit_NoTrustedCA(t *testing.T) {
 		HTTPRequest: newCertHTTPRequest(t, agentLeaf(t, root, nil)),
 	})
 	assert.ErrorIs(t, err, errNoTrustedCA)
+	assert.ErrorIs(t, err, helper.ErrAdmitNoTrustedCA, "discovery reports the class")
 	assert.Nil(t, resp)
 	assert.Nil(t, admitted(t, admitRequest(t, b, nil, true)))
 }

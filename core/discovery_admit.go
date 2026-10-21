@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -63,7 +63,8 @@ var errDiscoveryNoCredential = errors.New("introspection requires a JWT bearer t
 
 // hasDiscoveryCredential reports whether req carries a credential discovery
 // can present to an auth mount: a forwarded TLS client certificate, or an
-// Authorization bearer. It looks at neither: the target mounts verify it.
+// Authorization bearer, its scheme matched case-insensitively as the gateway
+// matches it. It looks at neither: the target mounts verify it.
 func hasDiscoveryCredential(req *logical.Request) bool {
 	if req.HTTPRequest == nil {
 		return false
@@ -71,8 +72,35 @@ func hasDiscoveryCredential(req *logical.Request) bool {
 	if listener.ForwardedClientCert(req.HTTPRequest.Context()) != nil {
 		return true
 	}
-	bearer, ok := strings.CutPrefix(req.HTTPRequest.Header.Get("Authorization"), "Bearer ")
-	return ok && bearer != ""
+	return logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")) != ""
+}
+
+// admitFailureClasses are the classes of the errors an auth mount's admission
+// check returns when it cannot decide, in the order they are matched. Each
+// class's text is the fixed phrase discovery reports for it.
+var admitFailureClasses = []error{
+	authhelper.ErrAdmitNotConfigured,
+	authhelper.ErrAgentAudiencesRequired,
+	authhelper.ErrAdmitNoAudiences,
+	authhelper.ErrAdmitNoTrustBundle,
+	authhelper.ErrAdmitNoTrustedCA,
+	authhelper.ErrAdmitUnverified,
+}
+
+// admitFailureGeneric is the phrase reported for a failure of no known class.
+const admitFailureGeneric = "could not decide"
+
+// admitFailurePhrase returns the fixed phrase discovery reports for a target
+// mount that failed with err: its class's, else admitFailureGeneric. It never
+// returns err's own text: discovery answers any bearer holder, and that text
+// may name the verifier's host, its status, or its reply.
+func admitFailurePhrase(err error) string {
+	for _, class := range admitFailureClasses {
+		if errors.Is(err, class) {
+			return class.Error()
+		}
+	}
+	return admitFailureGeneric
 }
 
 // discoverFromAdmissions finds the roles of the namespace in ctx that the
@@ -154,8 +182,9 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	for i, mount := range targets {
 		r := results[i]
 		if r.err != nil {
+			// The log keeps the error verbatim; the caller gets its class.
 			c.logger.Warn("introspect: mount failed", lgr.String("mount", mount), lgr.Err(r.err))
-			warnings = append(warnings, fmt.Sprintf("mount %q: %v", mount, r.err))
+			warnings = append(warnings, fmt.Sprintf("mount %q: %s", mount, admitFailurePhrase(r.err)))
 			continue
 		}
 		if r.adm == nil || r.adm.MountPath == "" {
@@ -202,7 +231,8 @@ func (c *Core) namespaceAuthTarget(ctx context.Context, ns *namespace.Namespace)
 // namespace-relative MountPath set, or nil when the mount did not admit the
 // credential or does not serve the path. An error is the mount failing or
 // unable to decide (unconfigured, no trust anchors, its verifier unreachable),
-// which discovery reports as the mount's warning.
+// which discovery reports as the mount's warning by its class
+// (admitFailurePhrase).
 func (c *Core) admitAt(ctx context.Context, parent *logical.Request, mount string) (*logical.Admission, error) {
 	childReq := &logical.Request{
 		Operation:   logical.ReadOperation,
@@ -245,29 +275,54 @@ type discoveryMemo struct {
 	err  error
 }
 
+// errDiscoveryFailed is the error of a discovery that panicked or returned
+// neither a result nor an error. Its text names nothing about the cause, which
+// is logged.
+var errDiscoveryFailed = errors.New("internal: discovery failed")
+
+// get returns the memoised discovery, running discover on the first call; the
+// others wait for that call and share its result. A panic in discover is
+// logged with its stack and becomes errDiscoveryFailed, for this call and every
+// later one, as the shared calls of package flight turn theirs into errors:
+// sync.Once counts a panicking call as done, so without this every later call
+// would get neither a discovery nor an error. It never returns (nil, nil).
+func (m *discoveryMemo) get(log *lgr.GatedLogger, discover func() (*admissionDiscovery, error)) (*admissionDiscovery, error) {
+	m.once.Do(func() {
+		m.err = errDiscoveryFailed // stands when discover panics
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("discovery panicked", lgr.Any("panic", r), lgr.String("stack", string(debug.Stack())))
+			}
+		}()
+		m.d, m.err = discover()
+		if m.d == nil && m.err == nil {
+			m.err = errDiscoveryFailed
+		}
+	})
+	return m.d, m.err
+}
+
 // discoveryMemoKey is the context key of a request's discoveryMemo.
 type discoveryMemoKey struct{}
 
 // requestDiscovery returns the discovery of the discovery-server request in
 // ctx: the memoised one when ctx carries a memo (withMCPRequest puts one
-// there), else a fresh one.
+// there), else a fresh one. It never returns (nil, nil).
 func (c *Core) requestDiscovery(ctx context.Context) (*admissionDiscovery, error) {
 	httpReq := mcpRequestFromContext(ctx)
 	if httpReq == nil {
 		return nil, fmt.Errorf("internal: request context missing")
 	}
-	discover := func() (*admissionDiscovery, error) {
+	memo, _ := ctx.Value(discoveryMemoKey{}).(*discoveryMemo)
+	if memo == nil {
+		memo = &discoveryMemo{}
+	}
+	return memo.get(c.logger, func() (*admissionDiscovery, error) {
 		return c.discoverFromAdmissions(ctx, &logical.Request{
 			HTTPRequest: httpReq,
 			ClientIP:    listener.ClientIP(httpReq),
 		})
-	}
-	memo, _ := ctx.Value(discoveryMemoKey{}).(*discoveryMemo)
-	if memo == nil {
-		return discover()
-	}
-	memo.once.Do(func() { memo.d, memo.err = discover() })
-	return memo.d, memo.err
+	})
 }
 
 // resolveDiscoveryWith resolves the discovery of the request in ctx for
@@ -279,6 +334,9 @@ func (c *Core) resolveDiscoveryWith(ctx context.Context, skillExists func(name s
 	d, err := c.requestDiscovery(ctx)
 	if err != nil {
 		return nil, nil, err
+	}
+	if d == nil {
+		return nil, nil, errDiscoveryFailed
 	}
 	warnings := append([]string{}, d.warnings...)
 	roles := make([]mcpRole, len(d.granted))

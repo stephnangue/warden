@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -536,12 +537,134 @@ func TestDiscoveryAdmit_MountFailureWarning(t *testing.T) {
 
 	resp := e.introspect()
 	assert.Equal(t, []string{"r-vault"}, roleNames(resp.Data["roles"].([]admittedRole)))
-	assert.Equal(t, []string{`mount "jwt-b/": storage unavailable`}, resp.Data["warnings"])
+	assert.Equal(t, []string{`mount "jwt-b/": could not decide`}, resp.Data["warnings"])
 
 	roles, warnings, err := e.listRoles("eyJ.any.token")
 	require.NoError(t, err)
 	assert.Len(t, roles, 1)
-	assert.Equal(t, []string{`mount "jwt-b/": storage unavailable`}, warnings)
+	assert.Equal(t, []string{`mount "jwt-b/": could not decide`}, warnings)
+}
+
+// A failed target is reported by the class of its error, in a fixed phrase:
+// never the error's own text, which may name the verifier's host, its status
+// or its reply, since discovery answers any bearer holder.
+func TestDiscoveryAdmit_MountFailurePhrases(t *testing.T) {
+	const (
+		host   = "10.0.0.1:6443"
+		detail = "x509: certificate signed by unknown authority"
+	)
+	upstream := fmt.Errorf("Post \"https://%s/apis/authentication.k8s.io/v1/tokenreviews\": %s (status 503)", host, detail)
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"not configured": {
+			authhelper.AdmitError(authhelper.ErrAdmitNotConfigured, "kubernetes auth method is not configured at "+host),
+			"not configured",
+		},
+		"agent audiences": {
+			fmt.Errorf("%w: on %s", authhelper.ErrAgentAudiencesRequired, host),
+			"bound_audiences is required on agent mounts",
+		},
+		"no audiences": {
+			authhelper.AdmitError(authhelper.ErrAdmitNoAudiences, "bound_audiences is not set: no JWT-SVID can be admitted"),
+			"bound_audiences is not set",
+		},
+		"verifier unreachable": {
+			fmt.Errorf("%w: %w", authhelper.AdmitError(authhelper.ErrAdmitUnverified, "TokenReview call failed"), upstream),
+			"could not verify the credential",
+		},
+		"no trust bundle": {
+			authhelper.AdmitError(authhelper.ErrAdmitNoTrustBundle, "no SPIFFE trust bundles loaded from "+host),
+			"no trust bundle",
+		},
+		"no trusted CA": {
+			authhelper.AdmitError(authhelper.ErrAdmitNoTrustedCA, "no trusted CA certificates configured"),
+			"no trusted CA",
+		},
+		"unclassified": {upstream, "could not decide"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newDiscEnv(t, "", "")
+			e.mountAuth("jwt/").err = tc.err
+			e.provider("vault", "vault/", "auth/jwt/")
+			e.role("deploy", "vault/", "")
+			e.group("all", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}))
+
+			want := []string{`mount "jwt/": ` + tc.want}
+			assert.Equal(t, want, e.introspect().Data["warnings"])
+			_, warnings, err := e.listRoles("eyJ.any.token")
+			require.NoError(t, err)
+			assert.Equal(t, want, warnings)
+
+			body := e.introspectJSON() + e.listRolesJSON()
+			for _, leak := range []string{host, detail, "503", "TokenReview", "SPIFFE", "certificates configured"} {
+				assert.NotContains(t, body, leak)
+			}
+		})
+	}
+}
+
+// The bearer scheme is matched case-insensitively, as the gateway matches it:
+// a credential the gateway admits with "bearer <jwt>" is discovered with it,
+// through a real jwt mount.
+func TestDiscoveryAdmit_BearerSchemeCaseInsensitive(t *testing.T) {
+	e := newJWTEnv(t, "")
+	e.mount("jwt/", nil)
+	mountDiscoveryProvider(t, e.c, e.ctx, "vault", "vault/", "auth/jwt/", "")
+	_, err := e.c.roleStore.Create(e.ctx, &logical.Role{Name: "reader", Policies: []string{"read"}, ProviderPath: "vault/"})
+	require.NoError(t, err)
+	grantRole(t, e.c, e.ctx, testGrant{Role: "reader", Mount: "auth/jwt/"})
+	token := e.token("agent-1", "")
+
+	for _, scheme := range []string{"Bearer ", "bearer ", "BEARER "} {
+		t.Run(scheme, func(t *testing.T) {
+			req := bearerRequest("")
+			req.HTTPRequest.Header.Set("Authorization", scheme+token)
+			assert.True(t, hasDiscoveryCredential(req))
+			d, err := e.c.discoverFromAdmissions(e.ctx, req)
+			require.NoError(t, err)
+			assert.Empty(t, d.warnings)
+			require.Len(t, d.granted, 1)
+			assert.Equal(t, "reader", d.granted[0].Name)
+		})
+	}
+}
+
+// A discovery that panics fails the call that ran it and every later call
+// sharing its memo with an error, never with neither a discovery nor an error;
+// the panic is not re-raised.
+func TestDiscoveryMemo_PanicBecomesError(t *testing.T) {
+	c := createTestCore(t)
+	memo := &discoveryMemo{}
+	var runs atomic.Int64
+	panicking := func() (*admissionDiscovery, error) {
+		runs.Add(1)
+		panic("injected discovery panic")
+	}
+
+	d, err := memo.get(c.logger, panicking)
+	assert.Nil(t, d)
+	require.ErrorIs(t, err, errDiscoveryFailed)
+	assert.NotContains(t, err.Error(), "injected", "the panic value is logged, not returned")
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d, err := memo.get(c.logger, panicking)
+			assert.Nil(t, d)
+			assert.ErrorIs(t, err, errDiscoveryFailed)
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int64(1), runs.Load(), "the memo runs discovery once")
+
+	// A discovery that returns neither a result nor an error is an error too.
+	d, err = (&discoveryMemo{}).get(c.logger, func() (*admissionDiscovery, error) { return nil, nil })
+	assert.Nil(t, d)
+	assert.ErrorIs(t, err, errDiscoveryFailed)
 }
 
 // No credential is a 401 on sys/introspect/roles and a tool error on

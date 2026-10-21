@@ -58,6 +58,19 @@ func svidKind(adm *logical.Admission) []string {
 	return factstest.Values(adm, adm.Mount.Load(), "svid")
 }
 
+// The bearer scheme is matched case-insensitively, as the gateway matches it,
+// so discovery admits whatever the gateway admits.
+func TestExtractJWTFromRequest_SchemeCaseInsensitive(t *testing.T) {
+	for _, scheme := range []string{"Bearer ", "bearer ", "BEARER "} {
+		httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+		httpReq.Header.Set("Authorization", scheme+"eyJ.payload.sig")
+		assert.Equal(t, "eyJ.payload.sig", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}), scheme)
+	}
+	httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	httpReq.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	assert.Empty(t, extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}))
+}
+
 func TestAdmit_RefusedUnlessInternal(t *testing.T) {
 	f := newFactsFixture(t, map[string]any{"bound_audiences": []string{"warden"}})
 	resp := admitRequest(t, f.b, "", f.svid(t, admitID), false)
@@ -125,6 +138,7 @@ func TestAdmit_JWTSVIDNeedsMountAudiences(t *testing.T) {
 		"no config":                {nil, errNoMountAudiences},
 		"stored without audiences": {map[string]any{"token_ttl": "1h"}, helper.ErrAgentAudiencesRequired},
 		"human without audiences":  {map[string]any{"entity_kind": "human"}, errNoMountAudiences},
+		"class reported":           {nil, helper.ErrAdmitNoAudiences},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFactsFixture(t, nil)
@@ -180,6 +194,7 @@ func TestAdmit_NoBundles(t *testing.T) {
 	ca, caKey, _ := testCA(t)
 	resp, err := routeAdmit(b, "", testSVID(t, ca, caKey, admitID), true)
 	assert.ErrorIs(t, err, errNoBundles)
+	assert.ErrorIs(t, err, helper.ErrAdmitNoTrustBundle, "discovery reports the class")
 	assert.Nil(t, resp)
 	assert.Nil(t, admitted(t, admitRequest(t, b, "", nil, true)), "no credential: nothing to decide")
 }

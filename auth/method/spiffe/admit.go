@@ -26,10 +26,10 @@ type admittedSVID struct {
 
 var (
 	// errNoBundles: with no trust bundle loaded the mount cannot decide.
-	errNoBundles = errors.New("no SPIFFE trust bundles loaded")
+	errNoBundles = helper.AdmitError(helper.ErrAdmitNoTrustBundle, "no SPIFFE trust bundles loaded")
 	// errNoMountAudiences: with no bound_audiences the mount cannot decide on
 	// any JWT-SVID.
-	errNoMountAudiences = errors.New("bound_audiences is not set: no JWT-SVID can be admitted")
+	errNoMountAudiences = helper.AdmitError(helper.ErrAdmitNoAudiences, "bound_audiences is not set: no JWT-SVID can be admitted")
 )
 
 // admitX509SVID verifies cert as an X.509-SVID against the trust bundles in

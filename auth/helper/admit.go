@@ -36,6 +36,43 @@ var errAdmitInternal = logical.ErrForbidden(AdmitPattern + " is internal to Ward
 // refuses admission with it.
 var ErrAgentAudiencesRequired = errors.New("bound_audiences is required on agent mounts")
 
+// The classes of the errors an AdmitFunc returns, each a reason the mount
+// could not decide. Discovery answers any bearer holder, so it reports a
+// failed mount by its class alone (errors.Is), never by the error's own text,
+// which may name a verifier's host or repeat its reply. A method's error joins
+// its class through AdmitError and keeps its own text for the server log.
+// ErrAgentAudiencesRequired is a class of its own.
+var (
+	// ErrAdmitNotConfigured: the mount has no configuration.
+	ErrAdmitNotConfigured = errors.New("not configured")
+	// ErrAdmitUnverified: the verifier the mount relies on could not be
+	// reached or did not answer, so nothing was decided about the credential.
+	ErrAdmitUnverified = errors.New("could not verify the credential")
+	// ErrAdmitNoTrustBundle: the mount has no trust bundle loaded.
+	ErrAdmitNoTrustBundle = errors.New("no trust bundle")
+	// ErrAdmitNoTrustedCA: the mount has no trusted CA.
+	ErrAdmitNoTrustedCA = errors.New("no trusted CA")
+	// ErrAdmitNoAudiences: the mount binds no audience, so it admits no
+	// credential that must carry one.
+	ErrAdmitNoAudiences = errors.New("bound_audiences is not set")
+)
+
+// admitError is an error reading text that errors.Is matches to its class.
+type admitError struct {
+	class error
+	text  string
+}
+
+func (e *admitError) Error() string { return e.text }
+func (e *admitError) Unwrap() error { return e.class }
+
+// AdmitError returns an error reading text that errors.Is matches to class,
+// one of the ErrAdmit classes. A method declares its sentinel with it, so the
+// sentinel keeps its own text and still reports as its class.
+func AdmitError(class error, text string) error {
+	return &admitError{class: class, text: text}
+}
+
 // RequireAgentAudiences returns ErrAgentAudiencesRequired when a mount of
 // entity kind kind binds no audience, unless the kind is human: a human mount
 // may leave its audience to the resource identifier of the request. Any kind
@@ -60,9 +97,10 @@ func AgentAudiencesWriteError() error {
 // credential failing; the method may log why), which the caller does not
 // report. An error means the mount could not decide (no configuration, no
 // trust anchors, the verifier unreachable), which the caller reports per
-// mount; its text names the mount's condition only, never a fact, claim or
-// group. It never logs in, mints a token, writes storage or records the
-// caller; MountPath is left for core to set.
+// mount by its class (the ErrAdmit classes, ErrAgentAudiencesRequired); its
+// text names the mount's condition only, never a fact, claim or group, and
+// reaches the server log alone. It never logs in, mints a token, writes
+// storage or records the caller; MountPath is left for core to set.
 type AdmitFunc func(ctx context.Context, req *logical.Request, now time.Time) (*logical.Admission, error)
 
 // AdmitPath returns the introspect/admit path of an auth method whose

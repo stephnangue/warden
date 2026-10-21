@@ -216,8 +216,10 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 
 	b.installConfig(cfg)
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data:       map[string]any{"message": "configuration updated"},
-	}, nil
+	// The write warns as the read does, so the operator sees it when acting.
+	data := map[string]any{"message": "configuration updated"}
+	if len(cfg.BoundAudiences) == 0 {
+		helper.SetWarnings(data, []string{noAudiencesWarning})
+	}
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }

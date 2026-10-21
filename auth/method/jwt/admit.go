@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
@@ -58,7 +57,7 @@ func tokenExpiry(claims map[string]any) (time.Time, error) {
 }
 
 // errNotConfigured refuses admission on a mount with no configuration.
-var errNotConfigured = errors.New("JWT auth backend not configured")
+var errNotConfigured = helper.AdmitError(helper.ErrAdmitNotConfigured, "JWT auth backend not configured")
 
 // admitToken verifies token against the mount's configuration alone: the
 // signature, the mount's issuer and subject, its bound_audiences (any one of
@@ -105,12 +104,13 @@ func admitToken(ctx context.Context, config *JWTAuthConfig, token string, now ti
 }
 
 // extractJWTFromRequest returns the bearer JWT of an introspect/admit
-// request: the Authorization header of the request discovery forwards, else
+// request: the Authorization bearer of the request discovery forwards, its
+// scheme matched case-insensitively as the gateway matches it, else
 // req.ClientToken.
 func extractJWTFromRequest(req *logical.Request) string {
 	if req.HTTPRequest != nil {
-		if auth := req.HTTPRequest.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			return strings.TrimPrefix(auth, "Bearer ")
+		if token := logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")); token != "" {
+			return token
 		}
 	}
 	return req.ClientToken

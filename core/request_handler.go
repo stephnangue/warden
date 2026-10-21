@@ -943,7 +943,8 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// Triggered when there's no explicit X-Warden-Token but an auth path
 		// is configured on the namespace. The Authorization: Bearer value is
 		// treated as a JWT credential, not a Warden token.
-		// Role precedence: ?role= query param > X-Warden-Role header. There is
+		// Role precedence: ?role= query param > X-Warden-Role header; an empty
+		// ?role= selects nothing, so it leaves the header in force. There is
 		// no provider here, so no default_role: a request selecting neither is
 		// refused before its credential is admitted.
 		if !providerAuth && req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
@@ -953,7 +954,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			}
 			if authPath != "" {
 				var authRole string
-				if role, ok := req.Data["role"].(string); ok {
+				if role, _ := req.Data["role"].(string); role != "" {
 					authRole = role
 				} else {
 					authRole = req.HTTPRequest.Header.Get("X-Warden-Role")
@@ -2557,7 +2558,7 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 
 	// userTE is this request's own copy, so the metadata set here reaches
 	// this request alone.
-	userTE.Metadata = userMetadata(adm, time.Now())
+	userTE.Metadata = userMetadata(adm)
 
 	req.User = &logical.UserPrincipal{
 		TokenEntry: userTE,
@@ -2645,8 +2646,21 @@ func (c *Core) checkUserAudience(ctx context.Context, adm *logical.Admission, ns
 // compare and does not allocate, and a mapping edit on the user mount (facts,
 // entity_kind) renders afresh on the next request. The returned map is shared
 // and must not be modified.
-func userMetadata(adm *logical.Admission, now time.Time) map[string]string {
-	return membership(adm, emptyNSGroups, now).Metadata
+//
+// It takes no instant and reads no clock: with no groups, nothing in the
+// membership can expire (its ValidUntil is zero) and compute matches no rule,
+// so the zero time decides nothing, and a request reads the clock for a
+// membership once, for the agent leg's grant (resolveRoleGrant).
+//
+// When one agent-kind mount serves as both auto_auth_path and user_auth_path
+// (a configuration its provider's config read warns about), a credential
+// presented on both legs shares one admission, whose cached membership then
+// alternates between the user leg's (no groups) and the agent leg's (the
+// namespace's groups): each leg recomputes on the other's cache and the
+// zero-allocation steady state is lost, but each request still gets the
+// membership of its own leg, so correctness is not affected.
+func userMetadata(adm *logical.Admission) map[string]string {
+	return membership(adm, emptyNSGroups, time.Time{}).Metadata
 }
 
 // resolveUserAuthConfig resolves the secondary (user) auth configuration for a

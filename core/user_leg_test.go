@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
@@ -298,9 +297,9 @@ func TestUserLeg_Metadata(t *testing.T) {
 	assert.Equal(t, map[string]string{"dept": "eng"}, claims)
 
 	// The steady state is the cached render: the same map, no allocation.
-	first := userMetadata(adm, time.Now())
-	assert.Equal(t, reflect.ValueOf(first).Pointer(), reflect.ValueOf(userMetadata(adm, time.Now())).Pointer())
-	allocs := testing.AllocsPerRun(1000, func() { _ = userMetadata(adm, time.Now()) })
+	first := userMetadata(adm)
+	assert.Equal(t, reflect.ValueOf(first).Pointer(), reflect.ValueOf(userMetadata(adm)).Pointer())
+	allocs := testing.AllocsPerRun(1000, func() { _ = userMetadata(adm) })
 	assert.Zero(t, allocs)
 
 	// A facts edit on the user mount reaches the next request on the same
