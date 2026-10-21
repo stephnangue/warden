@@ -93,6 +93,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	// The admission adopts the claims map, so it is built after the last
 	// read of claims above and nothing reads them after this line.
 	admission := newAdmission(claims, jwtToken, b.mountFacts)
+	admission.AudienceBound = len(config.BoundAudiences) > 0
 
 	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
 	// JWTRoleTokenType.Generate(), which hashes it with the mount accessor

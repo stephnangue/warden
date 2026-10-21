@@ -217,6 +217,12 @@ type Core struct {
 	// against its snapshot.
 	identityStore *IdentityStore
 
+	// authRoleLeftovers counts, per auth mount UUID, the auth roles its
+	// storage still holds from before roles moved to the namespace. Built at
+	// unseal on the active node (detectAuthRoleLeftovers), read by sys/auth to
+	// warn; nil until then.
+	authRoleLeftovers atomic.Pointer[map[string]int]
+
 	// skillRenders memoises each skill's SKILL.md as the discovery server
 	// serves it, with its digest (Skills extension listings carry one).
 	skillRenders skillRenderCache
@@ -2029,6 +2035,9 @@ func (c *Core) preSeal() error {
 	// Drop the group snapshot likewise.
 	c.teardownIdentityStore()
 
+	// The next active node counts leftover auth roles again.
+	c.authRoleLeftovers.Store(nil)
+
 	// Stop all credential managers
 	if err := c.teardownCredentialManager(); err != nil {
 		c.logger.Warn("error tearing down credential managers", logger.Err(err))
@@ -2146,6 +2155,12 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 	// Groups too: their write-time checks ask the auth mounts for their facts.
 	if err := c.setupIdentityStore(ctx, standby); err != nil {
 		return err
+	}
+
+	// Auth roles left in auth mount storage are no longer used: say so, once
+	// per mount, without touching them.
+	if !standby {
+		c.detectAuthRoleLeftovers(ctx)
 	}
 
 	if err := c.loadTokensFromStorage(ctx); err != nil {

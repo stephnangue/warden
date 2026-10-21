@@ -44,10 +44,6 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 			Description: "OCSP request timeout (default: 5s). Example: 3s, 10s",
 			Default:     "5s",
 		},
-		"default_role": {
-			Type:        framework.TypeString,
-			Description: "Default role for transparent operations when no role is specified",
-		},
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
 
@@ -96,21 +92,19 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 		certCount = parsePEMCertificates(b.config.TrustedCAPEM)
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"trusted_ca_pem":   b.config.TrustedCAPEM,
-			"principal_claim":  b.config.PrincipalClaim,
-			"trusted_ca_count": certCount,
-			"token_ttl":        b.config.TokenTTL.String(),
-			"revocation_mode":  b.config.RevocationMode,
-			"crl_cache_ttl":    b.config.CRLCacheTTL,
-			"ocsp_timeout":     b.config.OCSPTimeout,
-			"default_role":     b.config.DefaultRole,
-			"entity_kind":      b.config.EntityKind,
-			"facts":            maps.Clone(b.config.Facts),
-		},
-	}, nil
+	data := map[string]any{
+		"trusted_ca_pem":   b.config.TrustedCAPEM,
+		"principal_claim":  b.config.PrincipalClaim,
+		"trusted_ca_count": certCount,
+		"token_ttl":        b.config.TokenTTL.String(),
+		"revocation_mode":  b.config.RevocationMode,
+		"crl_cache_ttl":    b.config.CRLCacheTTL,
+		"ocsp_timeout":     b.config.OCSPTimeout,
+		"entity_kind":      b.config.EntityKind,
+		"facts":            maps.Clone(b.config.Facts),
+	}
+	helper.SetWarnings(data, helper.RemovedConfigWarnings(b.config.removed))
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }
 
 // handleConfigWrite handles writing the configuration.
@@ -122,6 +116,13 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
+
+	// Keys of the role era are refused, not ignored: the write would otherwise
+	// succeed while doing nothing the operator asked for. The stored config
+	// never carries them, so this write also removes any it still did.
+	if err := helper.RefuseRemovedConfigKeys(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 
 	// Build config map from field data
 	conf := make(map[string]any)
@@ -150,7 +151,6 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		conf["revocation_mode"] = b.config.RevocationMode
 		conf["crl_cache_ttl"] = b.config.CRLCacheTTL
 		conf["ocsp_timeout"] = b.config.OCSPTimeout
-		conf["default_role"] = b.config.DefaultRole
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
 	}

@@ -215,6 +215,40 @@ func joinResourceURL(base, suffix string) string {
 	return strings.TrimSuffix(base, "/") + "/" + strings.TrimPrefix(suffix, "/")
 }
 
+// resourceAPIPrefix is the path every resource identifier carries between the
+// external base and the namespace-qualified mount path.
+const resourceAPIPrefix = "/v1/"
+
+// resourceIDMatches reports whether v is exactly the resource identifier of
+// the mount at mountPath (namespace-relative, "github/") in the namespace at
+// nsPath ("team-a/", or "" for the root): what joinResourceURL(base,
+// "/v1/"+nsPath+mountPath) builds once mountPath loses its trailing slash, as
+// the metadata endpoint publishes it. It compares piece by piece and does not
+// allocate. Only that canonical spelling matches: an identifier that would
+// name the same mount once decoded or normalized (percent-encoding, dot
+// segments, a doubled or trailing slash, a different case) never does.
+func resourceIDMatches(v, base, nsPath, mountPath string) bool {
+	base = strings.TrimSuffix(base, "/")
+	mountPath = strings.TrimSuffix(mountPath, "/")
+	if base == "" || mountPath == "" {
+		return false
+	}
+	if len(v) != len(base)+len(resourceAPIPrefix)+len(nsPath)+len(mountPath) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(v, base)
+	if !ok {
+		return false
+	}
+	if rest, ok = strings.CutPrefix(rest, resourceAPIPrefix); !ok {
+		return false
+	}
+	if rest, ok = strings.CutPrefix(rest, nsPath); !ok {
+		return false
+	}
+	return rest == mountPath
+}
+
 // externalBaseTTL bounds how long a cached external base is served. A write
 // through sys/protected-resource invalidates it at once on the node that took
 // it; the bound covers every other way the stored value can change, such as a

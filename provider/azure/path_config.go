@@ -47,10 +47,6 @@ func (b *azureBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Auth mount that authenticates the secondary (user) principal, marking this mount a protected resource (bearer/JWT format required)",
 			},
-			"user_auth_role": {
-				Type:        framework.TypeString,
-				Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role)",
-			},
 			framework.HostAllowlistKey: {
 				Type:        framework.TypeCommaStringSlice,
 				Description: "Hosts the gateway forwards to, each with a leading dot: '.example.com' allows example.com and every host under it (default: the public cloud's Resource Manager, Graph, Key Vault, Storage, OpenAI, AI services and AI Foundry endpoints; an empty list restores the default)",
@@ -85,7 +81,6 @@ func (b *azureBackend) handleConfigRead(ctx context.Context, req *logical.Reques
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
-			"user_auth_role":  tc.UserAuthRole,
 
 			framework.HostAllowlistKey: b.hostAllowlist(),
 		},
@@ -162,7 +157,6 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		AutoAuthPath:    current.AutoAuthPath,
 		DefaultAuthRole: current.DefaultAuthRole,
 		UserAuthPath:    current.UserAuthPath,
-		UserAuthRole:    current.UserAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -173,9 +167,6 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 	if val, ok := d.GetOk("user_auth_path"); ok {
 		tc.UserAuthPath = val.(string)
 	}
-	if val, ok := d.GetOk("user_auth_role"); ok {
-		tc.UserAuthRole = val.(string)
-	}
 
 	// Validate: auto_auth_path required
 	if tc.AutoAuthPath == "" {
@@ -185,13 +176,10 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		}, nil
 	}
 
-	// Validate the secondary (user) auth config: types and the
-	// user_auth_role -> user_auth_path dependency. The bearer-format check on
-	// the referenced mount is enforced at runtime (fail closed).
-	if err := framework.ValidateUserAuthConfig(map[string]any{
-		"user_auth_path": tc.UserAuthPath,
-		"user_auth_role": tc.UserAuthRole,
-	}); err != nil {
+	// Refuse the removed user_auth_role. The bearer-format check on the user
+	// auth mount is enforced at runtime (fail closed). The write stores no
+	// user_auth_role, so it also removes one a stored config still names.
+	if err := framework.RefuseUserAuthRole(d.Raw); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        logical.ErrBadRequest(err.Error()),
@@ -220,7 +208,6 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
-			"user_auth_role":  tc.UserAuthRole,
 
 			framework.HostAllowlistKey: allowedHosts,
 		})

@@ -50,7 +50,7 @@ func TestConfig_MaxAge(t *testing.T) {
 	assert.Equal(t, "10m0s", read()["max_age"])
 
 	// A write that leaves it out keeps it.
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "reader"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"user_claim": "email"}).StatusCode)
 	assert.Equal(t, 10*time.Minute, b.config.MaxAge)
 
 	// Storage holds the duration string, and a reload reads it back.
@@ -63,7 +63,7 @@ func TestConfig_MaxAge(t *testing.T) {
 	reloaded.storageView = b.storageView
 	require.NoError(t, reloaded.Initialize(ctx))
 	assert.Equal(t, 10*time.Minute, reloaded.config.MaxAge)
-	assert.Equal(t, "reader", reloaded.config.DefaultRole)
+	assert.Equal(t, "email", reloaded.config.UserClaim)
 
 	// Seconds are accepted; zero unsets it.
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"max_age": 90}).StatusCode)

@@ -476,10 +476,10 @@ func TestHandleLogin_RoleNotFound(t *testing.T) {
 // A login selects no role
 // =============================================================================
 
-// A login neither needs nor reads a role: a role sent anyway, or a mount
-// default_role, changes nothing, and nothing is refused for lacking one.
+// A login neither needs nor reads a role: a role sent anyway changes nothing,
+// and nothing is refused for lacking one.
 func TestHandleLogin_NoRole(t *testing.T) {
-	b, key := factsBackend(t, map[string]any{"default_role": "fallback-role"})
+	b, key := factsBackend(t, nil)
 	token := signES256(t, key, baseClaims(nil))
 
 	resp, err := b.handleLogin(context.Background(), &logical.Request{}, &framework.FieldData{

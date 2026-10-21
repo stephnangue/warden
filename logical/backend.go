@@ -197,9 +197,21 @@ type UserAuthConfigProvider interface {
 	// configured — in which case the feature is off and the request is unchanged.
 	GetUserAuthPath() string
 
-	// GetUserAuthRole returns the role used to authenticate the user credential,
-	// or "" to fall back to the user auth mount's own default_role.
-	GetUserAuthRole() string
+	// UserAuthRefusal returns why every user credential is refused under the
+	// provider's stored configuration (it still names a setting that was
+	// removed), or nil. Core asks it once per user credential presented.
+	UserAuthRefusal() error
+}
+
+// AudienceBinder is implemented by auth methods whose configuration can bind
+// the audience of the bearer credentials they admit. Core asks it only when a
+// provider configuration is read, to warn ahead of time about a user leg whose
+// audience nothing binds; a request decides from the admission itself
+// (Admission.AudienceBound).
+type AudienceBinder interface {
+	// BindsAudience reports whether every bearer credential the mount admits
+	// under its current configuration is checked against bound_audiences.
+	BindsAudience() bool
 }
 
 // AuthorizationServerProvider is implemented by auth methods that can name the

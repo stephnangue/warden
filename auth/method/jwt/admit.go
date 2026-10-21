@@ -126,5 +126,17 @@ func (b *jwtAuthBackend) admit(ctx context.Context, req *logical.Request, now ti
 		b.logger.Debug("introspect/admit: JWT not admitted", lgr.Err(err))
 		return nil, nil
 	}
-	return newAdmission(claims, token, b.mountFacts), nil
+	adm := newAdmission(claims, token, b.mountFacts)
+	adm.AudienceBound = len(config.BoundAudiences) > 0
+	return adm, nil
+}
+
+var _ logical.AudienceBinder = (*jwtAuthBackend)(nil)
+
+// BindsAudience implements logical.AudienceBinder: admitToken checks every
+// JWT against bound_audiences when the mount sets them.
+func (b *jwtAuthBackend) BindsAudience() bool {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+	return b.config != nil && len(b.config.BoundAudiences) > 0
 }

@@ -1,6 +1,7 @@
-// Package factstest holds helpers for auth method tests that read admissions:
-// a selector.Source over an admission and a naming, as core builds one, and
-// drains that render what a fact yields. Only tests import it.
+// Package factstest holds helpers for auth method tests: a selector.Source
+// over an admission and a naming, as core builds one, drains that render what
+// a fact yields, and checks that the removed auth roles stay gone. Only tests
+// import it.
 package factstest
 
 import (

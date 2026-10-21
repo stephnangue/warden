@@ -3721,7 +3721,6 @@ func TestResolveExchangeInputs_DefaultDelegation(t *testing.T) {
 	}
 	userTE := &logical.TokenEntry{
 		PrincipalID: "alice", NamespaceID: "ns1", NamespacePath: "team-payments/", MountAccessor: "auth_oidc_2",
-		RoleName: "users",
 		Metadata: map[string]string{"username": "alice"},
 		Actors: []logical.ActorRef{
 			{Subject: "broker-beta", Issuer: "https://idp.example"},
@@ -3741,7 +3740,9 @@ func TestResolveExchangeInputs_DefaultDelegation(t *testing.T) {
 
 	assert.Equal(t, "alice", claims["sub"], "sub is the USER's raw principal, with no Warden namespace or mount")
 	assert.Equal(t, "team-payments/", claims["warden_namespace"], "the user's namespace qualifies sub")
-	assert.Equal(t, "users", claims["warden_role"], "the top-level role is the user's; the agent's is in act")
+	assert.NotContains(t, claims, "warden_role", "a user runs under no role; the agent's is in act")
+	assert.Contains(t, inputs.SubjectCacheIdentity, `user={"username":"alice"}`,
+		"the user's projected claims key the cache")
 	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_metadata"], "the user's claims, without sub")
 	assert.Equal(t, map[string]any{
 		"sub":         wardenSubject(agentTE),

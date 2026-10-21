@@ -35,12 +35,12 @@ func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
 	_, _, caPEM := testCA(t)
 	b, _ := createTestBackend(t)
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{
-		"trusted_ca_pem": caPEM, "default_role": "reader",
+		"trusted_ca_pem": caPEM, "ocsp_timeout": "3s",
 	}).StatusCode)
 	before := b.config
 	b.storageView = failingStorage{newInmemStorage()}
 
-	resp := writeConfig(b, map[string]any{"default_role": "admin", "revocation_mode": "crl"})
+	resp := writeConfig(b, map[string]any{"ocsp_timeout": "4s", "revocation_mode": "crl"})
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	assert.Same(t, before, b.config, "an unpersisted write must not have been installed")
 	assert.Nil(t, b.config.revocationChecker)
@@ -61,7 +61,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			writeConfig(b, map[string]any{"default_role": "reader"})
+			writeConfig(b, map[string]any{"ocsp_timeout": "3s"})
 		}()
 		go func() {
 			defer wg.Done()
@@ -71,7 +71,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		require.Equal(t, "reader", b.config.DefaultRole, "iteration %d lost the default_role write", i)
+		require.Equal(t, "3s", b.config.OCSPTimeout, "iteration %d lost the ocsp_timeout write", i)
 		require.Equal(t, "dns_san", b.config.PrincipalClaim, "iteration %d lost the principal_claim write", i)
 	}
 }

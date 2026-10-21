@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
@@ -60,7 +61,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			writeConfig(b, map[string]any{"default_role": "reader"})
+			writeConfig(b, map[string]any{"token_ttl": 1800})
 		}()
 		go func() {
 			defer wg.Done()
@@ -70,7 +71,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		require.Equal(t, "reader", b.config.DefaultRole, "iteration %d lost the default_role write", i)
+		require.Equal(t, 30*time.Minute, b.config.TokenTTL, "iteration %d lost the token_ttl write", i)
 		require.Equal(t, "https://kubernetes.default.svc", b.config.Issuer, "iteration %d lost the issuer write", i)
 	}
 }

@@ -2,11 +2,15 @@ package framework
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stephnangue/warden/logical"
 )
 
 // --- ParseMaxBodySize ---
@@ -349,9 +353,7 @@ func TestValidateUserAuthConfig(t *testing.T) {
 
 	t.Run("all valid fields", func(t *testing.T) {
 		err := ValidateUserAuthConfig(map[string]any{
-			"user_auth_path":    "auth/user-jwt/",
-			"user_token_header": "X-Warden-User-Token",
-			"user_auth_role":    "slack-user",
+			"user_auth_path": "auth/user-jwt/",
 		})
 		assert.NoError(t, err)
 	})
@@ -373,9 +375,50 @@ func TestValidateUserAuthConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), "user_auth_path must be a string")
 	})
 
-	t.Run("user_auth_role without user_auth_path is rejected", func(t *testing.T) {
-		err := ValidateUserAuthConfig(map[string]any{"user_auth_role": "slack-user"})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "user_auth_role requires user_auth_path")
+	t.Run("a stored user_auth_role still loads", func(t *testing.T) {
+		// A mount config is validated each time the mount loads, so a mount
+		// enabled with the removed key must keep loading; the provider fails
+		// closed on it instead (HasUserAuthRole).
+		assert.NoError(t, ValidateUserAuthConfig(map[string]any{
+			"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user",
+		}))
 	})
+}
+
+func TestRefuseUserAuthRole(t *testing.T) {
+	for _, raw := range []map[string]any{
+		{"user_auth_role": "slack-user"},
+		{"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user"},
+		{"user_auth_role": 7},
+	} {
+		err := RefuseUserAuthRole(raw)
+		require.Error(t, err)
+		assert.Equal(t, ErrUserAuthRoleRemoved.Error(), err.Error())
+		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+	}
+	assert.NoError(t, RefuseUserAuthRole(map[string]any{"user_auth_role": ""}), "an empty value names no role")
+	assert.NoError(t, RefuseUserAuthRole(map[string]any{"user_auth_path": "auth/user-jwt/"}))
+}
+
+func TestUserAuthRoleLeftover(t *testing.T) {
+	assert.True(t, HasUserAuthRole(map[string]any{"user_auth_role": "slack-user"}))
+	assert.False(t, HasUserAuthRole(map[string]any{"user_auth_role": ""}))
+	assert.False(t, HasUserAuthRole(map[string]any{"user_auth_path": "auth/user-jwt/"}))
+
+	stored, err := sdklogical.StorageEntryJSON("config", map[string]any{
+		"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user",
+	})
+	require.NoError(t, err)
+	assert.True(t, StoredUserAuthRole(stored))
+	clean, err := sdklogical.StorageEntryJSON("config", map[string]any{"user_auth_path": "auth/user-jwt/"})
+	require.NoError(t, err)
+	assert.False(t, StoredUserAuthRole(clean))
+	assert.False(t, StoredUserAuthRole(nil))
+
+	b := &StreamingBackend{}
+	assert.NoError(t, b.UserAuthRefusal(), "no config refuses nothing")
+	b.SetTransparentConfig(&TransparentConfig{UserAuthPath: "auth/user-jwt/"})
+	assert.NoError(t, b.UserAuthRefusal())
+	b.SetTransparentConfig(&TransparentConfig{UserAuthPath: "auth/user-jwt/", UserAuthRoleStored: true})
+	assert.ErrorIs(t, b.UserAuthRefusal(), ErrUserAuthRoleRemoved)
 }

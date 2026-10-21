@@ -35,13 +35,11 @@ type JWTAuthConfig struct {
 	JWTValidationPubKeys []string `json:"jwt_validation_pubkeys,omitempty"`
 
 	// Validation
-	BoundIssuer       string         `json:"bound_issuer,omitempty"`
-	BoundAudiences    []string       `json:"bound_audiences,omitempty"`
-	BoundSubject      string         `json:"bound_subject,omitempty"`
-	BoundClaims       map[string]any `json:"bound_claims,omitempty"`
-	UserClaim         string         `json:"user_claim,omitempty" default:"sub"`
-	GroupsClaim       string         `json:"groups_claim,omitempty"`
-	GroupPolicyPrefix string         `json:"group_policy_prefix,omitempty"`
+	BoundIssuer    string         `json:"bound_issuer,omitempty"`
+	BoundAudiences []string       `json:"bound_audiences,omitempty"`
+	BoundSubject   string         `json:"bound_subject,omitempty"`
+	BoundClaims    map[string]any `json:"bound_claims,omitempty"`
+	UserClaim      string         `json:"user_claim,omitempty" default:"sub"`
 
 	// Token settings
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
@@ -51,8 +49,9 @@ type JWTAuthConfig struct {
 	// negative) and enforced by admitToken, through helper.CheckMaxAge.
 	MaxAge time.Duration `json:"max_age,omitempty"`
 
-	// Default role for transparent operations when no role is specified
-	DefaultRole string `json:"default_role,omitempty"`
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
 
 	// Facts: entity_kind, and the claims (a name or a JSON pointer) the mount
 	// publishes beyond its built-in facts. Compiled in buildJWTConfig. A
@@ -106,14 +105,12 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				"introspect/roles",
 			},
 		},
-		Paths: []*framework.Path{
+		Paths: append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
 			b.pathIntrospect(),
 			helper.AdmitPath(b.admit),
-		},
+		}, pathRoles()...),
 	}
 
 	// Setup the backend with configuration
@@ -148,6 +145,9 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 	if err := helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences); err != nil {
 		b.logger.Warn("auth mount admits no JWT until its config is rewritten", logger.Err(err))
 	}
+	if len(config.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", config.removed))
+	}
 	b.installConfig(config)
 	return nil
 }
@@ -169,6 +169,7 @@ func buildJWTConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, e
 	if err != nil {
 		return nil, err
 	}
+	config.removed = helper.RemovedConfigKeys(conf)
 
 	// Facts that do not compile are kept on the config, not returned: the
 	// caller decides whether to refuse them or fail closed.
@@ -263,11 +264,8 @@ func normalizedJWTConfig(config *JWTAuthConfig) map[string]any {
 		"bound_subject":          config.BoundSubject,
 		"bound_claims":           config.BoundClaims,
 		"user_claim":             config.UserClaim,
-		"groups_claim":           config.GroupsClaim,
-		"group_policy_prefix":    config.GroupPolicyPrefix,
 		"token_ttl":              config.TokenTTL.String(),
 		"max_age":                config.MaxAge.String(),
-		"default_role":           config.DefaultRole,
 		"entity_kind":            config.EntityKind,
 		"facts":                  config.Facts,
 	}

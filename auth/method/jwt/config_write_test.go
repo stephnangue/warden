@@ -64,7 +64,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			writeConfig(b, map[string]any{"default_role": "reader"})
+			writeConfig(b, map[string]any{"user_claim": "email"})
 		}()
 		go func() {
 			defer wg.Done()
@@ -74,7 +74,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		require.Equal(t, "reader", b.config.DefaultRole, "iteration %d lost the default_role write", i)
+		require.Equal(t, "email", b.config.UserClaim, "iteration %d lost the user_claim write", i)
 		require.Equal(t, "https://issuer.example.com", b.config.BoundIssuer, "iteration %d lost the bound_issuer write", i)
 	}
 }

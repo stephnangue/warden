@@ -454,7 +454,7 @@ func TestCertFingerprint(t *testing.T) {
 // =============================================================================
 
 // A login neither needs nor reads a role: none, an empty one, or one sent
-// anyway, with or without a mount default_role, admits alike.
+// anyway, admits alike.
 func TestHandleLogin_NoRole(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	clientCert := testClientCert(t, caCert, caKey, "test-agent")
@@ -464,7 +464,6 @@ func TestHandleLogin_NoRole(t *testing.T) {
 		TrustedCAPEM:   caPEM,
 		PrincipalClaim: "cn",
 		TokenTTL:       time.Hour,
-		DefaultRole:    "fallback-role",
 	}
 	b.config.caPool, _ = buildCAPool(caPEM)
 

@@ -59,9 +59,9 @@ type KubernetesAuthConfig struct {
 	// reviewed again, capped by the token's own expiry.
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
 
-	// DefaultRole, if set, is used by transparent-mode flows when the
-	// caller doesn't specify a role.
-	DefaultRole string `json:"default_role,omitempty"`
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
 
 	// BoundAudiences are the audiences a workload token must carry for the
 	// mount to admit it, any one of them, sent as the TokenReview's
@@ -125,14 +125,12 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				"introspect/roles",
 			},
 		},
-		Paths: []*framework.Path{
+		Paths: append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
 			b.pathIntrospect(),
 			helper.AdmitPath(b.admit),
-		},
+		}, pathRoles()...),
 	}
 
 	// Release the TokenReview client's pooled connections on unmount/seal. The
@@ -174,6 +172,9 @@ func (b *kubernetesAuthBackend) setupConfig(ctx context.Context, conf map[string
 	if err := cfg.FactsConfig.Err(); err != nil {
 		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
 	}
+	if len(cfg.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", cfg.removed))
+	}
 	b.installConfig(cfg)
 	return nil
 }
@@ -204,6 +205,7 @@ func buildConfig(_ context.Context, conf map[string]any) (*KubernetesAuthConfig,
 	if err != nil {
 		return nil, err
 	}
+	cfg.removed = helper.RemovedConfigKeys(conf)
 
 	if cfg.KubernetesHost == "" {
 		return nil, fmt.Errorf("kubernetes_host is required")
@@ -235,7 +237,6 @@ func normalizedConfig(cfg *KubernetesAuthConfig) map[string]any {
 		"issuer":                 cfg.Issuer,
 		"disable_iss_validation": cfg.DisableIssValidation,
 		"token_ttl":              cfg.TokenTTL.String(),
-		"default_role":           cfg.DefaultRole,
 		"bound_audiences":        cfg.BoundAudiences,
 		"max_age":                cfg.MaxAge.String(),
 		"entity_kind":            cfg.EntityKind,

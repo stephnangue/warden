@@ -447,7 +447,8 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 				AutoAuthPath:    parsedConfig.AutoAuthPath,
 				DefaultAuthRole: parsedConfig.DefaultAuthRole,
 				UserAuthPath:    parsedConfig.UserAuthPath,
-				UserAuthRole:    parsedConfig.UserAuthRole,
+
+				UserAuthRoleStored: parsedConfig.UserAuthRoleStored,
 			})
 
 			// Apply TLS configuration if provided
@@ -518,7 +519,6 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		autoAuthPath, _ := config["auto_auth_path"].(string)
 		defaultRole, _ := config["default_role"].(string)
 		userAuthPath, _ := config["user_auth_path"].(string)
-		userAuthRole, _ := config["user_auth_role"].(string)
 		// A persisted user_token_header from a pre-0.20 config is ignored: the
 		// user credential now always rides Authorization.
 		if hdr, _ := config["user_token_header"].(string); hdr != "" {
@@ -529,7 +529,8 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			AutoAuthPath:    autoAuthPath,
 			DefaultAuthRole: defaultRole,
 			UserAuthPath:    userAuthPath,
-			UserAuthRole:    userAuthRole,
+
+			UserAuthRoleStored: framework.HasUserAuthRole(config),
 		})
 
 		// Load TLS configuration
@@ -570,7 +571,6 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
 			"user_auth_path":    tc.UserAuthPath,
-			"user_auth_role":    tc.UserAuthRole,
 			"tls_skip_verify":   b.tlsSkipVerify,
 			"ca_data":           b.caData,
 		}

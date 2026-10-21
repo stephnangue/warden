@@ -24,7 +24,10 @@ type CertAuthConfig struct {
 	RevocationMode string        `json:"revocation_mode,omitempty"` // "none" (default), "crl", "ocsp", "best_effort"
 	CRLCacheTTL    string        `json:"crl_cache_ttl,omitempty"`   // CRL cache TTL (default: "1h")
 	OCSPTimeout    string        `json:"ocsp_timeout,omitempty"`    // OCSP request timeout (default: "5s")
-	DefaultRole    string        `json:"default_role,omitempty"`    // Default role for transparent operations
+
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
 
 	// Facts: entity_kind, and the certificate fields the mount publishes
 	// under other names beyond its built-in facts. Compiled in
@@ -81,14 +84,12 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				"introspect/roles",
 			},
 		},
-		Paths: []*framework.Path{
+		Paths: append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
 			b.pathIntrospect(),
 			helper.AdmitPath(b.admit),
-		},
+		}, pathRoles()...),
 	}
 
 	if err := b.Backend.Setup(ctx, conf); err != nil {
@@ -124,6 +125,9 @@ func (b *certAuthBackend) setupCertConfig(ctx context.Context, conf map[string]a
 	if err := config.FactsConfig.Err(); err != nil {
 		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
 	}
+	if len(config.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", config.removed))
+	}
 	b.installConfig(config)
 	return nil
 }
@@ -145,6 +149,7 @@ func buildCertConfig(_ context.Context, conf map[string]any) (*CertAuthConfig, e
 	if err != nil {
 		return nil, err
 	}
+	config.removed = helper.RemovedConfigKeys(conf)
 
 	if config.TokenTTL == 0 {
 		config.TokenTTL = time.Hour
@@ -213,7 +218,6 @@ func normalizedCertConfig(config *CertAuthConfig) map[string]any {
 		"revocation_mode": config.RevocationMode,
 		"crl_cache_ttl":   config.CRLCacheTTL,
 		"ocsp_timeout":    config.OCSPTimeout,
-		"default_role":    config.DefaultRole,
 		"entity_kind":     config.EntityKind,
 		"facts":           config.Facts,
 	}
@@ -300,14 +304,11 @@ Clients present a certificate during the TLS handshake (direct mTLS) or via
 a forwarding header from a trusted load balancer (X-Forwarded-Client-Cert or
 X-SSL-Client-Cert).
 
-The certificate is validated against trusted CAs configured globally or per-role.
-Role constraints (allowed CNs, SANs, OUs, Organizations) further restrict which
-certificates are accepted.
+The certificate is validated against the trusted CAs the mount configures.
 
 Configuration:
   POST /auth/{mount}/config      - Configure trusted CAs and defaults
   GET  /auth/{mount}/config      - Read current configuration
-  POST /auth/{mount}/role/:name  - Create roles with certificate constraints
   POST /auth/{mount}/login       - Authenticate with a client certificate
 
 The mount's entity_kind and facts name what it admits.

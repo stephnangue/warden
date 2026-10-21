@@ -328,7 +328,6 @@ func (b *mcpAWSBackend) resolveConfig(conf map[string]any) (*resolvedConfig, err
 		"auto_auth_path":  parsed.AutoAuthPath,
 		"default_role":    parsed.DefaultAuthRole,
 		"user_auth_path":  parsed.UserAuthPath,
-		"user_auth_role":  parsed.UserAuthRole,
 		"tls_skip_verify": parsed.TLSSkipVerify,
 		"ca_data":         parsed.CAData,
 	}
@@ -348,7 +347,8 @@ func (b *mcpAWSBackend) resolveConfig(conf map[string]any) (*resolvedConfig, err
 			AutoAuthPath:    parsed.AutoAuthPath,
 			DefaultAuthRole: parsed.DefaultAuthRole,
 			UserAuthPath:    parsed.UserAuthPath,
-			UserAuthRole:    parsed.UserAuthRole,
+
+			UserAuthRoleStored: parsed.UserAuthRoleStored,
 		},
 		persist: persist,
 	}, nil

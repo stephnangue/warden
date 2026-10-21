@@ -24,8 +24,11 @@ import (
 // SPIFFEAuthConfig is the mount-level configuration. Trust domains are managed
 // via the trust-domain/ paths, not here.
 type SPIFFEAuthConfig struct {
-	TokenTTL    time.Duration `json:"token_ttl" default:"1h"`
-	DefaultRole string        `json:"default_role,omitempty"`
+	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
+
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
 
 	// BoundAudiences are the audiences a JWT-SVID must carry for the mount to
 	// admit it, any one of them. Validated (no empty entry); required on an
@@ -95,14 +98,12 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 				"introspect/roles",
 			},
 		},
-		Paths: append([]*framework.Path{
+		Paths: append(append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
 			b.pathIntrospect(),
 			helper.AdmitPath(b.admit),
-		}, b.spiffe.Paths()...),
+		}, pathRoles()...), b.spiffe.Paths()...),
 	}
 
 	// Stop the federation refresh loop on unmount/seal (step-down is covered by
@@ -139,6 +140,9 @@ func (b *spiffeAuthBackend) setupSPIFFEConfig(_ context.Context, conf map[string
 	if err := helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences); err != nil {
 		b.logger.Warn("auth mount admits no JWT-SVID until its config is rewritten", logger.Err(err))
 	}
+	if len(config.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", config.removed))
+	}
 	b.installConfig(config)
 	return nil
 }
@@ -159,6 +163,7 @@ func buildSPIFFEConfig(conf map[string]any) (*SPIFFEAuthConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	config.removed = helper.RemovedConfigKeys(conf)
 	if config.TokenTTL == 0 {
 		config.TokenTTL = time.Hour
 	}
@@ -173,7 +178,6 @@ func buildSPIFFEConfig(conf map[string]any) (*SPIFFEAuthConfig, error) {
 func normalizedSPIFFEConfig(config *SPIFFEAuthConfig) map[string]any {
 	return map[string]any{
 		"token_ttl":       config.TokenTTL.String(),
-		"default_role":    config.DefaultRole,
 		"bound_audiences": config.BoundAudiences,
 		"max_age":         config.MaxAge.String(),
 		"entity_kind":     config.EntityKind,
@@ -239,12 +243,10 @@ It accepts both SVID types on a single mount:
     with a mandatory audience.
 
 Trust is anchored per trust domain via bundles registered under trust-domain/,
-which may be static or fetched via SPIFFE Federation. Roles bind a trust domain
-to a set of token policies and optionally constrain the allowed SPIFFE IDs.
+which may be static or fetched via SPIFFE Federation.
 
 Configuration:
   POST /auth/{mount}/trust-domain/:name - Register a trust domain bundle
-  POST /auth/{mount}/role/:name         - Create a role bound to a trust domain
   POST /auth/{mount}/login              - Authenticate with an X.509-SVID or JWT-SVID
 
 The mount's entity_kind and facts name what it admits; bound_audiences are

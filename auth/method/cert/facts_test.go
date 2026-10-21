@@ -597,7 +597,7 @@ func TestConfigWrite_Facts(t *testing.T) {
 	assert.Equal(t, "workload", b.config.Facts["cn"])
 
 	// A write that leaves them out keeps them.
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "reader"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"ocsp_timeout": "3s"}).StatusCode)
 	assert.Equal(t, []string{"teams", "workload"}, b.mountFacts.Load().Mapping.Mapped())
 	assert.Equal(t, "human", b.mountFacts.Load().Kind)
 
@@ -697,7 +697,7 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		// A write that leaves the stored facts in place is told how to replace
 		// them, and changes nothing.
 		before := b.config
-		resp = writeConfig(b, map[string]any{"default_role": "reader"})
+		resp = writeConfig(b, map[string]any{"ocsp_timeout": "3s"})
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.EqualError(t, resp.Err, `the stored facts do not compile (facts: source "subject" is not a field of this mount (one of ca, cn, dns_san, email_san, org, ou, serial, uri_san)); send facts (and entity_kind) in this write to replace them`)
 		assert.Same(t, before, b.config)

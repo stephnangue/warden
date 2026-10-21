@@ -88,11 +88,19 @@ func (b *spiffeAuthBackend) admitJWTSVID(set *spiffebundle.Set, config *SPIFFEAu
 		return nil, fmt.Errorf("JWT-SVID verification: %w", err)
 	}
 	adm := newAdmission(svid.ID, svidJWT, svid.Audience, helper.IssuedAt(svid.Claims), b.mountFacts)
+	adm.AudienceBound = true
 	if err := config.CheckSVIDMaxAge(adm, now); err != nil {
 		return nil, fmt.Errorf("max_age: %w", err)
 	}
 	return &admittedSVID{adm: adm, id: svid.ID, expiry: svid.Expiry, claims: svid.Claims}, nil
 }
+
+var _ logical.AudienceBinder = (*spiffeAuthBackend)(nil)
+
+// BindsAudience implements logical.AudienceBinder: the only bearer credential
+// the mount admits is a JWT-SVID, and admitJWTSVID admits none without
+// bound_audiences.
+func (b *spiffeAuthBackend) BindsAudience() bool { return true }
 
 // admit is the mount's helper.AdmitFunc. It picks the SVID as the gateway
 // does (spiffelib.IsJWTSVID): a bearer JWT-SVID first, else the forwarded

@@ -40,10 +40,6 @@ func (b *dualgatewayBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeString,
 			Description: "Auth mount that authenticates the secondary (user) principal, marking this mount a protected resource. API mode only \u2014 an S3/SigV4 request has no channel for a user, and setting this rejects the non-transparent S3 path (X-Warden-Token beside a signature) outright, so a mount serving that needs to be a separate one.",
 		},
-		"user_auth_role": {
-			Type:        framework.TypeString,
-			Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role).",
-		},
 		"tls_skip_verify": {
 			Type:        framework.TypeBool,
 			Description: "Skip TLS certificate verification (dev/test only).",
@@ -99,7 +95,6 @@ func (b *dualgatewayBackend) handleConfigRead(ctx context.Context, req *logical.
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"user_auth_path":    tc.UserAuthPath,
-		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,
 	}
@@ -132,11 +127,17 @@ func (b *dualgatewayBackend) handleConfigWrite(ctx context.Context, req *logical
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
 
+	// The write stores no user_auth_role, so it also removes one a stored
+	// config still names.
+	if err := framework.RefuseUserAuthRole(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	conf := b.snapshotForMerge()
 
 	keys := []string{
 		b.spec.URLConfigKey, "max_body_size", "timeout",
-		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role",
+		"auto_auth_path", "default_role", "user_auth_path",
 		"tls_skip_verify", "ca_data",
 	}
 	keys = append(keys, b.extraConfigKeys()...)

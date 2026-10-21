@@ -115,6 +115,11 @@ func (b *SystemBackend) handleProviderCreate(ctx context.Context, req *logical.R
 	if err := ValidateMountPath(path); err != nil {
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
 	}
+	// A mount enabled with the removed user_auth_role would load and refuse
+	// every user credential; refuse it here, where it is being written.
+	if err := framework.RefuseUserAuthRole(config); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 
 	// Create mount entry
 	entry := &MountEntry{

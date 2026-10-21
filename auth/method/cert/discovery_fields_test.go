@@ -16,7 +16,7 @@ import (
 func TestRole_DiscoveryFields(t *testing.T) {
 	b, ctx := createTestBackend(t)
 	fd := func(raw map[string]any) *framework.FieldData {
-		return &framework.FieldData{Raw: raw, Schema: b.pathRole().Fields}
+		return &framework.FieldData{Raw: raw, Schema: b.legacyRolePath().Fields}
 	}
 
 	resp, err := b.handleRoleCreate(ctx, &logical.Request{}, fd(map[string]any{

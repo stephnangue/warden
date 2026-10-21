@@ -264,12 +264,13 @@ func TestLogin_CrossTrustDomainIsolation(t *testing.T) {
 	assert.Equal(t, "spiffe://a.example.org/sa/svc", resp.Auth.PrincipalID)
 }
 
-// A login neither needs nor reads a role: one sent anyway, or a mount
-// default_role, changes nothing.
+// A login neither needs nor reads a role: one sent anyway, or a default_role
+// a stored config still sets (and the mount ignores), changes nothing.
 func TestLogin_NoRole(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	b, ctx := createTestBackend(t)
 	require.NoError(t, b.setupSPIFFEConfig(ctx, map[string]any{"default_role": "api", "bound_audiences": "warden"}))
+	assert.Equal(t, []string{"default_role"}, b.config.removed)
 	registerTD(t, b, ctx, &spiffelib.TrustDomain{Name: testTD, BundlePEM: caPEM})
 
 	_, hasRole := b.pathLogin().Fields["role"]

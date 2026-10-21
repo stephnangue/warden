@@ -452,7 +452,7 @@ func TestInitialize_WithStorageView(t *testing.T) {
 }
 
 // =============================================================================
-// Login with default_role from config
+// Initialize with a persisted config
 // =============================================================================
 
 func TestInitialize_WithPersistedConfig(t *testing.T) {

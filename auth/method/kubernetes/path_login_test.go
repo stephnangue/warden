@@ -288,11 +288,13 @@ func TestConfigRead_WarnsWithoutBoundAudiences(t *testing.T) {
 	b, _ := loginSetup(t, tokenReviewStatus{}, nil)
 	resp, err := b.handleConfigRead(t.Context(), &logical.Request{}, &framework.FieldData{})
 	require.NoError(t, err)
-	require.Len(t, resp.Warnings, 1)
-	assert.Contains(t, resp.Warnings[0], "bound_audiences is empty")
+	// In the data, the one place an HTTP client sees it.
+	warnings, _ := resp.Data["warnings"].([]string)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "bound_audiences is empty")
 
 	bound, _ := loginSetup(t, tokenReviewStatus{}, map[string]any{"bound_audiences": []string{"warden"}})
 	resp, err = bound.handleConfigRead(t.Context(), &logical.Request{}, &framework.FieldData{})
 	require.NoError(t, err)
-	assert.Empty(t, resp.Warnings)
+	assert.NotContains(t, resp.Data, "warnings")
 }

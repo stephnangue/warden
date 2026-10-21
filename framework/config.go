@@ -6,12 +6,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+
+	"github.com/stephnangue/warden/logical"
 )
 
 const (
@@ -305,29 +310,64 @@ func ValidateCommonConfig(conf map[string]any) error {
 }
 
 // ValidateUserAuthConfig validates the secondary (user) transparent-auth config
-// fields: user_auth_path and user_auth_role. It enforces their types and the
-// user_auth_role → user_auth_path dependency (a role is meaningless without a
-// path and would otherwise be silently discarded). The bearer-format requirement
-// on the referenced mount (the user leg cannot carry an X.509 client
-// certificate) is enforced at runtime, where mount visibility exists — config
-// validation here has none.
+// field user_auth_path. The bearer-format requirement on the referenced mount
+// (the user leg cannot carry an X.509 client certificate) is enforced at
+// runtime, where mount visibility exists — config validation here has none.
 //
-// A persisted user_token_header from a pre-0.20 config is tolerated and ignored:
-// the user credential now always rides Authorization, decided by request
-// transport rather than mount config.
+// It validates a mount config both when the mount is enabled and each time it
+// is loaded, so it tolerates keys an existing mount may still carry: a
+// pre-0.20 user_token_header is ignored (the user credential now always rides
+// Authorization), and the removed user_auth_role is left for the provider to
+// fail closed on (HasUserAuthRole); a config write refuses it
+// (RefuseUserAuthRole).
 func ValidateUserAuthConfig(conf map[string]any) error {
-	if err := ValidateStringField(conf, "user_auth_path"); err != nil {
-		return err
-	}
-	if err := ValidateStringField(conf, "user_auth_role"); err != nil {
-		return err
-	}
+	return ValidateStringField(conf, "user_auth_path")
+}
 
-	path, _ := conf["user_auth_path"].(string)
+// userAuthRoleKey is the provider config key that named the auth role a user
+// credential was admitted under. It was removed: a user is admitted with no
+// role, and its token's audience is bound by the user auth mount or by the
+// provider's resource identifier.
+const userAuthRoleKey = "user_auth_role"
 
-	if role, _ := conf["user_auth_role"].(string); role != "" && path == "" {
-		return fmt.Errorf("user_auth_role requires user_auth_path")
+// ErrUserAuthRoleRemoved is why a provider whose stored configuration still
+// names user_auth_role refuses every user credential: the setting bound the
+// user token's audience through the role, and nothing it named is consulted
+// any more.
+var ErrUserAuthRoleRemoved = errors.New("user_auth_role was removed: the token audience is now bound by " +
+	"the user auth mount's bound_audiences, or by this mount's resource identifier; remove user_auth_role to continue")
+
+// HasUserAuthRole reports whether conf, a provider configuration as stored or
+// as given when the mount was enabled, still names user_auth_role.
+func HasUserAuthRole(conf map[string]any) bool {
+	role, _ := conf[userAuthRoleKey].(string)
+	return role != ""
+}
+
+// StoredUserAuthRole reports whether a stored provider configuration entry
+// still names user_auth_role. A nil entry names nothing.
+func StoredUserAuthRole(entry *sdklogical.StorageEntry) bool {
+	if entry == nil {
+		return false
 	}
+	var stored struct {
+		UserAuthRole string `json:"user_auth_role"`
+	}
+	if err := entry.DecodeJSON(&stored); err != nil {
+		return false
+	}
+	return stored.UserAuthRole != ""
+}
 
-	return nil
+// RefuseUserAuthRole refuses a provider config write that names
+// user_auth_role, with a 400. An empty value names no role and passes.
+func RefuseUserAuthRole(raw map[string]any) error {
+	v, ok := raw[userAuthRoleKey]
+	if !ok || v == nil {
+		return nil
+	}
+	if s, isString := v.(string); isString && s == "" {
+		return nil
+	}
+	return logical.ErrBadRequest(ErrUserAuthRoleRemoved.Error())
 }

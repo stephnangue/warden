@@ -21,6 +21,17 @@ type reviewed struct {
 	// claims are the token's claims parsed without checking the signature;
 	// the review verified that same token. Nil when it does not parse.
 	claims map[string]any
+	// audienceBound: the review was asked for the mount's bound_audiences and
+	// validated one of them (admitToken), not the API server's own audience.
+	audienceBound bool
+}
+
+// admission returns what rv verified as an admission of the mount whose
+// naming is mount.
+func (rv *reviewed) admission(mount *logical.MountFacts) *logical.Admission {
+	adm := newAdmission(rv.status, rv.namespace, rv.name, rv.claims, mount)
+	adm.AudienceBound = rv.audienceBound
+	return adm
 }
 
 // reviewWorkload runs the checks every kubernetes admission makes of a
@@ -101,7 +112,19 @@ func admitToken(ctx context.Context, cfg *KubernetesAuthConfig, token string, no
 	if err := authhelper.CheckMaxAge(cfg.MaxAge, authhelper.IssuedAt(rv.claims), now); err != nil {
 		return nil, fmt.Errorf("max_age: %w", err)
 	}
+	rv.audienceBound = len(cfg.BoundAudiences) > 0
 	return rv, nil
+}
+
+var _ logical.AudienceBinder = (*kubernetesAuthBackend)(nil)
+
+// BindsAudience implements logical.AudienceBinder: admitToken asks the
+// review for bound_audiences when the mount sets them, and the API server's
+// own audience otherwise.
+func (b *kubernetesAuthBackend) BindsAudience() bool {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+	return b.config != nil && len(b.config.BoundAudiences) > 0
 }
 
 // admit is the mount's authhelper.AdmitFunc: the bearer token admitted by
@@ -127,5 +150,5 @@ func (b *kubernetesAuthBackend) admit(ctx context.Context, req *logical.Request,
 		b.logger.Debug("introspect/admit: token not admitted", lgr.Err(err))
 		return nil, nil
 	}
-	return newAdmission(rv.status, rv.namespace, rv.name, rv.claims, b.mountFacts), nil
+	return rv.admission(b.mountFacts), nil
 }

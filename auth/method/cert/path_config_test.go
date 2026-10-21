@@ -11,6 +11,37 @@ import (
 	"time"
 )
 
+// default_role was removed: a stored config that sets it loads without it and
+// its read warns; a write that sets it is refused and changes nothing; any
+// other write stores the config without it.
+func TestConfig_RemovedKeys(t *testing.T) {
+	_, _, caPEM := testCA(t)
+	b, ctx := createTestBackend(t)
+	require.NoError(t, b.setupCertConfig(ctx, map[string]any{"trusted_ca_pem": caPEM, "default_role": "reader"}))
+	assert.Equal(t, []string{"default_role"}, b.config.removed)
+
+	resp, err := b.handleConfigRead(ctx, &logical.Request{}, &framework.FieldData{})
+	require.NoError(t, err)
+	warnings, _ := resp.Data["warnings"].([]string)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "default_role was removed and is ignored")
+	assert.NotContains(t, resp.Data, "default_role")
+
+	before := b.config
+	resp = writeConfig(b, map[string]any{"default_role": "reader", "ocsp_timeout": "3s"})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), "default_role was removed")
+	assert.Same(t, before, b.config)
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"ocsp_timeout": "3s"}).StatusCode)
+	assert.Empty(t, b.config.removed)
+	entry, err := b.storageView.Get(ctx, "config")
+	require.NoError(t, err)
+	var stored map[string]any
+	require.NoError(t, entry.DecodeJSON(&stored))
+	assert.NotContains(t, stored, "default_role")
+}
+
 func TestSetupCertConfig_InvalidPrincipalClaim(t *testing.T) {
 	b, _ := createTestBackend(t)
 	err := b.setupCertConfig(context.Background(), map[string]any{
@@ -150,14 +181,13 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 		PrincipalClaim: "cn",
 		TokenTTL:       time.Hour,
 		RevocationMode: "none",
-		DefaultRole:    "default",
 	}
 
 	resp, err := b.handleConfigRead(ctx, &logical.Request{}, &framework.FieldData{})
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "cn", resp.Data["principal_claim"])
-	assert.Equal(t, "default", resp.Data["default_role"])
+	assert.NotContains(t, resp.Data, "default_role")
 	assert.Equal(t, 1, resp.Data["trusted_ca_count"])
 }
 
@@ -212,7 +242,6 @@ func TestHandleConfigWrite_PersistsToStorage(t *testing.T) {
 			"trusted_ca_pem":  caPEM,
 			"principal_claim": "cn",
 			"token_ttl":       3600,
-			"default_role":    "my-role",
 		},
 		Schema: b.pathConfig().Fields,
 	}
@@ -239,10 +268,10 @@ func TestHandleConfigWrite_MergesWithExisting(t *testing.T) {
 	}
 	b.config.caPool, _ = buildCAPool(caPEM)
 
-	// Update only default_role
+	// Update only ocsp_timeout
 	d := &framework.FieldData{
 		Raw: map[string]any{
-			"default_role": "new-default",
+			"ocsp_timeout": "3s",
 		},
 		Schema: b.pathConfig().Fields,
 	}
@@ -250,5 +279,6 @@ func TestHandleConfigWrite_MergesWithExisting(t *testing.T) {
 	resp, err := b.handleConfigWrite(ctx, &logical.Request{}, d)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "new-default", b.config.DefaultRole)
+	assert.Equal(t, "3s", b.config.OCSPTimeout)
+	assert.Equal(t, caPEM, b.config.TrustedCAPEM)
 }

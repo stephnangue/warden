@@ -57,24 +57,11 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			Description: "Claim to use as principal identity (default: sub)",
 			Default:     "sub",
 		},
-		"groups_claim": {
-			Type:        framework.TypeString,
-			Description: "JWT claim containing group names for dynamic policy mapping. Empty disables group-based policies.",
-		},
-		"group_policy_prefix": {
-			Type:        framework.TypeString,
-			Description: "Prefix prepended to each group name to form the policy name (default: group-)",
-			Default:     "group-",
-		},
 		"token_ttl": {
 			Type:        framework.TypeDurationSecond,
 			Description: "Token TTL (default: 1h)",
 		},
 		"max_age": helper.MaxAgeFieldSchema(),
-		"default_role": {
-			Type:        framework.TypeString,
-			Description: "Default role for transparent operations when no role is specified",
-		},
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas("a claim name, or a JSON Pointer with a leading / into nested claims"))
 
@@ -123,28 +110,24 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 		}, nil
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
-			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
-			"jwks_url":               b.config.JWKSURL,
-			"jwks_ca_pem":            b.config.JWKSCA,
-			"jwt_validation_pubkeys": slices.Clone(b.config.JWTValidationPubKeys),
-			"bound_issuer":           b.config.BoundIssuer,
-			"bound_audiences":        slices.Clone(b.config.BoundAudiences),
-			"bound_subject":          b.config.BoundSubject,
-			"bound_claims":           b.config.BoundClaims,
-			"user_claim":             b.config.UserClaim,
-			"groups_claim":           b.config.GroupsClaim,
-			"group_policy_prefix":    b.config.GroupPolicyPrefix,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"max_age":                b.config.MaxAge.String(),
-			"default_role":           b.config.DefaultRole,
-			"entity_kind":            b.config.EntityKind,
-			"facts":                  maps.Clone(b.config.Facts),
-		},
-	}, nil
+	data := map[string]any{
+		"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
+		"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
+		"jwks_url":               b.config.JWKSURL,
+		"jwks_ca_pem":            b.config.JWKSCA,
+		"jwt_validation_pubkeys": slices.Clone(b.config.JWTValidationPubKeys),
+		"bound_issuer":           b.config.BoundIssuer,
+		"bound_audiences":        slices.Clone(b.config.BoundAudiences),
+		"bound_subject":          b.config.BoundSubject,
+		"bound_claims":           b.config.BoundClaims,
+		"user_claim":             b.config.UserClaim,
+		"token_ttl":              b.config.TokenTTL.String(),
+		"max_age":                b.config.MaxAge.String(),
+		"entity_kind":            b.config.EntityKind,
+		"facts":                  maps.Clone(b.config.Facts),
+	}
+	helper.SetWarnings(data, helper.RemovedConfigWarnings(b.config.removed))
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }
 
 // handleConfigWrite handles writing the configuration.
@@ -156,6 +139,13 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
+
+	// Keys of the role era are refused, not ignored: the write would otherwise
+	// succeed while doing nothing the operator asked for. The stored config
+	// never carries them, so this write also removes any it still did.
+	if err := helper.RefuseRemovedConfigKeys(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 
 	// Build config map from field data
 	conf := make(map[string]any)
@@ -189,11 +179,8 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["bound_subject"] = b.config.BoundSubject
 		conf["bound_claims"] = b.config.BoundClaims
 		conf["user_claim"] = b.config.UserClaim
-		conf["groups_claim"] = b.config.GroupsClaim
-		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["max_age"] = b.config.MaxAge
-		conf["default_role"] = b.config.DefaultRole
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
 	}
@@ -293,5 +280,4 @@ authenticated principal identity.
 Configuration:
   POST /auth/{mount}/config   - Configure key source and claim bindings
   GET  /auth/{mount}/config   - Read current configuration
-  POST /auth/{mount}/role/:name - Create roles with per-role claim constraints
 `

@@ -478,6 +478,54 @@ func TestNewFactory_OnInitialize(t *testing.T) {
 	assert.Equal(t, "hello", pb.extraState["extra_field"])
 }
 
+// user_auth_role was removed. A mount enabled with it, or a stored config
+// that names it, loads and refuses every user credential; a config write
+// naming it is refused; any other write stores the config without it.
+func TestUserAuthRole_Removed(t *testing.T) {
+	ctx := context.Background()
+	factory := NewFactory(testSpec())
+
+	enabled, err := factory(ctx, &logical.BackendConfig{
+		StorageView: newInmemStorage(),
+		Logger:      testLogger(),
+		Config: map[string]any{
+			"test_url": "https://ok.com", "auto_auth_path": "auth/jwt/",
+			"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user",
+		},
+	})
+	require.NoError(t, err, "a mount enabled with it still loads")
+	assert.ErrorIs(t, enabled.(*proxyBackend).UserAuthRefusal(), framework.ErrUserAuthRoleRemoved)
+
+	storage := newInmemStorage()
+	entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
+		"test_url": "https://ok.com", "auto_auth_path": "auth/jwt/",
+		"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user",
+	})
+	require.NoError(t, err)
+	require.NoError(t, storage.Put(ctx, entry))
+	b, err := factory(ctx, &logical.BackendConfig{StorageView: storage, Logger: testLogger()})
+	require.NoError(t, err)
+	pb := b.(*proxyBackend)
+	require.NoError(t, pb.Initialize(ctx))
+	assert.ErrorIs(t, pb.UserAuthRefusal(), framework.ErrUserAuthRoleRemoved)
+
+	write := func(raw map[string]any) *logical.Response {
+		resp, _ := pb.handleConfigWrite(ctx, nil, &framework.FieldData{Raw: raw, Schema: pb.pathConfig().Fields})
+		return resp
+	}
+	resp := write(map[string]any{"user_auth_role": "slack-user"})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.EqualError(t, resp.Err, framework.ErrUserAuthRoleRemoved.Error())
+	assert.ErrorIs(t, pb.UserAuthRefusal(), framework.ErrUserAuthRoleRemoved, "a refused write changes nothing")
+
+	require.Equal(t, http.StatusOK, write(map[string]any{"timeout": 60}).StatusCode)
+	assert.NoError(t, pb.UserAuthRefusal())
+	assert.Equal(t, "auth/user-jwt/", pb.GetUserAuthPath())
+	stored, err := storage.Get(ctx, "config")
+	require.NoError(t, err)
+	assert.False(t, framework.StoredUserAuthRole(stored))
+}
+
 func TestNewFactory_ShutdownHook(t *testing.T) {
 	spec := testSpec()
 	var hookCalled bool

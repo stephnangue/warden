@@ -153,7 +153,7 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 			// What the review verified. claims are the ones the issuer
 			// pre-filter and max_age already parsed, so the iat costs no
 			// extra parse.
-			Admission: newAdmission(status, rv.namespace, rv.name, rv.claims, b.mountFacts),
+			Admission: rv.admission(b.mountFacts),
 		},
 		Data: map[string]any{
 			"principal_id":              status.User.Username,

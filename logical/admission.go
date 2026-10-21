@@ -58,6 +58,12 @@ type Admission struct {
 	// otherwise.
 	IssuedAt time.Time
 
+	// AudienceBound reports that the credential's audience was checked
+	// against the mount's bound_audiences when it was admitted. It records
+	// what that admission verified, so a later config edit neither grants nor
+	// withdraws it for a credential already admitted.
+	AudienceBound bool
+
 	// Bytes estimates the memory Facts retains (the decoded claims, or the
 	// strings of a table), set by the auth method that builds the admission.
 	// The token cache counts it in the cost of the entry that holds it.

@@ -379,7 +379,7 @@ func TestRenderMetadata_AudiencesAndKind(t *testing.T) {
 // =============================================================================
 
 func TestConfigWrite_FactsAndAudiences(t *testing.T) {
-	f := newFactsFixture(t, map[string]any{"default_role": "api"})
+	f := newFactsFixture(t, map[string]any{"max_age": 300})
 	b := f.b
 	ctx := context.Background()
 
@@ -417,7 +417,7 @@ func TestConfigWrite_FactsAndAudiences(t *testing.T) {
 	assert.Equal(t, []string{"where", "workload"}, b.mountFacts.Load().Mapping.Mapped())
 	assert.Equal(t, "human", b.mountFacts.Load().Kind)
 	assert.Equal(t, []string{"warden", "api"}, b.config.BoundAudiences)
-	assert.Equal(t, "api", b.config.DefaultRole)
+	assert.Equal(t, 5*time.Minute, b.config.MaxAge)
 
 	// The stored config reloads into the same naming and audiences.
 	entry, err := b.storageView.Get(ctx, "config")
@@ -466,7 +466,6 @@ func TestConfigRead_UnconfiguredRendersDefaults(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, map[string]any{
 		"token_ttl":       "0s",
-		"default_role":    "",
 		"bound_audiences": []string(nil),
 		"max_age":         "0s",
 		"entity_kind":     logical.EntityKindAgent,
@@ -597,7 +596,7 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		// A write that leaves the stored facts in place is told how to replace
 		// them, and changes nothing.
 		before := b.config
-		resp := writeConfig(b, map[string]any{"default_role": "api"})
+		resp := writeConfig(b, map[string]any{"token_ttl": 600})
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.EqualError(t, resp.Err, `the stored facts do not compile (facts: source "sub" is not a field of this mount (one of aud, path, spiffe_id, svid, trust_domain)); send facts (and entity_kind) in this write to replace them`)
 		assert.Same(t, before, b.config)

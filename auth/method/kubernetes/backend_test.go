@@ -2,12 +2,14 @@ package kubernetes
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -99,8 +101,32 @@ func TestInitialize_RoundTripsConfigFromStorage(t *testing.T) {
 	assert.True(t, b.config.TLSSkipVerify)
 	assert.Equal(t, "reviewer-jwt", b.config.TokenReviewerJWT)
 	assert.Equal(t, "https://kubernetes.default.svc", b.config.Issuer)
-	assert.Equal(t, "ops-reader", b.config.DefaultRole)
 	assert.NotNil(t, b.config.httpClient, "Initialize must rebuild the HTTP client")
+
+	// default_role was removed: the stored one is ignored, a read warns about
+	// it, and a write that sets it is refused.
+	assert.Equal(t, []string{"default_role"}, b.config.removed)
+	resp, err := b.handleConfigRead(ctx, &logical.Request{}, &framework.FieldData{})
+	require.NoError(t, err)
+	warnings, _ := resp.Data["warnings"].([]string)
+	require.NotEmpty(t, warnings)
+	assert.Contains(t, warnings[0], "default_role was removed and is ignored")
+	assert.NotContains(t, resp.Data, "default_role")
+
+	before := b.config
+	resp = writeConfig(b, map[string]any{"default_role": "ops-reader"})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), "default_role was removed")
+	assert.Same(t, before, b.config)
+
+	// Any other write stores the config without it.
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"issuer": "https://kubernetes.default.svc"}).StatusCode)
+	assert.Empty(t, b.config.removed)
+	stored2, err := b.storageView.Get(ctx, "config")
+	require.NoError(t, err)
+	var storedMap map[string]any
+	require.NoError(t, stored2.DecodeJSON(&storedMap))
+	assert.NotContains(t, storedMap, "default_role")
 }
 
 func TestInitialize_NoStoredConfigIsNotAnError(t *testing.T) {

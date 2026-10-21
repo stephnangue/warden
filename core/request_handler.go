@@ -28,6 +28,7 @@ import (
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/helper/flight"
+	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
@@ -1046,7 +1047,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// whether this mount is a protected resource decides how the extractor
 		// reads Authorization. On a mount with no effective user_auth_path the
 		// rule collapses to the pre-0.20 behaviour and userCred stays empty.
-		userAuthPath, userAuthRole := c.resolveUserAuthConfig(ctx, matchingBackend)
+		userAuthPath, userAuthRefusal := c.resolveUserAuthConfig(ctx, matchingBackend)
 		userLeg := userAuthPath != ""
 		userLegMount = userLeg
 
@@ -1120,18 +1121,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// minting run. Skipped for stream-unauthenticated requests, which bypass
 		// CheckToken, minting, and audit entirely.
 		if !req.StreamUnauthenticated {
-			if err := c.captureUserContext(ctx, req, userAuthPath, userAuthRole, userCred); err != nil {
+			if err := c.captureUserContext(ctx, req, userAuthPath, userAuthRefusal, userCred); err != nil {
 				c.logger.Warn("secondary user authentication failed",
 					logger.Err(err),
 					logger.String("path", req.Path),
 					logger.String("request_id", req.RequestID),
 				)
-				// A user credential WAS presented and rejected, so the challenge
-				// carries error="invalid_token" — the client should replace it
-				// rather than assume it simply forgot to send one.
-				errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
-				c.attachUserChallenge(ctx, req, errResp, true)
-				return errResp, nil, nil
+				return c.userCaptureFailure(ctx, req, err), nil, nil
 			}
 		}
 	}
@@ -1290,6 +1286,19 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 
 	// Route the request
 	resp, routeErr := c.doRouting(ctx, req)
+
+	// A provider's config read also says, ahead of time, when its user leg
+	// would refuse every user credential: only core sees the user auth mount
+	// and the protected-resource configuration that decide it.
+	if entry != nil && entry.Class == mountClassProvider && !req.Streamed &&
+		req.Operation == logical.ReadOperation && req.Path == "config" && resp != nil && resp.Err == nil {
+		if warnings := c.userLegConfigWarnings(ctx, entry); len(warnings) > 0 {
+			if resp.Data == nil {
+				resp.Data = map[string]any{}
+			}
+			appendWarnings(resp.Data, warnings...)
+		}
+	}
 
 	// A non-login request should not return an auth block
 	if resp != nil && resp.Auth != nil {
@@ -1651,32 +1660,33 @@ func agentTemplateClaims(projected map[string]string, principalID string) map[st
 }
 
 // projectUserClaims selects the operator-allowlisted keys from the secondary
-// (user) principal's login-derived metadata for the assertion's user level and for
-// per-user secret_path templating. Unlike projectAssertionMetadata it FAILS CLOSED
-// on an absent key: the user's claims scope a security-sensitive downstream
-// path (a templated policy / a per-user secret path), so a named-but-missing claim
-// must deny rather than silently widen the scope. Returns the projected map, which
-// is empty-key → nil.
-func projectUserClaims(md map[string]string, keys []string) (map[string]string, error) {
+// (user) principal's metadata for the assertion's user level and for per-user
+// secret_path templating. Unlike projectAssertionMetadata it FAILS CLOSED on an
+// absent key: the user's claims scope a security-sensitive downstream path (a
+// templated policy / a per-user secret path), so a named-but-missing claim must
+// deny rather than silently widen the scope. Returns the projected map, which is
+// empty-key → nil, and its JSON encoding, the fingerprint the credential cache
+// keys it by ("" when nothing is projected).
+func projectUserClaims(md map[string]string, keys []string) (map[string]string, string, error) {
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, "", nil
 	}
 	projected := make(map[string]string, len(keys))
 	for _, k := range keys {
 		v, ok := md[k]
 		if !ok {
-			return nil, fmt.Errorf("assertion_user_claims names %q but the user token has no such claim", k)
+			return nil, "", fmt.Errorf("assertion_user_claims names %q but the user token has no such claim", k)
 		}
 		projected[k] = v
 	}
 	encoded, err := json.Marshal(projected)
 	if err != nil {
-		return nil, fmt.Errorf("marshal user claims: %w", err)
+		return nil, "", fmt.Errorf("marshal user claims: %w", err)
 	}
 	if len(encoded) > maxAssertionMetadataBytes {
-		return nil, fmt.Errorf("user claims exceed %d bytes", maxAssertionMetadataBytes)
+		return nil, "", fmt.Errorf("user claims exceed %d bytes", maxAssertionMetadataBytes)
 	}
-	return projected, nil
+	return projected, string(encoded), nil
 }
 
 // resolveExchangeInputs derives the token-exchange inputs for the named spec on
@@ -1978,12 +1988,14 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// closed, since the user's claims scope a security-sensitive downstream path.
 	// userClaims (the projected values plus the user's raw principal as "sub") is
 	// surfaced on the setup so a driver can template a per-user path from it.
-	// Per-user cache isolation is the manager's ":u:" token-id dimension, so the
-	// user does not enter cacheIdentity here.
+	// Per-user cache isolation is the manager's ":u:" token-id dimension; the
+	// user's projected claims enter cacheIdentity as well (userFingerprint),
+	// because they are rendered per request from the user mount's naming in
+	// force, so a mapping edit changes them under the same user token id.
 	//
 	// The same opt-in can also DISCLOSE the user to the profile (userIdentity:
-	// namespace, mount, principal, role and the user token's own verified act
-	// chain), which makes the user the assertion's subject and the agent its
+	// namespace, mount, principal and the user token's own verified act chain),
+	// which makes the user the assertion's subject and the agent its
 	// actor. It is disclosed only for the subject slot — an actor token must name
 	// the agent, since the token service builds act from its sub — and only when
 	// the source's verifier can bind claims beyond iss, sub and aud
@@ -1992,6 +2004,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// composite sub, and userClaims still drives templating. Projected once, here,
 	// and snapshotted into the mint closure.
 	var userClaims map[string]string
+	var userFingerprint string
 	var userIdentity *credential.AssertionIdentity
 	if userKeys := credential.AssertionUserClaimKeys(spec.Config); len(userKeys) > 0 {
 		if userTE == nil {
@@ -2012,7 +2025,8 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 				metaKeys = append(metaKeys, k)
 			}
 		}
-		projectedUser, perr := projectUserClaims(userTE.Metadata, metaKeys)
+		projectedUser, fingerprint, perr := projectUserClaims(userTE.Metadata, metaKeys)
+		userFingerprint = fingerprint
 		if perr != nil {
 			return nil, fmt.Errorf("spec %q: %w", specName, perr)
 		}
@@ -2054,9 +2068,9 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// source config, which can change under a fixed specName) and the projected-
 	// metadata fingerprint. Each fragment is appended only when non-empty, so the
 	// no-resource / no-metadata cache keys stay byte-for-byte unchanged; the
-	// fragments carry mutually non-prefix leads — "role=", "res=", "prof=", and the
-	// '{' of the marshalled metadata JSON — so one fragment's start cannot be read
-	// as another's.
+	// fragments carry mutually non-prefix leads — "role=", "res=", "user=",
+	// "prof=", and the '{' of the marshalled metadata JSON — so one fragment's
+	// start cannot be read as another's.
 	//
 	// That disambiguates starts, not contents: a value holding a NUL could spell a
 	// later fragment that is itself absent. Nothing can reach it — role names are
@@ -2085,12 +2099,12 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	//
 	// ONE fragment is enough, and it is worth saying why. Every input a profile can
 	// read is already fingerprinted: identity and audience directly, role via
-	// "role=", resource via "res=", projected metadata via mdFingerprint, and the
-	// user via the Manager's ":u:" token-id dimension. That last one covers the
-	// user's whole IDENTITY, not just its claims: namespace, mount, principal and
-	// act chain are all fixed for the life of the user's token entry, and a
-	// transparent user token's id hashes the very credential the act chain was read
-	// from. (The agent's own act chain is read only to refuse, never rendered, so it
+	// "role=", resource via "res=", projected metadata via mdFingerprint, the
+	// user's projected claims via "user=", and the user via the Manager's ":u:"
+	// token-id dimension. That last one covers the user's IDENTITY: namespace,
+	// mount, principal and act chain are all fixed for the life of the user's token
+	// entry, and a transparent user token's id hashes the very credential the act
+	// chain was read from. (The agent's own act chain is read only to refuse, never rendered, so it
 	// keys nothing.) A profile only changes how those are RENDERED, so its name is
 	// the single new degree of freedom. Should a later profile ever read something
 	// outside that set, it needs a fragment of its own — that is the moment to give
@@ -2113,6 +2127,11 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	}
 	if mdFingerprint != "" {
 		cacheIdentity += "\x00" + mdFingerprint
+	}
+	// The user's projected claims, which can change under one user token id:
+	// they are rendered from the user mount's naming in force.
+	if userFingerprint != "" {
+		cacheIdentity += "\x00user=" + userFingerprint
 	}
 	// Keyed on the RESOLVED profile's Name(), not the config string that selected
 	// it. Identical today, but it keeps an alias possible later: were two config
@@ -2470,7 +2489,15 @@ func (c *Core) providerTransparentSurface(ctx context.Context, req *logical.Requ
 // The user credential is supplied by the caller rather than read here: the
 // backend's ExtractTokens already decided which wire slot carries the user for
 // this provider and this request shape, and the two must not disagree.
-func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, userAuthPath, userAuthRole, userCred string) error {
+//
+// The user is admitted like any credential, with no role, and is granted
+// nothing: no role grant, no policies. What it carries is its principal (the
+// user auth mount's claim, from the login) and its metadata, rendered from its
+// admission under the user auth mount's naming in force (userMetadata). Its
+// token's audience must be bound (checkUserAudience), and refusal, the
+// provider's own reason to refuse every user credential, refuses this one.
+// Both of those are a *userLegRefusal when no other credential would pass.
+func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, userAuthPath string, refusal error, userCred string) error {
 	if userAuthPath == "" {
 		return nil // per-user auth not configured — feature off
 	}
@@ -2498,8 +2525,10 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 	// subject_token path.
 	req.HTTPRequest.Header.Del("Authorization")
 
-	// The user is admitted like any credential, with no role: a login names
-	// none, so userAuthRole selects nothing here.
+	if refusal != nil {
+		return &userLegRefusal{err: refusal}
+	}
+
 	userTE, _, err := c.resolveTransparentIdentity(ctx, req, userAuthPath, userCred)
 	if err != nil {
 		return fmt.Errorf("user authentication failed: %w", err)
@@ -2508,9 +2537,27 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 	// Cross-namespace guard (defense-in-depth): the user must live in the
 	// request's namespace. resolveTransparentIdentity routes through the mount in
 	// the request namespace, so a mismatch should not arise — fail closed if it does.
-	if ns, nsErr := namespace.FromContext(ctx); nsErr == nil && ns != nil && userTE.NamespaceID != ns.ID {
+	ns, nsErr := namespace.FromContext(ctx)
+	if nsErr != nil || ns == nil {
+		return fmt.Errorf("user authentication failed: no namespace in the request")
+	}
+	if userTE.NamespaceID != ns.ID {
 		return fmt.Errorf("user token namespace %q does not match request namespace %q", userTE.NamespaceID, ns.ID)
 	}
+
+	// Every token the user mount issues is an admission token, and every
+	// decision below reads its admission: one without is refused.
+	adm := userTE.Admission
+	if adm == nil {
+		return errUserNoAdmission
+	}
+	if err := c.checkUserAudience(ctx, adm, ns.Path, req.MountPoint, userAuthPath); err != nil {
+		return err
+	}
+
+	// userTE is this request's own copy, so the metadata set here reaches
+	// this request alone.
+	userTE.Metadata = userMetadata(adm, time.Now())
 
 	req.User = &logical.UserPrincipal{
 		TokenEntry: userTE,
@@ -2519,10 +2566,94 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 	return nil
 }
 
+// userCaptureFailure is the response to a request whose user credential
+// captureUserContext refused with err.
+func (c *Core) userCaptureFailure(ctx context.Context, req *logical.Request, err error) *logical.Response {
+	// The mount's configuration refuses every user credential: nothing the
+	// client presents instead would pass, so there is no challenge to answer
+	// with.
+	var refused *userLegRefusal
+	if errors.As(err, &refused) {
+		return logical.ErrorResponse(logical.ErrForbidden(err.Error()))
+	}
+	// A user credential WAS presented and rejected, so the challenge carries
+	// error="invalid_token" — the client should replace it rather than assume
+	// it simply forgot to send one.
+	errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
+	c.attachUserChallenge(ctx, req, errResp, true)
+	return errResp
+}
+
+// userLegRefusal is a user credential refused for the provider's configuration
+// rather than for anything about the credential: no other credential would
+// pass, so the request is refused without a challenge to obtain one.
+type userLegRefusal struct{ err error }
+
+func (r *userLegRefusal) Error() string { return r.err.Error() }
+func (r *userLegRefusal) Unwrap() error { return r.err }
+
+var (
+	// errUserNoAdmission refuses a user token that carries no admission. The
+	// user mount's logins always attach one, so this is defense in depth.
+	errUserNoAdmission = errors.New("user authentication failed: the user token carries no admission")
+
+	// errUserAudienceNotResource refuses a user token minted for another
+	// resource than the one requested.
+	errUserAudienceNotResource = errors.New("user token audience does not name this resource")
+)
+
+// factAudience is the fact naming a credential's audiences.
+const factAudience = "aud"
+
+// checkUserAudience decides whether a user token's audience is bound to this
+// request's resource, in order:
+//
+//  1. the user auth mount checked it against its bound_audiences when it
+//     admitted the token (adm.AudienceBound);
+//  2. otherwise, with protected-resource metadata on (an external base is
+//     configured; the mount opted in by setting user_auth_path), the token's
+//     aud facts must contain this mount's resource identifier exactly
+//     (resourceIDMatches), else errUserAudienceNotResource;
+//  3. otherwise nothing binds it, and the request is refused as a
+//     *userLegRefusal.
+//
+// mountPath is the request's namespace-relative mount ("github/"), nsPath its
+// namespace path. It does not allocate unless it refuses.
+func (c *Core) checkUserAudience(ctx context.Context, adm *logical.Admission, nsPath, mountPath, userAuthPath string) error {
+	if adm.AudienceBound {
+		return nil
+	}
+	base := c.externalBaseURL(ctx)
+	if base == "" {
+		return &userLegRefusal{err: fmt.Errorf("user token audience is not bound: set bound_audiences on %s or enable protected-resource metadata", userAuthPath)}
+	}
+	aud := adm.Lookup(adm.Mount.Load(), factAudience)
+	for {
+		v, ok := aud.Next()
+		if !ok {
+			return errUserAudienceNotResource
+		}
+		if v.Kind == selector.KindString && resourceIDMatches(v.S, base, nsPath, mountPath) {
+			return nil
+		}
+	}
+}
+
+// userMetadata renders the user's metadata from its admission under the user
+// auth mount's naming in force. It is cached on the admission through the
+// membership mechanism, with no groups to match: the steady state is a pointer
+// compare and does not allocate, and a mapping edit on the user mount (facts,
+// entity_kind) renders afresh on the next request. The returned map is shared
+// and must not be modified.
+func userMetadata(adm *logical.Admission, now time.Time) map[string]string {
+	return membership(adm, emptyNSGroups, now).Metadata
+}
+
 // resolveUserAuthConfig resolves the secondary (user) auth configuration for a
 // gateway request from the mount's own config (a backend that implements
 // logical.UserAuthConfigProvider). Returns an empty path when per-user auth is
-// not configured on this mount.
+// not configured on this mount, and refusal, the provider's reason to refuse
+// every user credential, when it has one.
 //
 // Deliberately mount-only, unlike auto_auth_path, which also falls back to the
 // namespace's custom metadata. Agent identity genuinely is namespace-scoped —
@@ -2531,14 +2662,40 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 // carries the user rather than the agent, and it binds one resource to one
 // identity provider and audience. A namespace-wide fallback would opt in every
 // mount in the namespace, including ones that never intended to reinterpret
-// Authorization, and would force a single user_auth_role's bound_audiences to
-// cover every resource at once.
-func (c *Core) resolveUserAuthConfig(_ context.Context, backend logical.Backend) (userAuthPath, userAuthRole string) {
+// Authorization, and would bind one audience to every resource at once.
+func (c *Core) resolveUserAuthConfig(_ context.Context, backend logical.Backend) (userAuthPath string, refusal error) {
 	if p, ok := backend.(logical.UserAuthConfigProvider); ok {
 		userAuthPath = p.GetUserAuthPath()
-		userAuthRole = p.GetUserAuthRole()
+		refusal = p.UserAuthRefusal()
 	}
-	return userAuthPath, userAuthRole
+	return userAuthPath, refusal
+}
+
+// userLegConfigWarnings returns what the config read of the provider mounted
+// at entry warns about its user leg: a stored configuration that refuses every
+// user credential (UserAuthRefusal), or a user token audience nothing binds,
+// neither the user auth mount's bound_audiences nor this mount's resource
+// identifier (checkUserAudience refuses every user credential then). A
+// provider with no user leg warns of nothing.
+func (c *Core) userLegConfigWarnings(ctx context.Context, entry *MountEntry) []string {
+	userAuthPath, refusal := c.resolveUserAuthConfig(ctx, c.router.MatchingBackend(ctx, entry.Path))
+	if userAuthPath == "" {
+		return nil
+	}
+	if refusal != nil {
+		return []string{"user credentials are refused: " + refusal.Error()}
+	}
+	authPath := normalizeAuthPath(userAuthPath)
+	if c.router.MatchingMountEntry(ctx, authPath) != nil {
+		if binder, ok := c.router.MatchingBackend(ctx, authPath).(logical.AudienceBinder); ok && binder.BindsAudience() {
+			return nil
+		}
+	}
+	if c.externalBaseURL(ctx) != "" {
+		return nil
+	}
+	return []string{fmt.Sprintf("user token audience is not bound: set bound_audiences on %s or enable "+
+		"protected-resource metadata; until then every user credential is refused", authPath)}
 }
 
 // performImplicitAuth performs implicit authentication for the PRIMARY principal

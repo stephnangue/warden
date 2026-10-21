@@ -40,7 +40,7 @@ func TestConfig_MaxAge(t *testing.T) {
 	assert.Equal(t, "10m0s", read()["max_age"])
 
 	// A write that leaves it out keeps it.
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "api"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"token_ttl": 600}).StatusCode)
 	assert.Equal(t, 10*time.Minute, b.config.MaxAge)
 
 	// Storage holds the duration string, and a reload reads it back.
@@ -55,7 +55,7 @@ func TestConfig_MaxAge(t *testing.T) {
 	require.NoError(t, reloaded.Initialize(ctx))
 	t.Cleanup(reloaded.spiffe.Stop)
 	assert.Equal(t, 10*time.Minute, reloaded.config.MaxAge)
-	assert.Equal(t, "api", reloaded.config.DefaultRole)
+	assert.Equal(t, 10*time.Minute, reloaded.config.TokenTTL)
 
 	// Seconds are accepted; zero unsets it.
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"max_age": 90}).StatusCode)

@@ -23,6 +23,8 @@ import (
 type mockUnauthPathBackend struct {
 	mockTransparentModeProvider
 	userAuthPath string
+	// userAuthRefusal is what UserAuthRefusal answers.
+	userAuthRefusal error
 }
 
 func (m *mockUnauthPathBackend) IsUnauthenticatedPath(_ *http.Request, _ string) bool { return true }
@@ -30,7 +32,7 @@ func (m *mockUnauthPathBackend) IsUnauthenticatedPath(_ *http.Request, _ string)
 // GetUserAuthPath makes the mount a protected resource when non-empty, which is
 // what turns an empty agent into "the cert is the agent".
 func (m *mockUnauthPathBackend) GetUserAuthPath() string { return m.userAuthPath }
-func (m *mockUnauthPathBackend) GetUserAuthRole() string { return "" }
+func (m *mockUnauthPathBackend) UserAuthRefusal() error  { return m.userAuthRefusal }
 
 // ExtractTokens replaces the base mock's stub, which returns no credentials at
 // all. The gate now turns on the extracted user credential, so a stub would

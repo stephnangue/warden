@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -74,13 +75,15 @@ func TestPathConfig_Fields(t *testing.T) {
 		"bound_audiences",
 		"bound_subject",
 		"user_claim",
-		"groups_claim",
 		"token_ttl",
 	}
 
 	for _, field := range expectedFields {
 		_, exists := path.Fields[field]
 		assert.True(t, exists, "Field %s should exist", field)
+	}
+	for _, field := range []string{"default_role", "groups_claim", "group_policy_prefix"} {
+		assert.NotContains(t, path.Fields, field, "removed field %s", field)
 	}
 }
 
@@ -108,7 +111,6 @@ func TestPathConfig_FieldTypes(t *testing.T) {
 		{"bound_audiences", framework.TypeCommaStringSlice},
 		{"bound_subject", framework.TypeString},
 		{"user_claim", framework.TypeString},
-		{"groups_claim", framework.TypeString},
 		{"token_ttl", framework.TypeDurationSecond},
 	}
 
@@ -136,12 +138,6 @@ func TestPathConfig_DefaultValues(t *testing.T) {
 	// Check defaults
 	userClaimField := path.Fields["user_claim"]
 	assert.Equal(t, "sub", userClaimField.Default)
-
-	groupsClaimField := path.Fields["groups_claim"]
-	assert.Nil(t, groupsClaimField.Default) // empty = disabled
-
-	groupPolicyPrefixField := path.Fields["group_policy_prefix"]
-	assert.Equal(t, "group-", groupPolicyPrefixField.Default)
 }
 
 func TestPathConfig_Operations(t *testing.T) {
@@ -212,7 +208,6 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 		BoundAudiences: []string{"aud1", "aud2"},
 		BoundSubject:   "expected-subject",
 		UserClaim:      "email",
-		GroupsClaim:    "roles",
 		TokenTTL:       2 * time.Hour,
 	}
 
@@ -232,7 +227,7 @@ func TestHandleConfigRead_WithConfig(t *testing.T) {
 	assert.Equal(t, []string{"aud1", "aud2"}, resp.Data["bound_audiences"])
 	assert.Equal(t, "expected-subject", resp.Data["bound_subject"])
 	assert.Equal(t, "email", resp.Data["user_claim"])
-	assert.Equal(t, "roles", resp.Data["groups_claim"])
+	assert.NotContains(t, resp.Data, "groups_claim")
 	assert.Equal(t, "2h0m0s", resp.Data["token_ttl"])
 }
 
@@ -249,7 +244,6 @@ func TestHandleConfigRead_OIDC(t *testing.T) {
 	b.config = &JWTAuthConfig{
 		OIDCDiscoveryURL: "https://issuer.example.com/.well-known/openid-configuration",
 		UserClaim:        "sub",
-		GroupsClaim:      "groups",
 		TokenTTL:         1 * time.Hour,
 	}
 
@@ -407,21 +401,64 @@ func TestHandleConfigWrite_MergesExisting(t *testing.T) {
 }
 
 // =============================================================================
-// handleConfigRead with default_role
+// Config keys of the role era
 // =============================================================================
 
-func TestHandleConfigRead_WithDefaultRole(t *testing.T) {
-	b, _ := createTestBackendWithStorage(t)
-	b.config = &JWTAuthConfig{
-		JWKSURL:     "https://example.com/jwks",
-		DefaultRole: "auto-role",
-		UserClaim:   "sub",
-		TokenTTL:    time.Hour,
-	}
-
-	resp, err := b.handleConfigRead(context.Background(), &logical.Request{}, &framework.FieldData{})
+// A stored config that still sets default_role, groups_claim or
+// group_policy_prefix loads without them, and a read warns about each; a
+// write that sets one is refused and changes nothing; any other write stores
+// the config without them.
+func TestConfig_RemovedKeys(t *testing.T) {
+	_, pemStr := genTestPubKeyPEM(t, "ECDSA")
+	b, ctx := createTestBackendWithStorage(t)
+	entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
+		"jwt_validation_pubkeys": []string{pemStr},
+		"bound_audiences":        []string{"warden"},
+		"default_role":           "reader",
+		"groups_claim":           "groups",
+		"group_policy_prefix":    "group-",
+	})
 	require.NoError(t, err)
-	assert.Equal(t, "auto-role", resp.Data["default_role"])
+	require.NoError(t, b.storageView.Put(ctx, entry))
+	require.NoError(t, b.Initialize(ctx))
+
+	read := func() *logical.Response {
+		resp, err := b.handleConfigRead(ctx, &logical.Request{}, &framework.FieldData{})
+		require.NoError(t, err)
+		return resp
+	}
+	resp := read()
+	warnings, _ := resp.Data["warnings"].([]string)
+	require.Len(t, warnings, 3)
+	for i, key := range []string{"default_role", "group_policy_prefix", "groups_claim"} {
+		assert.Contains(t, warnings[i], key+" was removed and is ignored")
+		assert.NotContains(t, resp.Data, key)
+	}
+	assert.Equal(t, []string{"warden"}, resp.Data["bound_audiences"], "the rest of the config loads")
+
+	before := b.config
+	for _, raw := range []map[string]any{
+		{"default_role": "reader"},
+		{"groups_claim": "groups", "user_claim": "email"},
+		{"group_policy_prefix": "g-"},
+	} {
+		resp := writeConfig(b, raw)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "write %v", raw)
+		assert.Contains(t, resp.Err.Error(), "was removed")
+		assert.Same(t, before, b.config, "a refused write changes nothing")
+	}
+	assert.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": ""}).StatusCode,
+		"an empty value sets nothing")
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"user_claim": "email"}).StatusCode)
+	assert.NotContains(t, read().Data, "warnings")
+	stored, err := b.storageView.Get(ctx, "config")
+	require.NoError(t, err)
+	var storedMap map[string]any
+	require.NoError(t, stored.DecodeJSON(&storedMap))
+	for _, key := range []string{"default_role", "groups_claim", "group_policy_prefix"} {
+		assert.NotContains(t, storedMap, key)
+	}
 }
 
 // =============================================================================
