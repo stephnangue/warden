@@ -1207,12 +1207,26 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 	}
 }
 
+// isRootTokenEntry reports whether entry is the root token: a persisted
+// (non-transparent) token that no auth mount issued, bound to the root
+// principal. GenerateRootToken binds the root to the root namespace UUID;
+// the earliest releases bound it to the literal "root". Recognition does
+// not depend on the token type's name, and a token any auth mount issued
+// is never the root, whatever principal its identity provider mapped.
+func (s *TokenStore) isRootTokenEntry(entry *TokenEntry) bool {
+	if entry == nil || entry.MountAccessor != "" || s.registry.IsTransparent(entry.Type) {
+		return false
+	}
+	return entry.PrincipalID == namespace.RootNamespaceUUID || entry.PrincipalID == "root"
+}
+
 // loadAllTokensFromStorage loads all tokens from persistent storage into cache
 // This is called during token store initialization to restore tokens from storage
 func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) {
 	loadedCount := 0
 	expiredCount := 0
 	failedCount := 0
+	var rootID string // ID of the root token registered by this load, if any
 
 	// List all token IDs from storage
 	tokenKeys, err := s.storage.List(ctx, tokenIDPrefix)
@@ -1254,9 +1268,17 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
 		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
 
-		// Check if this is the root token
-		if entry.Type == TypeWardenToken && entry.PrincipalID == "root" {
+		// Register the root token with the root token manager so it can be
+		// revoked or replaced after a restart. Only one root should exist;
+		// if storage holds more, the last one loaded wins.
+		if s.isRootTokenEntry(entry) {
 			if tokenValue, ok := entry.Data["token"]; ok {
+				if rootID != "" && rootID != entry.ID {
+					s.logger.Warn("more than one root token found in storage, the last one loaded is kept",
+						logger.String("previous_token_id", rootID),
+						logger.String("token_id", entry.ID))
+				}
+				rootID = entry.ID
 				s.rootTokenManager.SetRootToken(tokenValue, entry.ID)
 			}
 		}

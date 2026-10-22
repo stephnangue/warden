@@ -206,27 +206,3 @@ func (c *Sys) HealthWithContext(ctx context.Context) (*HealthResponse, error) {
 	}
 	return out, nil
 }
-
-// RevokeRootToken revokes the current root token.
-func (c *Sys) RevokeRootToken() error {
-	return c.RevokeRootTokenWithContext(context.Background())
-}
-
-// RevokeRootTokenWithContext revokes the current root token with context.
-func (c *Sys) RevokeRootTokenWithContext(ctx context.Context) error {
-	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
-	defer cancelFunc()
-
-	r := c.c.NewRequest(http.MethodPost, "/v1/sys/revoke-root-token")
-	if err := r.SetJSONBody(map[string]any{}); err != nil {
-		return err
-	}
-
-	resp, err := c.c.rawRequestWithContext(ctx, r)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	return nil
-}

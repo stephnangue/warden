@@ -190,25 +190,3 @@ func TestSys_Health_UninitializedReturns501(t *testing.T) {
 		t.Errorf("StatusCode = %d; want 501", resp.StatusCode)
 	}
 }
-
-func TestSys_RevokeRootToken(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/v1/sys/revoke-root-token" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	config := DefaultConfig()
-	config.Address = server.URL
-	client, _ := NewClient(config)
-
-	err := client.Sys().RevokeRootToken()
-	if err != nil {
-		t.Fatalf("RevokeRootToken failed: %v", err)
-	}
-}
