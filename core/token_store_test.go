@@ -511,6 +511,7 @@ func TestTokenStore_IsRootTokenEntry(t *testing.T) {
 		{"independent of the type name", &TokenEntry{Type: "renamed_token", PrincipalID: namespace.RootNamespaceUUID}, true},
 		{"issued by an auth mount", &TokenEntry{Type: TypeServiceToken, PrincipalID: namespace.RootNamespaceUUID, MountAccessor: "auth_jwt_1234"}, false},
 		{"issued by an auth mount, literal root", &TokenEntry{Type: TypeServiceToken, PrincipalID: "root", MountAccessor: "auth_jwt_1234"}, false},
+		{"issued by an auth mount, legacy type name", &TokenEntry{Type: "warden_token", PrincipalID: namespace.RootNamespaceUUID, MountAccessor: "auth_jwt_1234"}, false},
 		{"identity token", &TokenEntry{Type: TypeIdentityToken, PrincipalID: namespace.RootNamespaceUUID}, false},
 		{"identity token, literal root", &TokenEntry{Type: TypeIdentityToken, PrincipalID: "root"}, false},
 		{"other principal", &TokenEntry{Type: TypeServiceToken, PrincipalID: "alice"}, false},
@@ -625,13 +626,13 @@ func TestTokenStore_SecondRootCandidateWarns(t *testing.T) {
 	simulateRestart(t, s)
 
 	out := buf.String()
-	require.Contains(t, out, "more than one root token found in storage")
+	require.Contains(t, out, "more than one root token in storage")
 	assert.Contains(t, out, firstID)
 	assert.Contains(t, out, second.ID)
 
 	kept := s.rootTokenManager.GetCurrentRootTokenID()
 	assert.Contains(t, []string{firstID, second.ID}, kept)
-	assert.Equal(t, 1, strings.Count(out, "more than one root token found in storage"))
+	assert.Equal(t, 1, strings.Count(out, "more than one root token in storage"))
 }
 
 // TestTokenStore_GetMetrics tests metrics retrieval

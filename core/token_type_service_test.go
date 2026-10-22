@@ -1,15 +1,19 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -148,4 +152,73 @@ func TestServiceToken_LegacyRootAfterRestart(t *testing.T) {
 	// look-alike of the new format is a different token.
 	_, err = c.LookupToken(ctx, "wds."+strings.Repeat("Q", 64))
 	assert.Error(t, err)
+}
+
+// lockedBuffer is an io.Writer safe for concurrent use.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// Loading storage that holds two root tokens warns rather than replacing one
+// with the other silently; an entry with a root principal issued by a mount is
+// loaded but is not a root candidate.
+func TestTokenStore_LoadWarnsOnSecondRootToken(t *testing.T) {
+	c := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	persist := func(value, mountAccessor string) *TokenEntry {
+		t.Helper()
+		accessor, err := generateAccessor()
+		require.NoError(t, err)
+		e := &TokenEntry{
+			ID:            (&ServiceTokenType{}).ComputeID(value),
+			Accessor:      accessor,
+			Type:          TypeServiceToken,
+			NamespaceID:   namespace.RootNamespaceID,
+			CreatedAt:     time.Now(),
+			PrincipalID:   namespace.RootNamespaceUUID,
+			MountAccessor: mountAccessor,
+			Policies:      []string{"root"},
+			Data:          map[string]string{"token": value},
+		}
+		require.NoError(t, c.tokenStore.persistToken(e))
+		return e
+	}
+	reload := func() (*TokenStore, string) {
+		t.Helper()
+		ts, err := NewTokenStore(c, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { ts.Close() })
+		out := &lockedBuffer{}
+		ts.logger, _ = logger.NewGatedLogger(&logger.Config{Level: logger.WarnLevel, Outputs: []io.Writer{out}},
+			logger.GatedWriterConfig{InitialState: logger.GateOpen})
+		require.NoError(t, ts.LoadFromStorage(ctx))
+		return ts, out.String()
+	}
+
+	first := persist("wds."+strings.Repeat("A", 64), "")
+	mounted := persist("wds."+strings.Repeat("M", 64), "auth_jwt_1")
+	ts, logs := reload()
+	assert.NotContains(t, logs, "more than one root token", "a token a mount issued is no root candidate")
+	assert.Equal(t, first.ID, ts.rootTokenManager.GetCurrentRootTokenID())
+	_, found := ts.byID.Get(mounted.ID)
+	assert.True(t, found, "it is still loaded")
+
+	second := persist("wds."+strings.Repeat("B", 64), "")
+	ts, logs = reload()
+	assert.Contains(t, logs, "more than one root token")
+	assert.Contains(t, []string{first.ID, second.ID}, ts.rootTokenManager.GetCurrentRootTokenID())
 }

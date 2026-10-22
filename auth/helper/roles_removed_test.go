@@ -26,15 +26,19 @@ var removedRoleNames = []string{
 	"matchesGlob", "matchesAnyGlob", "matchesAnyExact",
 	"matchRoleBindings", "matchBoundList", "audienceMatches", "onlyWildcardOrEmpty",
 	"roleAcceptsSVID", "VerifyX509SVID", "VerifyJWTSVID", "CheckRoleBinding",
-	"MatchPattern", "MatchAny", "ValidatePattern",
+	"MatchPattern", "ValidatePattern",
 	// metadata extractors and their field lists
-	"extractMetadata", "extractCertMetadata", "certFieldValue", "validCertMetadataFields",
+	"extractCertMetadata", "certFieldValue", "validCertMetadataFields",
 	"extractK8sMetadata", "validK8sMetadataFields",
 	"extractSPIFFEIDMetadata", "mergeStringMaps", "validSPIFFEMetadataFields",
-	"resolveGroupPolicies", "extractGroupsClaim", "resolveAudience",
+	"resolveGroupPolicies", "extractGroupsClaim",
 	// the role endpoint's schema
 	"legacyRolePath",
 }
+
+// removedAuthRoleNames are removed role code whose names are generic enough
+// that unrelated code elsewhere may use them again: banned under auth/ only.
+var removedAuthRoleNames = []string{"MatchAny", "extractMetadata", "resolveAudience"}
 
 // removedRolePackages are the client packages that logged in with an auth
 // role.
@@ -44,7 +48,8 @@ var removedRolePackages = []string{
 }
 
 // No Go file under auth/, api/ or core/, tests included, names a removed auth
-// role type, matcher or extractor, or imports a removed role-login package.
+// role type, matcher or extractor (the generic names, under auth/ only), or
+// imports a removed role-login package.
 func TestRemovedRoleCodeStaysGone(t *testing.T) {
 	root := moduleRoot(t)
 	self, err := filepath.Abs("roles_removed_test.go")
@@ -55,10 +60,15 @@ func TestRemovedRoleCodeStaysGone(t *testing.T) {
 	for _, n := range removedRoleNames {
 		banned[n] = true
 	}
+	bannedInAuth := make(map[string]bool, len(removedAuthRoleNames))
+	for _, n := range removedAuthRoleNames {
+		bannedInAuth[n] = true
+	}
 
 	fset := token.NewFileSet()
 	files := 0
 	for _, dir := range []string{"auth", "api", "core"} {
+		inAuth := dir == "auth"
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -87,7 +97,7 @@ func TestRemovedRoleCodeStaysGone(t *testing.T) {
 				}
 			}
 			ast.Inspect(f, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && banned[id.Name] {
+				if id, ok := n.(*ast.Ident); ok && (banned[id.Name] || inAuth && bannedInAuth[id.Name]) {
 					t.Errorf("%s:%d names %s, which was removed with auth roles", rel, fset.Position(id.Pos()).Line, id.Name)
 				}
 				return true

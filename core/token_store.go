@@ -1266,7 +1266,7 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 		if s.isRootTokenEntry(entry) {
 			if tokenValue, ok := entry.Data["token"]; ok {
 				if rootID != "" && rootID != entry.ID {
-					s.logger.Warn("more than one root token found in storage, the last one loaded is kept",
+					s.logger.Warn("more than one root token in storage: the last one loaded is the current root token, the others stay valid until revoked",
 						logger.String("previous_token_id", rootID),
 						logger.String("token_id", entry.ID))
 				}

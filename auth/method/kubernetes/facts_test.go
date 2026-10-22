@@ -945,7 +945,7 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 // The documented difference: max_age is stricter once converted. The role
 // login let a token whose iat was absent or not a number pass max_age (and ran
 // the check once, at login); the converted bound needs a known IssuedAt, so it
-// refuses. old is what the role login decided.
+// refuses. The case names say what the role login decided.
 func TestEquivalence_MaxAgeStricter(t *testing.T) {
 	b := reviewingBackend(t, nil)
 	naming, err := compileFacts("", nil)
@@ -954,14 +954,14 @@ func TestEquivalence_MaxAgeStricter(t *testing.T) {
 	rule := convertRole(t, "auth/kubernetes/", role, nil)
 
 	cases := []struct {
-		name     string
-		iat      any // nil: no iat claim
-		old, new bool
+		name string
+		iat  any // nil: no iat claim
+		new  bool
 	}{
-		{"fresh iat", time.Now().Add(-time.Minute).Unix(), true, true},
-		{"stale iat", time.Now().Add(-time.Hour).Unix(), false, false},
-		{"no iat", nil, true, false},
-		{"iat not a number", "1700000000", true, false},
+		{"fresh iat: admitted, as by the role login", time.Now().Add(-time.Minute).Unix(), true},
+		{"stale iat: refused, as by the role login", time.Now().Add(-time.Hour).Unix(), false},
+		{"no iat: refused, where the role login admitted", nil, false},
+		{"iat not a number: refused, where the role login admitted", "1700000000", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

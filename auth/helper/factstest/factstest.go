@@ -21,6 +21,8 @@ import (
 // is a table of (input, outcome) cases recorded from code that no longer
 // exists, so a test can keep checking that code's successor against what it
 // decided. An unreadable or empty table fails the test.
+//
+// These tables cannot be regenerated: the code that produced them was deleted.
 func Frozen[T any](t testing.TB, name string) []T {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", name))
