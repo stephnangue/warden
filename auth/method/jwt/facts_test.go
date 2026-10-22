@@ -45,12 +45,11 @@ func signES256(t testing.TB, key *ecdsa.PrivateKey, claims map[string]any) strin
 }
 
 // factsBackend returns a backend with storage, configured with a static key,
-// the test issuer and audience "warden", plus extra config keys, and a role
-// "reader" that only grants a policy.
+// the test issuer and audience "warden", plus extra config keys.
 func factsBackend(t *testing.T, extra map[string]any) (*jwtAuthBackend, *ecdsa.PrivateKey) {
 	t.Helper()
 	privAny, pemStr := genTestPubKeyPEM(t, "ECDSA")
-	b, ctx := createTestBackendWithStorage(t)
+	b, _ := createTestBackendWithStorage(t)
 	raw := map[string]any{
 		"jwt_validation_pubkeys": []string{pemStr},
 		"bound_issuer":           factsTestIssuer,
@@ -61,11 +60,6 @@ func factsBackend(t *testing.T, extra map[string]any) (*jwtAuthBackend, *ecdsa.P
 	}
 	resp := writeConfig(b, raw)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "config write: %v", resp.Err)
-	require.NoError(t, b.setRole(ctx, &JWTRole{
-		Name:          "reader",
-		TokenPolicies: []string{"read"},
-		TokenTTL:      "1h",
-	}))
 	return b, privAny.(*ecdsa.PrivateKey)
 }
 
@@ -88,7 +82,7 @@ func baseClaims(extra map[string]any) map[string]any {
 func login(t *testing.T, b *jwtAuthBackend, token string) *logical.Response {
 	t.Helper()
 	resp, err := b.handleLogin(context.Background(), &logical.Request{}, &framework.FieldData{
-		Raw:    map[string]any{"jwt": token, "role": "reader"},
+		Raw:    map[string]any{"jwt": token},
 		Schema: b.pathLogin().Fields,
 	})
 	require.NoError(t, err)
@@ -236,7 +230,7 @@ func TestFactNames(t *testing.T) {
 }
 
 // =============================================================================
-// Login carries the admission alongside today's role logic
+// Login is an admission
 // =============================================================================
 
 func TestLogin_CarriesAdmission(t *testing.T) {
@@ -254,11 +248,14 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	auth := resp.Auth
 	require.NotNil(t, auth)
 
-	// Today's role output is untouched.
-	assert.Equal(t, "reader", auth.RoleName)
-	assert.Equal(t, []string{"read"}, auth.Policies)
-	assert.Equal(t, "agent-1", auth.PrincipalID)
+	// An admission: no policies, no metadata, no role or spec to carry.
+	assert.Nil(t, auth.Policies)
 	assert.Nil(t, auth.Metadata)
+	assert.Equal(t, "jwt_role", auth.TokenType)
+	assert.Equal(t, token, auth.ClientToken)
+	assert.Equal(t, "agent-1", auth.PrincipalID)
+	assert.InDelta(t, time.Hour.Seconds(), auth.TokenTTL.Seconds(), 5, "min(token_ttl, exp)")
+	assert.NotContains(t, resp.Data, "role")
 	require.Len(t, auth.Actors, 1)
 	assert.Equal(t, "broker", auth.Actors[0].Subject)
 

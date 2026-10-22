@@ -28,17 +28,14 @@ type SPIFFEAuthConfig struct {
 	DefaultRole string        `json:"default_role,omitempty"`
 
 	// BoundAudiences are the audiences a JWT-SVID must carry for the mount to
-	// admit it, any one of them. Stored, read back and validated (no empty
-	// entry), but not used by role logins, which still verify a JWT-SVID
-	// against the role's bound_audiences; the role-free admission verifies
-	// every JWT-SVID against it.
+	// admit it, any one of them. Validated (no empty entry); required on an
+	// agent mount, and without it no JWT-SVID is admitted.
 	BoundAudiences []string `json:"bound_audiences,omitempty"`
 
 	// MaxAge bounds a JWT-SVID's age at admission, from its iat: one older,
 	// or without an iat, is not admitted. X.509-SVIDs carry no issue time and
-	// are not checked. Zero is unset. Stored, read back and validated (not
-	// negative), but not used by role logins; the role-free admission
-	// enforces it, through CheckSVIDMaxAge.
+	// are not checked. Zero is unset. Validated (not negative) and enforced
+	// at admission, through CheckSVIDMaxAge.
 	MaxAge time.Duration `json:"max_age,omitempty"`
 
 	// Facts: entity_kind, and the SVID fields the mount publishes under other
@@ -138,6 +135,9 @@ func (b *spiffeAuthBackend) setupSPIFFEConfig(_ context.Context, conf map[string
 	}
 	if err := config.FactsConfig.Err(); err != nil {
 		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
+	}
+	if err := helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences); err != nil {
+		b.logger.Warn("auth mount admits no JWT-SVID until its config is rewritten", logger.Err(err))
 	}
 	b.installConfig(config)
 	return nil
@@ -247,8 +247,8 @@ Configuration:
   POST /auth/{mount}/role/:name         - Create a role bound to a trust domain
   POST /auth/{mount}/login              - Authenticate with an X.509-SVID or JWT-SVID
 
-The mount's entity_kind and facts name what it admits; bound_audiences is
-stored for mount-level audience binding and not used by logins yet; max_age
-bounds a JWT-SVID's age at the role-free admission, not at role logins
-(X.509-SVIDs carry no issue time and are not checked).
+The mount's entity_kind and facts name what it admits; bound_audiences are
+the audiences a JWT-SVID must carry (required on an agent mount); max_age
+bounds a JWT-SVID's age at admission (X.509-SVIDs carry no issue time and are
+not checked).
 `

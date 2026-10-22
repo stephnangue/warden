@@ -25,16 +25,14 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 		},
 		"bound_audiences": {
 			Type: framework.TypeCommaStringSlice,
-			Description: "Audiences a JWT-SVID must carry, any one of them. Stored for mount-level audience binding; " +
-				"logins do not use it yet (a role's bound_audiences still applies). " +
-				"No entry may be empty; an empty value clears the list.",
+			Description: "Audiences a JWT-SVID must carry, any one of them. Required when entity_kind is agent; " +
+				"X.509-SVIDs carry no audience. No entry may be empty.",
 		},
 		"max_age": {
 			Type: framework.TypeDurationSecond,
 			Description: "Maximum age of an SVID at admission, measured from its issue time (iat): a duration such as 10m, " +
 				"or a number of seconds. Applies to JWT-SVIDs; X.509-SVIDs carry no issue time and are not checked. " +
 				"JWT-SVIDs older than max_age, or without an issue time, are not admitted. " +
-				"Enforced from the role-free admission; role logins do not use it. " +
 				"0 or empty leaves it unset.",
 		},
 	}
@@ -54,12 +52,11 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 'facts' maps SVID fields to the fact names the mount publishes beyond its
 built-in facts (aud, path, spiffe_id, svid, trust_domain; svid is x509 or jwt,
 and aud holds a JWT-SVID's audiences); a write replaces the whole map.
-'bound_audiences' is stored for mount-level audience binding and not used by
-logins yet.
+'bound_audiences' are the audiences a JWT-SVID must carry; required on a mount
+that admits agents.
 'max_age' bounds a JWT-SVID's age at admission, from its iat: a JWT-SVID older
 than it, or without an iat, is not admitted. It applies to JWT-SVIDs;
-X.509-SVIDs carry no issue time and are not checked. It is enforced from the
-role-free admission, not by role logins.`,
+X.509-SVIDs carry no issue time and are not checked.`,
 	}
 }
 
@@ -148,6 +145,11 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 	// load only ever see a config that compiled here.
 	if err := helper.FactsWriteError(&config.FactsConfig, factsTouched); err != nil {
 		return &logical.Response{StatusCode: http.StatusBadRequest, Err: err}, nil
+	}
+	// An agent mount binds an audience; a stored config without one admits
+	// no JWT-SVID, and a write cannot create one.
+	if helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences) != nil {
+		return &logical.Response{StatusCode: http.StatusBadRequest, Err: helper.AgentAudiencesWriteError()}, nil
 	}
 
 	// Persist normalized config before installing it.

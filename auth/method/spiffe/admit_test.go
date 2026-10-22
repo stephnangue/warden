@@ -114,17 +114,27 @@ func TestAdmit_JWTSVID(t *testing.T) {
 
 // Without bound_audiences on the mount (or with no config at all), the mount
 // cannot decide on a JWT-SVID: an error, which discovery reports as the mount's
-// warning. X.509-SVIDs are still admitted.
+// warning. A stored agent config without them (written before audience binding
+// was required, since a write now refuses it) says so. X.509-SVIDs are still
+// admitted.
 func TestAdmit_JWTSVIDNeedsMountAudiences(t *testing.T) {
-	for name, raw := range map[string]map[string]any{
-		"no config":          nil,
-		"no bound_audiences": {"token_ttl": "1h"},
+	for name, tc := range map[string]struct {
+		stored map[string]any // installed as storage holds it; nil: no config
+		want   error
+	}{
+		"no config":                {nil, errNoMountAudiences},
+		"stored without audiences": {map[string]any{"token_ttl": "1h"}, helper.ErrAgentAudiencesRequired},
+		"human without audiences":  {map[string]any{"entity_kind": "human"}, errNoMountAudiences},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFactsFixture(t, raw)
+			f := newFactsFixture(t, nil)
+			f.b.config = nil
+			if tc.stored != nil {
+				require.NoError(t, f.b.setupSPIFFEConfig(context.Background(), tc.stored))
+			}
 			token := f.jwt.sign(t, admitID, []string{"warden"}, time.Now().Add(time.Hour), nil)
 			resp, err := routeAdmit(f.b, token, nil, true)
-			assert.ErrorIs(t, err, errNoMountAudiences)
+			assert.ErrorIs(t, err, tc.want)
 			assert.Nil(t, resp)
 			assert.NotNil(t, admitted(t, admitRequest(t, f.b, "", f.svid(t, admitID), true)))
 		})

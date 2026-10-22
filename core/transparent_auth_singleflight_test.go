@@ -41,13 +41,10 @@ func (b *blockingLoginBackend) HandleRequest(ctx context.Context, req *logical.R
 		return nil, err
 	}
 	jwt, _ := req.Data["jwt"].(string)
-	role, _ := req.Data["role"].(string)
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
 			PrincipalID: "agent-1",
-			RoleName:    role,
-			Policies:    []string{"default"},
 			TokenType:   TypeJWTRole,
 			TokenTTL:    time.Hour,
 			ClientToken: jwt,
@@ -126,7 +123,7 @@ type resolved struct {
 func resolveAsync(core *Core, ctx context.Context, jwt string) <-chan resolved {
 	out := make(chan resolved, 1)
 	go func() {
-		te, _, err := core.resolveTransparentIdentity(ctx, &logical.Request{ClientToken: jwt}, "auth/jwt-block/", "terraform", "")
+		te, _, err := core.resolveTransparentIdentity(ctx, &logical.Request{ClientToken: jwt}, "auth/jwt-block/", "")
 		out <- resolved{te, err}
 	}()
 	return out

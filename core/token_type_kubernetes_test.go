@@ -59,55 +59,45 @@ func TestKubernetesRoleTokenType_ValidateValue(t *testing.T) {
 func TestKubernetesRoleTokenType_LookupValue_IncludesMountAccessor(t *testing.T) {
 	kt := &KubernetesRoleTokenType{}
 
-	// Same JWT + same role, different mount accessors → different hashes.
-	// This is the load-bearing property: two kubernetes mounts (e.g. two
-	// spokes) with the same workload SA token + same role name must not
-	// share a cache entry.
-	h1 := kt.LookupValue(sampleK8sSAJWT, "accessor-A", "deploy")
-	h2 := kt.LookupValue(sampleK8sSAJWT, "accessor-B", "deploy")
+	// Same JWT, different mount accessors → different hashes. This is the
+	// load-bearing property: two kubernetes mounts (e.g. two spokes)
+	// presented the same workload SA token must not share a cache entry.
+	h1 := kt.LookupValue(sampleK8sSAJWT, "accessor-A")
+	h2 := kt.LookupValue(sampleK8sSAJWT, "accessor-B")
 	assert.NotEqual(t, h1, h2,
 		"mount accessor must namespace the cache key")
 }
 
-func TestKubernetesRoleTokenType_LookupValue_DifferentRolesProduceDifferentHashes(t *testing.T) {
-	kt := &KubernetesRoleTokenType{}
-	h1 := kt.LookupValue(sampleK8sSAJWT, "acc1", "role1")
-	h2 := kt.LookupValue(sampleK8sSAJWT, "acc1", "role2")
-	assert.NotEqual(t, h1, h2)
-}
-
 func TestKubernetesRoleTokenType_LookupValue_IsDeterministic(t *testing.T) {
 	kt := &KubernetesRoleTokenType{}
-	h1 := kt.LookupValue(sampleK8sSAJWT, "acc1", "deploy")
-	h2 := kt.LookupValue(sampleK8sSAJWT, "acc1", "deploy")
+	h1 := kt.LookupValue(sampleK8sSAJWT, "acc1")
+	h2 := kt.LookupValue(sampleK8sSAJWT, "acc1")
 	assert.Equal(t, h1, h2)
 }
 
 func TestKubernetesRoleTokenType_LookupValue_HashShapeMatchesProductionExpectation(t *testing.T) {
-	// performImplicitAuth (and the singleflight key) build the same
-	// (mountAccessor + ":" + credential + ":" + role) shape. Pin the
-	// exact format here so the dispatch code and the TokenType stay in
-	// agreement; if either side changes the hash input shape without
-	// the other, transparent-mode cache lookups silently miss.
+	// Pin the exact (mountAccessor + ":" + credential) format, so a change
+	// to the hash input shape is a deliberate one: the cache key is one per
+	// credential and mount, whatever role a request asks for.
 	kt := &KubernetesRoleTokenType{}
-	expected := sha256.Sum256([]byte("accX:" + sampleK8sSAJWT + ":role-Y"))
-	assert.Equal(t, hex.EncodeToString(expected[:]), kt.LookupValue(sampleK8sSAJWT, "accX", "role-Y"))
+	expected := sha256.Sum256([]byte("accX:" + sampleK8sSAJWT))
+	assert.Equal(t, hex.EncodeToString(expected[:]), kt.LookupValue(sampleK8sSAJWT, "accX"))
 }
 
 func TestKubernetesRoleTokenType_LookupValue_DoesNotCollideWithJWTRoleTokenType(t *testing.T) {
 	// Defense in depth: even with the per-type IDPrefix ("jwtr_" vs
 	// "kubr_") making the final cache IDs disjoint, the underlying
-	// hash inputs should also differ. Same JWT + accessor + role hashed
-	// by two different transparent types must not collide on LookupValue.
+	// hash inputs should also differ. Same JWT + accessor hashed by two
+	// different transparent types must not collide on LookupValue.
 	jwtType := &JWTRoleTokenType{}
 	k8sType := &KubernetesRoleTokenType{}
-	assert.Equal(t, jwtType.LookupValue(sampleK8sSAJWT, "acc", "r"),
-		k8sType.LookupValue(sampleK8sSAJWT, "acc", "r"),
-		"hash inputs are identical (both shapes are mountAccessor+cred+role); "+
+	assert.Equal(t, jwtType.LookupValue(sampleK8sSAJWT, "acc"),
+		k8sType.LookupValue(sampleK8sSAJWT, "acc"),
+		"hash inputs are identical (both shapes are mountAccessor+cred); "+
 			"separation comes from ComputeID's per-type IDPrefix")
 
-	jwtID := jwtType.ComputeID(jwtType.LookupValue(sampleK8sSAJWT, "acc", "r"))
-	k8sID := k8sType.ComputeID(k8sType.LookupValue(sampleK8sSAJWT, "acc", "r"))
+	jwtID := jwtType.ComputeID(jwtType.LookupValue(sampleK8sSAJWT, "acc"))
+	k8sID := k8sType.ComputeID(k8sType.LookupValue(sampleK8sSAJWT, "acc"))
 	assert.NotEqual(t, jwtID, k8sID,
 		"cache IDs must differ across TokenTypes even for identical hash inputs")
 	assert.True(t, strings.HasPrefix(jwtID, "jwtr_"))
@@ -120,16 +110,15 @@ func TestKubernetesRoleTokenType_Generate_StoresHashedLookupValueUnderJWTKey(t *
 	auth := &AuthData{
 		TokenValue:    sampleK8sSAJWT,
 		MountAccessor: "acc-1",
-		RoleName:      "deploy",
 	}
 	data, err := kt.Generate(context.Background(), auth, entry)
 	require.NoError(t, err)
 
 	stored, ok := data[kt.LookupKey()]
 	require.True(t, ok, "Generate must populate entry.Data[\"jwt\"]")
-	expected := kt.LookupValue(sampleK8sSAJWT, "acc-1", "deploy")
+	expected := kt.LookupValue(sampleK8sSAJWT, "acc-1")
 	assert.Equal(t, expected, stored,
-		"stored value must match what LookupTransparentTokenWithRole will compute")
+		"stored value must match what LookupTransparentToken will compute")
 }
 
 func TestKubernetesRoleTokenType_Generate_NoOpOnNilOrEmpty(t *testing.T) {

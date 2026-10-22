@@ -33,7 +33,7 @@ func writeConfig(b *spiffeAuthBackend, raw map[string]any) *logical.Response {
 // config was live by the time the storage write failed.
 func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
 	b, _ := createTestBackend(t)
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "reader"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "reader", "bound_audiences": "warden"}).StatusCode)
 	before := b.config
 	b.storageView = failingStorage{newInmemStorage()}
 
@@ -48,6 +48,7 @@ func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
 func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		b, _ := createTestBackend(t)
+		require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"bound_audiences": "warden"}).StatusCode)
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup

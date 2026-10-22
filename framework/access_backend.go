@@ -80,8 +80,8 @@ func (b *AccessBackend) GetAutoAuthPath() string {
 	return cfg.AutoAuthPath
 }
 
-// GetAuthRole extracts the auth role from the ?role= query parameter.
-// Falls back to empty string (auth method's default_role provides the fallback).
+// GetAuthRole extracts the auth role from the ?role= query parameter, or "" when
+// the request names none (core then refuses it: no role selected).
 func (b *AccessBackend) GetAuthRole(_ string, req *logical.Request) string {
 	if req != nil {
 		if role, ok := req.Data["role"].(string); ok {
@@ -92,7 +92,7 @@ func (b *AccessBackend) GetAuthRole(_ string, req *logical.Request) string {
 }
 
 // GetDefaultAuthRole returns "" — AccessBackend has no mount-level default_role
-// concept today. The auth method's default_role provides the fallback.
+// concept today, so a request must name its role.
 func (b *AccessBackend) GetDefaultAuthRole() string {
 	return ""
 }

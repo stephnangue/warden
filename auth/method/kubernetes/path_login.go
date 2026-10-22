@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,13 @@ import (
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
+
+// noAudiencesWarning is the config-read warning of a mount without
+// bound_audiences: its reviews check the API server's own audience, which a
+// default service-account token for the Kubernetes API carries too.
+const noAudiencesWarning = "bound_audiences is empty: TokenReview checks the API server's own audience, " +
+	"so a default service-account token for the Kubernetes API is admitted too; " +
+	"set bound_audiences to the audience of the projected tokens issued for Warden"
 
 // validK8sMetadataFields lists the verified TokenReview attributes usable in a
 // role's metadata_mappings.
@@ -64,10 +72,6 @@ func (b *kubernetesAuthBackend) pathLogin() *framework.Path {
 				Description: "Kubernetes ServiceAccount JWT (workload identity token).",
 				Required:    true,
 			},
-			"role": {
-				Type:        framework.TypeString,
-				Description: "Name of the role to authenticate against. Falls back to config.default_role if unset.",
-			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
@@ -77,26 +81,23 @@ func (b *kubernetesAuthBackend) pathLogin() *framework.Path {
 		},
 		HelpSynopsis: "Authenticate using a Kubernetes ServiceAccount JWT",
 		HelpDescription: `Validates the workload's JWT by calling TokenReview on the configured
-kube-apiserver, matches the resolved SA against the role's bound
-service-account names and namespaces, and issues a token bound to the
-role's policies.`,
+kube-apiserver with the mount's bound_audiences, and returns the reviewed
+service account. It selects no role: the role a request runs under is granted
+per request.`,
 	}
 }
 
-// handleLogin runs the TokenReview-based login flow:
-//  1. extract JWT and resolve role (with default_role fallback)
-//  2. cheap issuer pre-filter (unverified iss claim) if configured
-//  3. TokenReview against the kube-apiserver
-//  4. parse the returned system:serviceaccount:<ns>:<name> username
-//  5. match against role's bound_service_account_names/namespaces
-//  6. enforce role.max_age if configured (against iat claim)
-//  7. compute effective TTL = min(role.TokenTTL, jwt-exp-derived-TTL)
-//  8. return auth response with PrincipalID + role + policies, plus the
-//     admission: the reviewed service account as facts
+// handleLogin admits the workload token against the mount's configuration
+// with admitToken, the check introspect/admit runs too (the issuer
+// pre-filter, one TokenReview with the mount's bound_audiences, the reviewed
+// service account, the mount's max_age), and returns the admission: the
+// reviewed username as principal and a TTL of the mount's token_ttl capped by
+// the token's exp. It carries no role, no policies, no credential spec and no
+// metadata.
 //
-// All authentication failures collapse to errAuthFailed in the response
-// to prevent leaking which check failed; detailed reasons are logged
-// server-side via the gated logger.
+// Failures of the token collapse to errAuthFailed in the response to prevent
+// leaking which check failed; detailed reasons are logged server-side via the
+// gated logger.
 func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	// Snapshot config under lock so concurrent /config writes don't block
 	// the TokenReview HTTP round-trip.
@@ -114,71 +115,25 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 		return logical.ErrorResponse(logical.ErrBadRequest("jwt is required")), nil
 	}
 
-	roleName, _ := d.GetOk("role")
-	roleStr, _ := roleName.(string)
-	if roleStr == "" {
-		roleStr = cfg.DefaultRole
-	}
-	if roleStr == "" {
-		return logical.ErrorResponse(logical.ErrBadRequest("role is required (no default_role configured)")), nil
-	}
-
-	role, err := b.getRole(ctx, roleStr)
+	now := time.Now()
+	rv, err := admitToken(ctx, cfg, jwtStr, now)
 	if err != nil {
-		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
-	}
-	if role == nil {
-		return logical.ErrorResponse(logical.ErrNotFoundf("role %q not found", roleStr)), nil
-	}
-
-	// The issuer pre-filter, the TokenReview (with the role's audience) and
-	// the service-account check, shared with the role-free admission.
-	var audiences []string
-	if role.Audience != "" {
-		audiences = []string{role.Audience}
-	}
-	rv, err := reviewWorkload(ctx, cfg, jwtStr, audiences)
-	if err != nil {
-		b.logger.Warn("kubernetes login: token review failed", lgr.String("role", roleStr), lgr.Err(err))
-		return logical.ErrorResponse(errAuthFailed), nil
-	}
-	status, saNamespace, saName, claims := rv.status, rv.namespace, rv.name, rv.claims
-
-	if err := matchRoleBindings(role, saNamespace, saName); err != nil {
-		b.logger.Warn("kubernetes login: SA binding mismatch",
-			lgr.String("role", roleStr),
-			lgr.String("sa", saName),
-			lgr.String("namespace", saNamespace),
-			lgr.Err(err))
-		return logical.ErrorResponse(errAuthFailed), nil
-	}
-
-	// Optional freshness check via the iat claim. The TokenReview already
-	// rejects expired tokens; max_age adds a stricter bound (e.g. only
-	// accept tokens issued in the last 5 minutes).
-	if role.MaxAge != "" && claims != nil {
-		maxAge, parseErr := role.ParseMaxAge()
-		if parseErr == nil && maxAge > 0 {
-			if iat, ok := claims["iat"].(float64); ok {
-				if time.Since(time.Unix(int64(iat), 0)) > maxAge {
-					b.logger.Warn("kubernetes login: token older than role.max_age",
-						lgr.String("role", roleStr),
-						lgr.Float64("iat", iat))
-					return logical.ErrorResponse(errAuthFailed), nil
-				}
-			}
+		if errors.Is(err, errTokenReviewCall) {
+			b.logger.Warn("kubernetes login: token review failed", lgr.Err(err))
+		} else {
+			b.logger.Warn("kubernetes login: token not admitted", lgr.Err(err))
 		}
+		return logical.ErrorResponse(errAuthFailed), nil
 	}
+	status := rv.status
 
-	// Effective TTL: min(role.TokenTTL, jwt-exp-derived). If the JWT has
-	// no exp claim or it's already expired, only use role.TokenTTL.
-	roleTTL, _ := role.ParseTokenTTL()
-	effectiveTTL := roleTTL
-	if claims != nil {
-		if exp, ok := claims["exp"].(float64); ok {
-			until := time.Until(time.Unix(int64(exp), 0))
-			if until > 0 && until < effectiveTTL {
-				effectiveTTL = until
+	// The token never outlives its exp, nor the mount's token_ttl. A token
+	// without an exp is capped by the token_ttl alone.
+	ttl := cfg.TokenTTL
+	if rv.claims != nil {
+		if exp, ok := rv.claims["exp"].(float64); ok {
+			if until := time.Unix(int64(exp), 0).Sub(now); until > 0 && (ttl <= 0 || until < ttl) {
+				ttl = until
 			}
 		}
 	}
@@ -186,31 +141,25 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
-			PrincipalID:    status.User.Username,
-			RoleName:       roleStr,
-			Policies:       role.TokenPolicies,
-			CredentialSpec: role.CredSpecName,
-			TokenType:      role.TokenType,
-			TokenTTL:       effectiveTTL,
-			ClientIP:       req.ClientIP,
+			PrincipalID: status.User.Username,
+			TokenType:   "kubernetes_role",
+			TokenTTL:    ttl,
+			ClientIP:    req.ClientIP,
 			// ClientToken carries the raw JWT so LoginCreateToken can pass
 			// it to KubernetesRoleTokenType.Generate(), which hashes
-			// (mountAccessor + JWT + role) into the deterministic cache ID
-			// used for transparent-mode lookups.
+			// (mountAccessor + JWT) into the deterministic cache ID used for
+			// transparent-mode lookups.
 			ClientToken: jwtStr,
-			Metadata:    extractK8sMetadata(role.MetadataMappings, saNamespace, saName, status.User.UID, status.User.Username, status.User.Groups),
-			// What the review verified, alongside the role logic above,
-			// which does not read it. claims are the ones the issuer
+			// What the review verified. claims are the ones the issuer
 			// pre-filter and max_age already parsed, so the iat costs no
 			// extra parse.
-			Admission: newAdmission(status, saNamespace, saName, claims, b.mountFacts),
+			Admission: newAdmission(status, rv.namespace, rv.name, rv.claims, b.mountFacts),
 		},
 		Data: map[string]any{
 			"principal_id":              status.User.Username,
-			"role":                      roleStr,
 			"service_account_uid":       status.User.UID,
-			"service_account_namespace": saNamespace,
-			"service_account_name":      saName,
+			"service_account_namespace": rv.namespace,
+			"service_account_name":      rv.name,
 		},
 	}, nil
 }

@@ -352,7 +352,8 @@ func TestHandleConfigWrite_PersistsToStorage(t *testing.T) {
 
 	d := &framework.FieldData{
 		Raw: map[string]any{
-			"jwks_url": srv.URL,
+			"jwks_url":        srv.URL,
+			"bound_audiences": []string{"warden"},
 		},
 		Schema: b.pathConfig().Fields,
 	}
@@ -383,7 +384,8 @@ func TestHandleConfigWrite_MergesExisting(t *testing.T) {
 	// First write
 	d := &framework.FieldData{
 		Raw: map[string]any{
-			"jwks_url": srv.URL,
+			"jwks_url":        srv.URL,
+			"bound_audiences": []string{"warden"},
 		},
 		Schema: b.pathConfig().Fields,
 	}

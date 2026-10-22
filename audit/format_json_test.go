@@ -851,16 +851,14 @@ func TestFormatResponseWithSalting(t *testing.T) {
 	t.Run("salt auth result", func(t *testing.T) {
 		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{
 			"response.auth_result.principal_id",
-			"response.auth_result.credential_spec",
 		}))
 		entry := &LogEntry{
 			Timestamp: time.Now(),
 			Response: &Response{
 				StatusCode: 200,
 				AuthResult: &AuthResult{
-					PrincipalID:    "user@example.com",
-					CredentialSpec: "spec-123",
-					RoleName:       "admin",
+					PrincipalID: "user@example.com",
+					TokenType:   "jwt_role",
 				},
 			},
 		}
@@ -875,11 +873,8 @@ func TestFormatResponseWithSalting(t *testing.T) {
 		if result.Response.AuthResult.PrincipalID == "user@example.com" {
 			t.Error("principal_id should be salted")
 		}
-		if result.Response.AuthResult.CredentialSpec == "spec-123" {
-			t.Error("credential_spec should be salted")
-		}
-		if result.Response.AuthResult.RoleName != "admin" {
-			t.Error("role_name should not be salted")
+		if result.Response.AuthResult.TokenType != "jwt_role" {
+			t.Error("token_type should not be salted")
 		}
 	})
 
@@ -1086,7 +1081,7 @@ func TestOmitResponseFields(t *testing.T) {
 				Timestamp: fixedTS,
 				Response: &Response{
 					StatusCode: 200,
-					AuthResult: &AuthResult{PrincipalID: "user1", RoleName: "admin"},
+					AuthResult: &AuthResult{PrincipalID: "user1", TokenType: "admin_type"},
 				},
 			},
 			check: func(t *testing.T, data []byte) {
@@ -1102,15 +1097,15 @@ func TestOmitResponseFields(t *testing.T) {
 				Timestamp: fixedTS,
 				Response: &Response{
 					StatusCode: 200,
-					AuthResult: &AuthResult{PrincipalID: "user1", RoleName: "admin"},
+					AuthResult: &AuthResult{PrincipalID: "user1", TokenType: "admin_type"},
 				},
 			},
 			check: func(t *testing.T, data []byte) {
 				if containsBytes(data, "user1") {
 					t.Error("principal_id value should be omitted")
 				}
-				if !containsBytes(data, "admin") {
-					t.Error("role_name should still be present")
+				if !containsBytes(data, "admin_type") {
+					t.Error("token_type should still be present")
 				}
 			},
 		},
@@ -1386,17 +1381,15 @@ func TestOmitResponseFields(t *testing.T) {
 		},
 		{
 			name:       "omit auth result sub-fields",
-			omitFields: []string{"response.auth_result.token_type", "response.auth_result.policies", "response.auth_result.token_ttl", "response.auth_result.credential_spec", "response.auth_result.role_name"},
+			omitFields: []string{"response.auth_result.token_type", "response.auth_result.policies", "response.auth_result.token_ttl"},
 			entry: &LogEntry{
 				Timestamp: fixedTS,
 				Response: &Response{
 					AuthResult: &AuthResult{
-						TokenType:      "service",
-						PrincipalID:    "user1",
-						RoleName:       "admin",
-						Policies:       []string{"p1"},
-						TokenTTL:       3600,
-						CredentialSpec: "spec",
+						TokenType:   "service",
+						PrincipalID: "user1",
+						Policies:    []string{"p1"},
+						TokenTTL:    3600,
 					},
 				},
 			},

@@ -120,20 +120,24 @@ func TestConfig_MaxAgeRefused(t *testing.T) {
 	}
 }
 
-// max_age is stored but not used by role logins: a JWT issued long before
-// max_age is admitted when the role sets no max_age; a role's max_age still
-// applies as before.
-func TestConfig_MaxAgeNotUsedByLogins(t *testing.T) {
-	b, key := factsBackend(t, map[string]any{"max_age": "1m"})
+// The mount's max_age is enforced at login, as at introspect/admit: a JWT
+// issued longer ago than max_age, or without an iat, is not admitted; a fresh
+// one is.
+func TestLogin_EnforcesMountMaxAge(t *testing.T) {
+	b, key := factsBackend(t, map[string]any{"max_age": "30m"})
+
 	issued := time.Now().Add(-time.Hour)
-
 	resp := login(t, b, signES256(t, key, baseClaims(map[string]any{"iat": issued.Unix()})))
-	require.Equal(t, http.StatusOK, resp.StatusCode, "old iat: %v", resp.Err)
-	assert.Equal(t, issued.Unix(), resp.Auth.Admission.IssuedAt.Unix())
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "an hour-old JWT is older than max_age")
+	assert.Nil(t, resp.Auth)
 
-	require.NoError(t, b.setRole(context.Background(), &JWTRole{
-		Name: "reader", TokenPolicies: []string{"read"}, TokenTTL: "1h", MaxAge: "30m",
-	}))
-	resp = login(t, b, signES256(t, key, baseClaims(map[string]any{"iat": issued.Unix()})))
-	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "the role's max_age applies")
+	noIat := baseClaims(nil)
+	delete(noIat, "iat")
+	resp = login(t, b, signES256(t, key, noIat))
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "a JWT without iat is not admitted under max_age")
+
+	fresh := time.Now().Add(-time.Minute)
+	resp = login(t, b, signES256(t, key, baseClaims(map[string]any{"iat": fresh.Unix()})))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "fresh iat: %v", resp.Err)
+	assert.Equal(t, fresh.Unix(), resp.Auth.Admission.IssuedAt.Unix())
 }

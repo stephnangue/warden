@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"sync"
 	"testing"
-	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
@@ -85,12 +84,6 @@ func TestLogin_ConcurrentWithConfigWrites(t *testing.T) {
 	clientCert := testClientCert(t, caCert, caKey, "test-agent")
 	b, ctx := createTestBackend(t)
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"trusted_ca_pem": caPEM}).StatusCode)
-	require.NoError(t, b.setRole(ctx, &CertRole{
-		Name:               "test-role",
-		AllowedCommonNames: []string{"test-*"},
-		TokenTTL:           time.Hour.String(),
-		TokenType:          "cert_role",
-	}))
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -109,7 +102,7 @@ func TestLogin_ConcurrentWithConfigWrites(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			_, err := b.handleLogin(ctx,
 				&logical.Request{HTTPRequest: newCertHTTPRequest(t, clientCert)},
-				&framework.FieldData{Raw: map[string]any{"role": "test-role"}, Schema: b.pathLogin().Fields})
+				&framework.FieldData{Raw: map[string]any{}, Schema: b.pathLogin().Fields})
 			assert.NoError(t, err)
 		}
 	}()

@@ -82,7 +82,9 @@ var (
 // call. It returns what the review verified, or why the token is not
 // admitted.
 //
-// It reads cfg, a snapshot the caller took, and writes nothing.
+// It is the one admission check of the mount: login and introspect/admit both
+// call it, so they cannot drift. It reads cfg, a snapshot the caller took, and
+// writes nothing.
 func admitToken(ctx context.Context, cfg *KubernetesAuthConfig, token string, now time.Time) (*reviewed, error) {
 	if cfg == nil {
 		return nil, errNotConfigured

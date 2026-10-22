@@ -38,7 +38,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 		},
 		"bound_audiences": {
 			Type:        framework.TypeCommaStringSlice,
-			Description: "Required audiences for JWT validation",
+			Description: "Audiences a JWT must carry, any one of them. Required when entity_kind is agent.",
 		},
 		"bound_subject": {
 			Type:        framework.TypeString,
@@ -99,15 +99,15 @@ endpoint), or 'jwt_validation_pubkeys' (static PEM-encoded RSA/ECDSA keys)
 to configure how token signatures are verified.
 
 Use 'bound_issuer', 'bound_audiences', 'bound_subject', and 'bound_claims'
-to constrain which tokens are accepted. Per-role 'metadata_claims' copies
-JWT claims into token metadata for use in token_metadata policy conditions.
+to constrain which tokens are admitted. 'bound_audiences' is required on a
+mount that admits agents: without it, a token the issuer minted for any other
+relying party would be admitted.
 
 'entity_kind' (agent or human, default agent) names what the mount admits.
 'facts' maps source claims to the fact names the mount publishes beyond its
 built-in facts (sub, iss, aud); a write replaces the whole map.
 'max_age' bounds a JWT's age at admission, from its iat: a JWT older than it,
-or without an iat, is not admitted. It is enforced from the role-free
-admission; role logins keep their role's max_age.`,
+or without an iat, is not admitted.`,
 	}
 }
 
@@ -232,6 +232,14 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
+		}, nil
+	}
+	// An agent mount binds an audience; a stored config without one refuses
+	// admission, and a write cannot create one.
+	if helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences) != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        helper.AgentAudiencesWriteError(),
 		}, nil
 	}
 

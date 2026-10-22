@@ -29,17 +29,15 @@ type mockUserAuthProvider struct {
 func (m *mockUserAuthProvider) GetUserAuthPath() string { return m.userAuthPath }
 func (m *mockUserAuthProvider) GetUserAuthRole() string { return m.userAuthRole }
 
-// seedUserToken caches a transparent JWT-role token on the given mount so a later
-// resolveTransparentIdentity call resolves it from cache without a login.
-func seedUserToken(t *testing.T, core *Core, ctx context.Context, mount *MountEntry, jwt, role, principal string) *TokenEntry {
+// seedUserToken caches a transparent JWT admission token on the given mount so a
+// later resolveTransparentIdentity call resolves it from cache without a login.
+func seedUserToken(t *testing.T, core *Core, ctx context.Context, mount *MountEntry, jwt, principal string) *TokenEntry {
 	t.Helper()
 	te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
 		TokenValue:    jwt,
 		MountAccessor: mount.Accessor,
-		RoleName:      role,
 		PrincipalID:   principal,
 		ExpireAt:      time.Now().Add(time.Hour),
-		Policies:      []string{"default"},
 	})
 	require.NoError(t, err)
 	return te
@@ -55,7 +53,7 @@ func TestResolveTransparentIdentity_NoRequestMutation(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	mount := mountStubAuthMethod(t, core, "user-jwt/", "jwt")
 	userJWT := mintK8sJWT(`{"sub":"alice"}`)
-	userTE := seedUserToken(t, core, ctx, mount, userJWT, "slack-user", "alice")
+	userTE := seedUserToken(t, core, ctx, mount, userJWT, "alice")
 
 	const agentToken = "agent-primary-token" // opaque; resolver never reads it
 	req := &logical.Request{
@@ -63,7 +61,7 @@ func TestResolveTransparentIdentity_NoRequestMutation(t *testing.T) {
 		HTTPRequest: httptest.NewRequest(http.MethodPost, "/v1/slack-mcp/role/agent/gateway", nil),
 	}
 
-	te, clearClientToken, err := core.resolveTransparentIdentity(ctx, req, "auth/user-jwt/", "slack-user", userJWT)
+	te, clearClientToken, err := core.resolveTransparentIdentity(ctx, req, "auth/user-jwt/", userJWT)
 	require.NoError(t, err)
 	require.NotNil(t, te)
 	assert.Equal(t, userTE.ID, te.ID)
@@ -90,7 +88,6 @@ func TestPerformImplicitAuth_CertClearsStrayBearer(t *testing.T) {
 	te, err := core.tokenStore.GenerateToken(ctx, TypeCertRole, &AuthData{
 		TokenValue:    fingerprint,
 		MountAccessor: mount.Accessor,
-		RoleName:      "agent",
 		PrincipalID:   "cn=agent",
 		ExpireAt:      time.Now().Add(time.Hour),
 	})
@@ -115,7 +112,7 @@ func TestCaptureUserContext(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	userMount := mountStubAuthMethod(t, core, "user-jwt/", "jwt")
 	userJWT := mintK8sJWT(`{"sub":"alice"}`)
-	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "slack-user", "alice")
+	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "alice")
 
 	newReq := func(agentToken string, headers map[string]string) *logical.Request {
 		hr := httptest.NewRequest(http.MethodPost, "/v1/slack-mcp/role/agent/gateway", nil)
@@ -237,7 +234,7 @@ func TestStampUserAttribution(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	userMount := mountStubAuthMethod(t, core, "user-jwt/", "jwt")
 	userJWT := mintK8sJWT(`{"sub":"alice"}`)
-	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "slack-user", "alice")
+	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "alice")
 
 	t.Run("stamps the user identity when req.User is set", func(t *testing.T) {
 		req := &logical.Request{
@@ -252,7 +249,7 @@ func TestStampUserAttribution(t *testing.T) {
 		assert.NotContains(t, entry.Auth.User.Subject, "wid:", "user attribution must be the raw sub, not the wid composite")
 		assert.Equal(t, userTE.ID, entry.Auth.User.TokenID)
 		assert.Equal(t, userTE.NamespaceID, entry.Auth.User.NamespaceID)
-		assert.Equal(t, "slack-user", entry.Auth.User.RoleName, "the user auth role a delegation assertion carries")
+		assert.Empty(t, entry.Auth.User.RoleName, "a user is admitted with no role")
 
 		// The raw user credential must never be serialized into an audit record.
 		blob, err := json.Marshal(entry)

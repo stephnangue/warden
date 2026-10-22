@@ -3,6 +3,7 @@ package cert
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -23,12 +24,7 @@ var errCertAuthFailed = fmt.Errorf("authentication failed")
 func (b *certAuthBackend) pathLogin() *framework.Path {
 	return &framework.Path{
 		Pattern: "login",
-		Fields: map[string]*framework.FieldSchema{
-			"role": {
-				Type:        framework.TypeString,
-				Description: "Role to assume after authentication (falls back to default_role if configured)",
-			},
-		},
+		Fields:  map[string]*framework.FieldSchema{},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
 				Callback: b.handleLogin,
@@ -39,18 +35,25 @@ func (b *certAuthBackend) pathLogin() *framework.Path {
 				Summary:  "Authenticate using a TLS client certificate",
 			},
 		},
-		HelpSynopsis:    "Authenticate using a TLS client certificate",
-		HelpDescription: "This endpoint authenticates using a client certificate presented via TLS or forwarded by a trusted load balancer.",
+		HelpSynopsis: "Authenticate using a TLS client certificate",
+		HelpDescription: "This endpoint admits a client certificate presented via TLS or forwarded by a trusted load balancer " +
+			"against the mount's trusted CAs and revocation settings. It selects no role: the role a request runs under " +
+			"is granted per request.",
 	}
 }
 
-// handleLogin handles the certificate login operation
+// handleLogin admits the client certificate against the mount's configuration
+// with admitCert, the check introspect/admit runs too (the chain against the
+// mount's trusted CAs, a principal under the mount's principal_claim), then
+// checks its revocation, and returns the admission: the principal and a TTL of
+// the mount's token_ttl capped by the certificate's NotAfter. It carries no
+// role, no policies, no credential spec and no metadata.
 func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	// Snapshot config under the lock, then release it: the lock is NOT held
-	// across the role lookup and the OCSP/CRL round-trip, so a config write
-	// neither waits on in-flight logins nor, while it waits, stalls new ones.
-	// The snapshot carries its own CA pool and revocation checker, so one
-	// login is judged by one configuration throughout.
+	// across the OCSP/CRL round-trip, so a config write neither waits on
+	// in-flight logins nor, while it waits, stalls new ones. The snapshot
+	// carries its own CA pool and revocation checker, so one login is judged
+	// by one configuration throughout.
 	b.configMu.RLock()
 	config := b.config
 	b.configMu.RUnlock()
@@ -61,44 +64,15 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		return logical.ErrorResponse(logical.ErrBadRequest("no client certificate provided")), nil
 	}
 
-	// Get role name — fall back to default_role if configured
-	roleName := d.Get("role").(string)
-	if roleName == "" && config != nil && config.DefaultRole != "" {
-		roleName = config.DefaultRole
-	}
-	if roleName == "" {
-		return logical.ErrorResponse(logical.ErrBadRequest("missing role")), nil
-	}
-
-	// Look up the role
-	role, err := b.getRole(ctx, roleName)
-	if err != nil {
-		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
-	}
-	if role == nil {
-		b.logger.Warn("login failed: role not found", lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errCertAuthFailed,
-		}, nil
-	}
-
-	// Build CA pool: role-specific overrides global
-	caPool, err := getCAPool(config, role)
-	if err != nil {
-		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
-	}
-	if caPool == nil {
+	verifiedChains, err := admitCert(config, cert)
+	if errors.Is(err, errNoTrustedCA) {
 		return &logical.Response{
 			StatusCode: http.StatusInternalServerError,
-			Err:        fmt.Errorf("no trusted CA certificates configured"),
+			Err:        err,
 		}, nil
 	}
-
-	// Verify certificate chain
-	verifiedChains, err := verifyChain(caPool, cert)
 	if err != nil {
-		b.logger.Warn("login failed: certificate verification error", lgr.Err(err), lgr.String("role", roleName))
+		b.logger.Warn("login failed: certificate not admitted", lgr.Err(err))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
 			Err:        errCertAuthFailed,
@@ -106,9 +80,9 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 
 	// Check certificate revocation status if configured
-	if config != nil && config.revocationChecker != nil {
+	if config.revocationChecker != nil {
 		if err := config.revocationChecker.checkRevocation(cert, verifiedChains, config.RevocationMode); err != nil {
-			b.logger.Warn("login failed: certificate revocation check", lgr.Err(err), lgr.String("role", roleName))
+			b.logger.Warn("login failed: certificate revocation check", lgr.Err(err))
 			return &logical.Response{
 				StatusCode: http.StatusUnauthorized,
 				Err:        errCertAuthFailed,
@@ -116,33 +90,8 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		}
 	}
 
-	// Validate role constraints
-	if err := validateCertConstraints(cert, role); err != nil {
-		b.logger.Warn("login failed: certificate constraint check", lgr.Err(err), lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errCertAuthFailed,
-		}, nil
-	}
-
-	// Determine principal claim source: role overrides global config
-	principalClaim := principalClaimOf(config, role)
-
-	// Extract principal identity from the certificate
-	principalID := extractPrincipal(cert, principalClaim)
-	if principalID == "" {
-		b.logger.Warn("login failed: no principal identity in certificate",
-			lgr.String("principal_claim", principalClaim), lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errCertAuthFailed,
-		}, nil
-	}
-
-	// Calculate effective TTL
-	effectiveTTL := calculateTTL(config, cert, role)
-
-	tokenType := "cert_role"
+	// admitCert checked that the principal is there.
+	principalID := extractPrincipal(cert, principalClaimOf(config, nil))
 
 	// Certificate fingerprint for token caching in transparent mode
 	fingerprint := certFingerprint(cert)
@@ -150,23 +99,17 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
-			PrincipalID:    principalID,
-			RoleName:       roleName,
-			Policies:       role.TokenPolicies,
-			CredentialSpec: role.CredSpecName,
-			TokenType:      tokenType,
-			TokenTTL:       effectiveTTL,
-			ClientIP:       req.ClientIP,
-			ClientToken:    fingerprint, // Cert fingerprint for token type caching
-			Metadata:       extractCertMetadata(cert, role.MetadataMappings),
-			// What the login verified, alongside the role logic above, which
-			// does not read it: the leaf's fields, and the anchors of the
-			// chains it verified along.
+			PrincipalID: principalID,
+			TokenType:   "cert_role",
+			TokenTTL:    calculateTTL(config, cert, time.Now()),
+			ClientIP:    req.ClientIP,
+			ClientToken: fingerprint, // Cert fingerprint for token type caching
+			// The leaf's fields, and the anchors of the chains it verified
+			// along.
 			Admission: newAdmission(cert, verifiedChains, b.mountFacts),
 		},
 		Data: map[string]any{
 			"principal_id": principalID,
-			"role":         roleName,
 			"fingerprint":  fingerprint,
 		},
 	}, nil
@@ -185,36 +128,18 @@ func getCAPool(config *CertAuthConfig, role *CertRole) (*x509.CertPool, error) {
 	return nil, nil
 }
 
-// calculateTTL returns the effective TTL, capped by the certificate's NotAfter.
-func calculateTTL(config *CertAuthConfig, cert *x509.Certificate, role *CertRole) time.Duration {
-	// Start with the certificate's remaining validity
-	certTTL := time.Until(cert.NotAfter)
+// calculateTTL returns the TTL of a certificate's admission at now: the
+// mount's token_ttl, capped by the certificate's NotAfter (0 once it has
+// passed). A zero token_ttl is no cap from the mount.
+func calculateTTL(config *CertAuthConfig, cert *x509.Certificate, now time.Time) time.Duration {
+	certTTL := cert.NotAfter.Sub(now)
 	if certTTL <= 0 {
 		return 0
 	}
-
-	// Role TTL
-	roleTTL, err := role.ParseTokenTTL()
-	if err != nil {
-		roleTTL = time.Hour
+	if config != nil && config.TokenTTL > 0 && config.TokenTTL < certTTL {
+		return config.TokenTTL
 	}
-
-	// Global config TTL
-	var configTTL time.Duration
-	if config != nil {
-		configTTL = config.TokenTTL
-	}
-
-	// Pick the smallest positive TTL among: certTTL, roleTTL, configTTL
-	effectiveTTL := certTTL
-	if roleTTL > 0 && roleTTL < effectiveTTL {
-		effectiveTTL = roleTTL
-	}
-	if configTTL > 0 && configTTL < effectiveTTL {
-		effectiveTTL = configTTL
-	}
-
-	return effectiveTTL
+	return certTTL
 }
 
 // validateCertConstraints checks whether the certificate satisfies the role constraints.

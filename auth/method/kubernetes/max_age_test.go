@@ -118,17 +118,23 @@ func TestConfig_MaxAgeRefused(t *testing.T) {
 	}
 }
 
-// max_age is stored but not used by role logins: a token issued long before
-// max_age, and one without an iat, are both admitted.
-func TestConfig_MaxAgeNotUsedByLogins(t *testing.T) {
+// The mount's max_age is enforced at login, as at introspect/admit: a token
+// issued long before max_age, and one without an iat, are both refused; a
+// fresh one is admitted.
+func TestLogin_EnforcesMountMaxAge(t *testing.T) {
 	b := reviewingBackend(t, map[string]any{"max_age": "1m"})
 	issued := time.Now().Add(-time.Hour)
 
-	resp := login(t, b, saToken("default", "myapp", []string{apiServerAudience}, map[string]any{"iat": issued.Unix()}), "reader")
-	require.Equal(t, http.StatusOK, resp.StatusCode, "old iat: %v", resp.Err)
-	assert.Equal(t, issued.Unix(), resp.Auth.Admission.IssuedAt.Unix())
+	resp := login(t, b, saToken("default", "myapp", []string{apiServerAudience}, map[string]any{"iat": issued.Unix()}))
+	assert.Equal(t, errAuthFailed, resp.Err, "old iat")
+	assert.Nil(t, resp.Auth)
 
-	resp = login(t, b, saToken("default", "myapp", []string{apiServerAudience}, nil), "reader")
-	require.Equal(t, http.StatusOK, resp.StatusCode, "no iat: %v", resp.Err)
-	assert.True(t, resp.Auth.Admission.IssuedAt.IsZero())
+	resp = login(t, b, saToken("default", "myapp", []string{apiServerAudience}, nil))
+	assert.Equal(t, errAuthFailed, resp.Err, "no iat")
+	assert.Nil(t, resp.Auth)
+
+	fresh := time.Now().Add(-10 * time.Second)
+	resp = login(t, b, saToken("default", "myapp", []string{apiServerAudience}, map[string]any{"iat": fresh.Unix()}))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "fresh iat: %v", resp.Err)
+	assert.Equal(t, fresh.Unix(), resp.Auth.Admission.IssuedAt.Unix())
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logical"
@@ -32,12 +33,15 @@ import (
 
 const accessTestJWT = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZ2VudC0xIn0.access-sig"
 
-// loginStub is a transparent auth method that admits a fixed set of roles. A
-// "jwt" mount logs in the bearer JWT; a "cert" mount logs in the forwarded
-// client certificate by fingerprint, as the real methods key their tokens.
+// loginStub is a transparent auth method whose login admits every credential
+// (unless refuse is set) as the subject agent-1, with no role: the role is
+// granted per request by a group. A "jwt" mount logs in the bearer JWT; a
+// "cert" mount logs in the forwarded client certificate by fingerprint, as the
+// real methods key their tokens.
 type loginStub struct {
 	mountType string
-	roles     map[string]bool
+	naming    *logical.MountFacts
+	refuse    bool
 	delay     time.Duration
 	logins    atomic.Int32
 }
@@ -50,16 +54,17 @@ func (b *loginStub) HandleRequest(_ context.Context, req *logical.Request) (*log
 	if b.delay > 0 {
 		time.Sleep(b.delay)
 	}
-	role, _ := req.Data["role"].(string)
-	if !b.roles[role] {
-		return logical.ErrorResponse(logical.ErrBadRequestf("role %q could not be found", role)), nil
+	if b.refuse {
+		return logical.ErrorResponse(logical.ErrBadRequest("credential refused")), nil
 	}
 
 	auth := &logical.Auth{
 		PrincipalID: "agent-1",
-		RoleName:    role,
-		Policies:    []string{"access-reader"},
 		TokenTTL:    time.Hour,
+		Admission: &logical.Admission{
+			Facts: selector.NewClaims(map[string]any{"sub": "agent-1"}),
+			Mount: b.naming,
+		},
 	}
 	switch b.mountType {
 	case "cert":
@@ -93,12 +98,17 @@ func (b *loginStub) SpecialPaths() *logical.Paths {
 }
 func (b *loginStub) ExtractTokens(*http.Request, bool) (string, string) { return "", "" }
 
-// mountLoginStub mounts a loginStub at auth/<mountType>/ in the root namespace.
+// mountLoginStub mounts a loginStub at auth/<mountType>/ in the root namespace,
+// and has a group grant each of roles, with the policy access-reader, to every
+// credential that mount admits.
 func mountLoginStub(t *testing.T, c *Core, mountType string, roles ...string) *loginStub {
 	t.Helper()
-	stub := &loginStub{mountType: mountType, roles: map[string]bool{}}
+	naming := &logical.MountFacts{}
+	naming.Publish(testNaming(t, "", map[string]string{"sub": "sub"}))
+	stub := &loginStub{mountType: mountType, naming: naming}
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	for _, r := range roles {
-		stub.roles[r] = true
+		grantRole(t, c, ctx, testGrant{Role: r, Policies: []string{"access-reader"}, Mount: "auth/" + mountType + "/"})
 	}
 
 	accessor, err := c.generateMountAccessor(mountType)
@@ -323,15 +333,44 @@ func TestAccessPath_ImplicitAuth_JWT(t *testing.T) {
 
 	t.Run("a refused login answers 401", func(t *testing.T) {
 		env := newAccessEnv(t, "auth/jwt/")
-		mountLoginStub(t, env.c, "jwt", "reader")
+		stub := mountLoginStub(t, env.c, "jwt", "reader")
+		stub.refuse = true
 
-		resp, req, err := env.get(t, "db/access/ro?role=unknown", bearer(accessTestJWT))
+		resp, req, err := env.get(t, "db/access/ro?role=reader", bearer(accessTestJWT))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 		require.NotNil(t, resp.Err)
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "the same 401 a gateway path answers")
 		assert.True(t, req.Transparent)
 		assert.Nil(t, resp.Data["secret"])
+	})
+
+	t.Run("a role no group grants is refused per request", func(t *testing.T) {
+		env := newAccessEnv(t, "auth/jwt/")
+		stub := mountLoginStub(t, env.c, "jwt", "reader")
+
+		resp, req, err := env.get(t, "db/access/ro?role=unknown", bearer(accessTestJWT))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `role "unknown" not found`)
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode, "admitted, then refused the role, as on a gateway path")
+		assert.True(t, req.Transparent)
+		require.NotNil(t, req.RoleGrant())
+		assert.Equal(t, logical.RoleDeniedNotFound, req.RoleGrant().DeniedReason)
+		assert.EqualValues(t, 1, stub.logins.Load())
+		assert.Nil(t, resp.Data["secret"])
+	})
+
+	t.Run("no role selected answers 400 before any login", func(t *testing.T) {
+		env := newAccessEnv(t, "auth/jwt/")
+		stub := mountLoginStub(t, env.c, "jwt", "reader")
+
+		resp, _, err := env.get(t, "db/access/ro", bearer(accessTestJWT))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.Contains(t, resp.Err.Error(), noRoleSelectedAccess)
+		assert.Zero(t, stub.logins.Load())
 	})
 
 	t.Run("a non-JWT bearer answers 401", func(t *testing.T) {
@@ -401,7 +440,6 @@ func TestAccessPath_ExplicitWardenToken(t *testing.T) {
 
 	te, err := env.c.tokenStore.GenerateToken(ctx, TypeWardenToken, &AuthData{
 		PrincipalID: "operator",
-		RoleName:    "ops",
 		ExpireAt:    time.Now().Add(time.Hour),
 		Policies:    []string{"access-reader"},
 	})

@@ -35,7 +35,9 @@ var (
 // admitX509SVID verifies cert as an X.509-SVID against the trust bundles in
 // set alone, with no role: go-spiffe's SVID rules and a chain to the X.509
 // authorities of the SVID's own trust domain. An X.509-SVID carries no
-// audience and no issue time, so neither bound_audiences nor max_age applies.
+// audience and no issue time, so neither bound_audiences nor max_age applies:
+// it is admitted with or without a config, and on an agent mount whose stored
+// config has no bound_audiences.
 // It returns what it verified as an admission of this mount, or why it is not
 // admitted: errNoBundles when the mount cannot decide, any other error when the
 // SVID failed a check.
@@ -60,13 +62,25 @@ func (b *spiffeAuthBackend) admitX509SVID(set *spiffebundle.Set, cert *x509.Cert
 // mount's bound_audiences (a nil config, or one without bound_audiences,
 // admits no JWT-SVID), and the mount's max_age against its iat at now
 // (CheckSVIDMaxAge). It returns what it verified as an admission of this
-// mount, or why it is not admitted: errNoBundles or errNoMountAudiences when
-// the mount cannot decide, any other error when the SVID failed a check.
+// mount, or why it is not admitted: errNoBundles, errNoMountAudiences or
+// helper.ErrAgentAudiencesRequired when the mount cannot decide, any other
+// error when the SVID failed a check.
+//
+// admitJWTSVID and admitX509SVID are the mount's admission checks: login and
+// introspect/admit both call them, so they cannot drift.
 func (b *spiffeAuthBackend) admitJWTSVID(set *spiffebundle.Set, config *SPIFFEAuthConfig, token string, now time.Time) (*admittedSVID, error) {
 	if set == nil || set.Len() == 0 {
 		return nil, errNoBundles
 	}
 	if config == nil || len(config.BoundAudiences) == 0 {
+		// A stored agent config without bound_audiences (written before
+		// audience binding was required) says so; anything else simply has
+		// no audience to verify against.
+		if config != nil {
+			if err := helper.RequireAgentAudiences(config.EntityKind, nil); err != nil {
+				return nil, err
+			}
+		}
 		return nil, errNoMountAudiences
 	}
 	svid, err := spiffelib.VerifyJWTSVIDToken(set, token, config.BoundAudiences)
@@ -107,7 +121,7 @@ func (b *spiffeAuthBackend) admit(_ context.Context, req *logical.Request, now t
 	} else {
 		got, err = b.admitX509SVID(set, cert)
 	}
-	if errors.Is(err, errNoBundles) || errors.Is(err, errNoMountAudiences) {
+	if errors.Is(err, errNoBundles) || errors.Is(err, errNoMountAudiences) || errors.Is(err, helper.ErrAgentAudiencesRequired) {
 		return nil, err
 	}
 	if err != nil {

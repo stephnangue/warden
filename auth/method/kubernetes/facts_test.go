@@ -122,32 +122,23 @@ func saToken(namespace, name string, audiences []string, extra map[string]any) s
 }
 
 // reviewingBackend returns a backend with storage, configured against a
-// reviewing API server plus extra config keys, and a role "reader" bound to
-// default/myapp that only grants a policy.
+// reviewing API server plus extra config keys.
 func reviewingBackend(t *testing.T, extra map[string]any) *kubernetesAuthBackend {
 	t.Helper()
-	b, ctx := newTestBackend(t)
+	b, _ := newTestBackend(t)
 	raw := map[string]any{"kubernetes_host": newReviewingAPIServer(t), "tls_skip_verify": true}
 	for k, v := range extra {
 		raw[k] = v
 	}
 	resp := writeConfig(b, raw)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "config write: %v", resp.Err)
-	require.NoError(t, b.setRole(ctx, &KubernetesRole{
-		Name:                          "reader",
-		BoundServiceAccountNames:      []string{"myapp"},
-		BoundServiceAccountNamespaces: []string{"default"},
-		TokenPolicies:                 []string{"read"},
-		TokenTTL:                      "1h",
-		TokenType:                     "kubernetes_role",
-	}))
 	return b
 }
 
-func login(t testing.TB, b *kubernetesAuthBackend, token, role string) *logical.Response {
+func login(t testing.TB, b *kubernetesAuthBackend, token string) *logical.Response {
 	t.Helper()
 	resp, err := b.handleLogin(context.Background(), &logical.Request{}, &framework.FieldData{
-		Raw:    map[string]any{"jwt": token, "role": role},
+		Raw:    map[string]any{"jwt": token},
 		Schema: b.pathLogin().Fields,
 	})
 	require.NoError(t, err)
@@ -229,8 +220,8 @@ func TestFacts_FromTokenReview(t *testing.T) {
 	assert.Equal(t, int64(want), adm.Size())
 
 	// A username the API server would not split as a service account admits
-	// nothing, even for a role that binds any name in the namespace (before,
-	// "default:myapp:extra" was admitted as the name "myapp:extra").
+	// nothing (before, "default:myapp:extra" was admitted as the name
+	// "myapp:extra").
 	for _, username := range []string{
 		"system:serviceaccount:default:myapp:extra",
 		"system:serviceaccount:default:",
@@ -244,15 +235,7 @@ func TestFacts_FromTokenReview(t *testing.T) {
 				Authenticated: true,
 				User:          tokenReviewUser{Username: username},
 			}, nil)
-			require.NoError(t, b.setRole(context.Background(), &KubernetesRole{
-				Name:                          "anyname",
-				BoundServiceAccountNames:      []string{"*"},
-				BoundServiceAccountNamespaces: []string{"default", "Default"},
-				TokenPolicies:                 []string{"p"},
-				TokenTTL:                      "1h",
-				TokenType:                     "kubernetes_role",
-			}))
-			resp := login(t, b, mintJWT(map[string]any{"sub": username}), "anyname")
+			resp := login(t, b, mintJWT(map[string]any{"sub": username}))
 			require.Error(t, resp.Err)
 			assert.Nil(t, resp.Auth)
 		})
@@ -347,7 +330,7 @@ func TestFactNames(t *testing.T) {
 }
 
 // =============================================================================
-// Login carries the admission alongside today's role logic
+// Login is an admission
 // =============================================================================
 
 func TestLogin_CarriesAdmission(t *testing.T) {
@@ -362,37 +345,23 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	}, map[string]any{
 		"facts":           map[string]any{"username": "workload"},
 		"bound_audiences": []string{"warden", "other"},
+		"max_age":         "10m",
 	})
-	ctx := context.Background()
-	resp, err := b.handleRoleCreate(ctx, nil, roleFieldData(t, b, map[string]any{
-		"name":                             "auditor",
-		"bound_service_account_names":      []string{"myapp"},
-		"bound_service_account_namespaces": []string{"default"},
-		"audience":                         "warden",
-		"max_age":                          "10m",
-		"token_policies":                   []string{"audit"},
-		"metadata_mappings":                map[string]any{"groups": "groups", "service_account_name": "sa"},
-	}))
-	require.NoError(t, err)
-	require.Nil(t, resp.Err)
 
 	iat := time.Now().Add(-time.Minute).Unix()
 	token := mintJWT(map[string]any{"sub": "system:serviceaccount:default:myapp", "iat": iat})
-	resp = login(t, b, token, "auditor")
+	resp := login(t, b, token)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	auth := resp.Auth
 	require.NotNil(t, auth)
 
-	// Today's role output is untouched, and bound_audiences is not sent yet:
-	// the review carries the role's audience only.
-	assert.Equal(t, "auditor", auth.RoleName)
-	assert.Equal(t, []string{"audit"}, auth.Policies)
+	// An admission: no policies, no metadata; the review carries the mount's
+	// bound_audiences.
+	assert.Nil(t, auth.Policies)
+	assert.Nil(t, auth.Metadata)
+	assert.Equal(t, "kubernetes_role", auth.TokenType)
 	assert.Equal(t, "system:serviceaccount:default:myapp", auth.PrincipalID)
-	assert.Equal(t, map[string]string{
-		"groups": "system:serviceaccounts,system:serviceaccounts:default,system:authenticated",
-		"sa":     "myapp",
-	}, auth.Metadata)
-	assert.Equal(t, []string{"warden"}, fake.AudsSeen)
+	assert.Equal(t, []string{"warden", "other"}, fake.AudsSeen)
 
 	adm := auth.Admission
 	require.NotNil(t, adm)
@@ -409,10 +378,6 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	assert.Equal(t, []string{"system:serviceaccount:default:myapp"}, factstest.Values(adm, n, "workload"))
 	assert.Len(t, factstest.Values(adm, n, "groups"), 3)
 	assert.Equal(t, []string{"warden"}, factstest.Values(adm, n, "aud"))
-
-	// A role without an audience sends none, whatever bound_audiences holds.
-	require.Equal(t, http.StatusOK, login(t, b, token, "myrole").StatusCode)
-	assert.Empty(t, fake.AudsSeen)
 }
 
 // The claims are parsed on every login, with or without max_age, so IssuedAt
@@ -434,7 +399,7 @@ func TestLogin_IssuedAt(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := login(t, b, tc.token, "myrole")
+			resp := login(t, b, tc.token)
 			require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 			require.NotNil(t, resp.Auth.Admission)
 			assert.Equal(t, tc.want, resp.Auth.Admission.IssuedAt)
@@ -444,16 +409,16 @@ func TestLogin_IssuedAt(t *testing.T) {
 
 // A refused login carries no admission.
 func TestLogin_RefusedCarriesNoAdmission(t *testing.T) {
-	b := reviewingBackend(t, nil)
+	b := reviewingBackend(t, map[string]any{"max_age": "10m"})
 	for _, token := range []string{
-		saToken("default", "other", []string{apiServerAudience}, nil), // not bound
-		saToken("default", "myapp", []string{"elsewhere"}, nil),       // review refused
+		saToken("default", "myapp", []string{"elsewhere"}, nil),                                                            // review refused
+		saToken("default", "myapp", []string{apiServerAudience}, map[string]any{"iat": time.Now().Add(-time.Hour).Unix()}), // older than max_age
 	} {
-		resp := login(t, b, token, "reader")
+		resp := login(t, b, token)
 		require.Error(t, resp.Err)
 		assert.Nil(t, resp.Auth)
 	}
-	resp := login(t, b, saToken("default", "myapp", []string{apiServerAudience}, nil), "reader")
+	resp := login(t, b, saToken("default", "myapp", []string{apiServerAudience}, map[string]any{"iat": time.Now().Unix()}))
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	assert.NotNil(t, resp.Auth.Admission)
 }
@@ -658,7 +623,7 @@ func TestConfigWrite_FactsAndAudiencesRefused(t *testing.T) {
 // A stored config whose facts do not compile (written under looser rules, or
 // edited in storage) does not fail the mount: it is installed with no naming,
 // so the mount answers no fact and nothing reading facts can match its
-// admissions. Today's role logins are not affected by facts.
+// admissions. Logins themselves are not refused over facts.
 func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 	ctx := context.Background()
 	host := newReviewingAPIServer(t)
@@ -674,10 +639,6 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		entry, err := sdklogical.StorageEntryJSON("config", bad)
 		require.NoError(t, err)
 		require.NoError(t, b.storageView.Put(ctx, entry))
-		require.NoError(t, b.setRole(ctx, &KubernetesRole{
-			Name: "reader", BoundServiceAccountNames: []string{"myapp"},
-			BoundServiceAccountNamespaces: []string{"default"}, TokenPolicies: []string{"read"},
-		}))
 
 		require.NoError(t, b.Initialize(ctx), "a bad mapping does not fail the load")
 		require.NotNil(t, b.config)
@@ -685,9 +646,8 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		assert.Nil(t, b.mountFacts.Load())
 		assert.Empty(t, b.FactNames())
 
-		resp := login(t, b, token, "reader")
-		require.Equal(t, http.StatusOK, resp.StatusCode, "role logins do not read facts: %v", resp.Err)
-		assert.Equal(t, []string{"read"}, resp.Auth.Policies)
+		resp := login(t, b, token)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "logins do not read facts: %v", resp.Err)
 		adm := resp.Auth.Admission
 		require.NotNil(t, adm)
 		adm.MountPath = "auth/kubernetes/"
@@ -779,7 +739,7 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for !stop.Load() {
-				resp := login(t, b, token, "reader")
+				resp := login(t, b, token)
 				if resp.StatusCode != http.StatusOK || resp.Auth == nil || resp.Auth.Admission == nil {
 					report("login failed: %d %v", resp.StatusCode, resp.Err)
 					continue
@@ -984,9 +944,8 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 		})
 		require.NoError(t, b.setRole(ctx, role))
 
-		// Today: the real login.
-		resp := login(t, b, token, role.Name)
-		old := resp.Err == nil && resp.Auth != nil
+		// Before: the role login, frozen.
+		old := legacyRoleAdmits(t, b, token, role.Name)
 
 		// Converted.
 		rule := convertRole(t, "auth/kubernetes/", role, mountAudiences)
@@ -1046,8 +1005,7 @@ func TestEquivalence_MaxAgeStricter(t *testing.T) {
 				extra["iat"] = tc.iat
 			}
 			token := saToken("default", "myapp", []string{apiServerAudience}, extra)
-			resp := login(t, b, token, role.Name)
-			assert.Equal(t, tc.old, resp.Err == nil && resp.Auth != nil, "today's login")
+			assert.Equal(t, tc.old, legacyRoleAdmits(t, b, token, role.Name), "the role login")
 			assert.Equal(t, tc.new, admitConverted(t, b, token, nil, rule, naming, 10*time.Minute), "converted")
 		})
 	}

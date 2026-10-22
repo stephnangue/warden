@@ -103,8 +103,14 @@ func (b *kubernetesAuthBackend) handleConfigRead(_ context.Context, _ *logical.R
 		maskedReviewer = maskedSecret
 	}
 
+	var warnings []string
+	if len(b.config.BoundAudiences) == 0 {
+		warnings = append(warnings, noAudiencesWarning)
+	}
+
 	return &logical.Response{
 		StatusCode: http.StatusOK,
+		Warnings:   warnings,
 		Data: map[string]any{
 			"kubernetes_host":        b.config.KubernetesHost,
 			"kubernetes_ca_cert":     b.config.KubernetesCACert,

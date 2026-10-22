@@ -71,10 +71,11 @@ type TransparentTokenType interface {
 	TokenType
 
 	// LookupValue produces the deterministic input that ComputeID hashes
-	// into the byID-cache key. Including mountAccessor in the input
+	// into the byID-cache key: one key per (mount, credential), whatever
+	// role a request asks for. Including mountAccessor in the input
 	// prevents cache contamination across two mounts of the same auth
-	// type with overlapping role names + the same credential.
-	LookupValue(credential, mountAccessor, role string) string
+	// type presented the same credential.
+	LookupValue(credential, mountAccessor string) string
 
 	// IsTransparent always returns true; the method exists so the
 	// registry can ask "is this transparent?" without callers needing

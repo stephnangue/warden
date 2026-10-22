@@ -23,34 +23,21 @@ func TestCertRoleTokenType_Metadata(t *testing.T) {
 func TestCertRoleTokenType_LookupValue(t *testing.T) {
 	ct := &CertRoleTokenType{}
 
-	// With role
-	hash1 := ct.LookupValue("fingerprint123", "acc1", "admin")
-	hash2 := ct.LookupValue("fingerprint123", "acc1", "admin")
+	hash1 := ct.LookupValue("fingerprint123", "acc1")
+	hash2 := ct.LookupValue("fingerprint123", "acc1")
 	if hash1 != hash2 {
 		t.Fatal("LookupValue should be deterministic")
 	}
 
-	// Different roles should produce different hashes
-	hash3 := ct.LookupValue("fingerprint123", "acc1", "reader")
-	if hash1 == hash3 {
-		t.Fatal("different roles should produce different hashes")
-	}
-
 	// Different fingerprints should produce different hashes
-	hash4 := ct.LookupValue("fingerprint456", "acc1", "admin")
+	hash4 := ct.LookupValue("fingerprint456", "acc1")
 	if hash1 == hash4 {
 		t.Fatal("different fingerprints should produce different hashes")
 	}
 
-	// Without role
-	hash5 := ct.LookupValue("fingerprint123", "acc1", "")
-	if hash5 == hash1 {
-		t.Fatal("empty role should produce different hash from non-empty role")
-	}
-
-	// Mount accessor namespacing — same fingerprint + role on different mounts must not collide
-	hashMountA := ct.LookupValue("fingerprint123", "accA", "admin")
-	hashMountB := ct.LookupValue("fingerprint123", "accB", "admin")
+	// Mount accessor namespacing — same fingerprint on different mounts must not collide
+	hashMountA := ct.LookupValue("fingerprint123", "accA")
+	hashMountB := ct.LookupValue("fingerprint123", "accB")
 	if hashMountA == hashMountB {
 		t.Fatal("mount accessor must namespace the cache key")
 	}
@@ -119,7 +106,6 @@ func TestCertRoleTokenType_Generate(t *testing.T) {
 	authData := &AuthData{
 		TokenValue:    "abc123fingerprint",
 		MountAccessor: "acc1",
-		RoleName:      "agent",
 	}
 
 	result, err := ct.Generate(context.Background(), authData, entry)
@@ -136,7 +122,7 @@ func TestCertRoleTokenType_Generate(t *testing.T) {
 	}
 
 	// Verify it matches LookupValue
-	expected := ct.LookupValue("abc123fingerprint", "acc1", "agent")
+	expected := ct.LookupValue("abc123fingerprint", "acc1")
 	if fingerprint != expected {
 		t.Fatalf("expected %q, got %q", expected, fingerprint)
 	}
@@ -153,7 +139,7 @@ func TestCertRoleTokenType_Generate(t *testing.T) {
 
 	// With empty TokenValue
 	entry3 := &TokenEntry{Data: make(map[string]string)}
-	authData3 := &AuthData{TokenValue: "", RoleName: "agent"}
+	authData3 := &AuthData{TokenValue: "", MountAccessor: "acc1"}
 	result3, err := ct.Generate(context.Background(), authData3, entry3)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -190,14 +176,13 @@ func TestCertRoleTokenType_EndToEndIDComputation(t *testing.T) {
 	ct := &CertRoleTokenType{}
 
 	fingerprint := "a1b2c3d4e5f6"
-	role := "agent"
 
 	// This simulates the full flow: Generate stores hash, ComputeID creates the ID
-	hash := ct.LookupValue(fingerprint, "acc1", role)
+	hash := ct.LookupValue(fingerprint, "acc1")
 	tokenID := ct.ComputeID(hash)
 
-	// Verify the same computation in LookupTransparentTokenWithRole would produce the same ID
-	hash2 := ct.LookupValue(fingerprint, "acc1", role)
+	// Verify the same computation in LookupTransparentToken would produce the same ID
+	hash2 := ct.LookupValue(fingerprint, "acc1")
 	tokenID2 := ct.ComputeID(hash2)
 
 	if tokenID != tokenID2 {

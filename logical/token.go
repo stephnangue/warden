@@ -26,10 +26,9 @@ type TokenEntry struct {
 	// Authorization
 	PrincipalID string // Associated principal
 
-	// RoleName is the role the token runs under. A login sets it on the token;
-	// an admission token carries none, and core writes the role granted for
-	// one request onto that request's copy of the entry, never onto the
-	// stored one.
+	// RoleName is the role the token runs under for one request. No token is
+	// issued with one: core writes the role granted for one request onto that
+	// request's copy of an admission token's entry, never onto the stored one.
 	RoleName string
 
 	// MountAccessor is the stable identifier of the auth mount that issued
@@ -127,7 +126,8 @@ func (t *TokenEntry) IsUsed() bool {
 }
 
 type TokenAccess interface {
-	ResolveToken(ctx context.Context, tokenValue string) (string, string, error)
+	// ResolveToken returns the principal of the token tokenValue names.
+	ResolveToken(ctx context.Context, tokenValue string) (string, error)
 	GetToken(tokenValue string) *TokenEntry
 }
 

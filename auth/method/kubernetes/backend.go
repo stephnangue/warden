@@ -55,8 +55,8 @@ type KubernetesAuthConfig struct {
 	// even when Issuer is non-empty.
 	DisableIssValidation bool `json:"disable_iss_validation,omitempty"`
 
-	// TokenTTL is the default TTL for issued Warden tokens; per-role
-	// TokenTTL overrides this.
+	// TokenTTL is how long an admitted workload token is reused before it is
+	// reviewed again, capped by the token's own expiry.
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
 
 	// DefaultRole, if set, is used by transparent-mode flows when the
@@ -64,17 +64,14 @@ type KubernetesAuthConfig struct {
 	DefaultRole string `json:"default_role,omitempty"`
 
 	// BoundAudiences are the audiences a workload token must carry for the
-	// mount to admit it, any one of them. Stored, read back and validated
-	// (no empty entry), but not used by role logins, which still send the
-	// role's audience to TokenReview; the role-free admission sends it as
-	// the TokenReview's spec.audiences.
+	// mount to admit it, any one of them, sent as the TokenReview's
+	// spec.audiences. Validated (no empty entry). Empty, the review checks
+	// the API server's own audience, which a config read warns about.
 	BoundAudiences []string `json:"bound_audiences,omitempty"`
 
 	// MaxAge bounds a workload token's age at admission, from its iat: one
-	// older, or without an iat, is not admitted. Zero is unset. Stored, read
-	// back and validated (not negative), but not used by role logins, which
-	// keep their role's max_age; the role-free admission enforces it, through
-	// helper.CheckMaxAge.
+	// older, or without an iat, is not admitted. Zero is unset. Validated
+	// (not negative) and enforced by admitToken, through helper.CheckMaxAge.
 	MaxAge time.Duration `json:"max_age,omitempty"`
 
 	// Facts: entity_kind, and the TokenReview fields the mount publishes

@@ -87,7 +87,7 @@ func TestRoleCRUD(t *testing.T) {
 
 func TestConfigRoundTrip(t *testing.T) {
 	b, ctx := createTestBackend(t)
-	d := &framework.FieldData{Raw: map[string]any{"token_ttl": 7200, "default_role": "api"}, Schema: b.pathConfig().Fields}
+	d := &framework.FieldData{Raw: map[string]any{"token_ttl": 7200, "default_role": "api", "bound_audiences": "warden"}, Schema: b.pathConfig().Fields}
 	resp, err := b.handleConfigWrite(ctx, &logical.Request{}, d)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)

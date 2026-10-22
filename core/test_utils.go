@@ -300,8 +300,8 @@ func (m *mockTokenStore) GenerateToken(ctx context.Context, tokenType string, au
 	return nil, nil
 }
 
-func (m *mockTokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, string, error) {
-	return "", "", nil
+func (m *mockTokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, error) {
+	return "", nil
 }
 
 func (m *mockTokenStore) GetToken(tokenValue string) *logical.TokenEntry {

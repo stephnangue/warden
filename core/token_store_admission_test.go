@@ -39,7 +39,6 @@ func TestTokenStore_AdmissionSharedAcrossTransparentCopies(t *testing.T) {
 	created, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
 		TokenValue:    jwt,
 		MountAccessor: "auth_jwt_1",
-		RoleName:      "reader",
 		PrincipalID:   "agent-1",
 		ExpireAt:      time.Now().Add(time.Hour),
 		Admission:     adm,
@@ -48,9 +47,9 @@ func TestTokenStore_AdmissionSharedAcrossTransparentCopies(t *testing.T) {
 	require.Same(t, adm, created.Admission)
 
 	jwtType := &JWTRoleTokenType{}
-	first, err := core.LookupTransparentTokenWithRole(ctx, jwtType, jwt, "auth_jwt_1", "reader")
+	first, err := core.LookupTransparentToken(ctx, jwtType, jwt, "auth_jwt_1")
 	require.NoError(t, err)
-	second, err := core.LookupTransparentTokenWithRole(ctx, jwtType, jwt, "auth_jwt_1", "reader")
+	second, err := core.LookupTransparentToken(ctx, jwtType, jwt, "auth_jwt_1")
 	require.NoError(t, err)
 
 	assert.NotSame(t, first, second, "each lookup returns its own copy")

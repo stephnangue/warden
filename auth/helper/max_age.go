@@ -18,7 +18,6 @@ func MaxAgeFieldSchema() *framework.FieldSchema {
 		Type: framework.TypeDurationSecond,
 		Description: "Maximum age of a credential at admission, measured from its issue time (iat): a duration such as 10m, " +
 			"or a number of seconds. Credentials older than max_age, or without an issue time, are not admitted. " +
-			"Enforced from the role-free admission; role logins do not use it. " +
 			"0 or empty leaves it unset.",
 	}
 }

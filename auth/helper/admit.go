@@ -2,6 +2,8 @@ package helper
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -25,6 +27,32 @@ const (
 
 // errAdmitInternal refuses an introspect/admit request core did not build.
 var errAdmitInternal = logical.ErrForbidden(AdmitPattern + " is internal to Warden")
+
+// ErrAgentAudiencesRequired is why a mount that admits agents and binds no
+// audience cannot admit a bearer credential: without bound_audiences any
+// token its issuer signs would be admitted, including tokens minted for other
+// relying parties. A config write is refused with it, and a stored config
+// without bound_audiences (written before audience binding was required)
+// refuses admission with it.
+var ErrAgentAudiencesRequired = errors.New("bound_audiences is required on agent mounts")
+
+// RequireAgentAudiences returns ErrAgentAudiencesRequired when a mount of
+// entity kind kind binds no audience, unless the kind is human: a human mount
+// may leave its audience to the resource identifier of the request. Any kind
+// other than human is held to the agent rule, so a kind that does not parse
+// fails closed.
+func RequireAgentAudiences(kind string, audiences []string) error {
+	if kind == logical.EntityKindHuman || len(audiences) > 0 {
+		return nil
+	}
+	return ErrAgentAudiencesRequired
+}
+
+// AgentAudiencesWriteError is the refusal of a config write that would leave
+// an agent mount without bound_audiences, saying how to fix it.
+func AgentAudiencesWriteError() error {
+	return fmt.Errorf("%w: set bound_audiences to the audiences tokens for Warden carry, or set entity_kind to human for a mount that admits users", ErrAgentAudiencesRequired)
+}
 
 // AdmitFunc verifies the credential req presents against the mount's
 // configuration at now and returns what it verified. (nil, nil) means the

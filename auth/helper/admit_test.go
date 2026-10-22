@@ -15,6 +15,18 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
+// An agent mount binds an audience; a human mount may leave it to the
+// request's resource; any other kind is held to the agent rule.
+func TestRequireAgentAudiences(t *testing.T) {
+	for _, kind := range []string{"", logical.EntityKindAgent, "robot"} {
+		assert.ErrorIs(t, RequireAgentAudiences(kind, nil), ErrAgentAudiencesRequired, "kind %q", kind)
+		assert.ErrorIs(t, RequireAgentAudiences(kind, []string{}), ErrAgentAudiencesRequired, "kind %q", kind)
+		assert.NoError(t, RequireAgentAudiences(kind, []string{"warden"}), "kind %q", kind)
+	}
+	assert.NoError(t, RequireAgentAudiences(logical.EntityKindHuman, nil))
+	assert.ErrorIs(t, AgentAudiencesWriteError(), ErrAgentAudiencesRequired)
+}
+
 func TestAdmitPath(t *testing.T) {
 	var calls int
 	var adm *logical.Admission

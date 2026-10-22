@@ -135,9 +135,6 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 		if auth.PrincipalID != "" {
 			auditAuth.PrincipalID = auth.PrincipalID
 		}
-		if auth.RoleName != "" {
-			auditAuth.RoleName = auth.RoleName
-		}
 		if len(auth.Policies) > 0 {
 			auditAuth.Policies = auth.Policies
 		}
@@ -195,19 +192,19 @@ func toAuditActors(actors []logical.ActorRef) []audit.ActorRef {
 	return out
 }
 
-// buildAuditAuthResult converts logical.Auth (from login response) to audit.AuthResult
+// buildAuditAuthResult converts logical.Auth (from login response) to
+// audit.AuthResult. A login is an admission: it carries no role, no credential
+// spec and no metadata, so the entry records none.
 func buildAuditAuthResult(auth *logical.Auth) *audit.AuthResult {
 	if auth == nil {
 		return nil
 	}
 
 	return &audit.AuthResult{
-		TokenType:      auth.TokenType,
-		PrincipalID:    auth.PrincipalID,
-		RoleName:       auth.RoleName,
-		Policies:       auth.Policies,
-		TokenTTL:       int64(auth.TokenTTL.Seconds()),
-		CredentialSpec: auth.CredentialSpec,
+		TokenType:   auth.TokenType,
+		PrincipalID: auth.PrincipalID,
+		Policies:    auth.Policies,
+		TokenTTL:    int64(auth.TokenTTL.Seconds()),
 	}
 }
 

@@ -209,14 +209,14 @@ type MCPClientInfo struct {
 	Version string `json:"version,omitempty"`
 }
 
-// AuthResult contains authentication result from login operations
+// AuthResult contains authentication result from login operations. A login
+// admits a credential and carries no role and no credential spec: the role a
+// request runs under is recorded on that request's Auth.
 type AuthResult struct {
-	TokenType      string   `json:"token_type"`
-	PrincipalID    string   `json:"principal_id"`
-	RoleName       string   `json:"role_name"`
-	Policies       []string `json:"policies"`
-	TokenTTL       int64    `json:"token_ttl"` // Seconds
-	CredentialSpec string   `json:"credential_spec,omitempty"`
+	TokenType   string   `json:"token_type"`
+	PrincipalID string   `json:"principal_id"`
+	Policies    []string `json:"policies"`
+	TokenTTL    int64    `json:"token_ttl"` // Seconds
 }
 
 // Credential contains audit information about a credential that was issued
@@ -343,11 +343,9 @@ func (e *LogEntry) Clone() *LogEntry {
 		}
 		if e.Response.AuthResult != nil {
 			clone.Response.AuthResult = &AuthResult{
-				TokenType:      e.Response.AuthResult.TokenType,
-				PrincipalID:    e.Response.AuthResult.PrincipalID,
-				RoleName:       e.Response.AuthResult.RoleName,
-				TokenTTL:       e.Response.AuthResult.TokenTTL,
-				CredentialSpec: e.Response.AuthResult.CredentialSpec,
+				TokenType:   e.Response.AuthResult.TokenType,
+				PrincipalID: e.Response.AuthResult.PrincipalID,
+				TokenTTL:    e.Response.AuthResult.TokenTTL,
 			}
 			if e.Response.AuthResult.Policies != nil {
 				clone.Response.AuthResult.Policies = make([]string, len(e.Response.AuthResult.Policies))
