@@ -44,11 +44,8 @@ const (
 	// state for each other.
 	GitUserAuthMount = "auth/git-user-jwt/"
 
-	// GitUserAuthRole is the role user credentials are validated under.
-	GitUserAuthRole = "e2e-git-user"
-
-	// GitAgentCertRole is the cert-auth role the agent authenticates under. Its
-	// name is also what a client sends as the Basic username.
+	// GitAgentCertRole is the role certificate agents are granted. Its name is
+	// also what a client sends as the Basic username.
 	GitAgentCertRole = "e2e-git-agent"
 
 	// GitAgentJWTRole is the equivalent for tests that swap the certificate
@@ -258,11 +255,9 @@ func SetupGitEnv(t *testing.T, port int, upstreamURL string) (caCertPEM string, 
 	time.Sleep(time.Second)
 
 	mustAPI(t, port, "PUT", "auth/git-user-jwt/config",
-		fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":"%s","bound_issuer":"%s"}`, HydraIssuer, HydraIssuer),
+		fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":"%s","bound_issuer":"%s","bound_audiences":[%q],"user_claim":"sub","entity_kind":"human"}`,
+			HydraIssuer, HydraIssuer, HydraAudience),
 		"configure git-user-jwt auth")
-
-	mustAPI(t, port, "POST", "auth/git-user-jwt/role/"+GitUserAuthRole,
-		`{"user_claim":"sub","token_ttl":3600}`, "create git user role")
 
 	mustAPI(t, port, "POST", "sys/providers/"+GitMount,
 		fmt.Sprintf(`{"type":"github","description":%q}`, GitMountDescription),
@@ -274,8 +269,8 @@ func SetupGitEnv(t *testing.T, port int, upstreamURL string) (caCertPEM string, 
 	// stand in for GitHub. tls_skip_verify is what permits the http:// scheme;
 	// both the provider and the credential source reject plain http without it.
 	mustAPI(t, port, "PUT", GitMount+"/config",
-		fmt.Sprintf(`{"github_url":%q,"tls_skip_verify":true,"auto_auth_path":"auth/cert/","user_auth_path":%q,"user_auth_role":%q}`,
-			upstreamURL, GitUserAuthMount, GitUserAuthRole),
+		fmt.Sprintf(`{"github_url":%q,"tls_skip_verify":true,"auto_auth_path":"auth/cert/","user_auth_path":%q}`,
+			upstreamURL, GitUserAuthMount),
 		"configure github provider")
 
 	// PAT mode mints without calling GitHub, so no real credentials are needed
@@ -294,18 +289,12 @@ func SetupGitEnv(t *testing.T, port int, upstreamURL string) (caCertPEM string, 
 			GitMount, GitMount),
 		"create git policy")
 
-	mustAPI(t, port, "POST", "auth/cert/role/"+GitAgentCertRole,
-		fmt.Sprintf(`{"allowed_common_names":["agent-*"],"token_policies":["%s-access"],"cred_spec_name":"git-e2e-pat","token_ttl":3600}`,
-			GitMount),
-		"create git cert role")
+	gitRole := Role{Policies: []string{GitMount + "-access"}, CredSpec: "git-e2e-pat"}
+	GrantRole(t, port, "auth/cert/", GitAgentCertRole, gitRole, Rule{"cn": {"agent-*"}})
 
-	// The JWT counterpart, for the header-agent shapes. Recreated rather than
-	// created, since auth/jwt/ is set up by the suite and survives our teardown.
-	APIRequest(t, "DELETE", "auth/jwt/role/"+GitAgentJWTRole, port, "")
-	mustAPI(t, port, "POST", "auth/jwt/role/"+GitAgentJWTRole,
-		fmt.Sprintf(`{"token_policies":["%s-access"],"cred_spec_name":"git-e2e-pat","user_claim":"sub","token_ttl":3600}`,
-			GitMount),
-		"create git jwt agent role")
+	// The JWT counterpart, for the header-agent shapes: every agent auth/jwt/
+	// admits.
+	GrantRole(t, port, "auth/jwt/", GitAgentJWTRole, gitRole, nil)
 
 	return caCertPEM, caKey
 }
@@ -316,16 +305,8 @@ func SetupGitEnv(t *testing.T, port int, upstreamURL string) (caCertPEM string, 
 // user leg entirely, which is how the compatibility cases are exercised.
 func SetGitAgentPath(t *testing.T, port int, upstreamURL, autoAuthPath, userAuthPath, defaultRole string) {
 	t.Helper()
-	// user_auth_role is always written, empty when opting out: config writes
-	// merge into the stored config, so leaving a previously-set role behind
-	// while clearing the path is rejected as "user_auth_role requires
-	// user_auth_path".
-	role := ""
-	if userAuthPath != "" {
-		role = GitUserAuthRole
-	}
-	body := fmt.Sprintf(`{"github_url":%q,"tls_skip_verify":true,"auto_auth_path":%q,"user_auth_path":%q,"user_auth_role":%q`,
-		upstreamURL, autoAuthPath, userAuthPath, role)
+	body := fmt.Sprintf(`{"github_url":%q,"tls_skip_verify":true,"auto_auth_path":%q,"user_auth_path":%q`,
+		upstreamURL, autoAuthPath, userAuthPath)
 	if defaultRole != "" {
 		body += fmt.Sprintf(`,"default_role":%q`, defaultRole)
 	}
@@ -347,13 +328,12 @@ func TeardownGitEnvBestEffort(port int) {
 		TryRequest("DELETE", fmt.Sprintf("%s/v1/%s", NodeURL(port), path),
 			map[string]string{"X-Warden-Token": token}, "")
 	}
-	del("auth/cert/role/" + GitAgentCertRole)
-	del("auth/jwt/role/" + GitAgentJWTRole)
+	RevokeRoleBestEffort(port, "auth/cert/", GitAgentCertRole)
+	RevokeRoleBestEffort(port, "auth/jwt/", GitAgentJWTRole)
 	del("sys/policies/cbp/" + GitMount + "-access")
 	del("sys/cred/specs/git-e2e-pat")
 	del("sys/cred/sources/git-e2e")
 	del("sys/providers/" + GitMount)
-	del("auth/git-user-jwt/role/" + GitUserAuthRole)
 	del("sys/auth/git-user-jwt")
 	del("sys/auth/cert")
 	time.Sleep(time.Second)

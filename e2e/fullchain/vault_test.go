@@ -357,7 +357,7 @@ func setupVaultWrongCredEnv(t *testing.T) {
 	// Consumers before what they reference, which is also what clears anything a
 	// killed run left behind — a leftover would 409 the creates below.
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/cert/role/"+vaultWrongCredRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/cert/", vaultWrongCredRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+vaultWrongCredSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+vaultWrongCredSource, leaderPort, "")
 	}
@@ -374,11 +374,8 @@ func setupVaultWrongCredEnv(t *testing.T) {
 
 	// The mount's own policy, so authorization succeeds and the credential type is
 	// the only thing left that can refuse the request.
-	mustWrite("auth/cert/role/"+vaultWrongCredRole, `{
-		"allowed_common_names":["`+h.FullChainAgentCN+`"],
-		"token_policies":["`+vaultEnv.Policy()+`"],
-		"cred_spec_name":"`+vaultWrongCredSpec+`","token_ttl":3600}`,
-		"create the wrong-type agent role")
+	h.GrantRole(t, leaderPort, "auth/cert/", vaultWrongCredRole,
+		h.Role{Policies: []string{vaultEnv.Policy()}, CredSpec: vaultWrongCredSpec}, h.FullChainAgentRule)
 }
 
 // TestVault_NonVaultTokenCredentialIsRefused pins the provider's credential-type
@@ -473,7 +470,7 @@ func setupVaultRotationEnv(t *testing.T) {
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/cert/role/"+vaultRotAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/cert/", vaultRotAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+vaultRotSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+vaultRotSource, leaderPort, "")
 	}
@@ -494,14 +491,12 @@ func setupVaultRotationEnv(t *testing.T) {
 		"config":{"mint_method":"vault_token","token_role":"`+vaultTokenRole+`"}}`,
 		"create the rotating source's spec")
 
-	// A short token_ttl so the request made after the rotation is a new session
-	// that has to mint again, rather than one served from the cache the first
-	// request populated.
-	mustWrite("auth/cert/role/"+vaultRotAgentRole, `{
-		"allowed_common_names":["`+h.FullChainAgentCN+`"],
-		"token_policies":["`+vaultEnv.Policy()+`"],
-		"cred_spec_name":"`+vaultRotSpec+`","token_ttl":60}`,
-		"create the rotating agent role")
+	h.GrantRole(t, leaderPort, "auth/cert/", vaultRotAgentRole,
+		h.Role{Policies: []string{vaultEnv.Policy()}, CredSpec: vaultRotSpec}, h.FullChainAgentRule)
+	// A short session lifetime on the mount, so the request made after the
+	// rotation is a new session that has to mint again, rather than one served
+	// from the cache the first request populated.
+	h.CapMountTokenTTL(t, leaderPort, "auth/cert/", 60)
 }
 
 // vaultSecretIDCount returns how many secret_id accessors an AppRole role holds.

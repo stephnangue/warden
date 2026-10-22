@@ -36,7 +36,7 @@ func setupAWSProvider(t *testing.T, port int) {
 	t.Cleanup(func() {
 		leader := h.GetLeaderPort(t)
 		h.APIRequest(t, "DELETE", "sys/providers/aws", leader, "")
-		h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-aws-sigv4", leader, "")
+		h.RevokeRole(t, leader, "auth/jwt/", "e2e-aws-sigv4")
 		h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-aws-gateway", leader, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/e2e-aws-sigv4", leader, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/e2e-aws-local", leader, "")
@@ -69,12 +69,9 @@ func setupAWSProvider(t *testing.T, port int) {
 		t.Fatalf("create policy: expected 200/201/204/409, got %d: %s", status, string(body))
 	}
 
-	// 4. JWT role for transparent mode
-	status, body = h.APIRequest(t, "POST", "auth/jwt/role/e2e-aws-sigv4", port,
-		`{"token_policies":["e2e-aws-gateway"],"user_claim":"sub","cred_spec_name":"e2e-aws-sigv4","token_ttl":3600}`)
-	if status != 200 && status != 201 && status != 409 {
-		t.Fatalf("create JWT role: expected 200/201/409, got %d: %s", status, string(body))
-	}
+	// 4. Role for transparent mode, granted to every agent auth/jwt/ admits
+	h.GrantRole(t, port, "auth/jwt/", "e2e-aws-sigv4",
+		h.Role{Policies: []string{"e2e-aws-gateway"}, CredSpec: "e2e-aws-sigv4"}, nil)
 
 	// 5. AWS provider
 	status, body = h.APIRequest(t, "POST", "sys/providers/aws", port, `{"type":"aws"}`)
@@ -453,7 +450,7 @@ func TestSigV4PolicyDenialThroughStandby(t *testing.T) {
 	t.Cleanup(func() {
 		cur := h.GetLeaderPort(t)
 		h.APIRequest(t, "DELETE", "sys/providers/aws", cur, "")
-		h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-aws-deny", cur, "")
+		h.RevokeRole(t, cur, "auth/jwt/", "e2e-aws-deny")
 		h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-aws-deny", cur, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/e2e-aws-deny", cur, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/e2e-aws-deny", cur, "")
@@ -481,12 +478,9 @@ func TestSigV4PolicyDenialThroughStandby(t *testing.T) {
 		t.Fatalf("create deny policy: expected 200/201/204/409, got %d: %s", status, string(body))
 	}
 
-	// JWT role with the deny policy (transparent mode)
-	status, body = h.APIRequest(t, "POST", "auth/jwt/role/e2e-aws-deny", leader,
-		`{"token_policies":["e2e-aws-deny"],"user_claim":"sub","cred_spec_name":"e2e-aws-deny","token_ttl":3600}`)
-	if status != 200 && status != 201 && status != 409 {
-		t.Fatalf("create JWT role: expected 200/201/409, got %d: %s", status, string(body))
-	}
+	// Role with the deny policy (transparent mode)
+	h.GrantRole(t, leader, "auth/jwt/", "e2e-aws-deny",
+		h.Role{Policies: []string{"e2e-aws-deny"}, CredSpec: "e2e-aws-deny"}, nil)
 
 	// AWS provider (may already exist from other tests, ignore conflict).
 	h.APIRequest(t, "POST", "sys/providers/aws", leader, `{"type":"aws"}`)

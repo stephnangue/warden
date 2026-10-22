@@ -158,7 +158,7 @@ func ensureEnv(t *testing.T) {
 }
 
 // agentCert mints a client certificate for the agent leg. The common name must
-// match the cert roles' allowed_common_names.
+// match the cn every full-chain cert grant names (h.FullChainAgentRule).
 func agentCert(t *testing.T) string {
 	t.Helper()
 	certPEM, _ := h.GenerateClientCert(t, agentCAPEM, agentCAKey, h.FullChainAgentCN)

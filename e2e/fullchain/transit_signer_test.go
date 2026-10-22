@@ -243,7 +243,7 @@ func setupKMSAssertionChain(t *testing.T, stsURL, signingAlg string, signerMaxTT
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+kmsChainRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", kmsChainRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsExchangeSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+kmsExchangeSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsSignerSpec, leaderPort, "")
@@ -307,10 +307,8 @@ func setupKMSAssertionChain(t *testing.T, stsURL, signingAlg string, signerMaxTT
 			"audience":"https://api.internal.example.com"}}`, kmsExchangeSource),
 		"create the consuming spec")
 
-	mustWrite("POST", "auth/jwt/role/"+kmsChainRole, fmt.Sprintf(`{
-		"token_policies":["%s"],"cred_spec_name":%q,
-		"user_claim":"sub","token_ttl":3600}`, restEnv.Policy(), kmsExchangeSpec),
-		"create the consuming role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", kmsChainRole,
+		h.Role{Policies: []string{restEnv.Policy()}, CredSpec: kmsExchangeSpec}, nil)
 }
 
 // TestKMSClientAssertion_SignsWithAKeyWardenNeverHolds drives the whole chain: an agent
@@ -530,7 +528,7 @@ func setupCachedCapabilityChain(t *testing.T, stsURL, vaultProxyURL, secretCache
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+kmsCachedRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", kmsCachedRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsCachedExchangeSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+kmsCachedExchangeSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsCachedSignerSpec, leaderPort, "")
@@ -569,10 +567,8 @@ func setupCachedCapabilityChain(t *testing.T, stsURL, vaultProxyURL, secretCache
 			"audience":"https://api.internal.example.com"}}`, kmsCachedExchangeSource),
 		"create the cached consuming spec")
 
-	mustWrite("POST", "auth/jwt/role/"+kmsCachedRole, fmt.Sprintf(`{
-		"token_policies":["%s"],"cred_spec_name":%q,
-		"user_claim":"sub","token_ttl":3600}`, restEnv.Policy(), kmsCachedExchangeSpec),
-		"create the cached consuming role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", kmsCachedRole,
+		h.Role{Policies: []string{restEnv.Policy()}, CredSpec: kmsCachedExchangeSpec}, nil)
 }
 
 // TestKMSClientAssertion_CachedCapabilityIsReusedAndStillSigns covers the arrangement the

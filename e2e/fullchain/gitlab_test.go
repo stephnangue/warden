@@ -230,8 +230,8 @@ func TestGitLab_RESTLegInjectsMintedToken(t *testing.T) {
 	}
 }
 
-// gitlabChainConsumer names one consuming spec and the JWT agent role bound to
-// it, for setupGitLabChain.
+// gitlabChainConsumer names one consuming spec and the agent role, granted at
+// the JWT mount, bound to it, for setupGitLabChain.
 type gitlabChainConsumer struct {
 	spec, role string
 }
@@ -287,7 +287,7 @@ func setupGitLabChain(t *testing.T, gitlabEnv h.ProviderEnv, mode gitlabChainMod
 
 	clear := func() {
 		for _, c := range consumers {
-			h.APIRequest(t, "DELETE", "auth/jwt/role/"+c.role, leaderPort, "")
+			h.RevokeRole(t, leaderPort, "auth/jwt/", c.role)
 			h.APIRequest(t, "DELETE", "sys/cred/specs/"+c.spec, leaderPort, "")
 		}
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+source, leaderPort, "")
@@ -329,12 +329,10 @@ func setupGitLabChain(t *testing.T, gitlabEnv h.ProviderEnv, mode gitlabChainMod
 				"token_name":"warden-e2e-keyless","scopes":"api","access_level":"30","ttl":"24h"}}`,
 			"create the keyless consuming spec "+c.spec)
 
-		// The mount's own role binds its default spec, so each consumer needs one
-		// bound to its own spec instead.
-		mustWrite("POST", "auth/jwt/role/"+c.role, `{
-			"token_policies":["`+gitlabEnv.Policy()+`"],"cred_spec_name":"`+c.spec+`",
-			"user_claim":"sub","token_ttl":3600}`,
-			"create the keyless agent role "+c.role)
+		// The role granted at the JWT mount binds its default spec, so each
+		// consumer needs one bound to its own spec instead.
+		h.GrantRole(t, leaderPort, "auth/jwt/", c.role,
+			h.Role{Policies: []string{gitlabEnv.Policy()}, CredSpec: c.spec}, nil)
 	}
 }
 
@@ -922,7 +920,7 @@ func setupGitLabPerAgentChain(t *testing.T, gitlabEnv h.ProviderEnv, clientByAge
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+gitlabPerAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", gitlabPerAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+gitlabPerAgentSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+gitlabPerAgentSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+gitlabPerAgentSecretSpec, leaderPort, "")
@@ -962,10 +960,8 @@ func setupGitLabPerAgentChain(t *testing.T, gitlabEnv h.ProviderEnv, clientByAge
 			"token_name":"warden-e2e-per-agent","scopes":"api","access_level":"30","ttl":"24h"}}`,
 		"create the per-agent consuming spec")
 
-	mustWrite("POST", "auth/jwt/role/"+gitlabPerAgentRole, `{
-		"token_policies":["`+gitlabEnv.Policy()+`"],"cred_spec_name":"`+gitlabPerAgentSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the shared per-agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", gitlabPerAgentRole,
+		h.Role{Policies: []string{gitlabEnv.Policy()}, CredSpec: gitlabPerAgentSpec}, nil)
 }
 
 // TestGitLab_PerAgentOAuthClient is the row that needs both halves of this work: a

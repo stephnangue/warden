@@ -48,12 +48,17 @@ func TestBootstrap_Order(t *testing.T) {
 	}
 	before("sys/auth/agent", "auth/agent/config")
 	before("sys/providers/bank-api", "sys/skills/teller") // the rest skill it requires is seeded on mount
-	before("sys/skills/teller", "auth/agent/role/teller")
+	before("auth/user/config", "bank-me/config")          // a provider's user mount is checked when it is configured
+	before("sys/skills/teller", "sys/roles/teller")
 	before("sys/cred/sources/bank-as", "sys/cred/specs/bank-agent")
-	before("sys/cred/specs/bank-agent", "auth/agent/role/atm")
-	before("sys/policies/mcp/atm-tools", "auth/agent/role/atm")
+	before("sys/cred/specs/bank-agent", "sys/roles/atm")
+	before("sys/policies/mcp/atm-tools", "sys/roles/atm")
 	before("sys/providers/github-mcp", "github-mcp/config")
-	before("sys/policies/mcp/github-read", "auth/agent/role/github")
+	before("sys/policies/mcp/github-read", "sys/roles/github")
+	for _, role := range []string{RoleATM, RoleAssistant, RoleTeller, RoleGitHub} {
+		before("sys/roles/"+role, "sys/identity/group/"+GroupFor(role))
+		before("auth/agent/config", "sys/identity/group/"+GroupFor(role)) // the rule's facts are checked against the mount
+	}
 	assert.Equal(t, "sys/audit/playground", steps[len(steps)-1].Path, "audit last, so the log holds the scenarios")
 
 	seen := map[string]bool{}
@@ -70,11 +75,11 @@ func TestBootstrap_Roles(t *testing.T) {
 	steps := Bootstrap(testSettings())
 	want := map[string]string{RoleATM: "bank/", RoleAssistant: "bank-me/", RoleTeller: "bank-api/", RoleGitHub: "github-mcp/"}
 	for role, mount := range want {
-		i := stepIndex(steps, "auth/agent/role/"+role)
+		i := stepIndex(steps, "sys/roles/"+role)
 		require.NotEqual(t, -1, i, role)
 		data := steps[i].Data
 		assert.Equal(t, mount, data["provider_path"], role)
-		assert.Equal(t, []string{AudienceAgent}, data["bound_audiences"], role)
+		assert.NotEmpty(t, data["policies"], role)
 		desc := data["description"].(string)
 		assert.NotContains(t, desc, "skill:", role)
 		assert.NotContains(t, desc, "url:", role)
@@ -82,22 +87,55 @@ func TestBootstrap_Roles(t *testing.T) {
 	// The description says how the role is used, so an agent without the
 	// bank's MCP tools can tell teller from atm without guessing.
 	for _, role := range []string{RoleATM, RoleAssistant, RoleGitHub} {
-		desc := steps[stepIndex(steps, "auth/agent/role/"+role)].Data["description"]
+		desc := steps[stepIndex(steps, "sys/roles/"+role)].Data["description"]
 		assert.Contains(t, desc, "MCP tools", role)
 		assert.Contains(t, desc, "attached to your client", role)
 	}
-	assert.Contains(t, steps[stepIndex(steps, "auth/agent/role/teller")].Data["description"], "call yourself over HTTP")
-	assert.Equal(t, SkillTeller, steps[stepIndex(steps, "auth/agent/role/teller")].Data["skill"])
-	assert.NotContains(t, steps[stepIndex(steps, "auth/agent/role/atm")].Data, "skill", "an MCP role uses the mcp skill by default")
+	assert.Contains(t, steps[stepIndex(steps, "sys/roles/teller")].Data["description"], "call yourself over HTTP")
+	assert.Equal(t, SkillTeller, steps[stepIndex(steps, "sys/roles/teller")].Data["skill"])
+	assert.NotContains(t, steps[stepIndex(steps, "sys/roles/atm")].Data, "skill", "an MCP role uses the mcp skill by default")
+}
+
+// Each role is granted by one virtual group whose rule trusts the agent mount
+// alone, for tokens minted for agents.
+func TestBootstrap_Groups(t *testing.T) {
+	steps := Bootstrap(testSettings())
+	for _, role := range []string{RoleATM, RoleAssistant, RoleTeller, RoleGitHub} {
+		i := stepIndex(steps, "sys/identity/group/"+GroupFor(role))
+		require.NotEqual(t, -1, i, role)
+		data := steps[i].Data
+		assert.Equal(t, "virtual", data["type"], role)
+		assert.Equal(t, []string{role}, data["roles"], role)
+		assert.Equal(t, []map[string][]string{{"mount": {"auth/agent/"}, "aud": {AudienceAgent}}}, data["rules"], role)
+	}
+}
+
+// Each mount admits only the tokens minted for it, and says what it admits.
+func TestBootstrap_AuthMounts(t *testing.T) {
+	steps := Bootstrap(testSettings())
+	agent := steps[stepIndex(steps, "auth/agent/config")].Data
+	assert.Equal(t, []string{AudienceAgent}, agent["bound_audiences"])
+	assert.Equal(t, "agent", agent["entity_kind"])
+	user := steps[stepIndex(steps, "auth/user/config")].Data
+	assert.Equal(t, []string{AudienceUser}, user["bound_audiences"])
+	assert.Equal(t, "human", user["entity_kind"])
+
+	raw, err := json.Marshal(steps)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "user_auth_role")
+	assert.NotContains(t, string(raw), "/role/\"", "no auth role is written")
+	for _, s := range steps {
+		assert.NotContains(t, s.Path, "/role/", "auth roles are gone: %s", s.Path)
+	}
 }
 
 // The assistant's policies read may_act and the tier from the person's token,
-// so the user role must surface both as metadata.
+// so the user mount must map both as facts, which become the user's metadata.
 func TestBootstrap_UserMetadata(t *testing.T) {
 	steps := Bootstrap(testSettings())
-	claims := steps[stepIndex(steps, "auth/user/role/user")].Data["metadata_claims"].(map[string]any)
-	assert.Equal(t, "may_act_sub", claims["/may_act/sub"])
-	assert.Equal(t, "tier", claims["/tier"])
+	facts := steps[stepIndex(steps, "auth/user/config")].Data["facts"].(map[string]any)
+	assert.Equal(t, "may_act_sub", facts["/may_act/sub"])
+	assert.Equal(t, "tier", facts["/tier"])
 }
 
 func TestBootstrap_KeylessSource(t *testing.T) {

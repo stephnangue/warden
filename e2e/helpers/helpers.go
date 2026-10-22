@@ -336,14 +336,30 @@ func AssertClusterHealthy(t *testing.T) {
 
 // --- Auth Helpers ---
 
-// GetJWT obtains a JWT from Hydra via client_credentials grant.
+// HydraAudience is the audience every Hydra token the suites mint is issued
+// for, and the bound_audiences of every auth mount that admits them: a mount
+// that admits agents must bind one.
+const HydraAudience = "warden-e2e"
+
+// GetJWT obtains a JWT from Hydra via client_credentials grant, issued for
+// HydraAudience.
 func GetJWT(t *testing.T, clientID, clientSecret string) string {
+	t.Helper()
+	return GetJWTForAudience(t, clientID, clientSecret, HydraAudience)
+}
+
+// GetJWTForAudience is GetJWT issued for audience; an empty audience asks for
+// none, and Hydra then issues a token whose aud is empty.
+func GetJWTForAudience(t *testing.T, clientID, clientSecret, audience string) string {
 	t.Helper()
 	data := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
 		"scope":         {"api:read api:write"},
+	}
+	if audience != "" {
+		data.Set("audience", audience)
 	}
 
 	resp, err := http.PostForm("http://localhost:4444/oauth2/token", data)
@@ -424,7 +440,7 @@ func NSVaultTransparentRequestWithHeaderRole(t *testing.T, method, vaultPath, ur
 
 // NSVaultTransparentProviderRequest makes a namespace-scoped transparent Vault
 // gateway request using X-Warden-Provider for mount routing and X-Warden-Role
-// for the auth role. The URL carries only the literal upstream Vault API path
+// for the role. The URL carries only the literal upstream Vault API path
 // (e.g. v1/secret/data/foo), so the on-the-wire URL ends up /v1/v1/<vault-path>:
 // the outer /v1/ is Warden's prefix, the inner v1/<...> is Vault's API path.
 func NSVaultTransparentProviderRequest(t *testing.T, method, vaultPath, role, namespace string, port int, jwt string) (int, []byte) {
@@ -472,11 +488,11 @@ func SetupNSVaultEnv(t *testing.T, port int) {
 	// JWT auth method
 	NSAPIRequest(t, "POST", "sys/auth/jwt", ns, port, `{"type":"jwt"}`)
 	NSAPIRequest(t, "PUT", "auth/jwt/config", ns, port,
-		`{"oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444"}`)
+		`{"oidc_discovery_url":"http://localhost:4444","bound_issuer":"http://localhost:4444","bound_audiences":["`+HydraAudience+`"]}`)
 
-	// JWT role
-	NSAPIRequest(t, "POST", "auth/jwt/role/e2e-reader", ns, port,
-		`{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`)
+	// The role, granted to every agent the namespace's JWT mount admits.
+	GrantRoleInNS(t, port, ns, "auth/jwt/", "e2e-reader",
+		Role{Policies: []string{"vault-gateway-access"}, CredSpec: "vault-token-reader", ProviderPath: "vault/"}, nil)
 }
 
 // TeardownNSVaultEnv removes all resources created by SetupNSVaultEnv.
@@ -590,15 +606,17 @@ func ReadAuditEntries(t *testing.T, nodeNum int, substr string) []audit.LogEntry
 	return out
 }
 
-// LoginJWT logs in with a JWT and role, returns (statusCode, wardenToken).
-func LoginJWT(t *testing.T, jwt, role string, port int) (int, string) {
+// LoginJWT logs in with a JWT, returns (statusCode, wardenToken). A login
+// admits the credential and selects no role: a request picks its role, and a
+// group grants it.
+func LoginJWT(t *testing.T, jwt string, port int) (int, string) {
 	t.Helper()
-	return loginJWTOnMount(t, "auth/jwt", jwt, role, port, nil)
+	return loginJWTOnMount(t, "auth/jwt", jwt, port, nil)
 }
 
-func loginJWTOnMount(t *testing.T, mount, jwt, role string, port int, extraHeaders map[string]string) (int, string) {
+func loginJWTOnMount(t *testing.T, mount, jwt string, port int, extraHeaders map[string]string) (int, string) {
 	t.Helper()
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
+	loginBody := fmt.Sprintf(`{"jwt":"%s"}`, jwt)
 	headers := map[string]string{"Content-Type": "application/json"}
 	for k, v := range extraHeaders {
 		headers[k] = v
@@ -619,10 +637,10 @@ func loginJWTOnMount(t *testing.T, mount, jwt, role string, port int, extraHeade
 	return status, token
 }
 
-// LoginJWTInNS logs in with a JWT and role in a namespace.
-func LoginJWTInNS(t *testing.T, jwt, role, namespace string, port int) (int, string) {
+// LoginJWTInNS logs in with a JWT in a namespace.
+func LoginJWTInNS(t *testing.T, jwt, namespace string, port int) (int, string) {
 	t.Helper()
-	return loginJWTOnMount(t, "auth/jwt", jwt, role, port, map[string]string{
+	return loginJWTOnMount(t, "auth/jwt", jwt, port, map[string]string{
 		"X-Warden-Namespace": namespace,
 	})
 }
@@ -756,15 +774,15 @@ func VaultCertTransparentRequestViaLB(t *testing.T, method, vaultPath, role, cli
 	return DoLBRequest(t, method, u, nil, "", &cert)
 }
 
-// LoginJWTViaLB logs in with a JWT and role through the load balancer.
-func LoginJWTViaLB(t *testing.T, jwt, role string) (int, string) {
+// LoginJWTViaLB logs in with a JWT through the load balancer.
+func LoginJWTViaLB(t *testing.T, jwt string) (int, string) {
 	t.Helper()
-	return loginJWTViaLBOnMount(t, "auth/jwt", jwt, role)
+	return loginJWTViaLBOnMount(t, "auth/jwt", jwt)
 }
 
-func loginJWTViaLBOnMount(t *testing.T, mount, jwt, role string) (int, string) {
+func loginJWTViaLBOnMount(t *testing.T, mount, jwt string) (int, string) {
 	t.Helper()
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
+	loginBody := fmt.Sprintf(`{"jwt":"%s"}`, jwt)
 	status, body := DoLBRequest(t, "POST",
 		fmt.Sprintf("%s/v1/%s/login", LBNodeURL(), mount),
 		map[string]string{"Content-Type": "application/json"},
@@ -783,24 +801,23 @@ func loginJWTViaLBOnMount(t *testing.T, mount, jwt, role string) (int, string) {
 
 // CertLoginRequestViaLB performs a cert auth login through the load balancer.
 // The client presents its TLS certificate to nginx for forwarding.
-func CertLoginRequestViaLB(t *testing.T, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+func CertLoginRequestViaLB(t *testing.T, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
-	return certLoginRequestViaLBOnMount(t, "auth/cert", role, clientCertPEM, clientKeyPEM)
+	return certLoginRequestViaLBOnMount(t, "auth/cert", clientCertPEM, clientKeyPEM)
 }
 
 // CertNTLoginRequestViaLB performs a cert auth login on auth/cert-nt/ through the LB.
-func CertNTLoginRequestViaLB(t *testing.T, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+func CertNTLoginRequestViaLB(t *testing.T, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
-	return certLoginRequestViaLBOnMount(t, "auth/cert-nt", role, clientCertPEM, clientKeyPEM)
+	return certLoginRequestViaLBOnMount(t, "auth/cert-nt", clientCertPEM, clientKeyPEM)
 }
 
-func certLoginRequestViaLBOnMount(t *testing.T, mount, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+func certLoginRequestViaLBOnMount(t *testing.T, mount, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
 	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
 	u := fmt.Sprintf("%s/v1/%s/login", LBNodeURL(), mount)
 	headers := map[string]string{"Content-Type": "application/json"}
-	body := fmt.Sprintf(`{"role":"%s"}`, role)
-	return DoLBRequest(t, "POST", u, headers, body, &cert)
+	return DoLBRequest(t, "POST", u, headers, "{}", &cert)
 }
 
 // --- LB Passthrough Helpers ---
@@ -895,8 +912,8 @@ func TransparentOpsRequest(t *testing.T, method, path string, port int, jwt, rol
 	return DoRequest(t, method, u, headers, "")
 }
 
-// TransparentOpsRequestNoRole makes a transparent operations request using JWT implicit auth
-// without specifying a role (relies on default_role configured on the auth method).
+// TransparentOpsRequestNoRole makes a transparent operations request using
+// JWT implicit auth without selecting a role.
 func TransparentOpsRequestNoRole(t *testing.T, method, path string, port int, jwt string) (int, []byte) {
 	t.Helper()
 	u := fmt.Sprintf("%s/v1/%s", NodeURL(port), path)

@@ -62,9 +62,10 @@ func startCallerIdentityStub(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// setupAccessEnv mounts the rds provider with auto_auth_path and wires one
-// grant to a spec the JWT role's policy may read. Everything is test-local and
-// removed consumer-first, which also clears what a killed run left behind.
+// setupAccessEnv mounts the rds provider with auto_auth_path, wires one grant
+// to a spec, and has a group grant the agent's JWT a namespace role whose
+// policy may read it. Everything is test-local and removed consumer-first,
+// which also clears what a killed run left behind.
 func setupAccessEnv(t *testing.T, port int) {
 	t.Helper()
 	stub := startCallerIdentityStub(t)
@@ -79,7 +80,7 @@ func setupAccessEnv(t *testing.T, port int) {
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+accessRole, port, "")
+		h.RevokeRole(t, port, "auth/jwt/", accessRole)
 		h.APIRequest(t, "DELETE", "sys/providers/"+accessMount, port, "")
 		h.APIRequest(t, "DELETE", "sys/policies/cbp/"+accessPolicy, port, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+accessSpec, port, "")
@@ -110,10 +111,8 @@ func setupAccessEnv(t *testing.T, port int) {
 		`{"credential_spec":"`+accessSpec+`","db_name":"`+accessDBName+`"}`,
 		"create the grant")
 
-	mustWrite("POST", "auth/jwt/role/"+accessRole, `{
-		"token_policies":["`+accessPolicy+`"],"cred_spec_name":"`+accessSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the agent role")
+	h.GrantRole(t, port, "auth/jwt/", accessRole,
+		h.Role{Policies: []string{accessPolicy}, CredSpec: accessSpec}, nil)
 }
 
 func accessRequest(t *testing.T, port int, query string, headers map[string]string) (int, []byte) {
@@ -163,11 +162,22 @@ func TestAccessBackend_ImplicitAuth(t *testing.T) {
 		assertConnectionString(t, body)
 	})
 
-	t.Run("a role the JWT cannot assume answers 401", func(t *testing.T) {
+	t.Run("a role no group grants answers 403", func(t *testing.T) {
 		status, body := accessRequest(t, leader, "?role=e2e-no-such-role",
 			map[string]string{"Authorization": "Bearer " + jwt})
-		if status != 401 {
-			t.Fatalf("expected 401, got %d: %s", status, body)
+		if status != 403 {
+			t.Fatalf("expected 403, got %d: %s", status, body)
+		}
+	})
+
+	t.Run("no role selected answers 400", func(t *testing.T) {
+		status, body := accessRequest(t, leader, "",
+			map[string]string{"Authorization": "Bearer " + jwt})
+		if status != 400 {
+			t.Fatalf("expected 400, got %d: %s", status, body)
+		}
+		if !strings.Contains(string(body), "no role selected") {
+			t.Fatalf("expected the no-role refusal, got: %s", body)
 		}
 	})
 

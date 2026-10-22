@@ -26,7 +26,7 @@ import (
 // leaves to unit coverage.
 //
 // This is the only place the whole chain runs: a claim on a real IdP-issued
-// token, through the role's metadata_claims, into a CEL condition evaluated
+// token, through the user auth mount's facts, into a CEL condition evaluated
 // against the live agent. The unit tests fabricate req.User by hand and start at
 // the CEL layer, so they cannot catch a break in captureUserContext, in the
 // claim mapping, or in the order the two principals are resolved.
@@ -182,7 +182,8 @@ func assertChallengeAudited(t *testing.T, port int) {
 func TestBinding_UnmappedClaimDenies(t *testing.T) {
 	actingAgent := bindingEnv(t)
 
-	// Drop metadata_claims, leaving everything else in place.
+	// Drop the fact mapping, leaving everything else in place. It applies on
+	// the next request.
 	h.SetUserLegClaimMapping(t, leaderPort, false)
 
 	cert, _ := h.GenerateClientCert(t, agentCAPEM, agentCAKey, actingAgent)

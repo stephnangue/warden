@@ -250,10 +250,10 @@ func assertUserAttributed(t *testing.T, port int, wantSubject string) {
 	for time.Now().Before(deadline) {
 		for _, e := range h.ReadAuditEntries(t, nodeNum, h.UserLegMount) {
 			if e.Auth != nil && e.Auth.User != nil && strings.Contains(e.Auth.User.Subject, wantSubject) {
-				// The entry also records the auth role the user's token was
-				// validated under — the role a delegation assertion carries.
-				if e.Auth.User.RoleName != h.UserLegAuthRole {
-					t.Errorf("audited user role_name = %q, want the user auth role %q", e.Auth.User.RoleName, h.UserLegAuthRole)
+				// The user is admitted by the user auth mount and runs under
+				// no role: only the agent leg is granted one.
+				if e.Auth.User.RoleName != "" {
+					t.Errorf("audited user role_name = %q, want none: a user is granted no role", e.Auth.User.RoleName)
 				}
 				// The user is in the root namespace, whose stored path is empty.
 				if e.Auth.User.NamespacePath != "" {

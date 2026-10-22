@@ -13,7 +13,10 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
-const leftoverWarning = `auth mount "jwt/" holds 2 role(s) of a removed format`
+const (
+	leftoverWarning = `auth mount "jwt/" holds 2 role(s) of a removed format`
+	disableWarning  = `1 group(s) have a rule whose mount selector names auth/jwt/`
+)
 
 // fakeSysAuth answers sys/auth listings and reads with a warning, as a server
 // with leftover role storage does.
@@ -26,6 +29,10 @@ func fakeSysAuth(t *testing.T) (*bytes.Buffer, *bytes.Buffer) {
 			_, _ = w.Write([]byte(`{"data":{"mounts":{"jwt/":{"type":"jwt","accessor":"auth_jwt_1","description":"","config":{}}},` +
 				`"warnings":["` + `auth mount \"jwt/\" holds 2 role(s) of a removed format` + `"]}}`))
 		case "/v1/sys/auth/jwt/", "/v1/sys/auth/jwt":
+			if r.Method == http.MethodDelete {
+				_, _ = w.Write([]byte(`{"data":{"message":"Successfully unmounted jwt/","warnings":["` + disableWarning + `"]}}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"data":{"type":"jwt","path":"jwt/","accessor":"auth_jwt_1","description":"","config":{},` +
 				`"warnings":["` + `auth mount \"jwt/\" holds 2 role(s) of a removed format` + `"]}}`))
 		default:
@@ -58,6 +65,14 @@ func TestList_PrintsWarnings(t *testing.T) {
 	assert.Equal(t, "warning: "+leftoverWarning+"\n", stderr.String())
 	assert.Contains(t, stdout.String(), `"jwt/"`)
 	assert.NotContains(t, stdout.String(), "warning", "stdout stays the listing")
+}
+
+func TestDisable_PrintsWarnings(t *testing.T) {
+	stdout, stderr := fakeSysAuth(t)
+	require.NoError(t, runDisable(nil, []string{"jwt/"}))
+	assert.Equal(t, "warning: "+disableWarning+"\n", stderr.String())
+	assert.Contains(t, stdout.String(), `"warnings"`, "the structured output keeps them")
+	assert.Contains(t, stdout.String(), `"disabled": true`)
 }
 
 func TestRead_PrintsWarnings(t *testing.T) {

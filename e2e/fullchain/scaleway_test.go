@@ -155,7 +155,7 @@ func setupScalewayDynChain(t *testing.T, subj scalewaySubject) {
 	t.Helper()
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+scalewayDynAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", scalewayDynAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+scalewayDynSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+scalewayChainSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+scalewayMgmtSecretSpec, leaderPort, "")
@@ -183,10 +183,10 @@ func setupScalewayDynChain(t *testing.T, subj scalewaySubject) {
 
 	// The mount's own role binds its default spec, so the chained spec needs one
 	// bound to it instead.
-	scalewayMustWrite(t, "POST", "auth/jwt/role/"+scalewayDynAgentRole, `{
-		"token_policies":["`+scalewayEnv.Policy()+`"],"cred_spec_name":"`+scalewayDynSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained dynamic agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", scalewayDynAgentRole, h.Role{
+		Policies: []string{scalewayEnv.Policy()},
+		CredSpec: scalewayDynSpec,
+	}, nil)
 }
 
 // scalewayCredStub is a stand-in Scaleway API that exists to be left alone: the
@@ -225,7 +225,7 @@ func setupScalewayStaticChain(t *testing.T, credURL string, subj scalewaySubject
 	t.Helper()
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+scalewayStaticAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", scalewayStaticAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+scalewayStaticSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+scalewayStaticSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+scalewayPairSecretSpec, leaderPort, "")
@@ -247,10 +247,10 @@ func setupScalewayStaticChain(t *testing.T, credURL string, subj scalewaySubject
 			"mint_method":"static_keys","secret_spec":"`+scalewayPairSecretSpec+`"}}`,
 		"create the spec-chained static_keys spec")
 
-	scalewayMustWrite(t, "POST", "auth/jwt/role/"+scalewayStaticAgentRole, `{
-		"token_policies":["`+scalewayEnv.Policy()+`"],"cred_spec_name":"`+scalewayStaticSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained static agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", scalewayStaticAgentRole, h.Role{
+		Policies: []string{scalewayEnv.Policy()},
+		CredSpec: scalewayStaticSpec,
+	}, nil)
 }
 
 var scalewayEnv = h.ProviderEnv{

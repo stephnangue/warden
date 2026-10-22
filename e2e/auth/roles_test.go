@@ -11,9 +11,10 @@ import (
 )
 
 // TestIntrospectRoles_AggregatorReturnsCallerJWTRoles verifies that
-// GET /v1/sys/introspect/roles, called with a JWT bearer, returns the union
-// of roles bound to the caller's identity across the namespace's auth/jwt/
-// mounts. This is the server-side surface that backs the `warden role list` CLI.
+// GET /v1/sys/introspect/roles, called with a JWT bearer, returns the roles
+// groups grant the caller where each role's provider admits it (e2e-reader,
+// on the vault provider, through auth/jwt/). This is the server-side surface
+// that backs the `warden role list` CLI.
 func TestIntrospectRoles_AggregatorReturnsCallerJWTRoles(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)

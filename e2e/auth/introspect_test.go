@@ -35,16 +35,15 @@ func TestIntrospectRoles_DescriptionSurfaces(t *testing.T) {
 
 	const roleName = "e2e-introspect-described"
 	const desc = "Role with a non-empty description for the introspection test"
-	body := fmt.Sprintf(
-		`{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"description":%q}`,
-		desc)
-	status, respBody := h.APIRequest(t, "POST", "auth/jwt/role/"+roleName, port, body)
-	if status != 200 && status != 201 && status != 204 {
-		t.Fatalf("create role failed: status %d, body %s", status, string(respBody))
-	}
-	t.Cleanup(func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+roleName, port, "")
-	})
+	// Discovery evaluates a role at its provider's auto_auth_path, so the role
+	// names the vault provider, whose agents arrive through auth/jwt/.
+	h.GrantRole(t, port, "auth/jwt/", roleName, h.Role{
+		Policies:     []string{"vault-gateway-access"},
+		CredSpec:     "vault-token-reader",
+		Description:  desc,
+		ProviderPath: "vault/",
+	}, nil)
+	t.Cleanup(func() { h.RevokeRole(t, port, "auth/jwt/", roleName) })
 
 	jwt := h.GetDefaultJWT(t)
 	u := fmt.Sprintf("%s/v1/sys/introspect/roles", h.NodeURL(port))
@@ -74,23 +73,34 @@ func TestIntrospectRoles_DescriptionSurfaces(t *testing.T) {
 }
 
 // TestIntrospectRoles_HidesRolesNotSatisfiable is the security regression:
-// a role whose bound_audiences does NOT match the caller's JWT must NOT
-// appear in the aggregator output. The matcher used during introspection
-// must match the one used during login — leaking role names callable
-// neither here nor elsewhere would reveal information the caller can't act
-// on, defeating the point of introspection.
+// a role no group grants the caller must NOT appear in the aggregator output.
+// Discovery decides membership exactly as a request does — leaking role names
+// the caller cannot assume would reveal information it can't act on,
+// defeating the point of introspection. Three shapes: a group whose rule the
+// caller's facts miss, a group pinned to another mount, and no group at all.
 func TestIntrospectRoles_HidesRolesNotSatisfiable(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	const roleName = "e2e-introspect-bound-other"
-	body := `{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"bound_audiences":["audience-the-caller-does-not-have"]}`
-	status, respBody := h.APIRequest(t, "POST", "auth/jwt/role/"+roleName, port, body)
-	if status != 200 && status != 201 && status != 204 {
-		t.Fatalf("create role failed: status %d, body %s", status, string(respBody))
+	role := h.Role{Policies: []string{"vault-gateway-access"}, CredSpec: "vault-token-reader", ProviderPath: "vault/"}
+	hidden := map[string]func(name string){
+		"e2e-introspect-other-sub": func(name string) {
+			h.GrantRole(t, port, "auth/jwt/", name, role, h.Rule{"sub": {"a-subject-the-caller-does-not-have"}})
+			t.Cleanup(func() { h.RevokeRole(t, port, "auth/jwt/", name) })
+		},
+		"e2e-introspect-other-mount": func(name string) {
+			h.APIRequest(t, "POST", "sys/auth/e2e-introspect-other", port, `{"type":"jwt"}`)
+			t.Cleanup(func() { h.APIRequest(t, "DELETE", "sys/auth/e2e-introspect-other", port, "") })
+			h.GrantRole(t, port, "auth/e2e-introspect-other/", name, role, nil)
+			t.Cleanup(func() { h.RevokeRole(t, port, "auth/e2e-introspect-other/", name) })
+		},
+		"e2e-introspect-ungranted": func(name string) {
+			h.WriteRoleInNS(t, port, "", name, role)
+			t.Cleanup(func() { h.APIRequest(t, "DELETE", "sys/roles/"+name, port, "") })
+		},
 	}
-	t.Cleanup(func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+roleName, port, "")
-	})
+	for name, setup := range hidden {
+		setup(name)
+	}
 
 	jwt := h.GetDefaultJWT(t)
 	u := fmt.Sprintf("%s/v1/sys/introspect/roles", h.NodeURL(port))
@@ -109,8 +119,11 @@ func TestIntrospectRoles_HidesRolesNotSatisfiable(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	for _, r := range resp.Data.Roles {
-		if r["name"] == roleName {
-			t.Fatalf("role %q with mismatched bound_audiences was leaked: %#v", roleName, r)
+		if name, _ := r["name"].(string); hidden[name] != nil {
+			t.Fatalf("role %q the caller is not granted was leaked: %#v", name, r)
+		}
+		if _, ok := r["auth_paths"]; ok {
+			t.Fatalf("discovery names auth mounts: %#v", r)
 		}
 	}
 }

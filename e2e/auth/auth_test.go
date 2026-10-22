@@ -34,26 +34,34 @@ func TestJWTLoginExpiredJWT(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 
-	status, _ := h.LoginJWT(t, jwt, "e2e-reader", port)
+	status, _ := h.LoginJWT(t, jwt, port)
 	if status != 401 && status != 403 && status != 400 {
 		t.Fatalf("expected 401, 403, or 400 for expired JWT, got %d", status)
 	}
 }
 
-// TestJWTLoginWrongAudience verifies JWT with wrong audience is rejected (T-059).
+// TestJWTLoginWrongAudience verifies a JWT not issued for the mount's bound
+// audience is rejected, at login and on the gateway (T-059). The issuer signs
+// it; only the audience is wrong.
 func TestJWTLoginWrongAudience(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	h.APIRequest(t, "POST", "auth/jwt/role/e2e-bound-aud", port,
-		`{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"bound_audiences":["some-other-audience"]}`)
-
-	jwt := h.GetDefaultJWT(t)
-	status, _ := h.LoginJWT(t, jwt, "e2e-bound-aud", port)
+	jwt := h.GetJWTForAudience(t, "e2e-agent", "agent-secret", "")
+	status, _ := h.LoginJWT(t, jwt, port)
 	if status != 401 && status != 403 && status != 400 {
 		t.Fatalf("expected 401, 403, or 400 for wrong audience, got %d", status)
 	}
 
-	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-bound-aud", port, "")
+	status, _ = h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", port, jwt)
+	if status != 401 && status != 403 {
+		t.Fatalf("expected 401 or 403 on the gateway for wrong audience, got %d", status)
+	}
+
+	// The same client's token issued for the bound audience is admitted.
+	status, body := h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config", "e2e-reader", port, h.GetDefaultJWT(t))
+	if status != 200 {
+		t.Fatalf("expected the bound audience to be admitted on the gateway, got %d: %s", status, body)
+	}
 }
 
 // TestJWTLoginWrongIssuer verifies JWT with wrong issuer is rejected (T-060).
@@ -61,7 +69,7 @@ func TestJWTLoginWrongIssuer(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
 	forgedJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlIiwiaXNzIjoiaHR0cDovL2V2aWwuY29tIn0.invalid"
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"e2e-reader"}`, forgedJWT)
+	loginBody := fmt.Sprintf(`{"jwt":"%s"}`, forgedJWT)
 	u := fmt.Sprintf("%s/v1/auth/jwt/login", h.NodeURL(port))
 
 	status, _ := h.DoRequest(t, "POST", u,
@@ -169,8 +177,8 @@ func TestConditionsSourceIPDenied(t *testing.T) {
 
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-deny", port,
 		`{"policy":"path \"vault/role/e2e-reader/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  condition = \"cidrContains('10.0.0.0/8', request.client_ip)\"\n}"}`)
-	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-deny-test", port,
-		`{"token_policies":["e2e-cond-deny"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+	h.GrantRole(t, port, "auth/jwt/", "e2e-cond-deny-test",
+		h.Role{Policies: []string{"e2e-cond-deny"}, CredSpec: "vault-token-reader"}, nil)
 
 	jwt := h.GetDefaultJWT(t)
 
@@ -179,7 +187,7 @@ func TestConditionsSourceIPDenied(t *testing.T) {
 		t.Fatalf("expected 403 with non-matching source_ip condition, got %d", status)
 	}
 
-	h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-deny-test", port, "")
+	h.RevokeRole(t, port, "auth/jwt/", "e2e-cond-deny-test")
 	h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-deny", port, "")
 }
 
@@ -219,10 +227,10 @@ func TestConditionRecordedInAudit(t *testing.T) {
 	// request.path in the audited inputs.
 	h.APIRequest(t, "POST", "sys/policies/cbp/e2e-cond-audit", port,
 		`{"policy":"path \"vault/role/e2e-cond-audit-role/gateway/*\" {\n  capabilities = [\"read\",\"list\"]\n  condition = \"request.path != ''\"\n}"}`)
-	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-audit-role", port,
-		`{"token_policies":["e2e-cond-audit"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+	h.GrantRole(t, port, "auth/jwt/", "e2e-cond-audit-role",
+		h.Role{Policies: []string{"e2e-cond-audit"}, CredSpec: "vault-token-reader"}, nil)
 	defer func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-audit-role", port, "")
+		h.RevokeRole(t, port, "auth/jwt/", "e2e-cond-audit-role")
 		h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-audit", port, "")
 	}()
 
@@ -250,10 +258,10 @@ func TestConditionRecordedInAudit(t *testing.T) {
 func TestConditionRequestNamespaceEnforced(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	h.APIRequest(t, "POST", "auth/jwt/role/e2e-cond-ns-role", port,
-		`{"token_policies":["e2e-cond-ns"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300}`)
+	h.GrantRole(t, port, "auth/jwt/", "e2e-cond-ns-role",
+		h.Role{Policies: []string{"e2e-cond-ns"}, CredSpec: "vault-token-reader"}, nil)
 	defer func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-cond-ns-role", port, "")
+		h.RevokeRole(t, port, "auth/jwt/", "e2e-cond-ns-role")
 		h.APIRequest(t, "DELETE", "sys/policies/cbp/e2e-cond-ns", port, "")
 	}()
 	jwt := h.GetDefaultJWT(t)

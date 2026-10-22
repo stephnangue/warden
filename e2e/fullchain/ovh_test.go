@@ -186,7 +186,7 @@ func setupOVHClientCredChain(t *testing.T, subj scalewaySubject) {
 	t.Helper()
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+ovhChainAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", ovhChainAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+ovhChainSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+ovhChainSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+ovhClientCredSpec, leaderPort, "")
@@ -215,10 +215,10 @@ func setupOVHClientCredChain(t *testing.T, subj scalewaySubject) {
 			"mint_method":"oauth2_token"}}`,
 		"create the chained oauth2_token spec")
 
-	ovhMustWrite(t, "POST", "auth/jwt/role/"+ovhChainAgentRole, `{
-		"token_policies":["`+ovhEnv.Policy()+`"],"cred_spec_name":"`+ovhChainSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", ovhChainAgentRole, h.Role{
+		Policies: []string{ovhEnv.Policy()},
+		CredSpec: ovhChainSpec,
+	}, nil)
 }
 
 // setupOVHAccessKeysChain builds the SPEC-level chain. The source holds nothing
@@ -228,7 +228,7 @@ func setupOVHAccessKeysChain(t *testing.T, subj scalewaySubject) {
 	t.Helper()
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+ovhAccessAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", ovhAccessAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+ovhAccessSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+ovhAccessSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+ovhPairSecretSpec, leaderPort, "")
@@ -251,10 +251,10 @@ func setupOVHAccessKeysChain(t *testing.T, subj scalewaySubject) {
 			"mint_method":"access_keys","secret_spec":"`+ovhPairSecretSpec+`"}}`,
 		"create the spec-chained access_keys spec")
 
-	ovhMustWrite(t, "POST", "auth/jwt/role/"+ovhAccessAgentRole, `{
-		"token_policies":["`+ovhEnv.Policy()+`"],"cred_spec_name":"`+ovhAccessSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained access_keys agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", ovhAccessAgentRole, h.Role{
+		Policies: []string{ovhEnv.Policy()},
+		CredSpec: ovhAccessSpec,
+	}, nil)
 }
 
 // signOVHS3Request signs a gateway request the way an S3 client authenticating

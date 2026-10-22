@@ -25,6 +25,12 @@ const (
 // message of their path.
 var errNoRoleSelected = errors.New("no role selected")
 
+// errNoImplicitCredential refuses implicit auth for a request that carries no
+// credential at all (no token, no client certificate). It is answered 401
+// whether or not a role is selected: the client has to authenticate first,
+// and a 401 is what starts that (an OAuth challenge, git's Basic retry).
+var errNoImplicitCredential = errors.New("no credential presented")
+
 // errHumanMountOnAgentLeg refuses implicit auth for the agent through a mount
 // whose entity kind is human.
 var errHumanMountOnAgentLeg = errors.New("agent leg cannot admit through a human mount")
@@ -37,6 +43,22 @@ func implicitAuthFailure(err error, noRole string) *logical.Response {
 		return logical.ErrorResponse(logical.ErrBadRequest(noRole))
 	}
 	return logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
+}
+
+// providerImplicitAuthFailure is implicitAuthFailure on a provider's
+// transparent surface (a gateway path or an access backend's access path),
+// noRole being that surface's message. A git smart-HTTP request that selects
+// no role is answered 401 rather than 400: git sends the role as the Basic
+// username, and only after a challenge, so a 400 would end the exchange where
+// a 401 makes git retry with one. Either way a git request gets the Basic
+// challenge.
+func providerImplicitAuthFailure(req *logical.Request, err error, noRole string) *logical.Response {
+	resp := implicitAuthFailure(err, noRole)
+	if errors.Is(err, errNoRoleSelected) && isGitSmartHTTP(req) {
+		resp = logical.ErrorResponse(logical.ErrUnauthorized(noRole))
+	}
+	attachGitBasicChallenge(req, resp)
+	return resp
 }
 
 // takesRoleGrant reports whether te takes its role per request rather than

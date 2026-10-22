@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -53,13 +54,19 @@ func runDisable(cmd *cobra.Command, args []string) error {
 		return helpers.DryRun(c, "DELETE", "sys/auth/{path}", nil)
 	}
 
-	// Disable the auth method
-	err = c.Sys().DisableAuth(path)
+	// Disable the auth method. Its warnings name groups whose rules still list
+	// the mount: they go to stderr and stay in the structured output.
+	warnings, err := c.Sys().DisableAuthWithWarnings(context.Background(), path)
 	if err != nil {
 		return fmt.Errorf("error disabling auth method at path %s: %w", path, err)
 	}
+	helpers.PrintWarnings(warnings)
 
-	return helpers.RenderMap(map[string]any{"path": path, "disabled": true}, func() {
+	data := map[string]any{"path": path, "disabled": true}
+	if len(warnings) > 0 {
+		data["warnings"] = warnings
+	}
+	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Disabled auth method at: %s\n", path)
 	})
 }

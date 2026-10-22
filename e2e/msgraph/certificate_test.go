@@ -144,16 +144,14 @@ func setupOBOOverSource(t *testing.T, source, spec, role string) {
 			"subject_token_source": "user_identity",
 		},
 	}), "create the on_behalf_of spec over "+source)
-	mustAPI(t, leaderPort, "POST", "auth/jwt/role/"+role,
-		fmt.Sprintf(`{"token_policies":[%q],"cred_spec_name":%q,"user_claim":"sub","token_ttl":3600}`, policyName, spec),
-		"create the agent role for "+spec)
+	h.GrantRole(t, leaderPort, "auth/jwt/", role, h.Role{Policies: []string{policyName}, CredSpec: spec}, nil)
 }
 
 // setupCertSource creates a certificate source holding its key, issued by ca.
 func setupCertSource(t *testing.T, ca *testCA) (*rsa.PrivateKey, []byte) {
 	t.Helper()
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+certRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", certRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+certSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+certSource, leaderPort, "")
 	}
@@ -282,7 +280,7 @@ func TestCertificate_KMSKey_OnBehalfOf(t *testing.T) {
 	ensureEnv(t)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+kmsRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", kmsRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+kmsSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+kmsSignerSpec, leaderPort, "")

@@ -135,7 +135,8 @@ func mustWrite(t *testing.T, port int, path, body, what string) {
 }
 
 // setupAlicloudKeyless provisions the keyless source, an exchange spec, the policy
-// and JWT role that bind it, and the agent-only mount.
+// and the role that binds it (granted to agents of auth/jwt/), and the
+// agent-only mount.
 //
 // Cleanup is registered before anything is created, so a failure partway through
 // does not leave objects behind for the next run to trip over.
@@ -145,7 +146,7 @@ func setupAlicloudKeyless(t *testing.T, port int, stsURL string) {
 	t.Cleanup(func() {
 		leader := h.GetLeaderPort(t)
 		h.APIRequest(t, "DELETE", "sys/providers/"+alicloudMount, leader, "")
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+alicloudJWTRole, leader, "")
+		h.RevokeRole(t, leader, "auth/jwt/", alicloudJWTRole)
 		h.APIRequest(t, "DELETE", "sys/policies/cbp/"+alicloudPolicyName, leader, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+alicloudSpecName, leader, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+alicloudSourceName, leader, "")
@@ -182,12 +183,8 @@ func setupAlicloudKeyless(t *testing.T, port int, stsURL string) {
 		"policy": fmt.Sprintf("path %q {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}", alicloudMount+"/gateway*"),
 	}), "create alicloud gateway policy")
 
-	mustWrite(t, port, "auth/jwt/role/"+alicloudJWTRole, mustJSON(t, map[string]any{
-		"token_policies": []string{alicloudPolicyName},
-		"user_claim":     "sub",
-		"cred_spec_name": alicloudSpecName,
-		"token_ttl":      3600,
-	}), "create alicloud JWT role")
+	h.GrantRole(t, port, "auth/jwt/", alicloudJWTRole,
+		h.Role{Policies: []string{alicloudPolicyName}, CredSpec: alicloudSpecName}, nil)
 
 	mustWrite(t, port, "sys/providers/"+alicloudMount, `{"type":"alicloud"}`, "mount alicloud provider")
 
@@ -227,7 +224,7 @@ func TestAlicloudKeyless_MintsFromAWardenAssertion(t *testing.T) {
 	jwt := h.GetDefaultJWT(t)
 	// The Alicloud gateway is agent-only and takes its caller identity the way an
 	// ACS3 client would carry a session token: a JWT in x-acs-security-token is
-	// transparent mode, and the role comes from the mount's default_role. A plain
+	// transparent mode, and the role comes from the provider's default_role. A plain
 	// Authorization: Bearer is not a credential this provider recognises — it
 	// yields a 401 before anything mints.
 	//

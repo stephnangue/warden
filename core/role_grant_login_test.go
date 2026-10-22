@@ -353,6 +353,34 @@ func TestAdmissionLogin_NoRoleSelected(t *testing.T) {
 		assert.Nil(t, req.TokenEntry())
 	})
 
+	// A request with no credential at all is unauthenticated first: 401, so
+	// the client authenticates (an OAuth challenge, git's Basic retry).
+	t.Run("gateway without a credential", func(t *testing.T) {
+		hr := httptest.NewRequest(http.MethodGet, "/v1/gw/gateway/x", nil)
+		req := &logical.Request{Path: "gw/gateway/x", Operation: logical.ReadOperation, HTTPRequest: hr}
+		resp, _, _ := e.c.handleNonLoginRequest(e.ctx, req)
+		require.NotNil(t, resp)
+		require.Error(t, resp.Err)
+		assert.Equal(t, http.StatusUnauthorized, logical.GetErrorCode(resp.Err))
+		assert.Nil(t, req.TokenEntry())
+	})
+
+	// git sends the role as the Basic username only after a challenge, so a
+	// git request that selects no role is challenged with 401, not refused
+	// with 400.
+	t.Run("gateway git smart-HTTP", func(t *testing.T) {
+		hr := httptest.NewRequest(http.MethodGet, "/v1/gw/gateway/acme/widgets.git/info/refs?service=git-upload-pack", nil)
+		hr.Header.Set("Authorization", "Bearer "+token)
+		req := &logical.Request{Path: "gw/gateway/acme/widgets.git/info/refs", Operation: logical.ReadOperation, HTTPRequest: hr}
+		resp, _, _ := e.c.handleNonLoginRequest(e.ctx, req)
+		require.NotNil(t, resp)
+		require.Error(t, resp.Err)
+		assert.Equal(t, http.StatusUnauthorized, logical.GetErrorCode(resp.Err))
+		assert.Contains(t, resp.Err.Error(), noRoleSelectedGateway)
+		assert.Equal(t, `Basic realm="warden"`, resp.Headers.Get("WWW-Authenticate"))
+		assert.Nil(t, req.TokenEntry())
+	})
+
 	assert.Zero(t, b.logins.Load(), "no login ran")
 	assert.Nil(t, e.cached("jwt/", token), "nothing was cached")
 

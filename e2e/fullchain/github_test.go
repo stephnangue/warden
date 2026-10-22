@@ -310,8 +310,8 @@ func setupGitHubChain(t *testing.T, env h.ProviderEnv, keyPEM string) {
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+githubChainAgentRole, leaderPort, "")
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+githubChainAgentRoleB, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", githubChainAgentRole)
+		h.RevokeRole(t, leaderPort, "auth/jwt/", githubChainAgentRoleB)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+githubChainSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+githubChainSecretSpec, leaderPort, "")
 	}
@@ -339,13 +339,13 @@ func setupGitHubChain(t *testing.T, env h.ProviderEnv, keyPEM string) {
 			"secret_spec":"`+githubChainSecretSpec+`","secret_field":"private_key"}}`,
 		"create the keyless consuming spec")
 
-	// Two roles bound to the same spec, one per agent: a role pins the spec its
-	// callers mint, and both agents must land on this one.
+	// Two roles granted at the JWT mount over the same spec, one per agent: a role
+	// pins the spec its callers mint, and both agents must land on this one.
 	for _, role := range []string{githubChainAgentRole, githubChainAgentRoleB} {
-		mustWrite("POST", "auth/jwt/role/"+role, `{
-			"token_policies":["`+env.Policy()+`"],"cred_spec_name":"`+githubChainSpec+`",
-			"user_claim":"sub","token_ttl":3600}`,
-			"create the keyless agent role "+role)
+		h.GrantRole(t, leaderPort, "auth/jwt/", role, h.Role{
+			Policies: []string{env.Policy()},
+			CredSpec: githubChainSpec,
+		}, nil)
 	}
 }
 
@@ -530,7 +530,7 @@ func setupGitHubPerAgentChain(t *testing.T, env h.ProviderEnv, keyPEMByAgent map
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+githubPerAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", githubPerAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+githubPerAgentSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+githubPerAgentSecretSpec, leaderPort, "")
 	}
@@ -566,9 +566,10 @@ func setupGitHubPerAgentChain(t *testing.T, env h.ProviderEnv, keyPEMByAgent map
 	// It does not by itself prove the cache key separates two agents: these two
 	// present different tokens, so their fingerprints differ whatever else the key
 	// carries. What the key must ALSO cover is the claims a templated path resolves
-	// from, which are a function of the auth role's mapping and not of the token
-	// alone — two roles over one token would otherwise share an entry. That is
-	// pinned where it can be constructed, in the manager's own tests.
+	// from, which are a function of the claim mapping the agent was admitted under
+	// and not of the token alone — two mappings over one token would otherwise
+	// share an entry. That is pinned where it can be constructed, in the
+	// manager's own tests.
 	mustWrite("POST", "sys/cred/specs/"+githubPerAgentSpec, `{
 		"type":"github_token","source":"`+env.Source()+`","config":{
 			"mint_method":"app","app_id":"`+githubAppID+`",
@@ -577,12 +578,13 @@ func setupGitHubPerAgentChain(t *testing.T, env h.ProviderEnv, keyPEMByAgent map
 			"secret_cache_ttl":"5m"}}`,
 		"create the per-agent consuming spec")
 
-	// The role binds no subject, so any agent the issuer vouches for reaches this
-	// one spec — which is the arrangement the row is about.
-	mustWrite("POST", "auth/jwt/role/"+githubPerAgentRole, `{
-		"token_policies":["`+env.Policy()+`"],"cred_spec_name":"`+githubPerAgentSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the shared per-agent role")
+	// The role is granted to every agent the JWT mount admits, so any agent the
+	// issuer vouches for reaches this one spec — which is the arrangement the row
+	// is about.
+	h.GrantRole(t, leaderPort, "auth/jwt/", githubPerAgentRole, h.Role{
+		Policies: []string{env.Policy()},
+		CredSpec: githubPerAgentSpec,
+	}, nil)
 }
 
 // TestGitHub_PerAgentChainedKey is what {{agent.sub}} exists for: one spec, holding

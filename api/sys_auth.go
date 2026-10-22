@@ -85,6 +85,14 @@ func (c *Sys) DisableAuth(path string) error {
 }
 
 func (c *Sys) DisableAuthWithContext(ctx context.Context, path string) error {
+	_, err := c.DisableAuthWithWarnings(ctx, path)
+	return err
+}
+
+// DisableAuthWithWarnings is DisableAuthWithContext that also returns the
+// server's non-fatal warnings (nil when there are none), such as groups whose
+// rules still name the disabled mount.
+func (c *Sys) DisableAuthWithWarnings(ctx context.Context, path string) ([]string, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -94,7 +102,16 @@ func (c *Sys) DisableAuthWithContext(ctx context.Context, path string) error {
 	if resp != nil {
 		defer resp.Body.Close()
 	}
-	return err
+	if err != nil {
+		return nil, err
+	}
+
+	resource, perr := ParseResource(resp.Body)
+	if perr != nil || resource == nil || resource.Data == nil {
+		// The mount is disabled; a body that does not parse only loses warnings.
+		return nil, nil
+	}
+	return parseWarnings(resource.Data["warnings"]), nil
 }
 
 func (c *Sys) AuthInfo(path string) (*AuthMountOutput, error) {

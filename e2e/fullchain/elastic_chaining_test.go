@@ -86,7 +86,7 @@ func setupElasticChain(t *testing.T, subj scalewaySubject, secretSpec, secretPat
 	useJWTAgentLeg(t, elasticEnv)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+elasticChainAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", elasticChainAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+elasticChainSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+elasticChainSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+secretSpec, leaderPort, "")
@@ -123,10 +123,8 @@ func setupElasticChain(t *testing.T, subj scalewaySubject, secretSpec, secretPat
 		`{"type":"api_key","source":"`+elasticChainSource+`","config":{"expiration":"1h"}}`,
 		"create the chained elastic spec")
 
-	elasticMustWrite(t, "POST", "auth/jwt/role/"+elasticChainAgentRole, `{
-		"token_policies":["`+elasticEnv.Policy()+`"],"cred_spec_name":"`+elasticChainSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", elasticChainAgentRole,
+		h.Role{Policies: []string{elasticEnv.Policy()}, CredSpec: elasticChainSpec}, nil)
 }
 
 // TestElasticChaining_SourceFetchesTheClusterKeyPerRequest is the whole feature

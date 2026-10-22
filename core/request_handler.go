@@ -2424,8 +2424,9 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 // path or an access backend's access path. The caller has already decided, via
 // isTransparentRequest, that backend authenticates this request implicitly and
 // under which role. It returns nil once the agent is authenticated, or the
-// response to answer with when it is not: 400 with noRole (the surface's own
-// wording) for a request that selects no role, 401 for any other failure.
+// response to answer with when it is not (providerImplicitAuthFailure): 400
+// with noRole (the surface's own wording) for a request that selects no role,
+// 401 for any other failure.
 func (c *Core) authenticateImplicitly(ctx context.Context, req *logical.Request, backend logical.Backend, authRole, noRole string) *logical.Response {
 	err := c.handleTransparentAuth(ctx, req, backend, authRole)
 	if err == nil {
@@ -2437,9 +2438,7 @@ func (c *Core) authenticateImplicitly(ctx context.Context, req *logical.Request,
 		logger.String("operation", string(req.Operation)),
 		logger.String("request_id", req.RequestID),
 	)
-	errResp := implicitAuthFailure(err, noRole)
-	attachGitBasicChallenge(req, errResp)
-	return errResp
+	return providerImplicitAuthFailure(req, err, noRole)
 }
 
 // providerTransparentSurface reports whether a request that takes the
@@ -2750,14 +2749,21 @@ func (c *Core) userLegConfigWarnings(ctx context.Context, entry *MountEntry) []s
 // (req.Transparent, req.SetTokenEntry, and the ClientToken assignment). Used by
 // both gateway requests and transparent operations.
 //
-// A request that selects no role is refused with errNoRoleSelected before the
-// credential is admitted: nothing is logged in and nothing is cached. A
+// A request that selects no role is refused before the credential is admitted:
+// nothing is logged in and nothing is cached. It is refused with
+// errNoImplicitCredential when it carries no credential at all (the client
+// must authenticate first), else with errNoRoleSelected. A
 // credential admitted through a mount whose entity kind is human is refused
 // with errHumanMountOnAgentLeg before the token is set on req: a human mount
 // may admit without an audience binding of its own, so it never carries the
 // agent leg.
 func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, autoAuthPath, authRole string) error {
 	if authRole == "" {
+		// Presence only, from the request alone: a token or a client
+		// certificate the listener already parsed. Nothing is verified.
+		if req.ClientToken == "" && extractTransparentClientCert(req) == nil {
+			return errNoImplicitCredential
+		}
 		return errNoRoleSelected
 	}
 
