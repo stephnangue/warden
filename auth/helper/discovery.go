@@ -6,16 +6,6 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// Field descriptions for the discovery fields every auth method's role
-// carries. The discovery server (list_roles) turns them into the role's
-// skill URI and the URL an agent calls.
-const (
-	SkillFieldDescription = "Name of the skill that teaches an agent to use this role. " +
-		"Defaults to the skill of the provider at provider_path."
-	ProviderPathFieldDescription = "Mount path of the provider this role is used with, relative to the " +
-		"role's namespace (e.g. vault/). The discovery server derives the role's URL from it."
-)
-
 // maxProviderPathLen bounds provider_path; mount paths are short.
 const maxProviderPathLen = 256
 

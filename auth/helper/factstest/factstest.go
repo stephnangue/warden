@@ -1,13 +1,16 @@
 // Package factstest holds helpers for auth method tests: a selector.Source
 // over an admission and a naming, as core builds one, drains that render what
-// a fact yields, a reader for frozen case tables, and checks that the removed
-// auth roles stay gone. Only tests import it.
+// a fact yields, a reader for frozen case tables, the segment-pattern grammar
+// of the removed auth roles, and checks that those roles stay gone. Only tests
+// import it.
 package factstest
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stephnangue/warden/helper/selector"
@@ -32,6 +35,37 @@ func Frozen[T any](t testing.TB, name string) []T {
 		t.Fatalf("frozen table %s is empty", name)
 	}
 	return out
+}
+
+// SegmentPatternError reports why p is not a segment pattern as the removed
+// auth roles accepted them in allowed_uri_sans and allowed_spiffe_ids: '+'
+// one segment, '*' as the last segment one or more, "+*" forbidden, no empty
+// body or segment ("scheme://*" and a bare "*" match everything). The role
+// conversions in the method tests refuse what it refuses.
+func SegmentPatternError(p string) error {
+	if strings.Contains(p, "+*") {
+		return fmt.Errorf("pattern %q: '+*' is forbidden", p)
+	}
+	body := p
+	if _, rest, ok := strings.Cut(p, "://"); ok {
+		body = rest
+	}
+	if body == "" {
+		return fmt.Errorf("pattern %q: empty body", p)
+	}
+	if body == "*" {
+		return nil
+	}
+	parts := strings.Split(body, "/")
+	for i, s := range parts {
+		if s == "" {
+			return fmt.Errorf("pattern %q: empty segment at position %d", p, i)
+		}
+		if s == "*" && i != len(parts)-1 {
+			return fmt.Errorf("pattern %q: '*' is only allowed as the last segment", p)
+		}
+	}
+	return nil
 }
 
 // Source answers fact names from Adm under Naming, as core's matcher does:

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/framework"
@@ -18,49 +17,6 @@ import (
 const noAudiencesWarning = "bound_audiences is empty: TokenReview checks the API server's own audience, " +
 	"so a default service-account token for the Kubernetes API is admitted too; " +
 	"set bound_audiences to the audience of the projected tokens issued for Warden"
-
-// validK8sMetadataFields lists the verified TokenReview attributes usable in a
-// role's metadata_mappings.
-var validK8sMetadataFields = map[string]bool{
-	"service_account_namespace": true,
-	"service_account_name":      true,
-	"service_account_uid":       true,
-	"username":                  true,
-	"groups":                    true,
-}
-
-// extractK8sMetadata builds the token metadata map from verified TokenReview
-// attributes using the role's mappings (attribute -> metadata key, source ->
-// key). The multi-valued groups attribute is comma-joined. Empty values are
-// skipped. Returns nil when nothing was mapped.
-func extractK8sMetadata(mappings map[string]string, saNamespace, saName, uid, username string, groups []string) map[string]string {
-	if len(mappings) == 0 {
-		return nil
-	}
-	md := make(map[string]string)
-	for source, target := range mappings {
-		var v string
-		switch source {
-		case "service_account_namespace":
-			v = saNamespace
-		case "service_account_name":
-			v = saName
-		case "service_account_uid":
-			v = uid
-		case "username":
-			v = username
-		case "groups":
-			v = strings.Join(groups, ",")
-		}
-		if v != "" {
-			md[target] = v
-		}
-	}
-	if len(md) == 0 {
-		return nil
-	}
-	return md
-}
 
 // pathLogin returns the /login path definition.
 func (b *kubernetesAuthBackend) pathLogin() *framework.Path {

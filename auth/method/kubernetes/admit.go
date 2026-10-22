@@ -84,8 +84,8 @@ var (
 	errTokenReviewCall = authhelper.AdmitError(authhelper.ErrAdmitUnverified, "TokenReview call failed")
 )
 
-// admitToken verifies token against the mount's configuration alone, with no
-// role: reviewWorkload with the mount's bound_audiences as the review's
+// admitToken verifies token against the mount's configuration:
+// reviewWorkload with the mount's bound_audiences as the review's
 // audiences (the API server's own when none are set), the review reporting
 // one of them back (an audience-aware reviewer returns the audiences it
 // validated; one that returns none of the requested ones is not trusted), and

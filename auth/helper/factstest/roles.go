@@ -50,6 +50,19 @@ func (s *RecordingStorage) Delete(ctx context.Context, key string) error {
 	return s.Storage.Delete(ctx, key)
 }
 
+// SeedRole stores role, an auth role as an older version wrote it, under
+// helper.RolePrefix+name in s: what an upgraded mount still carries.
+func SeedRole(t testing.TB, s sdklogical.Storage, name string, role map[string]any) {
+	t.Helper()
+	entry, err := sdklogical.StorageEntryJSON(helper.RolePrefix+name, role)
+	if err != nil {
+		t.Fatalf("seed role %q: %v", name, err)
+	}
+	if err := s.Put(context.Background(), entry); err != nil {
+		t.Fatalf("seed role %q: %v", name, err)
+	}
+}
+
 // AssertRolesGone sends every operation to role/, role/<name> and a nested
 // path under role/ on b and asserts each answers 410 Gone with
 // helper.AuthRolesRemovedMessage.

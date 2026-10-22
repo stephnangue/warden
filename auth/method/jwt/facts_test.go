@@ -516,7 +516,7 @@ func TestConfigWrite_FactsRefused(t *testing.T) {
 // A stored config whose facts no longer compile (written under looser rules,
 // or edited in storage) does not fail the mount: it is installed with no
 // naming, so the mount answers no fact and nothing reading facts can match its
-// admissions. Today's role logins are not affected by facts.
+// admissions. Logins themselves are not affected by facts.
 func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 	ctx := context.Background()
 	privAny, pemStr := genTestPubKeyPEM(t, "ECDSA")
@@ -533,7 +533,6 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		entry, err := sdklogical.StorageEntryJSON("config", bad)
 		require.NoError(t, err)
 		require.NoError(t, b.storageView.Put(ctx, entry))
-		require.NoError(t, b.setRole(ctx, &JWTRole{Name: "reader", TokenPolicies: []string{"read"}, TokenTTL: "1h"}))
 
 		require.NoError(t, b.Initialize(ctx), "a bad mapping does not fail the load")
 		require.NotNil(t, b.config)
@@ -542,7 +541,7 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		assert.Empty(t, b.FactNames())
 
 		resp := login(t, b, signES256(t, key, baseClaims(nil)))
-		require.Equal(t, http.StatusOK, resp.StatusCode, "role logins do not read facts")
+		require.Equal(t, http.StatusOK, resp.StatusCode, "logins do not read facts")
 		adm := resp.Auth.Admission
 		require.NotNil(t, adm)
 		adm.MountPath = "auth/jwt/"

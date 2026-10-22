@@ -882,7 +882,7 @@ func convertGlob(p string) (string, error) {
 // URIs without one, which a glob cannot say, so it is refused: write the
 // scheme.
 func convertSegmentPattern(p string) (string, error) {
-	if err := helper.ValidatePattern(p); err != nil {
+	if err := factstest.SegmentPatternError(p); err != nil {
 		return "", err
 	}
 	scheme, body, ok := strings.Cut(p, "://")

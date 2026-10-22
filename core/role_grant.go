@@ -61,19 +61,18 @@ func providerImplicitAuthFailure(req *logical.Request, err error, noRole string)
 	return resp
 }
 
-// takesRoleGrant reports whether te takes its role per request rather than
-// carrying one: a token an auth mount issued (it names the mount). No token is
-// issued with a role; a token reloaded from storage names its mount but has
-// lost its admission, and is refused. Root and other tokens no mount issued
-// name no mount: they do not qualify and keep authorizing with the policies
+// takesRoleGrant reports whether te takes its role per request: a token an
+// auth mount issued (it names the mount). No token is issued with a role, so
+// every token an auth mount issues qualifies; root and other tokens no mount
+// issued name no mount, do not qualify, and keep authorizing with the policies
 // they were issued.
 //
 // A qualifying token is an admission token. One without an admission (a token
-// of that shape built any other way) qualifies too and is refused. A role
-// written on a per-request copy (RoleName) is this function's own result,
-// never an input: the check runs before the projection.
+// reloaded from storage, which has lost it, or one an older version stored
+// with a role) qualifies too and is refused. A role written on a per-request
+// copy (RoleName) is resolveRoleGrant's own result and is not consulted here.
 func takesRoleGrant(te *logical.TokenEntry) bool {
-	return te.MountAccessor != "" && te.RoleName == ""
+	return te.MountAccessor != ""
 }
 
 // resolveRoleGrant decides the role req runs under when its token te takes its
@@ -98,15 +97,16 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 //
 // It is the only writer of the request's grant, which lives inside req by
 // value. Lock-free; on a steady membership it allocates nothing, whether it
-// grants, refuses, or leaves a role-carrying token alone.
+// grants, refuses, or leaves a token no mount issued alone.
 func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, now time.Time) {
 	if !takesRoleGrant(te) {
 		req.ClearRoleGrant()
 		return
 	}
 
-	// Whatever happens below, an admission token runs with the granted role's
-	// policies and spec or with none.
+	// Whatever happens below, an admission token runs with the granted role,
+	// its policies and spec, or with none.
+	te.RoleName = ""
 	te.Policies = nil
 	te.CredentialSpec = ""
 
@@ -159,6 +159,7 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 func withholdRoleGrant(req *logical.Request, te *logical.TokenEntry) {
 	req.ClearRoleGrant()
 	if takesRoleGrant(te) {
+		te.RoleName = ""
 		te.Policies = nil
 		te.CredentialSpec = ""
 	}

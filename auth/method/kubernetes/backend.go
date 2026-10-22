@@ -291,7 +291,7 @@ The "kubernetes" auth method validates workload service-account tokens
 by calling the Kubernetes TokenReview API on the issuing kube-apiserver.
 
 Configure: kubernetes_host, kubernetes_ca_cert, optionally token_reviewer_jwt.
-Roles bind to bound_service_account_names and bound_service_account_namespaces.
-The mount's entity_kind and facts name what it admits; bound_audiences is
-stored for mount-level audience binding and not used by logins yet.
+The mount's bound_audiences are the audiences each TokenReview checks; its
+entity_kind and facts name what it admits. A login selects no role: the role
+a request runs under is granted per request by the namespace's groups.
 `

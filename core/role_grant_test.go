@@ -252,6 +252,18 @@ func TestRoleGrant_Refusals(t *testing.T) {
 			reason:  logical.RoleDeniedNoAdmission,
 			message: "token carries no admission to grant a role from; present the credential instead",
 		},
+		{
+			// An older version stored the role and its policies on the token;
+			// neither is honoured.
+			name: "a token stored with a role",
+			request: func(e *grantEnv) *logical.Request {
+				req := mustTransparent(e, e.issue(nil, []string{"deploy"}), "deploy")
+				req.TokenEntry().RoleName = "deploy"
+				return req
+			},
+			reason:  logical.RoleDeniedNoAdmission,
+			message: "token carries no admission to grant a role from; present the credential instead",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

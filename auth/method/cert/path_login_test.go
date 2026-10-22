@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/auth/helper/factstest"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
@@ -159,157 +160,6 @@ func testClientCert(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.Private
 	return cert
 }
 
-func TestValidateCertConstraints_AllowedCommonNames(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	cert := testClientCert(t, caCert, caKey, "agent-1")
-
-	// Matching glob pattern
-	role := &CertRole{AllowedCommonNames: []string{"agent-*"}}
-	if err := validateCertConstraints(cert, role); err != nil {
-		t.Fatalf("expected no error for matching CN, got: %v", err)
-	}
-
-	// Non-matching glob pattern
-	role = &CertRole{AllowedCommonNames: []string{"server-*"}}
-	if err := validateCertConstraints(cert, role); err == nil {
-		t.Fatal("expected error for non-matching CN")
-	}
-
-	// Empty constraint (should pass)
-	role = &CertRole{}
-	if err := validateCertConstraints(cert, role); err != nil {
-		t.Fatalf("expected no error for empty constraints, got: %v", err)
-	}
-}
-
-func TestValidateCertConstraints_AllowedDNSSANs(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	cert := testClientCert(t, caCert, caKey, "agent", func(tmpl *x509.Certificate) {
-		tmpl.DNSNames = []string{"agent.example.com"}
-	})
-
-	// Matching glob
-	role := &CertRole{AllowedDNSSANs: []string{"*.example.com"}}
-	if err := validateCertConstraints(cert, role); err != nil {
-		t.Fatalf("expected no error for matching DNS SAN, got: %v", err)
-	}
-
-	// Non-matching
-	role = &CertRole{AllowedDNSSANs: []string{"*.other.com"}}
-	if err := validateCertConstraints(cert, role); err == nil {
-		t.Fatal("expected error for non-matching DNS SAN")
-	}
-}
-
-func TestValidateCertConstraints_AllowedEmailSANs(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	cert := testClientCert(t, caCert, caKey, "agent", func(tmpl *x509.Certificate) {
-		tmpl.EmailAddresses = []string{"agent@example.com"}
-	})
-
-	role := &CertRole{AllowedEmailSANs: []string{"*@example.com"}}
-	if err := validateCertConstraints(cert, role); err != nil {
-		t.Fatalf("expected no error for matching email SAN, got: %v", err)
-	}
-
-	role = &CertRole{AllowedEmailSANs: []string{"*@other.com"}}
-	if err := validateCertConstraints(cert, role); err == nil {
-		t.Fatal("expected error for non-matching email SAN")
-	}
-}
-
-func TestValidateCertConstraints_AllowedURISANs(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	cert := testClientCert(t, caCert, caKey, "agent", func(tmpl *x509.Certificate) {
-		u, _ := url.Parse("spiffe://example.com/dept/team/agent")
-		tmpl.URIs = append(tmpl.URIs, u)
-	})
-
-	tests := []struct {
-		name    string
-		pattern string
-		wantErr bool
-	}{
-		// Prefix wildcard
-		{"prefix match", "spiffe://example.com/dept/*", false},
-		{"prefix mismatch domain", "spiffe://other.com/dept/*", true},
-		{"prefix mismatch path", "spiffe://example.com/other/*", true},
-
-		// Segment wildcard (+)
-		{"plus trust domain", "spiffe://+/dept/team/agent", false},
-		{"plus middle segment", "spiffe://example.com/+/team/agent", false},
-		{"plus multiple", "spiffe://+/+/+/agent", false},
-		{"plus mismatch", "spiffe://+/other/team/agent", true},
-
-		// Catch-all
-		{"scheme catch-all", "spiffe://*", false},
-		{"scheme catch-all wrong scheme", "https://*", true},
-
-		// Exact match
-		{"exact match", "spiffe://example.com/dept/team/agent", false},
-		{"exact mismatch", "spiffe://example.com/dept/team/other", true},
-
-		// Combined + and *
-		{"plus and star", "spiffe://+/dept/*", false},
-		{"plus and star mismatch", "spiffe://+/other/*", true},
-
-		// Empty constraint (should pass)
-		{"empty constraint", "", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var role *CertRole
-			if tc.pattern == "" {
-				role = &CertRole{}
-			} else {
-				role = &CertRole{AllowedURISANs: []string{tc.pattern}}
-			}
-			err := validateCertConstraints(cert, role)
-			if tc.wantErr && err == nil {
-				t.Fatalf("expected error for pattern %q, got nil", tc.pattern)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("expected no error for pattern %q, got: %v", tc.pattern, err)
-			}
-		})
-	}
-}
-
-func TestValidateCertConstraints_AllowedOrganizationalUnits(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	cert := testClientCert(t, caCert, caKey, "agent", func(tmpl *x509.Certificate) {
-		tmpl.Subject.OrganizationalUnit = []string{"Engineering"}
-	})
-
-	role := &CertRole{AllowedOrganizationalUnits: []string{"Engineering"}}
-	if err := validateCertConstraints(cert, role); err != nil {
-		t.Fatalf("expected no error for matching OU, got: %v", err)
-	}
-
-	role = &CertRole{AllowedOrganizationalUnits: []string{"Marketing"}}
-	if err := validateCertConstraints(cert, role); err == nil {
-		t.Fatal("expected error for non-matching OU")
-	}
-}
-
-func TestValidateCertConstraints_AllowedOrganizations(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-	cert := testClientCert(t, caCert, caKey, "agent", func(tmpl *x509.Certificate) {
-		tmpl.Subject.Organization = []string{"Acme Corp"}
-	})
-
-	role := &CertRole{AllowedOrganizations: []string{"Acme Corp"}}
-	if err := validateCertConstraints(cert, role); err != nil {
-		t.Fatalf("expected no error for matching org, got: %v", err)
-	}
-
-	role = &CertRole{AllowedOrganizations: []string{"Other Corp"}}
-	if err := validateCertConstraints(cert, role); err == nil {
-		t.Fatal("expected error for non-matching org")
-	}
-}
-
 func TestExtractPrincipal(t *testing.T) {
 	caCert, caKey, _ := testCA(t)
 
@@ -339,91 +189,6 @@ func TestExtractPrincipal(t *testing.T) {
 				t.Fatalf("expected %q, got %q", tc.expected, result)
 			}
 		})
-	}
-}
-
-func TestExtractCertMetadata(t *testing.T) {
-	caCert, caKey, _ := testCA(t)
-
-	cert := testClientCert(t, caCert, caKey, "svc-ci", func(tmpl *x509.Certificate) {
-		tmpl.Subject.OrganizationalUnit = []string{"platform-core"}
-		tmpl.Subject.Organization = []string{"acme"}
-		tmpl.DNSNames = []string{"a.example.com", "b.example.com"}
-		tmpl.EmailAddresses = []string{"ci@example.com"}
-	})
-
-	t.Run("maps fields, comma-joins multi-valued SANs, skips empty", func(t *testing.T) {
-		// mappings are source (cert field) -> target (metadata key)
-		md := extractCertMetadata(cert, map[string]string{
-			"cn":        "cn",
-			"ou":        "team",
-			"org":       "org",
-			"dns_san":   "hosts", // multi-valued -> comma-joined in order
-			"email_san": "email",
-			"uri_san":   "uri", // no URIs on this cert -> skipped
-		})
-		assert.Equal(t, map[string]string{
-			"cn":    "svc-ci",
-			"team":  "platform-core",
-			"org":   "acme",
-			"hosts": "a.example.com,b.example.com",
-			"email": "ci@example.com",
-		}, md)
-	})
-
-	t.Run("serial", func(t *testing.T) {
-		md := extractCertMetadata(cert, map[string]string{"serial": "sn"})
-		assert.Equal(t, map[string]string{"sn": cert.SerialNumber.String()}, md)
-	})
-
-	t.Run("nil mappings", func(t *testing.T) {
-		assert.Nil(t, extractCertMetadata(cert, nil))
-	})
-
-	t.Run("all empty -> nil", func(t *testing.T) {
-		bare := testClientCert(t, caCert, caKey, "bare")
-		assert.Nil(t, extractCertMetadata(bare, map[string]string{"ou": "team"}))
-	})
-}
-
-func TestMatchesGlob(t *testing.T) {
-	tests := []struct {
-		value    string
-		patterns []string
-		expected bool
-	}{
-		{"agent-1", []string{"agent-*"}, true},
-		{"agent-1", []string{"server-*"}, false},
-		{"agent-1", []string{"server-*", "agent-*"}, true},
-		{"exact-match", []string{"exact-match"}, true},
-		{"foo", []string{}, false},
-	}
-
-	for _, tc := range tests {
-		result := matchesGlob(tc.value, tc.patterns)
-		if result != tc.expected {
-			t.Fatalf("matchesGlob(%q, %v) = %v, want %v", tc.value, tc.patterns, result, tc.expected)
-		}
-	}
-}
-
-func TestMatchesAnyExact(t *testing.T) {
-	tests := []struct {
-		values   []string
-		allowed  []string
-		expected bool
-	}{
-		{[]string{"Engineering"}, []string{"Engineering", "Sales"}, true},
-		{[]string{"Marketing"}, []string{"Engineering", "Sales"}, false},
-		{[]string{"A", "B"}, []string{"B"}, true},
-		{[]string{}, []string{"A"}, false},
-	}
-
-	for _, tc := range tests {
-		result := matchesAnyExact(tc.values, tc.allowed)
-		if result != tc.expected {
-			t.Fatalf("matchesAnyExact(%v, %v) = %v, want %v", tc.values, tc.allowed, result, tc.expected)
-		}
 	}
 }
 
@@ -519,19 +284,19 @@ func TestSetupCertConfig_RejectsSpiffeID(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid principal_claim")
 }
 
-// TestHandleLogin_LegacyRoleClaimIgnored pins that a legacy role still carrying
-// principal_claim=spiffe_id (persisted via setRole, bypassing validation) is
-// never read: the principal comes from the mount's principal_claim.
+// TestHandleLogin_LegacyRoleClaimIgnored pins that a role an older version
+// stored with principal_claim=spiffe_id is never read: the principal comes
+// from the mount's principal_claim.
 func TestHandleLogin_LegacyRoleClaimIgnored(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	b, ctx := createTestBackend(t)
 	require.NoError(t, b.setupCertConfig(ctx, map[string]any{"trusted_ca_pem": caPEM, "principal_claim": "cn"}))
-	require.NoError(t, b.setRole(ctx, &CertRole{
-		Name:               "legacy",
-		AllowedCommonNames: []string{"*"},
-		PrincipalClaim:     "spiffe_id",
-		TokenTTL:           "1h",
-	}))
+	factstest.SeedRole(t, b.storageView, "legacy", map[string]any{
+		"name":                 "legacy",
+		"allowed_common_names": []string{"*"},
+		"principal_claim":      "spiffe_id",
+		"token_ttl":            "1h",
+	})
 
 	clientCert := testClientCert(t, caCert, caKey, "agent", func(tmpl *x509.Certificate) {
 		u, _ := url.Parse("spiffe://example.com/ns/default/sa/agent")

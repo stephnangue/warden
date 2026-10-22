@@ -732,7 +732,7 @@ func escapeValue(s string) string {
 // pattern without a scheme matches no SPIFFE ID today (every ID has one), so
 // it converts to nothing: live is false and the pattern is dropped.
 func convertIDPattern(p string) (v string, live bool, err error) {
-	if err := helper.ValidatePattern(p); err != nil {
+	if err := factstest.SegmentPatternError(p); err != nil {
 		return "", false, err
 	}
 	scheme, body, ok := strings.Cut(p, "://")
@@ -1058,19 +1058,18 @@ func TestConvertIDPattern(t *testing.T) {
 		assert.Equal(t, want, got, in)
 	}
 
-	// A pattern without a scheme matches no SPIFFE ID today, and converts to
-	// nothing.
+	// A pattern without a scheme matched no SPIFFE ID in the role login (an ID
+	// always has one), and converts to nothing.
 	for _, p := range []string{"example.org/+", "*", "+/ns/*"} {
 		_, live, err := convertIDPattern(p)
 		require.NoError(t, err, p)
 		assert.False(t, live, p)
-		assert.False(t, helper.MatchPattern("spiffe://example.org/ns/a", p), p)
 	}
 
-	// Patterns invalid today are refused, as role writes refuse them.
+	// Patterns role writes refused are refused.
 	for _, p := range []string{"spiffe://+*", "spiffe://a//b", "spiffe://*/a"} {
 		_, _, err := convertIDPattern(p)
-		assert.Error(t, err, "pattern %q is invalid today", p)
+		assert.Error(t, err, "pattern %q was refused on role writes", p)
 	}
 
 	// A role left with no live pattern admitted nothing.
