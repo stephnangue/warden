@@ -858,14 +858,28 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		if err := c.parseRequestBody(req); err != nil {
 			return logical.ErrorResponse(err), nil, nil
 		}
-		req.ClientToken = extractToken(req.HTTPRequest)
+
+		// A provider's transparent surface is not only its streaming gateway:
+		// an access backend serves its access/ paths as ordinary requests. When
+		// the provider authenticates this path implicitly, the agent credential
+		// is extracted and logged in exactly as on a gateway path, the provider's
+		// own auto_auth_path taking precedence over the namespace's below.
+		provider, authRole, providerAuth := c.providerTransparentSurface(ctx, req, entry)
+		if providerAuth {
+			req.ClientToken, _ = provider.ExtractTokens(req.HTTPRequest, false)
+			if failure := c.authenticateImplicitly(ctx, req, provider, authRole); failure != nil {
+				return failure, nil, nil
+			}
+		} else {
+			req.ClientToken = extractToken(req.HTTPRequest)
+		}
 
 		// Transparent operations: implicit auth on non-gateway endpoints.
 		// Triggered when there's no explicit X-Warden-Token but an auth path
 		// is configured on the namespace. The Authorization: Bearer value is
 		// treated as a JWT credential, not a Warden token.
 		// Auth role precedence: ?role= query param > X-Warden-Role header > auth method default_role.
-		if req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
+		if !providerAuth && req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
 			var authPath string
 			if ns, _ := namespace.FromContext(ctx); ns != nil {
 				authPath = ns.CustomMetadata["auto_auth_path"]
@@ -1026,17 +1040,8 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// Skip if already marked as unauthenticated (handled above)
 		if !req.StreamUnauthenticated {
 			if isTransparent, role := c.isTransparentRequest(req, matchingBackend); isTransparent {
-				if err := c.handleTransparentAuth(ctx, req, matchingBackend, role); err != nil {
-					c.logger.Warn("implicit authentication failed",
-						logger.Err(err),
-						logger.String("path", req.Path),
-						logger.String("operation", string(req.Operation)),
-						logger.String("request_id", req.RequestID),
-					)
-
-					errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
-					attachGitBasicChallenge(req, errResp)
-					return errResp, nil, nil
+				if failure := c.authenticateImplicitly(ctx, req, matchingBackend, role); failure != nil {
+					return failure, nil, nil
 				}
 			}
 		}
@@ -1235,8 +1240,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			retErr = multierror.Append(retErr, ErrInternalError)
 			return nil, auth, retErr
 		}
-		te.CredentialSpec = ad.CredentialSpec
-		if err := c.mintCredentialForRequest(ctx, req, te); err != nil {
+		if err := c.mintSpecForRequest(ctx, req, te, ad.CredentialSpec); err != nil {
 			c.logger.Error("failed to mint credential for access request",
 				logger.Err(err), logger.String("path", req.Path))
 			return logical.ErrorResponse(accessPathMintError(err)), auth, nil
@@ -2118,7 +2122,20 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	if te == nil {
 		return logical.ErrInternal("cannot mint credential since token entry is nil")
 	}
-	if te.CredentialSpec == "" {
+	return c.mintSpecForRequest(ctx, req, te, te.CredentialSpec)
+}
+
+// mintSpecForRequest mints specName for the request, as the caller te
+// identifies. The spec is a parameter, never written into te, because te may be
+// shared: an implicit login coalesced through one flight hands the same entry to
+// every request that waited on it, so a request-specific spec stored there (an
+// access grant's, say) would race with the others and could mint one request's
+// grant for another.
+func (c *Core) mintSpecForRequest(ctx context.Context, req *logical.Request, te *logical.TokenEntry, specName string) error {
+	if te == nil {
+		return logical.ErrInternal("cannot mint credential since token entry is nil")
+	}
+	if specName == "" {
 		c.logger.Debug("no credential spec for token",
 			logger.String("token_id", te.ID),
 		)
@@ -2131,12 +2148,12 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 	}
 
 	// Validate credential spec exists before attempting to issue
-	if !c.credentialManager.SpecExists(ctx, te.CredentialSpec) {
+	if !c.credentialManager.SpecExists(ctx, specName) {
 		c.logger.Warn("credential spec not found or disabled",
 			logger.String("token_id", te.ID),
-			logger.String("spec_name", te.CredentialSpec),
+			logger.String("spec_name", specName),
 		)
-		return logical.ErrBadRequestf("credential spec %q not found or disabled", te.CredentialSpec)
+		return logical.ErrBadRequestf("credential spec %q not found or disabled", specName)
 	}
 
 	// Calculate token TTL for cache duration
@@ -2178,18 +2195,18 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 
 	// Resolve any caller-supplied token-exchange inputs the spec opts into.
 	// Returns nil for non-exchange specs, leaving the mint path unchanged.
-	inputs, err := caller.ResolveInputs(ctx, te.CredentialSpec)
+	inputs, err := caller.ResolveInputs(ctx, specName)
 	if err != nil {
 		return exchangeInputError(err)
 	}
 
 	// Issue credential using the credential manager
 	// Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
-	cred, err := c.credentialManager.IssueCredential(ctx, caller, te.CredentialSpec, inputs)
+	cred, err := c.credentialManager.IssueCredential(ctx, caller, specName, inputs)
 	if err != nil {
 		// Typed so a gateway error renderer can tell a credential-issuance
 		// failure from the others that share its status; Error() is unchanged.
-		return &logical.CredentialIssueError{Spec: te.CredentialSpec, Err: err}
+		return &logical.CredentialIssueError{Spec: specName, Err: err}
 	}
 
 	// Inject credential into request
@@ -2205,8 +2222,9 @@ func (c *Core) mintCredentialForRequest(ctx context.Context, req *logical.Reques
 // non-streaming path consumes a user credential (captureUserContext runs only in
 // the streaming branch), so reinterpreting Authorization would change agent
 // resolution — on provider config paths and transparent operations alike —
-// while producing a user nobody reads. Streaming gateway requests use the
-// routed backend's ExtractTokens instead.
+// while producing a user nobody reads. Streaming gateway requests, and requests
+// on an access backend's transparent surface, use the routed backend's
+// ExtractTokens instead.
 func extractToken(r *http.Request) string {
 	// Try X-Warden-Token header first
 	if token := r.Header.Get(logical.HeaderWardenToken); token != "" {
@@ -2305,13 +2323,62 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 	return true, authRole
 }
 
-// handleTransparentAuth performs implicit authentication for gateway requests.
+// handleTransparentAuth performs implicit authentication for gateway and access requests.
 // It delegates to performImplicitAuth for credential detection and login.
 // The authRole may be empty — the auth method's default_role config provides the fallback.
 func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, authRole string) error {
 	tmp := backend.(logical.TransparentModeProvider)
 	autoAuthPath := tmp.GetAutoAuthPath()
 	return c.performImplicitAuth(ctx, req, autoAuthPath, authRole)
+}
+
+// authenticateImplicitly is the one entry point for a provider's implicit
+// authentication, whichever surface the request arrived on: a streaming gateway
+// path or an access backend's access path. The caller has already decided, via
+// isTransparentRequest, that backend authenticates this request implicitly and
+// under which auth role. It returns nil once the agent is authenticated, or the
+// 401 to answer with when it is not.
+func (c *Core) authenticateImplicitly(ctx context.Context, req *logical.Request, backend logical.Backend, authRole string) *logical.Response {
+	err := c.handleTransparentAuth(ctx, req, backend, authRole)
+	if err == nil {
+		return nil
+	}
+	c.logger.Warn("implicit authentication failed",
+		logger.Err(err),
+		logger.String("path", req.Path),
+		logger.String("operation", string(req.Operation)),
+		logger.String("request_id", req.RequestID),
+	)
+	errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
+	attachGitBasicChallenge(req, errResp)
+	return errResp
+}
+
+// providerTransparentSurface reports whether a request that takes the
+// non-streaming branch is nonetheless served on its provider's transparent
+// surface, so that the provider authenticates it implicitly. That is the case
+// for an access backend's access paths: they vend credentials in an ordinary
+// response, so they are not streaming paths, yet they are where agents call.
+//
+// It returns the routed provider and the auth role isTransparentRequest
+// resolved, under the same rules as a gateway path: the provider must have an
+// auto_auth_path, the path must be on its transparent surface, and an explicit
+// X-Warden-Token opts out. Only provider mounts are consulted, so system and
+// auth paths cost no extra lookup; help requests are answered from the path
+// schema and never authenticate implicitly, as on the streaming branch.
+func (c *Core) providerTransparentSurface(ctx context.Context, req *logical.Request, entry *MountEntry) (logical.Backend, string, bool) {
+	if entry == nil || entry.Class != mountClassProvider || req.Operation == logical.HelpOperation {
+		return nil, "", false
+	}
+	backend := c.router.MatchingBackend(ctx, req.Path)
+	if backend == nil {
+		return nil, "", false
+	}
+	isTransparent, authRole := c.isTransparentRequest(req, backend)
+	if !isTransparent {
+		return nil, "", false
+	}
+	return backend, authRole, true
 }
 
 // captureUserContext resolves the request's secondary (user) principal and
@@ -2465,7 +2532,7 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 //	  - X-Warden-Token header → explicit auth, implicit auth skipped entirely.
 //
 //	Auth path (config only, no per-request override — resolved before calling):
-//	  - Gateway: provider auto_auth_path config
+//	  - Gateway and access paths: provider auto_auth_path config
 //	  - Operations: namespace auto_auth_path metadata
 //
 //	Inside this function:

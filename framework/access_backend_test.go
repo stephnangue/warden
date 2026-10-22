@@ -77,7 +77,7 @@ func setupAccessBackend(t *testing.T) *AccessBackend {
 func TestAccessBackend_Setup(t *testing.T) {
 	b := setupAccessBackend(t)
 	assert.NotNil(t, b.StorageView)
-	assert.NotNil(t, b.cfg)
+	assert.NotNil(t, b.cfg.Load())
 }
 
 func TestAccessBackend_TransparentMode(t *testing.T) {
