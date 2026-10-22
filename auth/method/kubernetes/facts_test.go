@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -427,79 +426,75 @@ func TestLogin_RefusedCarriesNoAdmission(t *testing.T) {
 // Metadata equivalence: the mapping renders what metadata_mappings extracts
 // =============================================================================
 
-func TestRenderMetadata_EquivalentToExtractK8sMetadata(t *testing.T) {
-	type review struct {
-		ns, name, uid string
-		groups        []string
-	}
-	check := func(t *testing.T, r review, mapping map[string]string) {
-		t.Helper()
-		username := serviceAccountUsernamePrefix + r.ns + ":" + r.name
-		want := extractK8sMetadata(mapping, r.ns, r.name, r.uid, username, r.groups)
-		naming, err := compileFacts("", mapping)
-		require.NoError(t, err)
-		status := &tokenReviewStatus{Authenticated: true, User: tokenReviewUser{Username: username, UID: r.uid, Groups: r.groups}}
-		assert.Equal(t, want, newAdmission(status, r.ns, r.name, nil, nil).RenderMetadata(naming), "review %+v, mapping %v", r, mapping)
-	}
+// metadataCase is a reviewed service account, a metadata_mappings mapping, and
+// the metadata the removed role login rendered from them (Want, frozen).
+type metadataCase struct {
+	Name      string            `json:"name,omitempty"`
+	Namespace string            `json:"namespace"`
+	Account   string            `json:"account"`
+	UID       string            `json:"uid,omitempty"`
+	Groups    []string          `json:"groups,omitempty"`
+	Mapping   map[string]string `json:"mapping,omitempty"`
+	Want      map[string]string `json:"want,omitempty"`
+}
 
-	full := review{"ci", "deployer", "uid-7", []string{"system:serviceaccounts", "system:serviceaccounts:ci", "system:authenticated"}}
-	cases := []struct {
-		name    string
-		review  review
-		mapping map[string]string
-	}{
-		{"every field", full, map[string]string{
+var fullGroups = []string{"system:serviceaccounts", "system:serviceaccounts:ci", "system:authenticated"}
+
+// metadataCases are written by hand; testdata/metadata_equivalence.json holds
+// 300 more, generated from a fixed seed: any subset of the fields, each to a
+// distinct name or to itself.
+var metadataCases = []metadataCase{
+	{Name: "every field", Namespace: "ci", Account: "deployer", UID: "uid-7", Groups: fullGroups,
+		Mapping: map[string]string{
 			"service_account_namespace": "ns", "service_account_name": "sa",
 			"service_account_uid": "uid", "username": "workload", "groups": "teams",
+		},
+		Want: map[string]string{
+			"ns": "ci", "sa": "deployer", "uid": "uid-7", "workload": "system:serviceaccount:ci:deployer",
+			"teams": "system:serviceaccounts,system:serviceaccounts:ci,system:authenticated",
 		}},
-		{"identity mappings", full, map[string]string{"groups": "groups", "username": "username"}},
-		{"no mappings", full, nil},
-		{"one group", review{"ci", "deployer", "uid-7", []string{"g"}}, map[string]string{"groups": "teams"}},
-		{"no groups", review{"ci", "deployer", "uid-7", nil}, map[string]string{"groups": "teams", "username": "who"}},
-		{"empty uid skipped", review{"ci", "deployer", "", nil}, map[string]string{"service_account_uid": "uid"}},
-		{"everything absent", review{"ci", "deployer", "", nil}, map[string]string{"service_account_uid": "uid", "groups": "teams"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) { check(t, tc.review, tc.mapping) })
-	}
+	{Name: "identity mappings", Namespace: "ci", Account: "deployer", UID: "uid-7", Groups: fullGroups,
+		Mapping: map[string]string{"groups": "groups", "username": "username"},
+		Want: map[string]string{
+			"groups":   "system:serviceaccounts,system:serviceaccounts:ci,system:authenticated",
+			"username": "system:serviceaccount:ci:deployer",
+		}},
+	{Name: "no mappings", Namespace: "ci", Account: "deployer", UID: "uid-7", Groups: fullGroups},
+	{Name: "one group", Namespace: "ci", Account: "deployer", UID: "uid-7", Groups: []string{"g"},
+		Mapping: map[string]string{"groups": "teams"}, Want: map[string]string{"teams": "g"}},
+	{Name: "no groups", Namespace: "ci", Account: "deployer", UID: "uid-7",
+		Mapping: map[string]string{"groups": "teams", "username": "who"},
+		Want:    map[string]string{"who": "system:serviceaccount:ci:deployer"}},
+	{Name: "empty uid skipped", Namespace: "ci", Account: "deployer",
+		Mapping: map[string]string{"service_account_uid": "uid"}},
+	{Name: "everything absent", Namespace: "ci", Account: "deployer",
+		Mapping: map[string]string{"service_account_uid": "uid", "groups": "teams"}},
+}
 
-	// Generated reviews and mappings: any subset of fields, each to a distinct
-	// name or to itself.
-	rng := rand.New(rand.NewSource(20261020))
-	sources := kubernetesBuiltinFacts()
-	sources = slices.DeleteFunc(sources, func(s string) bool { return s == factAudiences }) // not a metadata_mappings source
-	targets := []string{"workload", "team", "who", "id", "where"}
-	for i := 0; i < 300; i++ {
-		r := review{ns: []string{"ci", "prod"}[rng.Intn(2)], name: []string{"a", "deployer"}[rng.Intn(2)]}
-		if rng.Intn(3) > 0 {
-			r.uid = fmt.Sprintf("uid-%d", rng.Intn(100))
-		}
-		for j := rng.Intn(4); j > 0; j-- {
-			r.groups = append(r.groups, fmt.Sprintf("g%d", rng.Intn(5)))
-		}
-		mapping := map[string]string{}
-		free := slices.Clone(targets)
-		for _, s := range sources {
-			switch rng.Intn(3) {
-			case 1:
-				mapping[s] = s
-			case 2:
-				k := rng.Intn(len(free))
-				mapping[s] = free[k]
-				free = slices.Delete(free, k, k+1)
-			}
-		}
-		check(t, r, mapping)
+// The mapping renders what the role's metadata_mappings extracted.
+func TestRenderMetadata_EquivalentToExtractK8sMetadata(t *testing.T) {
+	check := func(t *testing.T, c metadataCase) {
+		t.Helper()
+		username := serviceAccountUsernamePrefix + c.Namespace + ":" + c.Account
+		naming, err := compileFacts("", c.Mapping)
+		require.NoError(t, err)
+		status := &tokenReviewStatus{Authenticated: true, User: tokenReviewUser{Username: username, UID: c.UID, Groups: c.Groups}}
+		assert.Equal(t, c.Want, newAdmission(status, c.Namespace, c.Account, nil, nil).RenderMetadata(naming), "case %+v", c)
+	}
+	for _, c := range metadataCases {
+		t.Run(c.Name, func(t *testing.T) { check(t, c) })
+	}
+	for _, c := range factstest.Frozen[metadataCase](t, "metadata_equivalence.json") {
+		check(t, c)
 	}
 }
 
 // The one difference: an empty group name is not a fact, so it is dropped from
-// the rendering where today's extractor keeps its comma. Kubernetes does not
-// assert empty group names.
+// the rendering where the role login's extractor kept its comma ("a,").
+// Kubernetes does not assert empty group names.
 func TestRenderMetadata_EmptyGroupEntry(t *testing.T) {
 	mapping := map[string]string{"groups": "teams"}
 	groups := []string{"a", ""}
-	assert.Equal(t, map[string]string{"teams": "a,"}, extractK8sMetadata(mapping, "ci", "x", "", "u", groups))
 	naming, err := compileFacts("", mapping)
 	require.NoError(t, err)
 	status := &tokenReviewStatus{User: tokenReviewUser{Username: "u", Groups: groups}}
@@ -773,7 +768,8 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 }
 
 // =============================================================================
-// Equivalence: today's role matcher and the role converted to a selector rule
+// Equivalence: the removed role matcher (frozen) and the role converted to a
+// selector rule
 // =============================================================================
 
 // escapeValue writes s as an exact selector value.
@@ -796,7 +792,7 @@ func escapeValue(s string) string {
 // API server's own audience; when the mount sends a union, the review no longer
 // checks that audience, so the rule asks for it in "aud" (and the union must
 // carry it). The rule pins the mount.
-func convertRole(t *testing.T, mountPath string, role *KubernetesRole, mountAudiences []string) *selector.Rule {
+func convertRole(t *testing.T, mountPath string, role k8sRole, mountAudiences []string) *selector.Rule {
 	t.Helper()
 	rule := map[string][]string{"mount": {mountPath}}
 	bind := func(name string, list []string) {
@@ -807,8 +803,8 @@ func convertRole(t *testing.T, mountPath string, role *KubernetesRole, mountAudi
 			rule[name] = append(rule[name], escapeValue(v))
 		}
 	}
-	bind(factServiceAccountName, role.BoundServiceAccountNames)
-	bind(factServiceAccountNamespace, role.BoundServiceAccountNamespaces)
+	bind(factServiceAccountName, role.Names)
+	bind(factServiceAccountNamespace, role.Namespaces)
 	switch {
 	case role.Audience != "":
 		rule[factAudiences] = []string{escapeValue(role.Audience)}
@@ -850,113 +846,90 @@ func admitConverted(t *testing.T, b *kubernetesAuthBackend, token string, mountA
 	return rule.Match(factstest.Source{Adm: adm, Naming: naming}) && maxAgeHolds(adm, maxAge, time.Now())
 }
 
-// TestEquivalence_RoleMatcherAndConvertedRule checks, over generated service
-// accounts, token audiences and roles, that today's login accepts a token
-// exactly when the converted model does. Today's side is the real login: the
-// TokenReview with the role's audience, matchRoleBindings and the max_age
-// check on the token's iat. The converted side reviews with the mount's
-// audiences and matches the converted rule and max_age on the admission.
+// k8sRole is what a removed kubernetes auth role bound a token to.
+type k8sRole struct {
+	Names      []string `json:"bound_service_account_names"`
+	Namespaces []string `json:"bound_service_account_namespaces"`
+	Audience   string   `json:"audience,omitempty"`
+	MaxAge     string   `json:"max_age,omitempty"`
+}
+
+// k8sToken is a service-account token: its account, its aud claim, and how
+// long before the test signs it it was issued (its iat).
+type k8sToken struct {
+	Namespace string   `json:"namespace"`
+	Account   string   `json:"account"`
+	Audiences []string `json:"aud,omitempty"`
+	Age       string   `json:"age"`
+}
+
+// k8sCase is one frozen sample of the removed role login: a token, the role it
+// was presented for, the audiences the converted mount sends to TokenReview
+// (the union over its roles; empty when it sends none), and whether the role
+// login accepted the token.
+type k8sCase struct {
+	Token          k8sToken `json:"token"`
+	Role           k8sRole  `json:"role"`
+	MountAudiences []string `json:"mount_audiences,omitempty"`
+	Accepted       bool     `json:"accepted"`
+}
+
+// maxAgeOf parses a role's max_age; empty is no bound.
+func maxAgeOf(t testing.TB, role k8sRole) time.Duration {
+	t.Helper()
+	if role.MaxAge == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(role.MaxAge)
+	require.NoError(t, err)
+	return d
+}
+
+// TestEquivalence_RoleMatcherAndConvertedRule checks, over the frozen cases in
+// testdata/role_equivalence.json, that the converted model accepts a token
+// exactly when the removed role login did. That login ran a TokenReview with
+// the role's audience (none: the API server's), the role's service-account
+// bindings ("*" matching any value), and the role's max_age against the
+// token's iat. The converted side reviews with the mount's audiences and
+// matches the converted rule and max_age on the admission.
 //
-// The domain is the one where the conversion is exact: every token carries an
-// iat (see TestEquivalence_MaxAgeStricter for one that does not), and no bound
-// list is empty (today such a list matches nothing; a rule cannot say so).
-// Roles that bind both lists to "*" are stored directly: role validation
-// refuses them today, and a group carrying the converted rule is only warned.
+// The cases were generated (1000, from a fixed seed) where the conversion is
+// exact: every token carries an iat (see TestEquivalence_MaxAgeStricter for
+// one that does not), its age is far from the max_age boundary on either side,
+// and no bound list is empty (such a list matched nothing; a rule cannot say
+// so). Roles binding both lists to "*" are included: role validation refused
+// them, and a group carrying the converted rule is only warned.
 func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
-	ctx := context.Background()
 	b := reviewingBackend(t, nil)
 	naming, err := compileFacts("", nil)
 	require.NoError(t, err)
 
-	rng := rand.New(rand.NewSource(20261020))
-	pick := func(pool []string) string { return pool[rng.Intn(len(pool))] }
-	names := []string{"myapp", "deployer", "ci-bot"}
-	namespaces := []string{"default", "ci", "prod"}
-	tokenAudiences := []string{apiServerAudience, "warden", "vault"}
-	extraAudiences := []string{"warden", "vault", "other"}
-	boundList := func(pool []string) []string {
-		out := make([]string, 1+rng.Intn(2))
-		for i := range out {
-			if rng.Intn(5) == 0 {
-				out[i] = "*"
-			} else {
-				out[i] = pick(pool)
-			}
-		}
-		return out
-	}
-	maxAges := []time.Duration{time.Minute, 10 * time.Minute, time.Hour}
-
 	var accepted, refused, wildcards, unions, aged int
-	for i := 0; i < 1000; i++ {
-		var auds []string
-		for _, a := range tokenAudiences {
-			if rng.Intn(5) < 3 {
-				auds = append(auds, a)
-			}
-		}
-		role := &KubernetesRole{
-			Name:                          "r",
-			BoundServiceAccountNames:      boundList(names),
-			BoundServiceAccountNamespaces: boundList(namespaces),
-			TokenPolicies:                 []string{"p"},
-			TokenTTL:                      "1h",
-			TokenType:                     "kubernetes_role",
-		}
-		if rng.Intn(2) == 0 {
-			role.Audience = pick(tokenAudiences)
-		}
-		var maxAge time.Duration
-		age := time.Duration(rng.Intn(120)) * time.Minute
-		if rng.Intn(2) == 0 {
-			maxAge = maxAges[rng.Intn(len(maxAges))]
-			role.MaxAge = maxAge.String()
-			// Far from the boundary on either side, so the two clocks agree.
-			age = maxAge / 2
-			if rng.Intn(2) == 0 {
-				age = 2 * maxAge
-			}
-			aged++
-		}
-		if slices.Contains(role.BoundServiceAccountNames, "*") || slices.Contains(role.BoundServiceAccountNamespaces, "*") {
-			wildcards++
-		}
-
-		// The mount's audiences: the role's plus other roles', or, for a role
-		// without one, nothing or a union carrying the API server's.
-		var mountAudiences []string
-		if role.Audience != "" || rng.Intn(2) == 0 {
-			if role.Audience != "" {
-				mountAudiences = append(mountAudiences, role.Audience)
-			} else {
-				mountAudiences = append(mountAudiences, apiServerAudience)
-			}
-			for j := rng.Intn(3); j > 0; j-- {
-				mountAudiences = append(mountAudiences, pick(extraAudiences))
-			}
-			if len(mountAudiences) > 1 {
-				unions++
-			}
-		}
-
-		token := saToken(pick(namespaces), pick(names), auds, map[string]any{
+	for i, c := range factstest.Frozen[k8sCase](t, "role_equivalence.json") {
+		age, err := time.ParseDuration(c.Token.Age)
+		require.NoError(t, err)
+		token := saToken(c.Token.Namespace, c.Token.Account, c.Token.Audiences, map[string]any{
 			"iat": time.Now().Add(-age).Unix(),
 		})
-		require.NoError(t, b.setRole(ctx, role))
+		maxAge := maxAgeOf(t, c.Role)
 
-		// Before: the role login, frozen.
-		old := legacyRoleAdmits(t, b, token, role.Name)
+		rule := convertRole(t, "auth/kubernetes/", c.Role, c.MountAudiences)
+		got := admitConverted(t, b, token, c.MountAudiences, rule, naming, maxAge)
 
-		// Converted.
-		rule := convertRole(t, "auth/kubernetes/", role, mountAudiences)
-		got := admitConverted(t, b, token, mountAudiences, rule, naming, maxAge)
-
-		require.Equal(t, old, got, "sample %d: token audiences %v, role %+v, mount audiences %v, age %v",
-			i, auds, role, mountAudiences, age)
-		if old {
+		require.Equal(t, c.Accepted, got, "case %d: %+v", i, c)
+		if c.Accepted {
 			accepted++
 		} else {
 			refused++
+		}
+		if slices.Contains(c.Role.Names, "*") || slices.Contains(c.Role.Namespaces, "*") {
+			wildcards++
+		}
+		if len(c.MountAudiences) > 1 {
+			unions++
+		}
+		if maxAge > 0 {
+			aged++
 		}
 	}
 	// Both outcomes and every feature are exercised, so agreement is not vacuous.
@@ -968,24 +941,15 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 	assert.Greater(t, aged, 30)
 }
 
-// The documented difference: max_age is stricter once converted. Today a token
-// whose iat is absent or not a number passes max_age (and the check runs once,
-// at login); the converted bound needs a known IssuedAt, so it refuses.
+// The documented difference: max_age is stricter once converted. The role
+// login let a token whose iat was absent or not a number pass max_age (and ran
+// the check once, at login); the converted bound needs a known IssuedAt, so it
+// refuses. old is what the role login decided.
 func TestEquivalence_MaxAgeStricter(t *testing.T) {
-	ctx := context.Background()
 	b := reviewingBackend(t, nil)
 	naming, err := compileFacts("", nil)
 	require.NoError(t, err)
-	role := &KubernetesRole{
-		Name:                          "aged",
-		BoundServiceAccountNames:      []string{"myapp"},
-		BoundServiceAccountNamespaces: []string{"default"},
-		MaxAge:                        "10m",
-		TokenPolicies:                 []string{"p"},
-		TokenTTL:                      "1h",
-		TokenType:                     "kubernetes_role",
-	}
-	require.NoError(t, b.setRole(ctx, role))
+	role := k8sRole{Names: []string{"myapp"}, Namespaces: []string{"default"}, MaxAge: "10m"}
 	rule := convertRole(t, "auth/kubernetes/", role, nil)
 
 	cases := []struct {
@@ -1005,8 +969,7 @@ func TestEquivalence_MaxAgeStricter(t *testing.T) {
 				extra["iat"] = tc.iat
 			}
 			token := saToken("default", "myapp", []string{apiServerAudience}, extra)
-			assert.Equal(t, tc.old, legacyRoleAdmits(t, b, token, role.Name), "the role login")
-			assert.Equal(t, tc.new, admitConverted(t, b, token, nil, rule, naming, 10*time.Minute), "converted")
+			assert.Equal(t, tc.new, admitConverted(t, b, token, nil, rule, naming, maxAgeOf(t, role)), "converted")
 		})
 	}
 }

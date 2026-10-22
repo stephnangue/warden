@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -322,55 +322,68 @@ func TestLogin_EntraLikeTokenWithManyGroups(t *testing.T) {
 // Metadata equivalence: the mapping renders what metadata_claims extracts
 // =============================================================================
 
-func TestRenderMetadata_EquivalentToExtractMetadata(t *testing.T) {
-	cases := []struct {
-		name    string
-		claims  map[string]any
-		mapping map[string]string
-	}{
-		{"top-level and nested", map[string]any{
-			"team":            "platform-core",
-			"resource_access": map[string]any{"warden": map[string]any{"env": "prod"}},
-		}, map[string]string{"team": "team", "/resource_access/warden/env": "env"}},
-		{"no mappings", map[string]any{"team": "x"}, nil},
-		{"absent claim skipped", map[string]any{"team": "platform"},
-			map[string]string{"team": "team", "env": "env"}},
-		{"all absent", map[string]any{}, map[string]string{"env": "env"}},
-		{"act.sub consent binding", map[string]any{
-			"sub": "user-8f21c3", "team": "platform",
+// metadataCases are metadata_claims mappings over claims, each with the
+// metadata the role login rendered from them (want, frozen).
+var metadataCases = []struct {
+	name    string
+	claims  map[string]any
+	mapping map[string]string
+	want    map[string]string
+}{
+	{"top-level and nested", map[string]any{
+		"team":            "platform-core",
+		"resource_access": map[string]any{"warden": map[string]any{"env": "prod"}},
+	}, map[string]string{"team": "team", "/resource_access/warden/env": "env"},
+		map[string]string{"team": "platform-core", "env": "prod"}},
+	{"no mappings", map[string]any{"team": "x"}, nil, nil},
+	{"absent claim skipped", map[string]any{"team": "platform"},
+		map[string]string{"team": "team", "env": "env"},
+		map[string]string{"team": "platform"}},
+	{"all absent", map[string]any{}, map[string]string{"env": "env"}, nil},
+	{"act.sub consent binding", map[string]any{
+		"sub": "user-8f21c3", "team": "platform",
+		"act": map[string]any{"sub": "agent-gateway"},
+	}, map[string]string{"/act/sub": "acting_agent", "team": "team"},
+		map[string]string{"acting_agent": "agent-gateway", "team": "platform"}},
+	{"outermost actor of a chain", map[string]any{
+		"sub": "user-8f21c3",
+		"act": map[string]any{
+			"sub": "broker-beta",
 			"act": map[string]any{"sub": "agent-gateway"},
-		}, map[string]string{"/act/sub": "acting_agent", "team": "team"}},
-		{"outermost actor of a chain", map[string]any{
-			"sub": "user-8f21c3",
-			"act": map[string]any{
-				"sub": "broker-beta",
-				"act": map[string]any{"sub": "agent-gateway"},
-			},
-		}, map[string]string{"/act/sub": "acting_agent", "team": "team"}},
-		{"absent act", map[string]any{"sub": "user-8f21c3", "team": "platform"},
-			map[string]string{"/act/sub": "acting_agent", "team": "team"}},
-		{"namespaced claim key", map[string]any{"https://warden.io/env": "staging"},
-			map[string]string{"https://warden.io/env": "env"}},
-		{"array index pointer", map[string]any{"stages": []any{"build", "deploy"}},
-			map[string]string{"/stages/1": "stage"}},
-		{"empty string", map[string]any{"team": ""}, map[string]string{"team": "team"}},
-		{"renamed built-in source", map[string]any{"sub": "agent-1"},
-			map[string]string{"sub": "sub", "iss": "issuer"}},
-	}
-	for _, tc := range cases {
+		},
+	}, map[string]string{"/act/sub": "acting_agent", "team": "team"},
+		map[string]string{"acting_agent": "broker-beta"}},
+	{"absent act", map[string]any{"sub": "user-8f21c3", "team": "platform"},
+		map[string]string{"/act/sub": "acting_agent", "team": "team"},
+		map[string]string{"team": "platform"}},
+	{"namespaced claim key", map[string]any{"https://warden.io/env": "staging"},
+		map[string]string{"https://warden.io/env": "env"},
+		map[string]string{"env": "staging"}},
+	{"array index pointer", map[string]any{"stages": []any{"build", "deploy"}},
+		map[string]string{"/stages/1": "stage"},
+		map[string]string{"stage": "deploy"}},
+	{"empty string", map[string]any{"team": ""}, map[string]string{"team": "team"},
+		map[string]string{"team": ""}},
+	{"renamed built-in source", map[string]any{"sub": "agent-1"},
+		map[string]string{"sub": "sub", "iss": "issuer"},
+		map[string]string{"sub": "agent-1"}},
+}
+
+// The mapping renders what the role's metadata_claims extracted.
+func TestRenderMetadata_EquivalentToExtractMetadata(t *testing.T) {
+	for _, tc := range metadataCases {
 		t.Run(tc.name, func(t *testing.T) {
-			want, err := extractMetadata(tc.claims, tc.mapping)
-			require.NoError(t, err)
 			naming, err := compileFacts("", tc.mapping)
 			require.NoError(t, err)
 			adm := newAdmission(tc.claims, "", nil)
-			assert.Equal(t, want, adm.RenderMetadata(naming))
+			assert.Equal(t, tc.want, adm.RenderMetadata(naming))
 		})
 	}
 }
 
-// The one documented difference: a non-string claim fails the login today and
-// renders under the mapping (an object, which is no value, is left out).
+// The one documented difference: a non-string claim failed the role login,
+// whose metadata_claims took strings only, and renders under the mapping (an
+// object, which is no value, is left out).
 func TestRenderMetadata_NonStringClaimRenders(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -387,8 +400,6 @@ func TestRenderMetadata_NonStringClaimRenders(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mapping := map[string]string{tc.source: "x"}
-			_, err := extractMetadata(tc.claims, mapping)
-			require.Error(t, err, "today's extractor refuses a non-string claim")
 			naming, err := compileFacts("", mapping)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, newAdmission(tc.claims, "", nil).RenderMetadata(naming))
@@ -656,7 +667,8 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 }
 
 // =============================================================================
-// Equivalence: today's role matcher and the role converted to a selector rule
+// Equivalence: the removed role matcher (frozen) and the role converted to a
+// selector rule
 // =============================================================================
 
 // escapeValue writes s as an exact selector value.
@@ -684,6 +696,23 @@ func renderValue(v any) string {
 	panic(fmt.Sprintf("unexpected bound claim %T", v))
 }
 
+// jwtBinding is what a removed auth role, or the mount, bound a token to.
+type jwtBinding struct {
+	Subject   string         `json:"bound_subject,omitempty"`
+	Audiences []string       `json:"bound_audiences,omitempty"`
+	Claims    map[string]any `json:"bound_claims,omitempty"`
+}
+
+// jwtCase is one frozen sample of the removed role login: a token's claims
+// (iss, iat and exp are added when the test signs it), the role and the mount
+// configuration it was judged under, and whether the role login accepted it.
+type jwtCase struct {
+	Claims   map[string]any `json:"claims"`
+	Role     jwtBinding     `json:"role"`
+	Mount    jwtBinding     `json:"mount"`
+	Accepted bool           `json:"accepted"`
+}
+
 // convertRole converts one role on a mount to a selector rule: bound claims
 // become identity-mapped facts and rule values, bound_subject a "sub" value,
 // role audiences an "aud" rule (the mount enforces the union), and the rule
@@ -692,21 +721,21 @@ func renderValue(v any) string {
 // A role bound claim on a built-in name (sub, iss, aud) is refused rather than
 // converted: it would share the rule's one entry for that name with
 // bound_subject or the audiences, and a rule ANDs names but ORs the values of
-// one name, so the two constraints cannot both be written there. The
-// generator below never binds a built-in claim.
-func convertRole(t *testing.T, mountPath string, role *JWTRole) (*selector.Rule, *logical.MountNaming) {
+// one name, so the two constraints cannot both be written there. The frozen
+// cases never bind a built-in claim.
+func convertRole(t *testing.T, mountPath string, role jwtBinding) (*selector.Rule, *logical.MountNaming) {
 	t.Helper()
 	rule := map[string][]string{"mount": {mountPath}}
 	facts := map[string]string{}
-	if role.BoundSubject != "" {
-		rule["sub"] = []string{escapeValue(role.BoundSubject)}
+	if role.Subject != "" {
+		rule["sub"] = []string{escapeValue(role.Subject)}
 	}
-	if len(role.BoundAudiences) > 0 {
-		for _, a := range role.BoundAudiences {
+	if len(role.Audiences) > 0 {
+		for _, a := range role.Audiences {
 			rule["aud"] = append(rule["aud"], escapeValue(a))
 		}
 	}
-	for k, v := range role.BoundClaims {
+	for k, v := range role.Claims {
 		if slices.Contains(jwtBuiltinFacts(), k) {
 			t.Fatalf("bound claim %q names a built-in fact; it has no single-rule conversion", k)
 		}
@@ -726,20 +755,23 @@ func union(a, b []string) []string {
 	return slices.Compact(out)
 }
 
-// TestEquivalence_RoleMatcherAndConvertedRule checks, over generated claim
-// sets, roles and mount configs, that today's matcher (the role's validator
-// expectations via validateJWTForRole, then matchRole's config and role bound
-// claims) accepts a token exactly when the converted model does: the mount
-// validates the issuer, its own bound_subject and the union of the audiences,
-// keeps checking its own bound_claims, and the converted rule matches the
-// token's admission.
+// TestEquivalence_RoleMatcherAndConvertedRule checks, over the frozen cases in
+// testdata/role_equivalence.json, that the converted model accepts a token
+// exactly when the removed role login did. That login validated the token
+// against the role's subject and audiences where it set them, the mount's
+// otherwise, then checked the mount's and the role's bound claims. The
+// converted model: the mount validates the issuer, its own bound_subject and
+// the union of the audiences, keeps checking its own bound_claims, and the
+// converted rule matches the token's admission.
 //
-// The domain is the one where the conversion is exact: values are scalar,
-// same-typed per claim and never empty (a selector value cannot be); role
-// bound claims never name a built-in (see convertRole); and a config-level
-// bound_subject appears only on samples whose role sets none, since a role's
-// subject overrides the mount's today, and a mount that keeps its subject
-// cannot express that override.
+// The cases were generated (600, from a fixed seed) where the conversion is
+// exact: values are scalar, same-typed per claim and never empty (a selector
+// value cannot be); role bound claims never name a built-in (see
+// convertRole); and a mount-level bound_subject appears only on cases whose
+// role sets none, since a role's subject overrode the mount's, and a mount
+// that keeps its subject cannot express that override. Subjects, audiences
+// and claim values include ones a wildcard would widen to, so a missed escape
+// shows.
 func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 	ctx := context.Background()
 	b, key := factsBackend(t, nil)
@@ -747,97 +779,29 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 	const mountPath = "auth/jwt/"
 	mount := &logical.MountFacts{}
 
-	rng := rand.New(rand.NewSource(20261020))
-	pick := func(pool []string) string { return pool[rng.Intn(len(pool))] }
-	// Each pool holds values a wildcard would widen to, so a missed escape shows.
-	subjects := []string{"alice", "bob", "ci*bot", "ci-bot", "a?b", "axb", `back\slash`}
-	audiences := []string{"warden", "api", "other*", "otherwise"}
-	someAudiences := func() []string {
-		if rng.Intn(2) == 0 {
-			return nil
-		}
-		out := []string{pick(audiences)}
-		if rng.Intn(2) == 0 {
-			out = append(out, pick(audiences))
-		}
-		return out
-	}
-	typed := map[string]func() any{
-		"team":  func() any { return pick([]string{"core", "edge", "pl*t", "plant", "a?c", "abc"}) },
-		"env":   func() any { return pick([]string{"prod", "dev"}) },
-		"level": func() any { return []float64{0, 1, 2, 1.5}[rng.Intn(4)] },
-		"admin": func() any { return rng.Intn(2) == 0 },
-	}
-	// Fixed order, so the seed reproduces a run; no built-in name (sub, iss, aud).
-	claimNames := []string{"admin", "env", "level", "team"}
-	var configSubjects, configClaims int
-
-	var accepted, refused int
-	for i := 0; i < 600; i++ {
+	var accepted, refused, configSubjects, configClaims int
+	for i, c := range factstest.Frozen[jwtCase](t, "role_equivalence.json") {
 		claims := baseClaims(nil)
 		delete(claims, "aud")
 		delete(claims, "sub")
-		if rng.Intn(10) > 0 {
-			claims["sub"] = pick(subjects)
-		}
-		switch rng.Intn(3) {
-		case 1:
-			claims["aud"] = pick(audiences)
-		case 2:
-			claims["aud"] = []string{pick(audiences), pick(audiences)}
-		}
-		for _, k := range claimNames {
-			gen := typed[k]
-			if rng.Intn(10) < 7 {
-				claims[k] = gen()
-			}
-		}
-
-		role := &JWTRole{Name: "r", BoundAudiences: someAudiences(), BoundClaims: map[string]any{}}
-		if rng.Intn(2) == 0 {
-			role.BoundSubject = pick(subjects)
-		}
-		for _, k := range claimNames {
-			gen := typed[k]
-			if rng.Intn(3) == 0 {
-				role.BoundClaims[k] = gen()
-			}
-		}
-		cfg := base
-		cfg.BoundAudiences = someAudiences()
-		cfg.BoundSubject = ""
-		cfg.BoundClaims = nil
-		if role.BoundSubject == "" && rng.Intn(3) == 0 {
-			cfg.BoundSubject = pick(subjects)
-			configSubjects++
-		}
-		if rng.Intn(3) == 0 {
-			cfg.BoundClaims = map[string]any{}
-			for _, k := range claimNames {
-				if rng.Intn(3) == 0 {
-					cfg.BoundClaims[k] = typed[k]()
-				}
-			}
-			configClaims++
-		}
-
+		maps.Copy(claims, c.Claims)
 		token := signES256(t, key, claims)
 
-		// Today: the role's expectations, then the config and role bound
-		// claims.
-		oldClaims, err := validateJWTForRole(ctx, &cfg, role, token)
-		old := err == nil && matchRole(oldClaims, cfg.BoundClaims, role) == nil
+		cfg := base
+		cfg.BoundSubject = c.Mount.Subject
+		cfg.BoundAudiences = c.Mount.Audiences
+		cfg.BoundClaims = c.Mount.Claims
 
 		// Converted: the mount validates the issuer, its subject and the
 		// audience union and checks its bound claims, all carried unchanged;
 		// then the rule matches the admission.
-		rule, naming := convertRole(t, mountPath, role)
+		rule, naming := convertRole(t, mountPath, c.Role)
 		got := false
 		newClaims, err := cfg.validator.Validate(ctx, token, capjwt.Expected{
 			SigningAlgorithms: []capjwt.Alg{capjwt.ES256},
 			Issuer:            cfg.BoundIssuer,
 			Subject:           cfg.BoundSubject,
-			Audiences:         union(cfg.BoundAudiences, role.BoundAudiences),
+			Audiences:         union(cfg.BoundAudiences, c.Role.Audiences),
 		})
 		if err == nil && validateBoundClaims(newClaims, cfg.BoundClaims) == nil {
 			adm := newAdmission(newClaims, token, mount)
@@ -845,15 +809,21 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 			got = rule.Match(factstest.Source{Adm: adm, Naming: naming})
 		}
 
-		require.Equal(t, old, got, "sample %d: claims %v, role %+v, config subject %q, claims %v, audiences %v",
-			i, claims, role, cfg.BoundSubject, cfg.BoundClaims, cfg.BoundAudiences)
-		if old {
+		require.Equal(t, c.Accepted, got, "case %d: %+v", i, c)
+		if c.Accepted {
 			accepted++
 		} else {
 			refused++
 		}
+		if c.Mount.Subject != "" {
+			configSubjects++
+		}
+		if len(c.Mount.Claims) > 0 {
+			configClaims++
+		}
 	}
-	// Both outcomes are exercised, so agreement is not vacuous.
+	// Both outcomes and both mount-level bindings are exercised, so agreement
+	// is not vacuous.
 	assert.Greater(t, accepted, 30)
 	assert.Greater(t, refused, 30)
 	assert.Greater(t, configSubjects, 30)

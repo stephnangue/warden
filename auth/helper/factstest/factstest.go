@@ -1,13 +1,38 @@
 // Package factstest holds helpers for auth method tests: a selector.Source
 // over an admission and a naming, as core builds one, drains that render what
-// a fact yields, and checks that the removed auth roles stay gone. Only tests
-// import it.
+// a fact yields, a reader for frozen case tables, and checks that the removed
+// auth roles stay gone. Only tests import it.
 package factstest
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/logical"
 )
+
+// Frozen decodes testdata/<name>, a JSON array, into a slice of T. Such a file
+// is a table of (input, outcome) cases recorded from code that no longer
+// exists, so a test can keep checking that code's successor against what it
+// decided. An unreadable or empty table fails the test.
+func Frozen[T any](t testing.TB, name string) []T {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("frozen table: %v", err)
+	}
+	var out []T
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("frozen table %s: %v", name, err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("frozen table %s is empty", name)
+	}
+	return out
+}
 
 // Source answers fact names from Adm under Naming, as core's matcher does:
 // one naming for every lookup of an evaluation.

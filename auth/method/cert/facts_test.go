@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	mrand "math/rand"
 	"net/http"
 	"net/url"
 	"slices"
@@ -473,93 +472,100 @@ func TestLogin_RefusedCarriesNoAdmission(t *testing.T) {
 // Metadata equivalence: the mapping renders what metadata_mappings extracts
 // =============================================================================
 
+// certLeaf is a client certificate's serial (decimal; empty for the issuer's
+// default), subject and SANs.
+type certLeaf struct {
+	Serial string   `json:"serial,omitempty"`
+	CN     string   `json:"cn,omitempty"`
+	OU     []string `json:"ou,omitempty"`
+	Org    []string `json:"org,omitempty"`
+	DNS    []string `json:"dns,omitempty"`
+	Email  []string `json:"email,omitempty"`
+	URIs   []string `json:"uri,omitempty"`
+}
+
+// issueFrozenLeaf issues the client certificate l describes for key, signed by
+// parent.
+func issueFrozenLeaf(t testing.TB, parent *authority, key *ecdsa.PrivateKey, l certLeaf) *x509.Certificate {
+	t.Helper()
+	return issueLeaf(t, parent, key, func(c *x509.Certificate) {
+		if l.Serial != "" {
+			serial, ok := new(big.Int).SetString(l.Serial, 10)
+			require.True(t, ok, "serial %q", l.Serial)
+			c.SerialNumber = serial
+		}
+		c.Subject = pkix.Name{CommonName: l.CN, OrganizationalUnit: l.OU, Organization: l.Org}
+		c.DNSNames = l.DNS
+		c.EmailAddresses = l.Email
+		for _, u := range l.URIs {
+			c.URIs = append(c.URIs, mustURL(t, u))
+		}
+	})
+}
+
+// metadataCase is a certificate, a metadata_mappings mapping, and the
+// metadata the removed role login rendered from them (Want, frozen).
+type metadataCase struct {
+	Name    string            `json:"name,omitempty"`
+	Leaf    certLeaf          `json:"leaf"`
+	Mapping map[string]string `json:"mapping,omitempty"`
+	Want    map[string]string `json:"want,omitempty"`
+}
+
+var fullLeaf = certLeaf{
+	Serial: "7001", CN: "agent-1", OU: []string{"eng", "ops"}, Org: []string{"Acme"},
+	DNS: []string{"a.example.com", "b.example.com"}, Email: []string{"agent@example.com"},
+	URIs: []string{"spiffe://example.com/a", "urn:example:b"},
+}
+
+// metadataCases are written by hand; testdata/metadata_equivalence.json holds
+// 200 more, generated from a fixed seed: any subset of the fields, each to a
+// distinct name or to itself.
+var metadataCases = []metadataCase{
+	{Name: "every field", Leaf: fullLeaf,
+		Mapping: map[string]string{
+			"cn": "name", "serial": "sn", "ou": "units", "org": "orgs",
+			"dns_san": "dns", "email_san": "email", "uri_san": "uri",
+		},
+		Want: map[string]string{
+			"name": "agent-1", "sn": "7001", "units": "eng,ops", "orgs": "Acme",
+			"dns": "a.example.com,b.example.com", "email": "agent@example.com",
+			"uri": "spiffe://example.com/a,urn:example:b",
+		}},
+	{Name: "identity mappings", Leaf: fullLeaf, Mapping: map[string]string{"cn": "cn", "ou": "ou"},
+		Want: map[string]string{"cn": "agent-1", "ou": "eng,ops"}},
+	{Name: "no mappings", Leaf: fullLeaf},
+	{Name: "everything absent", Leaf: certLeaf{},
+		Mapping: map[string]string{"cn": "name", "ou": "units", "dns_san": "dns", "uri_san": "uri"}},
+}
+
+// The mapping renders what the role's metadata_mappings extracted.
 func TestRenderMetadata_EquivalentToExtractCertMetadata(t *testing.T) {
 	root := issueCA(t, "Root", newFixtureKey(t), nil)
 	key := newFixtureKey(t)
-	check := func(t *testing.T, leaf *x509.Certificate, mapping map[string]string) {
+	check := func(t *testing.T, c metadataCase) {
 		t.Helper()
-		want := extractCertMetadata(leaf, mapping)
-		naming, err := compileCertFacts("", mapping)
+		leaf := issueFrozenLeaf(t, root, key, c.Leaf)
+		naming, err := compileCertFacts("", c.Mapping)
 		require.NoError(t, err)
-		assert.Equal(t, want, newAdmission(leaf, nil, nil).RenderMetadata(naming), "cert %+v %v %v %v, mapping %v",
-			leaf.Subject, leaf.DNSNames, leaf.EmailAddresses, leaf.URIs, mapping)
+		assert.Equal(t, c.Want, newAdmission(leaf, nil, nil).RenderMetadata(naming), "case %+v", c)
 	}
-
-	full := issueLeaf(t, root, key, func(c *x509.Certificate) {
-		c.Subject = pkix.Name{CommonName: "agent-1", OrganizationalUnit: []string{"eng", "ops"}, Organization: []string{"Acme"}}
-		c.DNSNames = []string{"a.example.com", "b.example.com"}
-		c.EmailAddresses = []string{"agent@example.com"}
-		c.URIs = []*url.URL{mustURL(t, "spiffe://example.com/a"), mustURL(t, "urn:example:b")}
-	})
-	bare := issueLeaf(t, root, key, nil)
-	cases := []struct {
-		name    string
-		leaf    *x509.Certificate
-		mapping map[string]string
-	}{
-		{"every field", full, map[string]string{
-			"cn": "name", "serial": "sn", "ou": "units", "org": "orgs",
-			"dns_san": "dns", "email_san": "email", "uri_san": "uri",
-		}},
-		{"identity mappings", full, map[string]string{"cn": "cn", "ou": "ou"}},
-		{"no mappings", full, nil},
-		{"everything absent", bare, map[string]string{"cn": "name", "ou": "units", "dns_san": "dns", "uri_san": "uri"}},
+	for _, c := range metadataCases {
+		t.Run(c.Name, func(t *testing.T) { check(t, c) })
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) { check(t, tc.leaf, tc.mapping) })
-	}
-
-	// Generated certificates and mappings: any subset of fields, each to a
-	// distinct name or to itself.
-	rng := mrand.New(mrand.NewSource(20261020))
-	sources := slices.DeleteFunc(certBuiltinFacts(), func(s string) bool { return s == factCA }) // not a metadata_mappings source
-	targets := []string{"workload", "team", "who", "id", "where", "what", "how"}
-	some := func(pool []string) []string {
-		var out []string
-		for j := rng.Intn(3); j > 0; j-- {
-			out = append(out, pool[rng.Intn(len(pool))])
-		}
-		return out
-	}
-	for i := 0; i < 200; i++ {
-		leaf := issueLeaf(t, root, key, func(c *x509.Certificate) {
-			c.SerialNumber = big.NewInt(rng.Int63())
-			c.Subject = pkix.Name{
-				CommonName:         []string{"", "agent-1", "a/b"}[rng.Intn(3)],
-				OrganizationalUnit: some([]string{"eng", "ops"}),
-				Organization:       some([]string{"Acme", "Other"}),
-			}
-			c.DNSNames = some([]string{"a.example.com", "b.example.com"})
-			c.EmailAddresses = some([]string{"a@example.com", "b@other.org"})
-			for _, u := range some([]string{"spiffe://example.com/a", "https://x.example.com/p?q=1"}) {
-				c.URIs = append(c.URIs, mustURL(t, u))
-			}
-		})
-		mapping := map[string]string{}
-		free := slices.Clone(targets)
-		for _, s := range sources {
-			switch rng.Intn(3) {
-			case 1:
-				mapping[s] = s
-			case 2:
-				k := rng.Intn(len(free))
-				mapping[s] = free[k]
-				free = slices.Delete(free, k, k+1)
-			}
-		}
-		check(t, leaf, mapping)
+	for _, c := range factstest.Frozen[metadataCase](t, "metadata_equivalence.json") {
+		check(t, c)
 	}
 }
 
 // The one difference: an empty subject entry is not a fact, so it is dropped
-// from the rendering where today's extractor keeps its comma.
+// from the rendering where the role login's extractor kept its comma (",eng").
 func TestRenderMetadata_EmptySubjectEntry(t *testing.T) {
 	root := issueCA(t, "Root", newFixtureKey(t), nil)
 	leaf := issueLeaf(t, root, newFixtureKey(t), func(c *x509.Certificate) {
 		c.Subject = pkix.Name{CommonName: "agent", OrganizationalUnit: []string{"", "eng"}}
 	})
 	mapping := map[string]string{"ou": "units"}
-	assert.Equal(t, map[string]string{"units": ",eng"}, extractCertMetadata(leaf, mapping))
 	assert.Equal(t, map[string]string{"units": "eng"}, newAdmission(leaf, nil, nil).RenderMetadata(mustNaming(t, mapping)))
 }
 
@@ -819,7 +825,8 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 }
 
 // =============================================================================
-// Equivalence: today's role matcher and the role converted to a selector rule
+// Equivalence: the removed role matcher (frozen) and the role converted to a
+// selector rule
 // =============================================================================
 
 // escapeValue writes s as an exact selector value.
@@ -899,32 +906,29 @@ func convertSegmentPattern(p string) (string, error) {
 	return escapeValue(scheme) + "://" + strings.Join(segs, "/"), nil
 }
 
-// pemFingerprints returns the "ca" value of every certificate in a PEM bundle.
-func pemFingerprints(t testing.TB, bundle string) []string {
-	t.Helper()
-	var out []string
-	rest := []byte(bundle)
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			return out
-		}
-		c, err := x509.ParseCertificate(block.Bytes)
-		require.NoError(t, err)
-		out = append(out, fingerprint(c))
-	}
+// certRole is what a removed cert auth role bound a certificate to: its
+// patterns and exact lists, and the CAs its own certificate field held, as
+// indices into the CAs of TestEquivalence_RoleMatcherAndConvertedRule (none:
+// the role used the mount's).
+type certRole struct {
+	CommonNames []string `json:"allowed_common_names,omitempty"`
+	DNSSANs     []string `json:"allowed_dns_sans,omitempty"`
+	EmailSANs   []string `json:"allowed_email_sans,omitempty"`
+	URISANs     []string `json:"allowed_uri_sans,omitempty"`
+	OrgUnits    []string `json:"allowed_organizational_units,omitempty"`
+	Orgs        []string `json:"allowed_organizations,omitempty"`
+	CAs         []int    `json:"certificate,omitempty"`
 }
 
 // convertRole converts one role on a mount to a selector rule, pinned to the
-// mount. mountCAs are the CAs the mount trusted before (trusted_ca_pem) and
-// widened reports whether its converted trusted_ca_pem gained other roles'
-// CAs. A role CA becomes a "ca" rule on its fingerprints (the converted
-// trusted_ca_pem holds it). A role without one was verified against the
-// mount's CAs only; once the mount trusts more, the rule asks for those in
-// "ca", and with none it admits nothing (nil). A pattern with no selector
-// form is an error.
-func convertRole(t testing.TB, mountPath string, role *CertRole, mountCAs []*x509.Certificate, widened bool) (*selector.Rule, error) {
+// mount. roleCAs are the role's own CAs, mountCAs the CAs the mount trusted
+// before (trusted_ca_pem), and widened reports whether its converted
+// trusted_ca_pem gained other roles' CAs. A role CA becomes a "ca" rule on its
+// fingerprints (the converted trusted_ca_pem holds it). A role without one was
+// verified against the mount's CAs only; once the mount trusts more, the rule
+// asks for those in "ca", and with none it admits nothing (nil). A pattern
+// with no selector form is an error.
+func convertRole(t testing.TB, mountPath string, role certRole, roleCAs, mountCAs []*x509.Certificate, widened bool) (*selector.Rule, error) {
 	t.Helper()
 	rule := map[string][]string{"mount": {mountPath}}
 	globs := func(name string, patterns []string) error {
@@ -937,31 +941,33 @@ func convertRole(t testing.TB, mountPath string, role *CertRole, mountCAs []*x50
 		}
 		return nil
 	}
-	if err := globs(factCommonName, role.AllowedCommonNames); err != nil {
+	if err := globs(factCommonName, role.CommonNames); err != nil {
 		return nil, err
 	}
-	if err := globs(factDNSSAN, role.AllowedDNSSANs); err != nil {
+	if err := globs(factDNSSAN, role.DNSSANs); err != nil {
 		return nil, err
 	}
-	if err := globs(factEmailSAN, role.AllowedEmailSANs); err != nil {
+	if err := globs(factEmailSAN, role.EmailSANs); err != nil {
 		return nil, err
 	}
-	for _, p := range role.AllowedURISANs {
+	for _, p := range role.URISANs {
 		v, err := convertSegmentPattern(p)
 		if err != nil {
 			return nil, err
 		}
 		rule[factURISAN] = append(rule[factURISAN], v)
 	}
-	for _, v := range role.AllowedOrganizationalUnits {
+	for _, v := range role.OrgUnits {
 		rule[factOrgUnit] = append(rule[factOrgUnit], escapeValue(v))
 	}
-	for _, v := range role.AllowedOrganizations {
+	for _, v := range role.Orgs {
 		rule[factOrg] = append(rule[factOrg], escapeValue(v))
 	}
 	switch {
-	case role.Certificate != "":
-		rule[factCA] = pemFingerprints(t, role.Certificate)
+	case len(roleCAs) > 0:
+		for _, c := range roleCAs {
+			rule[factCA] = append(rule[factCA], fingerprint(c))
+		}
 	case widened:
 		if len(mountCAs) == 0 {
 			return nil, nil
@@ -995,77 +1001,63 @@ func admitConverted(leaf *x509.Certificate, pool []*x509.Certificate, rule *sele
 	return rule.Match(factstest.Source{Adm: adm, Naming: naming})
 }
 
-// globEscape writes v as a path.Match pattern matching v alone.
-func globEscape(v string) string {
-	var b strings.Builder
-	for i := 0; i < len(v); i++ {
-		switch v[i] {
-		case '*', '?', '\\', '[':
-			b.WriteByte('\\')
-		}
-		b.WriteByte(v[i])
-	}
-	return b.String()
-}
-
-// uriStrings returns c's URI SANs as strings.
-func uriStrings(c *x509.Certificate) []string {
-	out := make([]string, len(c.URIs))
-	for i, u := range c.URIs {
-		out[i] = u.String()
-	}
-	return out
-}
-
 // onlyStars reports whether p is a run of '*': the patterns that match an
 // empty value today.
 func onlyStars(p string) bool { return p != "" && strings.Trim(p, "*") == "" }
 
-// TestEquivalence_RoleMatcherAndConvertedRule checks, over generated leaf
-// certificates, mount CAs and roles, that today's matcher accepts a
-// certificate exactly when the converted model does. Today's side is the real
-// trust decision login makes before revocation: verification against the
-// role's CA, or the mount's (verifyCertForRole), then validateCertConstraints.
-// The converted side verifies against the converted trusted_ca_pem (the
-// mount's CAs plus every role's) and matches the converted rule.
-//
-// The domain is the one where the conversion is exact, but for one documented
-// narrowing (TestEquivalence_EmptyCommonName): a certificate without a common
-// name matched today by a pattern of only '*' has no "cn" fact once converted.
-// Patterns hold no character class (the conversion refuses them,
-// TestConvert_Refused).
-func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
-	naming, err := compileCertFacts("", nil)
-	require.NoError(t, err)
-
-	// CAs: three roots, a second certificate for root A's name and key (so a
-	// leaf of A verifies to both), and an untrusted one. Keys are reused so
-	// generation stays cheap.
+// equivalenceCAs returns the CAs the frozen cases index: three roots, a second
+// certificate for root A's name and key (so a leaf of A verifies to both), and
+// last an untrusted one, which signs some leaves and no mount or role trusts.
+func equivalenceCAs(t testing.TB) []*authority {
+	t.Helper()
 	keyA := newFixtureKey(t)
-	cas := []*authority{
+	return []*authority{
 		issueCA(t, "Root A", keyA, nil),
 		issueCA(t, "Root B", newFixtureKey(t), nil),
 		issueCA(t, "Root C", newFixtureKey(t), nil),
 		issueCA(t, "Root A", keyA, nil),
+		issueCA(t, "Untrusted", newFixtureKey(t), nil),
 	}
-	untrusted := issueCA(t, "Untrusted", newFixtureKey(t), nil)
-	leafKey := newFixtureKey(t)
+}
 
-	rng := mrand.New(mrand.NewSource(20261020))
-	pick := func(pool []string) string { return pool[rng.Intn(len(pool))] }
-	some := func(pool []string, max int) []string {
-		var out []string
-		for j := rng.Intn(max + 1); j > 0; j-- {
-			out = append(out, pick(pool))
-		}
-		return out
-	}
-	subset := func() []*authority {
-		var out []*authority
-		for _, ca := range cas {
-			if rng.Intn(2) == 0 {
-				out = append(out, ca)
-			}
+// certCase is one frozen sample of the removed role login: a leaf and the CA
+// that signed it, the CAs the mount trusted, the role, the CAs other roles on
+// the mount held (CAs as indices into equivalenceCAs), and whether the role
+// login accepted the leaf.
+type certCase struct {
+	Leaf     certLeaf `json:"leaf"`
+	Signer   int      `json:"signer"`
+	MountCAs []int    `json:"mount_cas,omitempty"`
+	Role     certRole `json:"role"`
+	OtherCAs []int    `json:"other_cas,omitempty"`
+	Accepted bool     `json:"accepted"`
+}
+
+// TestEquivalence_RoleMatcherAndConvertedRule checks, over the frozen cases in
+// testdata/role_equivalence.json, that the converted model accepts a
+// certificate exactly when the removed role login did. That login's trust
+// decision, before revocation, was verification against the role's CA, or
+// the mount's, then the role's constraints: path.Match globs on the common
+// name and the DNS and email SANs, segment patterns on the URI SANs, exact
+// lists of organizational units and organizations. The converted side
+// verifies against the converted trusted_ca_pem (the mount's CAs plus every
+// role's) and matches the converted rule.
+//
+// The cases were generated (1500, from a fixed seed) where the conversion is
+// exact, but for one documented narrowing (TestEquivalence_EmptyCommonName): a
+// certificate without a common name matched by a pattern of only '*' has no
+// "cn" fact once converted. Patterns hold no character class (the conversion
+// refuses them, TestConvert_Refused). Half the patterns were made from what
+// the leaf carries, so enough roles accept it for agreement to mean something.
+func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
+	naming, err := compileCertFacts("", nil)
+	require.NoError(t, err)
+	cas := equivalenceCAs(t)
+	leafKey := newFixtureKey(t)
+	authorities := func(idx []int) []*authority {
+		out := make([]*authority, len(idx))
+		for i, k := range idx {
+			out[i] = cas[k]
 		}
 		return out
 	}
@@ -1076,173 +1068,47 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 		}
 		return out
 	}
-	pemOf := func(as []*authority) string {
-		var b strings.Builder
-		for _, a := range as {
-			b.WriteString(a.pem)
-		}
-		return b.String()
-	}
-
-	cnValues := []string{"agent", "agent-1", "svc.prod", "a/b", "agent/1", "*", ""}
-	cnPieces := []string{"agent", "svc", "-", "1", ".", "/", "a", "*", "**", "?", `\*`, `\a`}
-	globPattern := func() string {
-		var b strings.Builder
-		for j := 1 + rng.Intn(3); j > 0; j-- {
-			b.WriteString(pick(cnPieces))
-		}
-		return b.String()
-	}
-	dnsValues := []string{"a.example.com", "web-1.example.com", "x.other.org"}
-	dnsPatterns := []string{"*.example.com", "a.*", "*", "web-?.example.com", "x.other.org", "*.*.org", `\*.example.com`}
-	emailValues := []string{"a@example.com", "ops@other.org"}
-	emailPatterns := []string{"*@example.com", "a@*", "*@*.org", "ops@other.org", "?@*"}
-	uriValues := func() string {
-		v := pick([]string{"spiffe", "https"}) + "://" + pick([]string{"example.com", "other.org"})
-		for j := rng.Intn(4); j > 0; j-- {
-			v += "/" + pick([]string{"dept", "team", "svc", ""})
-		}
-		return v
-	}
-	uriPattern := func() string {
-		scheme := pick([]string{"spiffe", "https"})
-		if rng.Intn(6) == 0 {
-			return scheme + "://*"
-		}
-		segs := []string{pick([]string{"example.com", "other.org", "+"})}
-		for j := rng.Intn(3); j > 0; j-- {
-			segs = append(segs, pick([]string{"dept", "team", "+"}))
-		}
-		if rng.Intn(3) == 0 {
-			segs = append(segs, "*")
-		}
-		return scheme + "://" + strings.Join(segs, "/")
-	}
-	ouValues := []string{"eng", "ops", "a*b", ""}
-	orgValues := []string{"Acme", "Other", "x?y"}
 
 	var accepted, refused, narrowed, roleCAs, widenedRoles, globs, uris, exacts int
-	for i := 0; i < 1500; i++ {
+	for i, c := range factstest.Frozen[certCase](t, "role_equivalence.json") {
 		// The mount's CAs, the role's own, and other roles' on the mount.
-		mountCAs, otherCAs := subset(), subset()
-		var roleCA []*authority
-		if rng.Intn(3) == 0 {
-			roleCA = []*authority{cas[rng.Intn(len(cas))]}
-			if rng.Intn(4) == 0 {
-				roleCA = append(roleCA, cas[rng.Intn(len(cas))])
-			}
-			roleCAs++
-		}
+		mountCAs, roleCA, otherCAs := authorities(c.MountCAs), authorities(c.Role.CAs), authorities(c.OtherCAs)
 		pool := slices.Concat(mountCAs, roleCA, otherCAs)
 		widened := slices.ContainsFunc(slices.Concat(roleCA, otherCAs), func(a *authority) bool { return !slices.Contains(mountCAs, a) })
+		leaf := issueFrozenLeaf(t, cas[c.Signer], leafKey, c.Leaf)
 
-		signer := cas[rng.Intn(len(cas))]
-		if rng.Intn(8) == 0 {
-			signer = untrusted
-		}
-		leaf := issueLeaf(t, signer, leafKey, func(c *x509.Certificate) {
-			c.Subject = pkix.Name{
-				CommonName:         pick(cnValues),
-				OrganizationalUnit: some(ouValues, 2),
-				Organization:       some(orgValues, 2),
-			}
-			c.DNSNames = some(dnsValues, 2)
-			c.EmailAddresses = some(emailValues, 2)
-			for j := rng.Intn(3); j > 0; j-- {
-				c.URIs = append(c.URIs, mustURL(t, uriValues()))
-			}
-		})
-
-		// Half the patterns are made from what the leaf carries, so enough
-		// roles accept it for agreement to mean something.
-		globNear := func(v string) string {
-			if v == "" || rng.Intn(2) == 0 {
-				return globPattern()
-			}
-			k := rng.Intn(len(v))
-			switch rng.Intn(3) {
-			case 0:
-				return globEscape(v[:k]) + "*"
-			case 1:
-				return globEscape(v[:k]) + "?" + globEscape(v[k+1:])
-			}
-			return globEscape(v)
-		}
-		uriNear := func() string {
-			if len(leaf.URIs) == 0 || rng.Intn(2) == 0 {
-				return uriPattern()
-			}
-			scheme, body, _ := strings.Cut(pick(uriStrings(leaf)), "://")
-			segs := strings.Split(body, "/")
-			for j := range segs {
-				if segs[j] == "" || rng.Intn(3) == 0 {
-					segs[j] = "+"
-				}
-			}
-			if k := 1 + rng.Intn(len(segs)); k < len(segs) {
-				segs = append(segs[:k], "*")
-			}
-			return scheme + "://" + strings.Join(segs, "/")
-		}
-
-		role := &CertRole{Name: "r", TokenPolicies: []string{"p"}, TokenTTL: "1h", TokenType: "cert_role", Certificate: pemOf(roleCA)}
-		for role.AllowedCommonNames == nil && role.AllowedDNSSANs == nil && role.AllowedEmailSANs == nil &&
-			role.AllowedURISANs == nil && role.AllowedOrganizationalUnits == nil && role.AllowedOrganizations == nil {
-			if rng.Intn(2) == 0 {
-				for j := 1 + rng.Intn(2); j > 0; j-- {
-					role.AllowedCommonNames = append(role.AllowedCommonNames, globNear(leaf.Subject.CommonName))
-				}
-				globs++
-			}
-			if rng.Intn(4) == 0 {
-				role.AllowedDNSSANs = append(some(dnsPatterns, 1), pick(dnsPatterns))
-			}
-			if rng.Intn(4) == 0 {
-				role.AllowedEmailSANs = append(some(emailPatterns, 1), pick(emailPatterns))
-			}
-			if rng.Intn(3) == 0 {
-				for j := 1 + rng.Intn(2); j > 0; j-- {
-					role.AllowedURISANs = append(role.AllowedURISANs, uriNear())
-				}
-				uris++
-			}
-			if rng.Intn(4) == 0 {
-				role.AllowedOrganizationalUnits = []string{pick(ouValues[:3]), pick(ouValues[:3])}
-				exacts++
-			}
-			if rng.Intn(4) == 0 {
-				role.AllowedOrganizations = []string{pick(orgValues)}
-				exacts++
-			}
-		}
-
-		// Today: the role's trust decision as login makes it.
-		config := &CertAuthConfig{}
-		if len(mountCAs) > 0 {
-			config.caPool, err = buildCAPool(pemOf(mountCAs))
-			require.NoError(t, err)
-		}
-		old := certSatisfiesRole(config, leaf, role)
-
-		// Converted.
-		rule, err := convertRole(t, "auth/cert/", role, certsOf(mountCAs), widened)
-		require.NoError(t, err, "role %+v", role)
-		if role.Certificate == "" && widened {
-			widenedRoles++
-		}
+		rule, err := convertRole(t, "auth/cert/", c.Role, certsOf(roleCA), certsOf(mountCAs), widened)
+		require.NoError(t, err, "case %d: role %+v", i, c.Role)
 		got := admitConverted(leaf, certsOf(pool), rule, naming)
 
-		if leaf.Subject.CommonName == "" && slices.ContainsFunc(role.AllowedCommonNames, onlyStars) {
-			require.False(t, got, "sample %d: a certificate without a common name has no cn fact", i)
-			if old {
+		switch {
+		case len(roleCA) > 0:
+			roleCAs++
+		case widened:
+			widenedRoles++
+		}
+		if len(c.Role.CommonNames) > 0 {
+			globs++
+		}
+		if len(c.Role.URISANs) > 0 {
+			uris++
+		}
+		if len(c.Role.OrgUnits) > 0 {
+			exacts++
+		}
+		if len(c.Role.Orgs) > 0 {
+			exacts++
+		}
+
+		if c.Leaf.CN == "" && slices.ContainsFunc(c.Role.CommonNames, onlyStars) {
+			require.False(t, got, "case %d: a certificate without a common name has no cn fact", i)
+			if c.Accepted {
 				narrowed++
 			}
 			continue
 		}
-		require.Equal(t, old, got, "sample %d: leaf %+v %v %v %v from %s, role %+v, mount CAs %d, role CAs %d, other CAs %d",
-			i, leaf.Subject, leaf.DNSNames, leaf.EmailAddresses, leaf.URIs, signer.cert.Subject.CommonName,
-			role, len(mountCAs), len(roleCA), len(otherCAs))
-		if old {
+		require.Equal(t, c.Accepted, got, "case %d: %+v", i, c)
+		if c.Accepted {
 			accepted++
 		} else {
 			refused++
@@ -1261,30 +1127,27 @@ func TestEquivalence_RoleMatcherAndConvertedRule(t *testing.T) {
 	assert.Greater(t, exacts, 30)
 }
 
-// The documented narrowing: today a pattern of only '*' matches a certificate
-// without a common name (path.Match("*", "") holds); converted, an empty
-// common name is not a fact, so the rule on "cn" fails.
+// The documented narrowing: a pattern of only '*' matched a certificate
+// without a common name in the role login (path.Match("*", "") holds), which
+// accepted both leaves below; converted, an empty common name is not a fact,
+// so the rule on "cn" fails.
 func TestEquivalence_EmptyCommonName(t *testing.T) {
 	naming, err := compileCertFacts("", nil)
 	require.NoError(t, err)
 	root := issueCA(t, "Root", newFixtureKey(t), nil)
-	role := &CertRole{AllowedCommonNames: []string{"*"}}
-	rule, err := convertRole(t, "auth/cert/", role, []*x509.Certificate{root.cert}, false)
+	rule, err := convertRole(t, "auth/cert/", certRole{CommonNames: []string{"*"}}, nil, []*x509.Certificate{root.cert}, false)
 	require.NoError(t, err)
-	config := &CertAuthConfig{}
-	config.caPool, _ = buildCAPool(root.pem)
 
 	named := issueLeaf(t, root, newFixtureKey(t), func(c *x509.Certificate) { c.Subject.CommonName = "agent" })
-	assert.True(t, certSatisfiesRole(config, named, role))
 	assert.True(t, admitConverted(named, []*x509.Certificate{root.cert}, rule, naming))
 
 	unnamed := issueLeaf(t, root, newFixtureKey(t), func(c *x509.Certificate) { c.DNSNames = []string{"a.example.com"} })
-	assert.True(t, certSatisfiesRole(config, unnamed, role), "today")
 	assert.False(t, admitConverted(unnamed, []*x509.Certificate{root.cert}, rule, naming), "converted")
 }
 
-// A run of '*' crosses no '/' today, so it converts to one '*': a '**' left as
-// written would cross '/' in a selector and widen the role.
+// A run of '*' crossed no '/' in the role login, which refused the leaf below,
+// so it converts to one '*': a '**' left as written would cross '/' in a
+// selector and widen the role.
 func TestConvert_StarRunsCollapse(t *testing.T) {
 	v, err := convertGlob(`a**b\**`)
 	require.NoError(t, err)
@@ -1294,12 +1157,8 @@ func TestConvert_StarRunsCollapse(t *testing.T) {
 	require.NoError(t, err)
 	root := issueCA(t, "Root", newFixtureKey(t), nil)
 	leaf := issueLeaf(t, root, newFixtureKey(t), func(c *x509.Certificate) { c.Subject.CommonName = "agent/1" })
-	role := &CertRole{AllowedCommonNames: []string{"agent**"}}
-	config := &CertAuthConfig{}
-	config.caPool, _ = buildCAPool(root.pem)
-	rule, err := convertRole(t, "auth/cert/", role, []*x509.Certificate{root.cert}, false)
+	rule, err := convertRole(t, "auth/cert/", certRole{CommonNames: []string{"agent**"}}, nil, []*x509.Certificate{root.cert}, false)
 	require.NoError(t, err)
-	assert.False(t, certSatisfiesRole(config, leaf, role))
 	assert.False(t, admitConverted(leaf, []*x509.Certificate{root.cert}, rule, naming))
 }
 
@@ -1312,7 +1171,7 @@ func TestConvert_Refused(t *testing.T) {
 	}
 	_, err := convertGlob("agent-[0-9]")
 	assert.ErrorContains(t, err, "character class")
-	_, err = convertRole(t, "auth/cert/", &CertRole{AllowedDNSSANs: []string{"web-[12].example.com"}}, nil, false)
+	_, err = convertRole(t, "auth/cert/", certRole{DNSSANs: []string{"web-[12].example.com"}}, nil, nil, false)
 	assert.ErrorContains(t, err, "character class")
 
 	// An escaped '[' is a literal, as it is today.

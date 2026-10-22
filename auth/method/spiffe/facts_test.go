@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
-	mrand "math/rand"
 	"net/http"
 	"net/url"
 	"slices"
@@ -307,59 +306,50 @@ func TestLogin_RefusedCarriesNoAdmission(t *testing.T) {
 // Metadata equivalence: the mapping renders what metadata_mappings extracts
 // =============================================================================
 
+// metadataCase is a SPIFFE ID, a metadata_mappings mapping, and the metadata
+// the removed role login rendered from them (Want, frozen).
+type metadataCase struct {
+	Name    string            `json:"name,omitempty"`
+	ID      string            `json:"id"`
+	Mapping map[string]string `json:"mapping,omitempty"`
+	Want    map[string]string `json:"want,omitempty"`
+}
+
+// metadataCases are written by hand; testdata/metadata_equivalence.json holds
+// 200 more, generated from a fixed seed: any subset of the ID components, each
+// to a distinct name or to itself.
+var metadataCases = []metadataCase{
+	{Name: "every component", ID: "spiffe://example.org/ns/prod/sa/ci",
+		Mapping: map[string]string{"trust_domain": "td", "spiffe_id": "id", "path": "where"},
+		Want:    map[string]string{"td": "example.org", "id": "spiffe://example.org/ns/prod/sa/ci", "where": "/ns/prod/sa/ci"}},
+	{Name: "identity mappings", ID: "spiffe://example.org/ns/prod/sa/ci",
+		Mapping: map[string]string{"spiffe_id": "spiffe_id", "path": "path"},
+		Want:    map[string]string{"spiffe_id": "spiffe://example.org/ns/prod/sa/ci", "path": "/ns/prod/sa/ci"}},
+	{Name: "no mappings", ID: "spiffe://example.org/ns/prod/sa/ci"},
+	{Name: "no path", ID: "spiffe://example.org",
+		Mapping: map[string]string{"path": "where", "trust_domain": "td"},
+		Want:    map[string]string{"td": "example.org"}},
+}
+
+// The mapping renders what the role's metadata_mappings extracted.
 func TestRenderMetadata_EquivalentToExtractSPIFFEIDMetadata(t *testing.T) {
-	check := func(t *testing.T, id spiffeid.ID, mapping map[string]string) {
+	check := func(t *testing.T, c metadataCase) {
 		t.Helper()
-		want := extractSPIFFEIDMetadata(mapping, id)
-		naming := mustNaming(t, mapping)
+		id := spiffeid.RequireFromString(c.ID)
+		naming := mustNaming(t, c.Mapping)
 		// Both SVID kinds render the ID's components alike.
 		for _, adm := range []*logical.Admission{
 			newAdmission(id, svidX509, nil, time.Time{}, nil),
 			newAdmission(id, svidJWT, []string{"warden", "api"}, time.Unix(1_700_000_000, 0), nil),
 		} {
-			assert.Equal(t, want, adm.RenderMetadata(naming), "id %s, mapping %v", id, mapping)
+			assert.Equal(t, c.Want, adm.RenderMetadata(naming), "case %+v", c)
 		}
 	}
-
-	full := spiffeid.RequireFromString("spiffe://example.org/ns/prod/sa/ci")
-	root := spiffeid.RequireFromString("spiffe://example.org")
-	cases := []struct {
-		name    string
-		id      spiffeid.ID
-		mapping map[string]string
-	}{
-		{"every component", full, map[string]string{"trust_domain": "td", "spiffe_id": "id", "path": "where"}},
-		{"identity mappings", full, map[string]string{"spiffe_id": "spiffe_id", "path": "path"}},
-		{"no mappings", full, nil},
-		{"no path", root, map[string]string{"path": "where", "trust_domain": "td"}},
+	for _, c := range metadataCases {
+		t.Run(c.Name, func(t *testing.T) { check(t, c) })
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) { check(t, tc.id, tc.mapping) })
-	}
-
-	// Generated IDs and mappings: any subset of the ID components, each to a
-	// distinct name or to itself.
-	rng := mrand.New(mrand.NewSource(20261020))
-	sources := []string{factSPIFFEID, factTrustDomain, factPath}
-	targets := []string{"workload", "team", "who", "where", "what"}
-	for i := 0; i < 200; i++ {
-		raw := "spiffe://" + []string{"example.org", "a.b-c_d.org", "x9"}[rng.Intn(3)]
-		for j := rng.Intn(4); j > 0; j-- {
-			raw += "/" + []string{"ns", "prod", "sa", "a.b", "x-y", "Z_9"}[rng.Intn(6)]
-		}
-		mapping := map[string]string{}
-		free := slices.Clone(targets)
-		for _, s := range sources {
-			switch rng.Intn(3) {
-			case 1:
-				mapping[s] = s
-			case 2:
-				k := rng.Intn(len(free))
-				mapping[s] = free[k]
-				free = slices.Delete(free, k, k+1)
-			}
-		}
-		check(t, spiffeid.RequireFromString(raw), mapping)
+	for _, c := range factstest.Frozen[metadataCase](t, "metadata_equivalence.json") {
+		check(t, c)
 	}
 }
 
@@ -719,7 +709,8 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 }
 
 // =============================================================================
-// Equivalence: today's role matcher and the role converted to selector rules
+// Equivalence: the removed role matcher (frozen) and the role converted to
+// selector rules
 // =============================================================================
 
 // escapeValue writes s as an exact selector value.
@@ -773,16 +764,16 @@ func convertIDPattern(p string) (v string, live bool, err error) {
 // had bound_audiences, which become the second rule's aud (the mount's
 // bound_audiences hold every role's). A role whose patterns all convert to
 // nothing admitted nothing, and converts to no rule.
-func convertRole(t testing.TB, mountPath string, role *SPIFFERole, convert func(string) (string, bool, error)) ([]*selector.Rule, error) {
+func convertRole(t testing.TB, mountPath string, role spiffeRole, convert func(string) (string, bool, error)) ([]*selector.Rule, error) {
 	t.Helper()
 	td, err := spiffeid.TrustDomainFromString(role.TrustDomain)
 	if err != nil {
 		return nil, err
 	}
 	base := map[string][]string{"mount": {mountPath}, factTrustDomain: {escapeValue(td.Name())}}
-	if len(role.AllowedSPIFFEIDs) > 0 {
+	if len(role.AllowedIDs) > 0 {
 		var ids []string
-		for _, p := range role.AllowedSPIFFEIDs {
+		for _, p := range role.AllowedIDs {
 			v, live, err := convert(p)
 			if err != nil {
 				return nil, err
@@ -852,16 +843,48 @@ type equivalenceRun struct {
 	idFormTrustDomain int            // roles giving trust_domain as spiffe://<name>
 }
 
-// runEquivalence generates samples credentials, roles and mount audiences from
-// seed, and compares today's decision (roleAcceptsSVID: the verification and
-// role binding a login runs) with the converted model's (admitConverted over
-// convertRole, with convert for allowed_spiffe_ids).
+// spiffeRole is what a removed spiffe auth role bound an SVID to.
+type spiffeRole struct {
+	TrustDomain    string   `json:"trust_domain"`
+	AllowedIDs     []string `json:"allowed_spiffe_ids,omitempty"`
+	BoundAudiences []string `json:"bound_audiences,omitempty"`
+}
+
+// spiffeCase is one frozen sample of the removed role login: an SVID of either
+// kind for ID (an X.509-SVID, or a JWT-SVID carrying Audiences, expired when
+// Expired), signed by its trust domain's authority or, when Rogue, by one no
+// trust domain holds; the role it was presented for; the converted mount's
+// bound_audiences (every role's, plus others); and whether the role login
+// accepted it.
+type spiffeCase struct {
+	Kind           string     `json:"svid"`
+	ID             string     `json:"id"`
+	Rogue          bool       `json:"rogue,omitempty"`
+	Audiences      []string   `json:"aud,omitempty"`
+	Expired        bool       `json:"expired,omitempty"`
+	Role           spiffeRole `json:"role"`
+	MountAudiences []string   `json:"mount_audiences,omitempty"`
+	Accepted       bool       `json:"accepted"`
+}
+
+// equivalenceCases are the frozen cases in testdata/role_equivalence.json,
+// generated (2000, from a fixed seed) over trust domains a, b and c.example.org.
+// Half the patterns, trust domains and audiences were made from the
+// credential, so enough roles accept it for agreement to mean something.
+func equivalenceCases(t *testing.T) []spiffeCase {
+	return factstest.Frozen[spiffeCase](t, "role_equivalence.json")
+}
+
+// runEquivalence compares, over cases, the removed role login's decision
+// (Accepted: the SVID verified against the trust bundles, its ID in the role's
+// trust domain and matching one of its allowed_spiffe_ids when it had any, a
+// JWT-SVID only for a role with bound_audiences, against them) with the
+// converted model's (admitConverted over convertRole, with convert for
+// allowed_spiffe_ids).
 //
 // Trust domains a and b are loaded with both X.509 and JWT authorities; c is
-// not loaded, and a rogue CA and JWT key sign some credentials. Half the
-// patterns, trust domains and audiences are made from the credential, so
-// enough roles accept it for agreement to mean something.
-func runEquivalence(t *testing.T, seed int64, samples int, convert func(string) (string, bool, error)) equivalenceRun {
+// not loaded, and a rogue CA and JWT key sign the cases marked rogue.
+func runEquivalence(t *testing.T, cases []spiffeCase, convert func(string) (string, bool, error)) equivalenceRun {
 	t.Helper()
 	ctx := context.Background()
 	b, _ := createTestBackend(t)
@@ -885,156 +908,75 @@ func runEquivalence(t *testing.T, seed int64, samples int, convert func(string) 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
-	rng := mrand.New(mrand.NewSource(seed))
-	pick := func(pool []string) string { return pool[rng.Intn(len(pool))] }
-	some := func(pool []string, max int) []string {
-		var out []string
-		for j := rng.Intn(max + 1); j > 0; j-- {
-			out = append(out, pick(pool))
-		}
-		return out
-	}
-	segPool := []string{"ns", "prod", "default", "sa", "api", "a.b", "x-y"}
-	audPool := []string{"warden", "api", "a*b", "other"}
-
-	randomPattern := func() string {
-		for {
-			scheme := pick([]string{"spiffe", "spiffe", "https", ""})
-			if rng.Intn(8) == 0 {
-				if scheme == "" {
-					return "*"
-				}
-				return scheme + "://*"
-			}
-			segs := []string{pick(append(slices.Clone(tds), "+"))}
-			for j := rng.Intn(3); j > 0; j-- {
-				segs = append(segs, pick(append(slices.Clone(segPool), "+")))
-			}
-			if rng.Intn(3) == 0 {
-				segs = append(segs, "*")
-			}
-			p := strings.Join(segs, "/")
-			if scheme != "" {
-				p = scheme + "://" + p
-			}
-			if helper.ValidatePattern(p) == nil {
-				return p
-			}
-		}
-	}
-	nearPattern := func(id string) string {
-		if rng.Intn(2) == 0 {
-			return randomPattern()
-		}
-		if rng.Intn(8) == 0 {
-			return "spiffe://*"
-		}
-		_, body, _ := strings.Cut(id, "://")
-		segs := strings.Split(body, "/")
-		for j := range segs {
-			if rng.Intn(3) == 0 {
-				segs[j] = "+"
-			}
-		}
-		if k := 1 + rng.Intn(len(segs)); k < len(segs) {
-			segs = append(segs[:k], "*")
-		}
-		if rng.Intn(10) == 0 {
-			return strings.Join(segs, "/") // no scheme
-		}
-		return "spiffe://" + strings.Join(segs, "/")
-	}
-
 	run := equivalenceRun{accepted: map[string]int{}, refused: map[string]int{}}
-	for i := 0; i < samples; i++ {
-		td := pick(tds)
-		id := "spiffe://" + td
-		for j := rng.Intn(4); j > 0; j-- {
-			id += "/" + pick(segPool)
-		}
-
-		// The role, and the other roles' audiences on the mount.
-		role := &SPIFFERole{Name: "r", TrustDomain: td, TokenTTL: "1h"}
-		if rng.Intn(3) == 0 {
-			role.TrustDomain = pick(tds)
-		}
-		if rng.Intn(5) == 0 {
-			role.TrustDomain = "spiffe://" + role.TrustDomain
+	for i, c := range cases {
+		td := spiffeid.RequireFromString(c.ID).TrustDomain().Name()
+		if strings.HasPrefix(c.Role.TrustDomain, "spiffe://") {
 			run.idFormTrustDomain++
 		}
-		if rng.Intn(3) != 0 {
-			for j := 1 + rng.Intn(2); j > 0; j-- {
-				p := nearPattern(id)
-				if !strings.Contains(p, "://") {
-					run.deadPatterns++
-				}
-				role.AllowedSPIFFEIDs = append(role.AllowedSPIFFEIDs, p)
-			}
+		if len(c.Role.AllowedIDs) > 0 {
 			run.patterns++
 		}
-		if rng.Intn(2) == 0 {
-			role.BoundAudiences = append(some(audPool, 1), pick(audPool))
+		for _, p := range c.Role.AllowedIDs {
+			if !strings.Contains(p, "://") {
+				run.deadPatterns++
+			}
+		}
+		if len(c.Role.BoundAudiences) > 0 {
 			run.audienceRoles++
 		}
-		mountAuds := slices.Compact(slices.Sorted(slices.Values(slices.Concat(role.BoundAudiences, some(audPool, 2)))))
 
 		// The credential.
 		var cert *x509.Certificate
-		var token, kind string
-		if rng.Intn(2) == 0 {
-			kind = svidX509
+		var token string
+		switch c.Kind {
+		case svidX509:
 			ca, caKey := cas[td], caKeys[td]
-			if rng.Intn(8) == 0 {
+			if c.Rogue {
 				ca, caKey = rogueCA, rogueKey
 			}
-			cert = issueSVID(t, ca, caKey, leafKey, id)
-		} else {
-			kind = svidJWT
-			aud := some(audPool, 2)
-			if len(role.BoundAudiences) > 0 && rng.Intn(2) == 0 {
-				aud = append(aud, pick(role.BoundAudiences))
-			}
+			cert = issueSVID(t, ca, caKey, leafKey, c.ID)
+		case svidJWT:
 			exp := time.Now().Add(time.Hour)
-			if rng.Intn(10) == 0 {
+			if c.Expired {
 				exp = time.Now().Add(-time.Hour)
 			}
 			signer := jwts[td]
-			if rng.Intn(8) == 0 {
+			if c.Rogue {
 				signer = rogueJWT
 			}
-			token = signer.sign(t, id, aud, exp, nil)
+			token = signer.sign(t, c.ID, c.Audiences, exp, nil)
+		default:
+			t.Fatalf("case %d: SVID kind %q", i, c.Kind)
 		}
 
-		old := b.roleAcceptsSVID(set, role, cert, token)
-		rules, err := convertRole(t, "auth/spiffe/", role, convert)
-		require.NoError(t, err, "role %+v", role)
-		got := admitConverted(set, cert, token, mountAuds, rules, naming)
+		rules, err := convertRole(t, "auth/spiffe/", c.Role, convert)
+		require.NoError(t, err, "case %d: role %+v", i, c.Role)
+		got := admitConverted(set, cert, token, c.MountAudiences, rules, naming)
 
-		if kind == svidJWT && len(role.BoundAudiences) == 0 {
-			if _, err := spiffelib.VerifyJWTSVIDToken(set, token, mountAuds); err == nil {
+		if c.Kind == svidJWT && len(c.Role.BoundAudiences) == 0 {
+			if _, err := spiffelib.VerifyJWTSVIDToken(set, token, c.MountAudiences); err == nil {
 				run.x509OnlyRefused++
 			}
 		}
-		if old != got {
-			run.mismatches = append(run.mismatches, fmt.Sprintf(
-				"sample %d: %s SVID %s, role trust_domain %q allowed_spiffe_ids %q bound_audiences %q, mount audiences %q: today %v, converted %v",
-				i, kind, id, role.TrustDomain, role.AllowedSPIFFEIDs, role.BoundAudiences, mountAuds, old, got))
+		if c.Accepted != got {
+			run.mismatches = append(run.mismatches, fmt.Sprintf("case %d: %+v: converted %v", i, c, got))
 			continue
 		}
-		if old {
-			run.accepted[kind]++
+		if c.Accepted {
+			run.accepted[c.Kind]++
 		} else {
-			run.refused[kind]++
+			run.refused[c.Kind]++
 		}
 	}
 	return run
 }
 
-// TestEquivalence_RoleMatcherAndConvertedRules checks, over generated SVIDs of
-// both kinds, roles and mount audiences, that today's matcher accepts an SVID
-// exactly when the converted model does: the conversion is exact.
+// TestEquivalence_RoleMatcherAndConvertedRules checks, over the frozen SVIDs
+// of both kinds, roles and mount audiences, that the converted model accepts
+// an SVID exactly when the removed role login did: the conversion is exact.
 func TestEquivalence_RoleMatcherAndConvertedRules(t *testing.T) {
-	run := runEquivalence(t, 20261020, 2000, convertIDPattern)
+	run := runEquivalence(t, equivalenceCases(t), convertIDPattern)
 	for _, m := range run.mismatches {
 		t.Error(m)
 	}
@@ -1052,9 +994,11 @@ func TestEquivalence_RoleMatcherAndConvertedRules(t *testing.T) {
 	assert.Greater(t, run.idFormTrustDomain, 30)
 }
 
-// The generator catches a conversion that skips a step: each mutation below
-// leaves one rewrite out, and the comparison must then disagree somewhere.
+// The frozen cases catch a conversion that skips a step: each mutation below
+// leaves one rewrite out, and the comparison must then disagree somewhere in
+// the first 600 cases.
 func TestEquivalence_CatchesBrokenConversion(t *testing.T) {
+	cases := equivalenceCases(t)[:600]
 	mutations := map[string]func(string) (string, bool, error){
 		// A trailing '/*' kept as '/*' no longer crosses '/'.
 		"trailing star kept": func(p string) (string, bool, error) {
@@ -1072,31 +1016,29 @@ func TestEquivalence_CatchesBrokenConversion(t *testing.T) {
 	}
 	for name, convert := range mutations {
 		t.Run(name, func(t *testing.T) {
-			run := runEquivalence(t, 20261020, 600, convert)
+			run := runEquivalence(t, cases, convert)
 			assert.NotEmpty(t, run.mismatches, "a broken conversion must be caught")
 		})
 	}
 }
 
-// A role without bound_audiences admitted no JWT-SVID, so it converts to an
+// A role without bound_audiences admitted no JWT-SVID (the role login refused
+// the token below and accepted the certificate), so it converts to an
 // X.509-only rule: once the mount's bound_audiences admit the token, its
 // "svid" is what keeps the role from accepting it.
 func TestEquivalence_RoleWithoutAudiencesIsX509Only(t *testing.T) {
 	f := newFactsFixture(t, nil)
-	role := &SPIFFERole{Name: "x509-only", TrustDomain: testTD, TokenTTL: "1h"}
 	set := f.b.spiffe.SnapshotBundleSet()
 	naming := mustNaming(t, nil)
-	rules, err := convertRole(t, "auth/spiffe/", role, convertIDPattern)
+	rules, err := convertRole(t, "auth/spiffe/", spiffeRole{TrustDomain: testTD}, convertIDPattern)
 	require.NoError(t, err)
 	require.Len(t, rules, 1)
 
 	const id = "spiffe://" + testTD + "/sa/api"
 	token := f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil)
-	assert.False(t, f.b.roleAcceptsSVID(set, role, nil, token), "today")
 	assert.False(t, admitConverted(set, nil, token, []string{"warden"}, rules, naming), "converted")
 
 	cert := f.svid(t, id)
-	assert.True(t, f.b.roleAcceptsSVID(set, role, cert, ""))
 	assert.True(t, admitConverted(set, cert, "", []string{"warden"}, rules, naming))
 }
 
@@ -1132,7 +1074,7 @@ func TestConvertIDPattern(t *testing.T) {
 	}
 
 	// A role left with no live pattern admitted nothing.
-	rules, err := convertRole(t, "auth/spiffe/", &SPIFFERole{TrustDomain: "example.org", AllowedSPIFFEIDs: []string{"example.org/*"}}, convertIDPattern)
+	rules, err := convertRole(t, "auth/spiffe/", spiffeRole{TrustDomain: "example.org", AllowedIDs: []string{"example.org/*"}}, convertIDPattern)
 	require.NoError(t, err)
 	assert.Nil(t, rules)
 }
