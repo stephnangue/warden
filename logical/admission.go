@@ -213,6 +213,34 @@ type FactsProvider interface {
 	EntityKind() string
 }
 
+// CredentialFormat names the credential a transparent auth method admits, which
+// tells core where in a request to find it.
+type CredentialFormat string
+
+const (
+	// CredentialFormatJWT is a JWT bearer, verified against the mount's keys.
+	CredentialFormatJWT CredentialFormat = "jwt"
+	// CredentialFormatKubernetesJWT is a Kubernetes service account JWT bearer,
+	// verified by a TokenReview. It travels as CredentialFormatJWT does.
+	CredentialFormatKubernetesJWT CredentialFormat = "k8s_sa_jwt"
+	// CredentialFormatCert is a TLS client certificate, from the connection or
+	// a trusted proxy's forwarding header.
+	CredentialFormatCert CredentialFormat = "cert"
+	// CredentialFormatSPIFFE is either SVID: a JWT-SVID bearer, or else an
+	// X.509-SVID client certificate.
+	CredentialFormatSPIFFE CredentialFormat = "spiffe"
+)
+
+// CredentialFormatProvider is implemented by auth methods that admit a
+// credential presented with each request (transparent authentication). Core
+// asks it on the request path, through the backend the router already returned
+// with the mount, to take the credential from the request; an auth method that
+// does not implement it does not support transparent authentication. The
+// format is fixed per auth method: it never depends on configuration.
+type CredentialFormatProvider interface {
+	CredentialFormat() CredentialFormat
+}
+
 // Lookup answers the canonical fact name against naming n: "mount" from the
 // admission, "kind" from n, and any other name through n's Mapping into Facts.
 // A name the mapping does not answer is invisible and yields an empty Cursor,

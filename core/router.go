@@ -443,6 +443,28 @@ func (r *Router) MatchingMountEntry(ctx context.Context, path string) *MountEntr
 	return raw.(*routeEntry).mountEntry
 }
 
+// MatchingMountEntryAndBackend returns the MountEntry and the backend used for
+// a path, from one lookup; both are nil when no mount matches.
+func (r *Router) MatchingMountEntryAndBackend(ctx context.Context, path string) (*MountEntry, logical.Backend) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, nil
+	}
+	path = ns.Path + path
+
+	r.mu.RLock()
+	_, raw, ok := r.root.LongestPrefix(path)
+	r.mu.RUnlock()
+	if !ok {
+		return nil, nil
+	}
+
+	re := raw.(*routeEntry)
+	re.l.RLock()
+	defer re.l.RUnlock()
+	return re.mountEntry, re.backend
+}
+
 // MatchingBackend returns the backend used for a path
 func (r *Router) MatchingBackend(ctx context.Context, path string) logical.Backend {
 	ns, err := namespace.FromContext(ctx)

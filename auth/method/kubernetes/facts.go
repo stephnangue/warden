@@ -39,6 +39,14 @@ func (b *kubernetesAuthBackend) FactNames() []string { return helper.FactNames(b
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *kubernetesAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+var _ logical.CredentialFormatProvider = (*kubernetesAuthBackend)(nil)
+
+// CredentialFormat implements logical.CredentialFormatProvider: the mount
+// admits a service account JWT bearer, verified by a TokenReview.
+func (b *kubernetesAuthBackend) CredentialFormat() logical.CredentialFormat {
+	return logical.CredentialFormatKubernetesJWT
+}
+
 // newAdmission returns what a successful TokenReview verified about a
 // service-account token: status is the review's result and namespace and name
 // the service account parsed from its username. claims are the token's

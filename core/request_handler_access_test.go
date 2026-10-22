@@ -66,6 +66,7 @@ func (b *loginStub) HandleRequest(_ context.Context, req *logical.Request) (*log
 			Mount: b.naming,
 		},
 	}
+	auth.TokenType = TypeIdentityToken
 	switch b.mountType {
 	case "cert":
 		cert := listener.ForwardedClientCert(req.HTTPRequest.Context())
@@ -73,13 +74,20 @@ func (b *loginStub) HandleRequest(_ context.Context, req *logical.Request) (*log
 			return logical.ErrorResponse(logical.ErrBadRequest("no client certificate")), nil
 		}
 		sum := sha256.Sum256(cert.Raw)
-		auth.TokenType = TypeCertRole
 		auth.ClientToken = hex.EncodeToString(sum[:])
 	default:
-		auth.TokenType = TypeJWTRole
 		auth.ClientToken, _ = req.Data["jwt"].(string)
 	}
 	return &logical.Response{StatusCode: http.StatusOK, Auth: auth, Data: map[string]any{}}, nil
+}
+
+// CredentialFormat takes the credential from the request as the real auth
+// method of the stub's type does.
+func (b *loginStub) CredentialFormat() logical.CredentialFormat {
+	if b.mountType == "cert" {
+		return logical.CredentialFormatCert
+	}
+	return logical.CredentialFormatJWT
 }
 
 func (b *loginStub) Cleanup(context.Context) {}
@@ -438,7 +446,7 @@ func TestAccessPath_ExplicitWardenToken(t *testing.T) {
 	stub := mountLoginStub(t, env.c, "jwt", "reader")
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	te, err := env.c.tokenStore.GenerateToken(ctx, TypeWardenToken, &AuthData{
+	te, err := env.c.tokenStore.GenerateToken(ctx, TypeServiceToken, &AuthData{
 		PrincipalID: "operator",
 		ExpireAt:    time.Now().Add(time.Hour),
 		Policies:    []string{"access-reader"},

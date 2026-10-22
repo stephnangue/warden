@@ -97,7 +97,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
 			PrincipalID: principalID,
-			TokenType:   "cert_role",
+			TokenType:   logical.TokenTypeIdentity,
 			TokenTTL:    calculateTTL(config, cert, time.Now()),
 			ClientIP:    req.ClientIP,
 			ClientToken: fingerprint, // Cert fingerprint for token type caching

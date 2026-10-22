@@ -251,7 +251,8 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	// An admission: no policies, no metadata, no role or spec to carry.
 	assert.Nil(t, auth.Policies)
 	assert.Nil(t, auth.Metadata)
-	assert.Equal(t, "jwt_role", auth.TokenType)
+	assert.Equal(t, logical.TokenTypeIdentity, auth.TokenType)
+	assert.Equal(t, logical.CredentialFormatJWT, b.CredentialFormat())
 	assert.Equal(t, token, auth.ClientToken)
 	assert.Equal(t, "agent-1", auth.PrincipalID)
 	assert.InDelta(t, time.Hour.Seconds(), auth.TokenTTL.Seconds(), 5, "min(token_ttl, exp)")

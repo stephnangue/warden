@@ -51,7 +51,7 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 				Timestamp: time.Now(),
 				Auth: &Auth{
 					TokenID:   "secret-token-123",
-					TokenType: "service",
+					TokenType: "service_token",
 				},
 			},
 			checkFunc: func(t *testing.T, entry *LogEntry) {
@@ -109,7 +109,7 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 				Timestamp: time.Now(),
 				Auth: &Auth{
 					TokenID:   "token-abc",
-					TokenType: "service",
+					TokenType: "service_token",
 				},
 				Request: &Request{
 					ID:   "req-456",
@@ -379,7 +379,7 @@ func TestJSONFormatOmitFields(t *testing.T) {
 				Timestamp: time.Now(),
 				Auth: &Auth{
 					TokenID:     "token-123",
-					TokenType:   "service",
+					TokenType:   "service_token",
 					PrincipalID: "user@example.com",
 				},
 				Request: &Request{
@@ -538,7 +538,7 @@ func TestJSONFormatNoSaltingWhenFieldsNotConfigured(t *testing.T) {
 		Timestamp: time.Now(),
 		Auth: &Auth{
 			TokenID:   "token-123",
-			TokenType: "service",
+			TokenType: "service_token",
 		},
 		Request: &Request{
 			ID:   "req-123",
@@ -667,7 +667,7 @@ func TestFormatConditionInputsSalting(t *testing.T) {
 						Expression: "agent.metadata.env == 'prod'",
 						Inputs: map[string]string{
 							"agent.metadata.env": "staging",
-							"agent.token_type":   "jwt_role",
+							"agent.token_type":   "identity_token",
 							"request.data.model": "opus",
 						},
 					},
@@ -858,7 +858,7 @@ func TestFormatResponseWithSalting(t *testing.T) {
 				StatusCode: 200,
 				AuthResult: &AuthResult{
 					PrincipalID: "user@example.com",
-					TokenType:   "jwt_role",
+					TokenType:   "identity_token",
 				},
 			},
 		}
@@ -873,7 +873,7 @@ func TestFormatResponseWithSalting(t *testing.T) {
 		if result.Response.AuthResult.PrincipalID == "user@example.com" {
 			t.Error("principal_id should be salted")
 		}
-		if result.Response.AuthResult.TokenType != "jwt_role" {
+		if result.Response.AuthResult.TokenType != "identity_token" {
 			t.Error("token_type should not be salted")
 		}
 	})
@@ -1242,7 +1242,7 @@ func TestOmitResponseFields(t *testing.T) {
 				Auth: &Auth{
 					TokenID:       "t1",
 					TokenAccessor: "ta1",
-					TokenType:     "service",
+					TokenType:     "service_token",
 					PrincipalID:   "p1",
 					RoleName:      "r1",
 					Policies:      []string{"pol1"},
@@ -1386,7 +1386,7 @@ func TestOmitResponseFields(t *testing.T) {
 				Timestamp: fixedTS,
 				Response: &Response{
 					AuthResult: &AuthResult{
-						TokenType:   "service",
+						TokenType:   "service_token",
 						PrincipalID: "user1",
 						Policies:    []string{"p1"},
 						TokenTTL:    3600,

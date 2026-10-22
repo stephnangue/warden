@@ -42,7 +42,8 @@ func extractJWTFromRequest(req *logical.Request) string {
 }
 
 // certFingerprint returns the hex SHA-256 of a certificate's DER bytes. This is
-// the ClientToken for an X.509-SVID login; it feeds the spiffe_role cache key.
+// the ClientToken for an X.509-SVID login; it feeds the identity token's cache
+// key.
 func certFingerprint(cert *x509.Certificate) string { return helper.CertFingerprint(cert) }
 
 // extractActChain walks the RFC 8693 §4.1 "act" delegation chain in a JWT-SVID's

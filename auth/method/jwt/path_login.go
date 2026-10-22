@@ -96,13 +96,13 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	admission.AudienceBound = len(config.BoundAudiences) > 0
 
 	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
-	// JWTRoleTokenType.Generate(), which hashes it with the mount accessor
-	// into the deterministic token ID used for transparent-mode cache lookups.
+	// the identity token type, which hashes it with the mount accessor into
+	// the deterministic token ID used for transparent-mode cache lookups.
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
 			PrincipalID: principalID,
-			TokenType:   "jwt_role",
+			TokenType:   logical.TokenTypeIdentity,
 			TokenTTL:    ttl,
 			ClientIP:    req.ClientIP,
 			ClientToken: jwtToken,

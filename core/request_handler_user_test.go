@@ -59,7 +59,7 @@ func seedUserToken(t *testing.T, core *Core, ctx context.Context, mount *MountEn
 // seedUserTokenWith is seedUserToken with the admission given.
 func seedUserTokenWith(t *testing.T, core *Core, ctx context.Context, mount *MountEntry, jwt, principal string, adm *logical.Admission) *TokenEntry {
 	t.Helper()
-	te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
+	te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
 		TokenValue:    jwt,
 		MountAccessor: mount.Accessor,
 		PrincipalID:   principal,
@@ -112,7 +112,7 @@ func TestPerformImplicitAuth_CertClearsStrayBearer(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	mount := mountStubAuthMethod(t, core, "cert/", "cert")
 	cert, fingerprint := spiffeFakeCert("agent-cert-der")
-	te, err := core.tokenStore.GenerateToken(ctx, TypeCertRole, &AuthData{
+	te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
 		TokenValue:    fingerprint,
 		MountAccessor: mount.Accessor,
 		PrincipalID:   "cn=agent",
@@ -224,7 +224,7 @@ func TestCaptureUserContext(t *testing.T) {
 
 	t.Run("a user token without an admission fails closed", func(t *testing.T) {
 		bare := mintK8sJWT(`{"sub":"bob"}`)
-		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
+		_, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
 			TokenValue:    bare,
 			MountAccessor: userMount.Accessor,
 			PrincipalID:   "bob",

@@ -22,7 +22,6 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
-	authhelper "github.com/stephnangue/warden/auth/helper"
 	spiffelib "github.com/stephnangue/warden/auth/spiffe"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
@@ -839,7 +838,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 	}
 
 	data := map[string]any{
-		"token_type":     authhelper.DisplayTokenType(tokenValue.Type, c.tokenStore.IsTransparentType(tokenValue.Type)),
+		"token_type":     tokenValue.Type,
 		"expire_at":      tokenValue.ExpireAt,
 		"bound_ip":       tokenValue.CreatedByIP,
 		"token_id":       tokenValue.ID,
@@ -2855,16 +2854,16 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 //	  - Operations: namespace auto_auth_path metadata
 //
 //	Inside this function:
-//	  1. Resolve the mount at autoAuthPath. Reject if no mount is registered.
-//	  2. Look up the TransparentTokenType registered for that mount's type
-//	     (via the TokenStore registry). Reject if no transparent type serves
-//	     this mount type — that means the mount doesn't support implicit auth.
-//	  3. Dispatch on the TokenType's CredentialFormat() to extract the
-//	     credential the mount expects (TLS client cert vs JWT bearer). Reject
-//	     with a specific error if the caller didn't present that credential.
-//	  4. Compute a deterministic cache key from (mountAccessor + credential)
-//	     via the TokenType's LookupValue, look up the cached token, fall
-//	     through to an internal login on miss.
+//	  1. Resolve the mount and its backend at autoAuthPath, in one router
+//	     lookup. Reject if no mount is registered.
+//	  2. Ask the backend for its credential format
+//	     (logical.CredentialFormatProvider). Reject if it reports none — that
+//	     means the mount doesn't support implicit auth.
+//	  3. Dispatch on that format to extract the credential the mount expects
+//	     (TLS client cert vs JWT bearer). Reject with a specific error if the
+//	     caller didn't present that credential.
+//	  4. Look up the identity token cached for (mountAccessor, credential),
+//	     falling through to an internal login on miss.
 //
 // The token is an admission token: one per credential and mount, whatever role
 // a request asks for. The role is not part of the login, the cache key or the
@@ -2886,23 +2885,23 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	// bearer format, and the credential is used verbatim as the bearer token.
 	explicitCred := credential != ""
 
-	// Resolve the auth mount once. mountEntry tells us which TransparentTokenType
-	// serves this mount (via the registry) and supplies the stable mount accessor
-	// that transparent types fold into their cache key.
-	authMountEntry := c.router.MatchingMountEntry(ctx, autoAuthPath)
+	// Resolve the auth mount and its backend in one lookup. The backend names
+	// the credential format it admits; the entry supplies the stable mount
+	// accessor folded into the cache key.
+	authMountEntry, authBackend := c.router.MatchingMountEntryAndBackend(ctx, autoAuthPath)
 	if authMountEntry == nil {
 		return nil, false, fmt.Errorf("no auth mount registered at %q for implicit auth", autoAuthPath)
 	}
 	mountAccessor := authMountEntry.Accessor
 
-	// Look up the TransparentTokenType registered for this mount type. If the
-	// mount type isn't a transparent auth method (or isn't registered at all),
-	// reject the request explicitly rather than silently falling back to
-	// credential-format sniffing.
-	ttype := c.tokenStore.GetTransparentTokenTypeForAuthMethod(authMountEntry.Type)
-	if ttype == nil {
+	// A backend that names no credential format is not a transparent auth
+	// method: reject the request explicitly rather than silently falling back
+	// to credential-format sniffing.
+	formatProvider, ok := authBackend.(logical.CredentialFormatProvider)
+	if !ok {
 		return nil, false, fmt.Errorf("auth method %q at %q does not support implicit auth", authMountEntry.Type, autoAuthPath)
 	}
+	credentialFormat := formatProvider.CredentialFormat()
 
 	var singleflightKey string
 	// lookupFunc takes its ctx rather than closing over the request's: inside the
@@ -2912,14 +2911,12 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	var credKey string // fingerprint or JWT — used for the post-login lookup
 
 	// Dispatch by the credential's wire-extraction shape. Cases group by what
-	// the credential looks like on the wire (cert vs JWT bearer), not by the
-	// discovery-level CredentialFormat subtype — JWTRoleTokenType ("jwt") and
-	// KubernetesRoleTokenType ("k8s_sa_jwt") both arrive as JWTs in the
-	// Authorization header and share the same parse path. The right TokenType
-	// is selected upstream via mountEntry.Type, so the cache key remains
-	// type-specific even when two formats share an extraction case.
-	switch ttype.CredentialFormat() {
-	case "cert":
+	// the credential looks like on the wire (cert vs JWT bearer): a generic JWT
+	// and a Kubernetes service account JWT both arrive as JWTs in the
+	// Authorization header and share the same parse path. The cache key is per
+	// mount, so formats sharing an extraction case never share an entry.
+	switch credentialFormat {
+	case logical.CredentialFormatCert:
 		if explicitCred {
 			return nil, false, fmt.Errorf("auth method %q at %q requires a bearer credential, not a TLS client certificate", authMountEntry.Type, autoAuthPath)
 		}
@@ -2940,10 +2937,10 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		// bearer, not the cert-minted token ID, in ClientToken).
 		clearClientToken = true
 		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-			return c.LookupTransparentToken(ctx, ttype, fingerprint, mountAccessor)
+			return c.LookupTransparentToken(ctx, fingerprint, mountAccessor)
 		}
 
-	case "jwt", "k8s_sa_jwt":
+	case logical.CredentialFormatJWT, logical.CredentialFormatKubernetesJWT:
 		clientToken := credential
 		if clientToken == "" {
 			clientToken = req.ClientToken
@@ -2956,10 +2953,10 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		loginData = map[string]any{"jwt": clientToken}
 		credKey = clientToken
 		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-			return c.LookupTransparentToken(ctx, ttype, clientToken, mountAccessor)
+			return c.LookupTransparentToken(ctx, clientToken, mountAccessor)
 		}
 
-	case "spiffe":
+	case logical.CredentialFormatSPIFFE:
 		// Unified SPIFFE mount: accept either a JWT-SVID (bearer) or an
 		// X.509-SVID (TLS/forwarded cert). Prefer an explicitly-presented
 		// JWT-SVID over an ambient mesh-forwarded cert — a sidecar makes a
@@ -2977,7 +2974,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 			loginData = map[string]any{"jwt": clientToken}
 			credKey = clientToken
 			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-				return c.LookupTransparentToken(ctx, ttype, clientToken, mountAccessor)
+				return c.LookupTransparentToken(ctx, clientToken, mountAccessor)
 			}
 		} else if explicitCred {
 			// The secondary (user) path is bearer-only; an X.509-SVID can't ride a
@@ -2995,14 +2992,14 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 			// becomes ClientToken (this function performs no request mutation).
 			clearClientToken = true
 			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-				return c.LookupTransparentToken(ctx, ttype, fingerprint, mountAccessor)
+				return c.LookupTransparentToken(ctx, fingerprint, mountAccessor)
 			}
 		} else {
 			return nil, false, fmt.Errorf("auth method %q at %q requires an X.509-SVID (TLS/forwarded cert) or a JWT-SVID bearer token", authMountEntry.Type, autoAuthPath)
 		}
 
 	default:
-		return nil, false, fmt.Errorf("auth method %q has unsupported credential format %q for implicit auth", authMountEntry.Type, ttype.CredentialFormat())
+		return nil, false, fmt.Errorf("auth method %q has unsupported credential format %q for implicit auth", authMountEntry.Type, credentialFormat)
 	}
 
 	// Step 1: Try cached lookup
@@ -3066,7 +3063,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		// Look the issued token up by its cache key, so the entry handed out
 		// is the one the cache holds (a concurrent login for this credential
 		// may have issued it), with that entry's admission.
-		newTE, postErr := c.LookupTransparentToken(ctx, ttype, credKey, mountAccessor)
+		newTE, postErr := c.LookupTransparentToken(ctx, credKey, mountAccessor)
 		if postErr != nil {
 			return nil, fmt.Errorf("failed to lookup created token: %w", postErr)
 		}

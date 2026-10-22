@@ -406,7 +406,8 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	// An admission: no policies, no metadata.
 	assert.Nil(t, auth.Policies)
 	assert.Nil(t, auth.Metadata)
-	assert.Equal(t, "cert_role", auth.TokenType)
+	assert.Equal(t, logical.TokenTypeIdentity, auth.TokenType)
+	assert.Equal(t, logical.CredentialFormatCert, b.CredentialFormat())
 	assert.Equal(t, "agent-1", auth.PrincipalID)
 	assert.Equal(t, certFingerprint(leaf), auth.ClientToken)
 

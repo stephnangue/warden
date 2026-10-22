@@ -98,11 +98,11 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
 			PrincipalID: status.User.Username,
-			TokenType:   "kubernetes_role",
+			TokenType:   logical.TokenTypeIdentity,
 			TokenTTL:    ttl,
 			ClientIP:    req.ClientIP,
 			// ClientToken carries the raw JWT so LoginCreateToken can pass
-			// it to KubernetesRoleTokenType.Generate(), which hashes
+			// it to the identity token type, which hashes
 			// (mountAccessor + JWT) into the deterministic cache ID used for
 			// transparent-mode lookups.
 			ClientToken: jwtStr,

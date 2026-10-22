@@ -58,6 +58,14 @@ func (b *spiffeAuthBackend) FactNames() []string { return helper.FactNames(b.mou
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *spiffeAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+var _ logical.CredentialFormatProvider = (*spiffeAuthBackend)(nil)
+
+// CredentialFormat implements logical.CredentialFormatProvider: the mount
+// admits a JWT-SVID bearer or an X.509-SVID client certificate.
+func (b *spiffeAuthBackend) CredentialFormat() logical.CredentialFormat {
+	return logical.CredentialFormatSPIFFE
+}
+
 // newAdmission returns what a successful login verified: id is the SVID's
 // verified SPIFFE ID, svid the kind that carried it (svidX509 or svidJWT),
 // audiences a JWT-SVID's 'aud' (nil for an X.509-SVID, which has none) and

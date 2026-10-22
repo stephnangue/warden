@@ -54,7 +54,7 @@ func TestHandleLogin_HappyPath_SelfReviewingMode(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NotNil(t, resp.Auth)
 	assert.Equal(t, "system:serviceaccount:default:myapp", resp.Auth.PrincipalID)
-	assert.Equal(t, "kubernetes_role", resp.Auth.TokenType)
+	assert.Equal(t, logical.TokenTypeIdentity, resp.Auth.TokenType)
 	assert.Nil(t, resp.Auth.Policies, "a login is an admission: no policies")
 	assert.Nil(t, resp.Auth.Metadata, "a login is an admission: no metadata")
 	assert.Equal(t, jwt, resp.Auth.ClientToken, "ClientToken must be the raw workload JWT for transparent-mode cache lookups")

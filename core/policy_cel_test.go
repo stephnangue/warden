@@ -481,7 +481,7 @@ func TestCEL_TokenNamespaceRemoved(t *testing.T) {
 		"token.metadata.env == 'prod'",
 		"token.principal == 'x'",
 		"size(token.actors) > 0",
-		"token.type == 'jwt_role'",
+		"token.type == 'identity_token'",
 		"size(token) > 0",
 	} {
 		t.Run(src, func(t *testing.T) {
@@ -506,7 +506,7 @@ func TestCEL_AgentFieldNames(t *testing.T) {
 	agt := celPrincipalInput{
 		Principal:     "agent-gateway",
 		Role:          "gw",
-		Type:          "cert_role",
+		Type:          "identity_token",
 		NamespacePath: "team-a/",
 		Policies:      []string{"p"},
 		Metadata:      map[string]string{"team": "platform"},
@@ -536,8 +536,8 @@ func TestCEL_AgentFieldNames(t *testing.T) {
 	}
 	// Assert values, not just presence: the two time fields are adjacent
 	// int64s, so a builder that swapped them would pass a presence-only check.
-	if got := ns["token_type"]; got != "cert_role" {
-		t.Errorf("agent.token_type = %v, want cert_role", got)
+	if got := ns["token_type"]; got != "identity_token" {
+		t.Errorf("agent.token_type = %v, want identity_token", got)
 	}
 	if got := ns["token_ttl_seconds"]; got != int64(60) {
 		t.Errorf("agent.token_ttl_seconds = %v, want 60", got)
@@ -553,12 +553,12 @@ func TestCEL_UserNamespace(t *testing.T) {
 	base := mustEnv(t, false)
 	now := time.Unix(1_757_404_800, 0)
 	agt := celPrincipalInput{
-		Present: true, Principal: "agent-gateway", Type: "cert_role",
+		Present: true, Principal: "agent-gateway", Type: "identity_token",
 		Policies: []string{"vault-gw-bound"},
 		Metadata: map[string]string{"team": "platform"},
 	}
 	usr := celPrincipalInput{
-		Present: true, Principal: "user-8f21c3", Role: "human", Type: "jwt_role",
+		Present: true, Principal: "user-8f21c3", Role: "human", Type: "identity_token",
 		Policies: []string{"should-never-surface"},
 		Metadata: map[string]string{"team": "platform"},
 	}
@@ -569,7 +569,7 @@ func TestCEL_UserNamespace(t *testing.T) {
 			"user.present == true",
 			"user.principal == 'user-8f21c3'",
 			"user.role == 'human'",
-			"user.token_type == 'jwt_role'",
+			"user.token_type == 'identity_token'",
 			"user.metadata.team == agent.metadata.team",
 		} {
 			ok, err := evalCELCondition(mustCompile(t, base, src), act)

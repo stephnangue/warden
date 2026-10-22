@@ -78,7 +78,7 @@ func (b *spiffeAuthBackend) handleLogin(ctx context.Context, req *logical.Reques
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
 			PrincipalID: principalID,
-			TokenType:   "spiffe_role",
+			TokenType:   logical.TokenTypeIdentity,
 			TokenTTL:    calculateTTL(config, got.expiry, now),
 			ClientIP:    req.ClientIP,
 			ClientToken: clientToken,

@@ -358,7 +358,8 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	// bound_audiences.
 	assert.Nil(t, auth.Policies)
 	assert.Nil(t, auth.Metadata)
-	assert.Equal(t, "kubernetes_role", auth.TokenType)
+	assert.Equal(t, logical.TokenTypeIdentity, auth.TokenType)
+	assert.Equal(t, logical.CredentialFormatKubernetesJWT, b.CredentialFormat())
 	assert.Equal(t, "system:serviceaccount:default:myapp", auth.PrincipalID)
 	assert.Equal(t, []string{"warden", "other"}, fake.AudsSeen)
 
