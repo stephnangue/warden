@@ -44,7 +44,9 @@ func (t *IdentityTokenType) Metadata() TokenTypeMetadata {
 // Generate stores the (mount, credential) hash, never the raw credential:
 // authData.TokenValue is the caller's JWT or certificate fingerprint. It
 // returns entry.Data, from which the token's ID is computed; nothing in it is
-// handed to the caller.
+// handed to the caller. It writes into entry.Data in place, which only an entry
+// still being built allows: TestTokenEntrySharedFieldsNotMutatedInPlace (in
+// logical) lists it as such a site.
 func (t *IdentityTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	if authData == nil || authData.TokenValue == "" {
 		return entry.Data, nil
