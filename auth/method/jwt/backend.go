@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -48,6 +49,14 @@ type JWTAuthConfig struct {
 	// Default role for transparent operations when no role is specified
 	DefaultRole string `json:"default_role,omitempty"`
 
+	// Facts: entity_kind, and the claims (a name or a JSON pointer) the mount
+	// publishes beyond its built-in facts. Compiled in buildJWTConfig. A
+	// config write refuses facts that do not compile, so they are never
+	// stored; ones that still fail at load (the mount table's, or storage
+	// written under looser rules) are installed with a nil naming: the mount
+	// answers no fact, so nothing that reads facts can match it.
+	helper.FactsConfig
+
 	// Internal
 	validator *jwt.Validator `json:"-"`
 	keySet    jwt.KeySet     `json:"-"`
@@ -63,6 +72,13 @@ type jwtAuthBackend struct {
 	configWriteMu sync.Mutex
 	logger        *logger.GatedLogger
 	storageView   sdklogical.Storage
+
+	// mountFacts holds the naming in force and is shared by pointer with
+	// every admission this mount produces. installConfig publishes it under
+	// configMu together with the config it was compiled from, so a reader
+	// holding configMu sees the two agree; admissions and FactNames load it
+	// without a lock and see one published naming, whole.
+	mountFacts *logical.MountFacts
 }
 
 var _ logical.Factory = Factory
@@ -72,6 +88,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b := &jwtAuthBackend{
 		logger:      conf.Logger,
 		storageView: conf.StorageView,
+		mountFacts:  &logical.MountFacts{},
 	}
 
 	b.Backend = &framework.Backend{
@@ -108,20 +125,31 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// setupJWTConfig builds the JWT configuration and installs it.
+// setupJWTConfig builds the JWT configuration and installs it. It serves the
+// mount table's config when the mount is set up and the stored config when it
+// is loaded, which a failure here would turn into a failed mount (and, at
+// unseal, a failed unseal). Facts that do not compile are therefore logged and
+// installed as a nil naming, which answers no fact: closed for every reader of
+// facts, while the config stays readable and rewritable.
 func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any) error {
 	config, err := buildJWTConfig(ctx, conf)
 	if err != nil {
 		return err
 	}
+	if err := config.FactsConfig.Err(); err != nil {
+		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
+	}
 	b.installConfig(config)
 	return nil
 }
 
-// installConfig makes config the live configuration. It cannot fail.
+// installConfig makes config the live configuration and publishes its naming
+// (nil when it does not compile, which answers no fact) in the same critical
+// section. It cannot fail.
 func (b *jwtAuthBackend) installConfig(config *JWTAuthConfig) {
 	b.configMu.Lock()
 	b.config = config
+	b.mountFacts.Publish(config.Naming())
 	b.configMu.Unlock()
 }
 
@@ -132,6 +160,10 @@ func buildJWTConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, e
 	if err != nil {
 		return nil, err
 	}
+
+	// Facts that do not compile are kept on the config, not returned: the
+	// caller decides whether to refuse them or fail closed.
+	config.Compile(jwtBuiltinFacts())
 
 	var keySet jwt.KeySet
 
@@ -226,6 +258,8 @@ func normalizedJWTConfig(config *JWTAuthConfig) map[string]any {
 		"group_policy_prefix":    config.GroupPolicyPrefix,
 		"token_ttl":              config.TokenTTL.String(),
 		"default_role":           config.DefaultRole,
+		"entity_kind":            config.EntityKind,
+		"facts":                  config.Facts,
 	}
 }
 
