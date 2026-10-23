@@ -418,6 +418,13 @@ func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logica
 		provider := req.HTTPRequest.Header.Get("X-Warden-Provider")
 		headerRole := req.HTTPRequest.Header.Get("X-Warden-Role")
 
+		// The role is spliced into the path policies are matched against,
+		// after the HTTP layer checked that path, so it must be a role name
+		// and nothing that adds or walks a segment.
+		if headerRole != "" && !validSysName(headerRole) {
+			return logical.ErrorResponse(logical.ErrBadRequestf("invalid X-Warden-Role %.64q: %s", headerRole, sysNameRule)), nil
+		}
+
 		switch {
 		case provider != "":
 			if strings.HasPrefix(req.Path, "sys/") {
@@ -519,7 +526,8 @@ func applyRoleHeader(path, role string) string {
 //	role empty:   <provider>/gateway/<api>
 //
 // One leading and one trailing slash on the provider value are tolerated
-// and stripped. Empty path segments and bare ".." segments are rejected.
+// and stripped. Empty path segments and bare "." and ".." segments are
+// rejected: the result is the path policies are matched against.
 // Whether the resolved mount exists is the caller's concern (the router's
 // existing 404 path handles that).
 func synthesizeGatewayPath(provider, role, apiPath string) (string, error) {
@@ -532,8 +540,8 @@ func synthesizeGatewayPath(provider, role, apiPath string) (string, error) {
 		if seg == "" {
 			return "", fmt.Errorf("X-Warden-Provider value contains an empty path segment")
 		}
-		if seg == ".." {
-			return "", fmt.Errorf("X-Warden-Provider value contains a path-traversal segment")
+		if seg == "." || seg == ".." {
+			return "", fmt.Errorf("X-Warden-Provider value contains a dot segment")
 		}
 	}
 

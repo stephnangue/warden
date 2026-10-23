@@ -822,6 +822,18 @@ func TestRespondStandby_PreservesPath(t *testing.T) {
 	assert.Equal(t, "http://10.0.0.1:8200/v1/aws/gateway/s3/bucket/key", loc)
 }
 
+// An encoded slash inside a segment stays encoded: flattened, it would split
+// an ARN into two segments on the leader.
+func TestRespondStandby_PreservesPathEncoding(t *testing.T) {
+	const path = "/v1/aws/role/bedrock/gateway/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Ainference-profile%2Fus.amazon.nova-lite-v1%3A0/converse"
+	req := httptest.NewRequest(http.MethodPost, path, nil)
+	w := httptest.NewRecorder()
+
+	respondStandby(w, req, "http://10.0.0.1:8200")
+
+	assert.Equal(t, "http://10.0.0.1:8200"+path, w.Header().Get("Location"))
+}
+
 // =============================================================================
 // standbyAllowedPaths Tests
 // =============================================================================

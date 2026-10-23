@@ -12,6 +12,7 @@ import (
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/graphbatch"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // maxGatewayBodySize is the default max body size if not configured
@@ -109,16 +110,15 @@ func (b *azureBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	}
 
 	// Build target URL
-	targetURL := b.buildTargetURL(azureHost, azurePath, req.HTTPRequest.URL.RawQuery)
-
-	// Prepare request for proxying
-	r := req.HTTPRequest
-	parsedURL, err := url.Parse(targetURL)
+	parsedURL, err := b.buildTargetURL(azureHost, azurePath, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
-		b.Logger.Error("Failed to parse target URL", logger.Err(err))
+		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	// Prepare request for proxying
+	r := req.HTTPRequest
 	r.URL = parsedURL
 	r.Host = parsedURL.Host
 	r.RequestURI = "" // Required for outgoing requests
@@ -193,18 +193,8 @@ func (b *azureBackend) getAzureCredentialInfo(req *logical.Request) (azureCreden
 }
 
 // buildTargetURL constructs the full Azure target URL
-func (b *azureBackend) buildTargetURL(host, path, rawQuery string) string {
-	var sb strings.Builder
-	sb.WriteString("https://")
-	sb.WriteString(host)
-	sb.WriteString(path)
-
-	if rawQuery != "" {
-		sb.WriteString("?")
-		sb.WriteString(rawQuery)
-	}
-
-	return sb.String()
+func (b *azureBackend) buildTargetURL(host, path, rawQuery string) (*url.URL, error) {
+	return upstream.URL("https://"+host, path, rawQuery)
 }
 
 // prepareHeaders removes unwanted headers and injects the Azure Bearer token

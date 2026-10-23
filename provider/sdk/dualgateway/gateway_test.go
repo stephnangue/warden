@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -385,7 +386,7 @@ func TestS3EndpointWithState(t *testing.T) {
 
 // specWithRewrite clones headerAuthSpec and adds a RewriteAPITarget function that
 // forwards /gateway/<host>/<rest> to https://<host><rest> on the given upstream.
-func specWithRewrite(rewrite func(providerURL, apiPath string, state map[string]any) (string, error), onConfigParsed func(map[string]any) map[string]any) *ProviderSpec {
+func specWithRewrite(rewrite func(providerURL, apiPath string, state map[string]any) (*url.URL, error), onConfigParsed func(map[string]any) map[string]any) *ProviderSpec {
 	return &ProviderSpec{
 		Name:           "rewritetest",
 		HelpText:       "h",
@@ -415,9 +416,9 @@ func TestHandleAPIRequest_RewriteAPITarget_Invoked(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	rewrite := func(_ string, apiPath string, _ map[string]any) (string, error) {
+	rewrite := func(_ string, apiPath string, _ map[string]any) (*url.URL, error) {
 		// Prepend "/transformed" and send to upstream
-		return upstream.URL + "/transformed" + apiPath, nil
+		return url.Parse(upstream.URL + "/transformed" + apiPath)
 	}
 	b := createBackend(t, specWithRewrite(rewrite, nil))
 
@@ -444,8 +445,8 @@ func TestHandleAPIRequest_RewriteAPITarget_ErrorReturns400(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	rewrite := func(_ string, _ string, _ map[string]any) (string, error) {
-		return "", assertableError("host not allowed")
+	rewrite := func(_ string, _ string, _ map[string]any) (*url.URL, error) {
+		return nil, assertableError("host not allowed")
 	}
 	b := createBackend(t, specWithRewrite(rewrite, nil))
 
@@ -509,9 +510,9 @@ func TestHandleAPIRequest_RewriteAPITarget_ReceivesState(t *testing.T) {
 	onConfigParsed := func(_ map[string]any) map[string]any {
 		return map[string]any{"tenant": "acme"}
 	}
-	rewrite := func(_ string, apiPath string, state map[string]any) (string, error) {
+	rewrite := func(_ string, apiPath string, state map[string]any) (*url.URL, error) {
 		tenant, _ := state["tenant"].(string)
-		return upstream.URL + "/" + tenant + apiPath, nil
+		return url.Parse(upstream.URL + "/" + tenant + apiPath)
 	}
 	spec := specWithRewrite(rewrite, onConfigParsed)
 	b := createBackend(t, spec)
@@ -537,9 +538,9 @@ func TestHandleGateway_SigV4_DoesNotInvokeRewriteAPITarget(t *testing.T) {
 	// Verifies that SigV4 (S3/COS) requests route to handleS3Request and never
 	// invoke the API-mode hook. Regression guard for the IBM COS design.
 	hookInvoked := false
-	rewrite := func(_ string, _ string, _ map[string]any) (string, error) {
+	rewrite := func(_ string, _ string, _ map[string]any) (*url.URL, error) {
 		hookInvoked = true
-		return "https://wrong.example.com/", nil
+		return url.Parse("https://wrong.example.com/")
 	}
 	b := createBackend(t, specWithRewrite(rewrite, nil))
 
@@ -555,4 +556,31 @@ func TestHandleGateway_SigV4_DoesNotInvokeRewriteAPITarget(t *testing.T) {
 	b.handleGateway(context.Background(), req)
 
 	assert.False(t, hookInvoked, "RewriteAPITarget must not be called for SigV4 requests")
+}
+
+// TestHandleAPIRequest_UpstreamReceivesTheAuthorizedPath: a double-encoded dot
+// segment is authorized as a literal "%2e%2e" segment and reaches the upstream
+// as one, never as a ".." it would resolve.
+func TestHandleAPIRequest_UpstreamReceivesTheAuthorizedPath(t *testing.T) {
+	var gotRequestURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+	}))
+	defer upstream.Close()
+
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	b.handleAPIRequest(context.Background(), &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/gateway/v1/a/%252e%252e/b?x=1", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "v"},
+		},
+	})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/v1/a/%252e%252e/b?x=1", gotRequestURI)
 }

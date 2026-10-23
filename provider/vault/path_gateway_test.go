@@ -125,7 +125,7 @@ func TestBuildTargetURL(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-			assert.Equal(t, tt.expected, result)
+			assert.Equal(t, tt.expected, result.String())
 		})
 	}
 }
@@ -517,4 +517,32 @@ func TestGetVaultToken_StreamUnauthenticated(t *testing.T) {
 	_, err := b.getVaultToken(req)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no credential available")
+}
+
+// TestHandleGateway_UpstreamReceivesTheAuthorizedPath: a double-encoded dot
+// segment is authorized as a literal "%2e%2e" segment and reaches Vault as one,
+// never as a ".." it would resolve.
+func TestHandleGateway_UpstreamReceivesTheAuthorizedPath(t *testing.T) {
+	var gotRequestURI string
+	mockVault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+	}))
+	defer mockVault.Close()
+
+	b := &vaultBackend{
+		vaultAddress: mockVault.URL,
+		StreamingBackend: &framework.StreamingBackend{
+			Logger: createTestLogger(),
+			Proxy:  &httputil.ReverseProxy{Director: func(req *http.Request) {}},
+		},
+	}
+	rr := httptest.NewRecorder()
+	b.handleGateway(t.Context(), &logical.Request{
+		HTTPRequest:           httptest.NewRequest(http.MethodGet, "/v1/vault/gateway/v1/secret/data/app/%252e%252e/admin", nil),
+		ResponseWriter:        rr,
+		StreamUnauthenticated: true,
+	})
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "/v1/secret/data/app/%252e%252e/admin", gotRequestURI)
 }

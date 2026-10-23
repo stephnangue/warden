@@ -125,8 +125,9 @@ func TestBuildTargetURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := b.buildTargetURL(tt.host, tt.path, tt.rawQuery)
-			assert.Equal(t, tt.want, result)
+			result, err := b.buildTargetURL(tt.host, tt.path, tt.rawQuery)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, result.String())
 		})
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // maxGatewayBodySize is the default max body size if not configured
@@ -101,16 +102,15 @@ func (b *gcpBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	}
 
 	// Build target URL
-	targetURL := b.buildTargetURL(gcpHost, gcpPath, req.HTTPRequest.URL.RawQuery)
-
-	// Prepare request for proxying
-	r := req.HTTPRequest
-	parsedURL, err := url.Parse(targetURL)
+	parsedURL, err := b.buildTargetURL(gcpHost, gcpPath, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
-		b.Logger.Error("Failed to parse target URL", logger.Err(err))
+		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	// Prepare request for proxying
+	r := req.HTTPRequest
 	r.URL = parsedURL
 	r.Host = parsedURL.Host
 	r.RequestURI = "" // Required for outgoing requests
@@ -185,18 +185,8 @@ func (b *gcpBackend) getGCPCredentialInfo(req *logical.Request) (gcpCredentialIn
 }
 
 // buildTargetURL constructs the full GCP target URL
-func (b *gcpBackend) buildTargetURL(host, path, rawQuery string) string {
-	var sb strings.Builder
-	sb.WriteString("https://")
-	sb.WriteString(host)
-	sb.WriteString(path)
-
-	if rawQuery != "" {
-		sb.WriteString("?")
-		sb.WriteString(rawQuery)
-	}
-
-	return sb.String()
+func (b *gcpBackend) buildTargetURL(host, path, rawQuery string) (*url.URL, error) {
+	return upstream.URL("https://"+host, path, rawQuery)
 }
 
 // prepareHeaders removes unwanted headers and injects the GCP Bearer token
