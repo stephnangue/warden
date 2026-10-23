@@ -1000,7 +1000,7 @@ func TestGroups_LoadActiveOnly(t *testing.T) {
 	_, err = standby.identityStore.CreateGroup(ctx, virtualGroup("other"))
 	assert.ErrorIs(t, err, ErrIdentityStoreNotLoaded, "a standby takes no group writes")
 
-	require.NoError(t, active.StepDown(nil))
+	require.NoError(t, active.StepDown())
 	promoted := waitForActiveNode(t, []*Core{standby}, 10*time.Second)
 	require.Same(t, standby, promoted)
 	require.Eventually(t, func() bool {

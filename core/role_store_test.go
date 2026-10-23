@@ -751,7 +751,7 @@ func TestRoles_LoadActiveOnly(t *testing.T) {
 	_, err = standby.roleStore.Create(ctx, &logical.Role{Name: "other"})
 	assert.ErrorIs(t, err, ErrRoleStoreNotLoaded, "a standby takes no role writes")
 
-	require.NoError(t, active.StepDown(nil))
+	require.NoError(t, active.StepDown())
 	promoted := waitForActiveNode(t, []*Core{standby}, 10*time.Second)
 	require.Same(t, standby, promoted)
 

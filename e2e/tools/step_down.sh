@@ -15,3 +15,11 @@ HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" \
   -X PUT "https://127.0.0.1:${PORT}/v1/sys/step-down" \
   -H "X-Warden-Token: $TOKEN")
 echo "Step-down on port $PORT: HTTP $HTTP_CODE"
+
+# Step-down needs the root token or a sudo grant. A refusal means the caller
+# is not authorized, which no test expects; any other code (204 accepted, 503
+# or 307 mid-election) is left to the caller to judge.
+if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+  echo "ERROR: step-down refused (HTTP $HTTP_CODE)"
+  exit 1
+fi

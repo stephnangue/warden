@@ -51,7 +51,7 @@ func TestHA_LeaderAdvertisement_Cleanup(t *testing.T) {
 	require.NotEmpty(t, keys1)
 
 	// Step down to cause a leadership transition
-	err = active.StepDown(nil)
+	err = active.StepDown()
 	require.NoError(t, err)
 
 	// Wait for the standby to become active

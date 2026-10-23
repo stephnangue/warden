@@ -45,6 +45,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 				// The group paths only: identity/usage is a normal ACL path.
 				"identity/group",
 				"identity/group/*",
+				"step-down",
 			},
 		},
 		Paths: b.paths(),
@@ -99,6 +100,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// Dev playground: present only on a server started with -dev-playground.
 	paths = append(paths, b.pathDev()...)
+
+	// HA leadership
+	paths = append(paths, b.pathStepDown()...)
 
 	return paths
 }

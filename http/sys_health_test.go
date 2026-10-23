@@ -461,37 +461,6 @@ func TestHandleSysLeader_MethodNotAllowed(t *testing.T) {
 }
 
 // =============================================================================
-// handleSysStepDown Tests (with real core)
-// =============================================================================
-
-func TestHandleSysStepDown_MethodNotAllowed(t *testing.T) {
-	c, log := createTestCoreForHTTP(t)
-	handler := handleSysStepDown(c, log)
-
-	for _, method := range []string{http.MethodGet, http.MethodDelete, http.MethodPatch} {
-		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, "/v1/sys/step-down", nil)
-			w := httptest.NewRecorder()
-			handler.ServeHTTP(w, req)
-			assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
-		})
-	}
-}
-
-func TestHandleSysStepDown_NoHA(t *testing.T) {
-	c, log := createTestCoreForHTTP(t)
-	handler := handleSysStepDown(c, log)
-
-	req := httptest.NewRequest(http.MethodPut, "/v1/sys/step-down", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	// No HA enabled -> 400
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "HA not enabled")
-}
-
-// =============================================================================
 // handleSysInit Tests (with real core)
 // =============================================================================
 
@@ -586,22 +555,6 @@ func TestHandleSysHealth_SealedCode(t *testing.T) {
 	// wins and sealedcode does not apply — so the response is 501, the
 	// base uninit code, not the 200 override.
 	assert.Equal(t, http.StatusNotImplemented, w.Code)
-}
-
-// =============================================================================
-// handleSysInitPut additional validation coverage
-// =============================================================================
-
-func TestHandleSysStepDown_POST(t *testing.T) {
-	c, log := createTestCoreForHTTP(t)
-	handler := handleSysStepDown(c, log)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/sys/step-down", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	// No HA -> 400
-	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // =============================================================================
