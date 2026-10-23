@@ -59,6 +59,12 @@ type TokenEntry struct {
 	// "act" claim) so that it survives transparent-mode token caching.
 	// Populated by the auth method at login time.
 	Actors []ActorRef
+
+	// Admission is what the auth method verified at login. Every copy of this
+	// entry shares the one *Admission, which is immutable. It is never
+	// serialized, so a token reloaded from storage has none (transparent
+	// tokens are cache-only and never reloaded).
+	Admission *Admission `json:"-"`
 }
 
 // MarkUsed marks the token as used (for one-time use tokens)

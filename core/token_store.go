@@ -408,6 +408,7 @@ func (s *TokenStore) generateWithCollisionDetection(
 			CreatedByIP:    authData.ClientIP,
 			Actors:         authData.Actors,
 			Metadata:       authData.Metadata,
+			Admission:      authData.Admission,
 		}
 
 		// Generate accessor (Tier 2)
@@ -433,6 +434,10 @@ func (s *TokenStore) generateWithCollisionDetection(
 			// + mountAccessor + role). Finding an existing token means this
 			// credential+mount+role already has a valid cache entry — return it
 			// instead of treating it as a collision.
+			//
+			// The caller receives the shared cached entry itself, not a copy,
+			// and its Admission may differ from the one in authData (a
+			// concurrent login won). Callers must not mutate it.
 			if s.registry.IsTransparent(meta.Name) {
 				return existingEntry, nil
 			}
@@ -454,9 +459,8 @@ func (s *TokenStore) generateWithCollisionDetection(
 		// Tier 1: Store in primary cache (byID) with TTL
 		// TTL is computed as max(remaining token lifetime, minimum retention)
 		// This prevents high token volume from evicting valid tokens prematurely
-		cost := int64(200)
 		cacheTTL := s.computeCacheTTL(entry)
-		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
+		s.byID.SetWithTTL(entry.ID, entry, entryCost(entry), cacheTTL)
 
 		// Tier 2: Store accessor mapping with same TTL
 		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
@@ -1002,6 +1006,7 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 		Data:           map[string]string{"token": customToken},
 		Actors:         oldEntry.Actors,
 		Metadata:       oldEntry.Metadata,
+		Admission:      oldEntry.Admission,
 	}
 
 	// Compute new ID from custom token value
@@ -1012,7 +1017,7 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 	s.byID.Del(oldTokenID)
 
 	// Store new entry in cache (no TTL for root token)
-	s.byID.SetWithTTL(newEntry.ID, newEntry, 200, 0)
+	s.byID.SetWithTTL(newEntry.ID, newEntry, entryCost(newEntry), 0)
 	s.byAccessor.SetWithTTL(newEntry.Accessor, newEntry.ID, 10, 0)
 	s.byID.Wait()
 	s.byAccessor.Wait()
@@ -1147,7 +1152,7 @@ func (s *TokenStore) loadToken(tokenID string) (*TokenEntry, error) {
 // restoreTokenToCache restores a loaded token to both cache tiers with appropriate TTL
 // Returns the entry if successfully restored, or an error if the token is expired
 func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry, caller string) error {
-	cost := int64(200)
+	cost := entryCost(entry)
 
 	// Check if token is already expired
 	if !entry.ExpireAt.IsZero() {
@@ -1263,9 +1268,8 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 		}
 
 		// Restore to cache with TTL computed from remaining lifetime and minimum retention
-		cost := int64(200)
 		cacheTTL := s.computeCacheTTL(entry)
-		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
+		s.byID.SetWithTTL(entry.ID, entry, entryCost(entry), cacheTTL)
 		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
 
 		// Register the root token with the root token manager so it can be
@@ -1753,6 +1757,16 @@ func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entr
 	}
 
 	return nil
+}
+
+// baseEntryCost is the token cache cost of an entry without an admission.
+const baseEntryCost = int64(200)
+
+// entryCost is the token cache cost of entry: the base cost plus the facts its
+// admission retains, so a cache holding large admissions evicts sooner. Every
+// write of a TokenEntry to the cache uses it.
+func entryCost(entry *TokenEntry) int64 {
+	return baseEntryCost + entry.Admission.Size()
 }
 
 // computeCacheTTL calculates the cache TTL for a token entry.

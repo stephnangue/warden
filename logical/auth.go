@@ -75,6 +75,10 @@ type Auth struct {
 	// the issued token and consulted by token_metadata policy conditions.
 	// Never caller-supplied — only an auth method writes it.
 	Metadata map[string]string
+
+	// Admission is what the auth method verified about the credential, carried
+	// to the issued token. In memory only: never serialized or persisted.
+	Admission *Admission `json:"-"`
 }
 
 // MCPDecision records the outcome of evaluating an MCP rule-set
@@ -308,4 +312,8 @@ type AuthData struct {
 	// method extracted (e.g. mapped JWT claims). Persisted onto the issued
 	// TokenEntry and consulted by token_metadata policy conditions.
 	Metadata map[string]string
+
+	// Admission is what the auth method verified about the credential; the
+	// issued TokenEntry shares the pointer. Never serialized.
+	Admission *Admission `json:"-"`
 }
