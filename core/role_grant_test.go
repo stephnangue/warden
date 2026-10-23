@@ -273,6 +273,9 @@ func TestRoleGrant_Refusals(t *testing.T) {
 			rerr := requireDenied(t, req, err, tc.reason)
 			assert.Equal(t, tc.message, rerr.Message)
 			assert.Contains(t, err.Error(), tc.message)
+			// The response body carries the refusal's message alone, not the
+			// bulleted list of the multierror it was gathered in.
+			assert.Equal(t, []string{tc.message}, logical.ErrorMessages(logical.ErrorResponse(err).Err))
 			assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(err))
 			assert.ErrorIs(t, err, sdklogical.ErrPermissionDenied)
 			assert.False(t, auth.PolicyResults.Allowed)
