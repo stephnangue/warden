@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/logger"
@@ -33,8 +35,13 @@ type AccessBackend struct {
 	// Defaults to "access/" if empty.
 	AccessPathPrefix string
 
-	// cfg holds the persisted implicit auth configuration.
-	cfg *AccessConfig
+	// cfg holds the persisted implicit auth configuration. Every access request
+	// reads it to decide whether to authenticate implicitly, concurrently with
+	// config writes, so it is published whole and never mutated in place.
+	cfg atomic.Pointer[AccessConfig]
+
+	// cfgWriteMu serializes config writes, each a read-modify-write of cfg.
+	cfgWriteMu sync.Mutex
 }
 
 // Compile-time interface assertions
@@ -52,7 +59,7 @@ func (b *AccessBackend) Setup(ctx context.Context, conf *logical.BackendConfig) 
 	if err := b.Backend.Setup(ctx, conf); err != nil {
 		return err
 	}
-	b.cfg = &AccessConfig{}
+	b.cfg.Store(&AccessConfig{})
 	b.loadConfig(ctx)
 	return nil
 }
@@ -61,15 +68,16 @@ func (b *AccessBackend) Setup(ctx context.Context, conf *logical.BackendConfig) 
 
 // IsTransparentMode returns whether the backend has an auth path configured.
 func (b *AccessBackend) IsTransparentMode() bool {
-	return b.cfg != nil && b.cfg.AutoAuthPath != ""
+	return b.GetAutoAuthPath() != ""
 }
 
 // GetAutoAuthPath returns the auth mount path for implicit authentication.
 func (b *AccessBackend) GetAutoAuthPath() string {
-	if b.cfg == nil {
+	cfg := b.cfg.Load()
+	if cfg == nil {
 		return ""
 	}
-	return b.cfg.AutoAuthPath
+	return cfg.AutoAuthPath
 }
 
 // GetAuthRole extracts the auth role from the ?role= query parameter.
@@ -115,22 +123,36 @@ func (b *AccessBackend) IsUnauthenticatedPath(_ *http.Request, _ string) bool {
 
 // --- Config persistence ---
 
-// GetAccessConfig returns the current access configuration.
+// GetAccessConfig returns a copy of the current access configuration.
 func (b *AccessBackend) GetAccessConfig() *AccessConfig {
-	if b.cfg == nil {
+	cfg := b.cfg.Load()
+	if cfg == nil {
 		return &AccessConfig{}
 	}
-	return b.cfg
+	out := *cfg
+	return &out
 }
 
-// SetAccessConfig updates and persists the access configuration.
+// SetAccessConfig persists the access configuration, then makes it current.
 func (b *AccessBackend) SetAccessConfig(ctx context.Context, cfg *AccessConfig) error {
-	b.cfg = cfg
-	entry, err := sdklogical.StorageEntryJSON("access_config", cfg)
+	b.cfgWriteMu.Lock()
+	defer b.cfgWriteMu.Unlock()
+	return b.setAccessConfigLocked(ctx, cfg)
+}
+
+// setAccessConfigLocked is SetAccessConfig for a caller holding cfgWriteMu. It
+// publishes a private copy, so the caller's value can never alias the live one.
+func (b *AccessBackend) setAccessConfigLocked(ctx context.Context, cfg *AccessConfig) error {
+	published := *cfg
+	entry, err := sdklogical.StorageEntryJSON("access_config", &published)
 	if err != nil {
 		return err
 	}
-	return b.StorageView.Put(ctx, entry)
+	if err := b.StorageView.Put(ctx, entry); err != nil {
+		return err
+	}
+	b.cfg.Store(&published)
+	return nil
 }
 
 // loadConfig loads persisted access configuration from storage.
@@ -146,7 +168,7 @@ func (b *AccessBackend) loadConfig(ctx context.Context) {
 	if err := json.Unmarshal(entry.Value, &cfg); err != nil {
 		return
 	}
-	b.cfg = &cfg
+	b.cfg.Store(&cfg)
 }
 
 // PathAccessConfig returns a standard config path for access backends.
@@ -186,13 +208,15 @@ func (b *AccessBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 }
 
 func (b *AccessBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *FieldData) (*logical.Response, error) {
-	cfg := b.GetAccessConfig()
+	b.cfgWriteMu.Lock()
+	defer b.cfgWriteMu.Unlock()
 
+	cfg := b.GetAccessConfig()
 	if v, ok := d.GetOk("auto_auth_path"); ok {
 		cfg.AutoAuthPath = v.(string)
 	}
 
-	if err := b.SetAccessConfig(ctx, cfg); err != nil {
+	if err := b.setAccessConfigLocked(ctx, cfg); err != nil {
 		return nil, err
 	}
 
