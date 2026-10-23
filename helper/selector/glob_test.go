@@ -1,6 +1,7 @@
 package selector
 
 import (
+	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -325,17 +326,31 @@ var worstCase = struct {
 	pattern, value string
 }{"**" + strings.Repeat("a*", MaxGlobStars) + "b", strings.Repeat("a", 64<<10) + "/"}
 
+// TestGlobMatch_WorstCaseAtCap checks that the worst case grows linearly with
+// the value. It compares two sizes instead of bounding the time, because
+// instrumentation (-race, -cover) slows the matcher by two orders of magnitude:
+// a value four times longer takes about four times as long when linear and
+// sixteen times when quadratic. Each size keeps its fastest of a few runs, so a
+// scheduling pause does not skew the ratio. BenchmarkGlobMatch_WorstCaseAtCap
+// measures the absolute cost.
 func TestGlobMatch_WorstCaseAtCap(t *testing.T) {
 	g := mustGlob(t, worstCase.pattern)
-	start := time.Now()
-	if g.Match(worstCase.value) {
-		t.Fatal("matched")
+	fastest := func(v string) time.Duration {
+		best := time.Duration(math.MaxInt64)
+		for range 5 {
+			start := time.Now()
+			matched := g.Match(v)
+			best = min(best, time.Since(start))
+			if matched {
+				t.Fatalf("%q matched %d bytes", worstCase.pattern, len(v))
+			}
+		}
+		return best
 	}
-	// Linear in the value, this takes about 2 ms (14 ms under -race); quadratic,
-	// seconds. The bound is loose so that a busy machine does not trip it;
-	// BenchmarkGlobMatch_WorstCaseAtCap measures it.
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("%d stars on %d bytes took %v", MaxGlobStars, len(worstCase.value), elapsed)
+	short := fastest(strings.Repeat("a", 4<<10) + "/")
+	long := fastest(strings.Repeat("a", 16<<10) + "/")
+	if ratio := float64(long) / float64(max(short, time.Microsecond)); ratio > 8 {
+		t.Fatalf("%d stars: 4 KiB took %v, 16 KiB took %v (x%.1f; linear is about x4)", MaxGlobStars, short, long, ratio)
 	}
 }
 
