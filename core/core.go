@@ -208,6 +208,10 @@ type Core struct {
 	// across namespaces; root-only mutations are enforced at the HTTP layer).
 	skillStore *SkillStore
 
+	// roleStore holds the namespace roles (sys/roles). Loaded on the active
+	// node only; reads are lock-free against its snapshot.
+	roleStore *RoleStore
+
 	// skillRenders memoises each skill's SKILL.md as the discovery server
 	// serves it, with its digest (Skills extension listings carry one).
 	skillRenders skillRenderCache
@@ -698,6 +702,9 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 
 	// Create SkillStore (storage view is wired up at unseal time).
 	c.skillStore = NewSkillStore(c)
+
+	// Create RoleStore (storage view is wired up and loaded at unseal time).
+	c.roleStore = NewRoleStore(c)
 
 	// Initialize global credential type, driver and assertion-profile registries
 	c.credentialTypeRegistry = credential.NewTypeRegistry()
@@ -2007,6 +2014,10 @@ func (c *Core) preSeal() error {
 		c.logger.Warn("error tearing down skill store", logger.Err(err))
 	}
 
+	// Drop the role snapshot (records remain in storage; the next active node
+	// loads them).
+	c.teardownRoleStore()
+
 	// Stop all credential managers
 	if err := c.teardownCredentialManager(); err != nil {
 		c.logger.Warn("error tearing down credential managers", logger.Err(err))
@@ -2112,6 +2123,12 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 		return err
 	}
 	if err := c.setupAuth(ctx); err != nil {
+		return err
+	}
+
+	// Roles load once the namespaces and mounts are in place, on the active
+	// node only.
+	if err := c.setupRoleStore(ctx, standby); err != nil {
 		return err
 	}
 

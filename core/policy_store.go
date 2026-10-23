@@ -38,7 +38,6 @@ var (
 	immutablePolicies = []string{
 		"root",
 	}
-	nonAssignablePolicies = []string{}
 )
 
 // PolicyStore is used to provide durable storage of policy, and to
@@ -493,9 +492,7 @@ func (ps *PolicyStore) ListPoliciesWithPrefix(ctx context.Context, policyType Po
 	}
 
 	if omitNonAssignable {
-		keys = slices.DeleteFunc(keys, func(policyName string) bool {
-			return slices.Contains(nonAssignablePolicies, policyName)
-		})
+		keys = slices.DeleteFunc(keys, logical.IsNonAssignablePolicy)
 	}
 
 	return keys, err

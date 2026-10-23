@@ -195,11 +195,11 @@ func TestClosestName_PicksClosestWithinThreshold(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"max_body_siz", "max_body_size"},     // distance 1
-		{"timeut", "timeout"},                 // distance 1
-		{"completely_unrelated_field", ""},    // beyond threshold
-		{"proxy_domain", "proxy_domains"},     // distance 1 (length diff)
-		{"PROXY_DOMAINS", "proxy_domains"},    // case-insensitive match
+		{"max_body_siz", "max_body_size"},  // distance 1
+		{"timeut", "timeout"},              // distance 1
+		{"completely_unrelated_field", ""}, // beyond threshold
+		{"proxy_domain", "proxy_domains"},  // distance 1 (length diff)
+		{"PROXY_DOMAINS", "proxy_domains"}, // case-insensitive match
 	}
 	for _, tt := range cases {
 		t.Run(tt.input, func(t *testing.T) {
@@ -264,5 +264,64 @@ func TestExtractBodySchema_ResolvesRef(t *testing.T) {
 	}
 	if _, ok := bs.properties["type"]; !ok {
 		t.Errorf("expected properties[type] after $ref resolution; got %#v", bs.properties)
+	}
+}
+
+// sourceDoc is shaped like the server's document for sys/cred/sources/{name}:
+// one body under "post" serving both create and update, with "type" required.
+func sourceDoc() map[string]any {
+	return map[string]any{
+		"paths": map[string]any{
+			"/sys/cred/sources/{name}": map[string]any{
+				"post": map[string]any{
+					"requestBody": map[string]any{
+						"content": map[string]any{
+							"application/json": map[string]any{
+								"schema": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"type":            map[string]any{"type": "string"},
+										"config":          map[string]any{"type": "object"},
+										"rotation_period": map[string]any{"type": "integer"},
+									},
+									"required": []any{"type"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestExtractBodySchema_PutFallsBackToPost(t *testing.T) {
+	bs := extractBodySchema(sourceDoc(), "PUT")
+	if bs.notDocumented {
+		t.Fatal("a PUT must find the body documented under post; got notDocumented")
+	}
+	if _, ok := bs.properties["config"]; !ok {
+		t.Errorf("expected properties[config]; got %#v", bs.properties)
+	}
+	if len(bs.required) != 0 {
+		t.Errorf("an update sends only what changes, so the create's required list must not apply; got %#v", bs.required)
+	}
+
+	// An update without "type" validates; a misspelled field is caught.
+	if errs := validatePayload(map[string]any{"config": map[string]any{"region": "eu-west-1"}}, bs); len(errs) != 0 {
+		t.Errorf("expected a clean update payload; got %v", errs)
+	}
+	errs := validatePayload(map[string]any{"confg": map[string]any{}}, bs)
+	if len(errs) != 1 || !strings.Contains(errs[0], `did you mean "config"`) {
+		t.Errorf("expected a did-you-mean for confg; got %v", errs)
+	}
+
+	// POST keeps the required list.
+	if post := extractBodySchema(sourceDoc(), "POST"); !post.required["type"] {
+		t.Errorf("POST must keep required[type]; got %#v", post.required)
+	}
+	// Other verbs do not fall back.
+	if del := extractBodySchema(sourceDoc(), "DELETE"); !del.notDocumented {
+		t.Errorf("DELETE must not borrow the post body; got %#v", del)
 	}
 }

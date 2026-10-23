@@ -5,19 +5,22 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
 var (
-	authPathFilter string
+	authPathFilter     string
+	listAll            bool
+	providerPathFilter string
 
 	ListCmd = &cobra.Command{
 		Use:           "list",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short:         "Discover roles the presented identity can assume",
+		Short:         "Discover roles the presented identity can assume, or list every role (-all)",
 		Long: `
-Usage: warden role list
+Usage: warden role list [options]
 
   Lists every Warden role the caller's identity vehicle can assume, across
   every auth mount of the matching credential type in the current namespace.
@@ -25,9 +28,16 @@ Usage: warden role list
   certificate the request was made with — Warden never needs the role names
   to be distributed out-of-band.
 
+  With -all, lists instead every role defined in the current namespace
+  (the operator inventory). It requires a token with sudo on sys/roles,
+  and -provider-path narrows it to the roles used with one provider.
+
   Output honors the global -output flag:
     table    one row per role (default for TTY)
     json     [{"name", "description", "auth_path"}, ...]
+             with -all: [{"name", "description", "policies",
+             "cred_spec_name", "provider_path", "skill",
+             "metadata"}, ...]
     ndjson   one role per line, agent-friendly for piping into jq
     text     key=value lines per role
 
@@ -55,6 +65,14 @@ Usage: warden role list
     Pipe just the names into jq:
 
       $ warden role list -o ndjson | jq -r .name
+
+    Every role of the namespace (sudo):
+
+      $ warden role list -all
+
+    Every role used with the aws/ provider (sudo):
+
+      $ warden role list -all -provider-path aws/
 `,
 		Args: cobra.NoArgs,
 		RunE: runList,
@@ -64,9 +82,19 @@ Usage: warden role list
 func init() {
 	ListCmd.Flags().StringVar(&authPathFilter, "auth-path", "",
 		"Restrict results to roles on a single auth mount (e.g. \"auth/jwt/\")")
+	ListCmd.Flags().BoolVar(&listAll, "all", false,
+		"List every role defined in the namespace instead of the ones the presented identity can assume (sudo)")
+	ListCmd.Flags().StringVar(&providerPathFilter, "provider-path", "",
+		"With -all, list only the roles used with this provider mount path (e.g. \"aws/\")")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
+	if listAll {
+		return runListAll()
+	}
+	if providerPathFilter != "" {
+		return fmt.Errorf("-provider-path requires -all: %w", helpers.ErrUsage)
+	}
 	if authPathFilter != "" {
 		if err := helpers.ValidatePath(authPathFilter); err != nil {
 			return err
@@ -108,6 +136,77 @@ func runList(cmd *cobra.Command, args []string) error {
 	})
 }
 
+// runListAll lists every role of the namespace through LIST sys/roles.
+func runListAll() error {
+	if authPathFilter != "" {
+		return fmt.Errorf("-auth-path cannot be combined with -all: %w", helpers.ErrUsage)
+	}
+	if providerPathFilter != "" {
+		if err := helpers.ValidatePath(providerPathFilter); err != nil {
+			return err
+		}
+	}
+
+	c, err := helpers.Client()
+	if err != nil {
+		return err
+	}
+	roles, err := c.Sys().ListRoles(providerPathFilter)
+	if err != nil {
+		return fmt.Errorf("failed to list roles: %w", err)
+	}
+
+	items := projectInventory(roles)
+	return helpers.RenderList(items, func() {
+		printInventoryTable(items)
+	})
+}
+
+// projectInventory shapes the namespace's roles for output.
+func projectInventory(roles []*api.Role) []map[string]any {
+	items := make([]map[string]any, 0, len(roles))
+	for _, r := range roles {
+		policies := r.Policies
+		if policies == nil {
+			policies = []string{}
+		}
+		metadata := make(map[string]any, len(r.Metadata))
+		for k, v := range r.Metadata {
+			metadata[k] = v
+		}
+		items = append(items, map[string]any{
+			"name":           r.Name,
+			"description":    r.Description,
+			"policies":       policies,
+			"cred_spec_name": r.CredSpecName,
+			"provider_path":  r.ProviderPath,
+			"skill":          r.Skill,
+			"metadata":       metadata,
+		})
+	}
+	return items
+}
+
+func printInventoryTable(items []map[string]any) {
+	if len(items) == 0 {
+		fmt.Println("No roles defined in this namespace.")
+		return
+	}
+	rows := make([][]any, len(items))
+	for i, it := range items {
+		rows[i] = []any{
+			cell(it["name"]),
+			cell(it["description"]),
+			cell(it["policies"]),
+			cell(it["cred_spec_name"]),
+			cell(it["provider_path"]),
+			cell(it["skill"]),
+			cell(it["metadata"]),
+		}
+	}
+	helpers.PrintTable([]string{"Name", "Description", "Policies", "Cred Spec", "Provider Path", "Skill", "Metadata"}, rows)
+}
+
 // projectRoles shapes the aggregator's raw roles for output, keeping only
 // those on authPathFilter when it is set. The discovery fields (skill,
 // provider_path) appear only on roles that set them.
@@ -141,12 +240,6 @@ func printRolesTable(items []map[string]any) {
 	if len(items) == 0 {
 		fmt.Println("No roles available for the presented identity.")
 		return
-	}
-	cell := func(v any) string {
-		if v == nil {
-			return ""
-		}
-		return fmt.Sprintf("%v", v)
 	}
 	rows := make([][]any, len(items))
 	for i, it := range items {

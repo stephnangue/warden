@@ -40,6 +40,8 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 				"audit/*",
 				"audit-hash/*",
 				"dev/*",
+				"roles",
+				"roles/*",
 			},
 		},
 		Paths: b.paths(),
@@ -78,6 +80,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// Policy paths
 	paths = append(paths, b.pathPolicies()...)
+
+	// Namespace roles
+	paths = append(paths, b.pathRoles()...)
 
 	// Audit paths
 	paths = append(paths, b.pathAudit()...)
@@ -151,5 +156,6 @@ This includes:
 - Namespace management (create, list, delete)
 - Credential management (sources and specs)
 - Policy management (create, list, delete)
+- Role management (create, read, update, delete, list)
 - System initialization and management
 `
