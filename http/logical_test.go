@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"github.com/stephnangue/warden/logical"
 
+	multierror "github.com/hashicorp/go-multierror"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -839,4 +840,48 @@ func TestHandleLogical_ErrorToStatusCode_Integration(t *testing.T) {
 
 	// Sealed core -> error response with "sealed" message
 	assert.Contains(t, w.Body.String(), "sealed")
+}
+
+// refusalError reads as its message and unwraps to the permission denial, the
+// shape of core's role refusal.
+type refusalError string
+
+func (e refusalError) Error() string { return string(e) }
+
+func (e refusalError) Unwrap() error { return sdklogical.ErrPermissionDenied }
+
+// A refusal core gathers in a multierror reaches the client as its message
+// alone, whether it is returned as the error or carried on the response, and
+// keeps its status. Several gathered errors stay several messages.
+func TestErrorBody_GatheredErrorsRenderAsMessages(t *testing.T) {
+	const refusal = `role "ops-reader" is not assumable through auth/agent/: no group grants it to this caller`
+	single := multierror.Append(nil, refusalError(refusal))
+	several := multierror.Append(errors.New("first"), errors.New("second"))
+
+	render := map[string]func(err error) *httptest.ResponseRecorder{
+		"returned error": func(err error) *httptest.ResponseRecorder {
+			w := httptest.NewRecorder()
+			respondErr(w, errorToStatusCode(err), err)
+			return w
+		},
+		"response error": func(err error) *httptest.ResponseRecorder {
+			w := httptest.NewRecorder()
+			writeLogicalResponse(w, logical.ErrorResponse(err))
+			return w
+		},
+	}
+	for name, do := range render {
+		t.Run(name, func(t *testing.T) {
+			w := do(single)
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			var body ErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, []string{refusal}, body.Errors)
+
+			w = do(several)
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, []string{"first", "second"}, body.Errors)
+		})
+	}
 }

@@ -56,15 +56,14 @@ const (
 // reviewToken POSTs a TokenReview to the kube-apiserver and returns the
 // authenticated status. Uses bearerJWT as the Authorization header —
 // when the operator configured token_reviewer_jwt this is that
-// hub-side service account token (standard Vault path); otherwise it
+// hub-side service account token; otherwise it
 // is the workload's own JWT (self-reviewing mode, requires the
 // workload SA to have system:auth-delegator).
 //
 // audiences is passed through to spec.audiences; if non-empty, the
 // kube-apiserver rejects the review if the token's natural audiences
-// do not include all requested values. For login, callers pass the
-// role's required audience; for introspection, callers pass nil to
-// learn the token's natural audiences from the response.
+// do not include all requested values. Admission passes the mount's
+// bound_audiences; nil leaves the API server to check its own audience.
 func reviewToken(
 	ctx context.Context,
 	client *http.Client,

@@ -19,12 +19,11 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
+// The two token types: a persisted bearer token carrying its own policies, and
+// the cache-only token of a caller admitted by a transparent auth method.
 const (
-	TypeWardenToken    = "warden_token"
-	TypeJWTRole        = "jwt_role"
-	TypeCertRole       = "cert_role"
-	TypeKubernetesRole = "kubernetes_role"
-	TypeSpiffeRole     = "spiffe_role"
+	TypeServiceToken  = logical.TokenTypeService
+	TypeIdentityToken = logical.TokenTypeIdentity
 )
 
 // Storage path constants for token store organization
@@ -307,11 +306,8 @@ func (s *TokenStore) UnloadFromCache() {
 // registerBuiltinTypes registers the built-in token types
 func (s *TokenStore) registerBuiltinTypes() error {
 	builtinTypes := []TokenType{
-		&WardenTokenType{},
-		&JWTRoleTokenType{},
-		&CertRoleTokenType{},
-		&KubernetesRoleTokenType{},
-		&SpiffeRoleTokenType{},
+		&ServiceTokenType{},
+		identityTokenType,
 	}
 
 	for _, tokenType := range builtinTypes {
@@ -328,14 +324,6 @@ func (s *TokenStore) registerBuiltinTypes() error {
 // callers don't need direct registry access.
 func (s *TokenStore) IsTransparentType(name string) bool {
 	return s.registry.IsTransparent(name)
-}
-
-// GetTransparentTokenTypeForAuthMethod returns the TransparentTokenType
-// registered to serve mounts of the given auth method type (e.g. "jwt",
-// "cert", "kubernetes"). Returns nil if no transparent type serves that
-// mount type. Thin wrapper over the registry.
-func (s *TokenStore) GetTransparentTokenTypeForAuthMethod(mountType string) TransparentTokenType {
-	return s.registry.GetTransparentTokenTypeForAuthMethod(mountType)
 }
 
 // GenerateToken creates a new namespace-aware token
@@ -527,8 +515,8 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 	var tokenID string
 	if err != nil {
 		// Fallback for dev-mode custom tokens without standard prefix.
-		// Compute what the ID would be if this were a Warden token.
-		wt := &WardenTokenType{}
+		// Compute what the ID would be if this were a service token.
+		wt := &ServiceTokenType{}
 		candidateID := wt.ComputeID(tokenValue)
 		if _, found := s.byID.Get(candidateID); found {
 			tokenType = wt
@@ -883,10 +871,9 @@ func (s *TokenStore) GenerateRootToken() (string, error) {
 			logger.String("old_token_id", oldTokenID))
 	}
 
-	// Get Warden token type
-	tokenType, err := s.registry.GetByName("warden_token")
+	tokenType, err := s.registry.GetByName(TypeServiceToken)
 	if err != nil {
-		return "", fmt.Errorf("warden token type not found: %w", err)
+		return "", fmt.Errorf("service token type not found: %w", err)
 	}
 
 	// Create AuthData with infinite TTL (for root namespace)
@@ -1011,8 +998,8 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 	}
 
 	// Compute new ID from custom token value
-	wardenType := &WardenTokenType{}
-	newEntry.ID = wardenType.ComputeID(customToken)
+	serviceType := &ServiceTokenType{}
+	newEntry.ID = serviceType.ComputeID(customToken)
 
 	// Remove old entry from cache
 	s.byID.Del(oldTokenID)
@@ -1174,7 +1161,7 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 		s.byAccessor.Wait()
 
 		// Register with expiration manager for timer-based TTL enforcement
-		// Tokens restored from storage are always persisted (JWT role tokens are not stored)
+		// Tokens restored from storage are always persisted (identity tokens are not stored)
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil {
 			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, true); err != nil {
 				s.logger.Warn("failed to register restored token with expiration manager",
@@ -1197,7 +1184,7 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 		s.byAccessor.Wait()
 
 		// Register non-expiring token with expiration manager (TTL=0)
-		// Tokens restored from storage are always persisted (JWT role tokens are not stored)
+		// Tokens restored from storage are always persisted (identity tokens are not stored)
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil {
 			if err := expMgr.RegisterToken(ctx, entry.ID, 0, true); err != nil {
 				s.logger.Warn("failed to register restored non-expiring token with expiration manager",
@@ -1279,7 +1266,7 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 		if s.isRootTokenEntry(entry) {
 			if tokenValue, ok := entry.Data["token"]; ok {
 				if rootID != "" && rootID != entry.ID {
-					s.logger.Warn("more than one root token found in storage, the last one loaded is kept",
+					s.logger.Warn("more than one root token in storage: the last one loaded is the current root token, the others stay valid until revoked",
 						logger.String("previous_token_id", rootID),
 						logger.String("token_id", entry.ID))
 				}
@@ -1424,8 +1411,8 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	var tokenID string
 	if err != nil {
 		// Fallback for dev-mode custom tokens without standard prefix.
-		// Compute what the ID would be if this were a Warden token.
-		wt := &WardenTokenType{}
+		// Compute what the ID would be if this were a service token.
+		wt := &ServiceTokenType{}
 		candidateID := wt.ComputeID(tokenValue)
 		if _, found := s.byID.Get(candidateID); found {
 			tokenType = wt
@@ -1529,21 +1516,20 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	return entry.Copy(), nil
 }
 
-// LookupTransparentToken looks up a cached transparent-auth token keyed by
-// (credential, mountAccessor): the admission token of one credential at one
-// mount, whatever role a request asks for. Used by resolveTransparentIdentity
-// for both the cache-check and post-login resolution paths.
+// LookupTransparentToken looks up the cached identity token keyed by
+// (credential, mountAccessor): the admission of one credential at one mount,
+// whatever role a request asks for. Used by resolveTransparentIdentity for both
+// the cache-check and post-login resolution paths. credential is the raw
+// bearer (a JWT, a JWT-SVID) or a certificate's fingerprint.
 //
-// The cache hash uses tokenType.LookupValue, so each TransparentTokenType
-// controls how its credential collapses into a deterministic cache key.
-// Mount accessor is included so two mounts of the same auth type presented
-// the same credential cannot share an entry.
+// The mount accessor is part of the key, so two mounts presented the same
+// credential cannot share an entry.
 //
 // It returns a copy of the cached entry, for one request. Returns
 // ErrTokenNotFound on cache miss, ErrTokenNamespaceMismatch on namespace
 // boundary violation, ErrTokenExpired on TTL exhaustion, ErrOriginViolation
 // on IP binding violation.
-func (c *Core) LookupTransparentToken(ctx context.Context, tokenType TransparentTokenType, credential, mountAccessor string) (*TokenEntry, error) {
+func (c *Core) LookupTransparentToken(ctx context.Context, credential, mountAccessor string) (*TokenEntry, error) {
 	if c.Sealed() {
 		return nil, fmt.Errorf("the core is sealed")
 	}
@@ -1565,7 +1551,8 @@ func (c *Core) LookupTransparentToken(ctx context.Context, tokenType Transparent
 		return nil, errors.New("namespace not found in context")
 	}
 
-	typeName := tokenType.Metadata().Name
+	tokenType := identityTokenType
+	typeName := TypeIdentityToken
 
 	// Hash of (mountAccessor, credential) — matches what Generate stored.
 	lookupHash := tokenType.LookupValue(credential, mountAccessor)

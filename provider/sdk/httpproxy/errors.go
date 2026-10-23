@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/middleware"
-	"github.com/hashicorp/go-multierror"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -79,12 +78,5 @@ func WardenErrorMessage(err error) string {
 	if err == nil {
 		return "Warden: request failed"
 	}
-	if merr, ok := err.(*multierror.Error); ok && len(merr.Errors) > 0 {
-		msgs := make([]string, len(merr.Errors))
-		for i, e := range merr.Errors {
-			msgs[i] = e.Error()
-		}
-		return "Warden: " + strings.Join(msgs, "; ")
-	}
-	return "Warden: " + err.Error()
+	return "Warden: " + strings.Join(logical.ErrorMessages(err), "; ")
 }

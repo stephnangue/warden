@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/auth/helper/factstest"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"math/big"
@@ -201,7 +202,7 @@ func TestHandleLogin_FullFlow_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NotNil(t, resp.Auth)
 	assert.Equal(t, "test-agent", resp.Auth.PrincipalID)
-	assert.Equal(t, "cert_role", resp.Auth.TokenType)
+	assert.Equal(t, logical.TokenTypeIdentity, resp.Auth.TokenType)
 	assert.Nil(t, resp.Auth.Policies, "a login is an admission: no policies")
 	assert.Nil(t, resp.Auth.Metadata, "a login is an admission: no metadata")
 	assert.Equal(t, certFingerprint(clientCert), resp.Auth.ClientToken)
@@ -242,19 +243,17 @@ func TestHandleLogin_NoCAPool(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "an unconfigured mount cannot decide")
 }
 
-// A role's CA no longer widens the mount: only the mount's trusted CAs admit.
+// A CA an older version's role held does not widen the mount: only the mount's
+// trusted CAs admit.
 func TestHandleLogin_OnlyTheMountPoolAdmits(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	clientCert := testClientCert(t, caCert, caKey, "test-agent")
 
-	b, ctx := createTestBackend(t)
+	b, _ := createTestBackend(t)
 	b.config = &CertAuthConfig{PrincipalClaim: "cn", TokenTTL: time.Hour}
-	require.NoError(t, b.setRole(ctx, &CertRole{
-		Name:        "test-role",
-		Certificate: caPEM, // a role CA, left in storage from before
-		TokenTTL:    time.Hour.String(),
-		TokenType:   "cert_role",
-	}))
+	factstest.SeedRole(t, b.storageView, "test-role", map[string]any{
+		"name": "test-role", "certificate": caPEM, "token_ttl": "1h",
+	})
 
 	resp := loginWith(t, b, clientCert)
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "no mount CA: the mount cannot decide")
@@ -280,39 +279,13 @@ func TestHandleLogin_MountPrincipalClaim(t *testing.T) {
 // getCAPool Tests
 // =============================================================================
 
-func TestGetCAPool_RoleSpecific(t *testing.T) {
+func TestGetCAPool_MountConfig(t *testing.T) {
 	_, _, caPEM := testCA(t)
-	b, _ := createTestBackend(t)
-	b.config = nil
-
-	role := &CertRole{Certificate: caPEM}
-	pool, err := getCAPool(b.config, role)
-	require.NoError(t, err)
-	assert.NotNil(t, pool)
-}
-
-func TestGetCAPool_GlobalConfig(t *testing.T) {
-	_, _, caPEM := testCA(t)
-	b, _ := createTestBackend(t)
 	caPool, _ := buildCAPool(caPEM)
-	b.config = &CertAuthConfig{caPool: caPool}
-
-	role := &CertRole{}
-	pool, err := getCAPool(b.config, role)
-	require.NoError(t, err)
-	assert.NotNil(t, pool)
+	assert.Same(t, caPool, getCAPool(&CertAuthConfig{caPool: caPool}))
 }
 
 func TestGetCAPool_None(t *testing.T) {
-	b, _ := createTestBackend(t)
-	b.config = &CertAuthConfig{}
-
-	role := &CertRole{}
-	pool, err := getCAPool(b.config, role)
-	require.NoError(t, err)
-	assert.Nil(t, pool)
+	assert.Nil(t, getCAPool(&CertAuthConfig{}))
+	assert.Nil(t, getCAPool(nil))
 }
-
-// =============================================================================
-// buildRoleFromFieldData with all fields
-// =============================================================================

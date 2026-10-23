@@ -76,10 +76,11 @@ func TestAdmit_NotAdmitted(t *testing.T) {
 	root := issueCA(t, "Root", newFixtureKey(t), nil)
 	untrusted := issueCA(t, "Untrusted", newFixtureKey(t), nil)
 	b := factsBackend(t, root, nil)
-	// A role CA is not the mount's: a certificate only it issues is not admitted.
-	require.NoError(t, b.setRole(context.Background(), &CertRole{
-		Name: "pinned", Certificate: untrusted.pem, TokenPolicies: []string{"p"}, TokenTTL: "1h", TokenType: "cert_role",
-	}))
+	// A CA an older version's role held is not the mount's: a certificate only
+	// it issues is not admitted.
+	factstest.SeedRole(t, b.storageView, "pinned", map[string]any{
+		"name": "pinned", "certificate": untrusted.pem, "token_policies": []string{"p"}, "token_ttl": "1h",
+	})
 
 	cases := map[string]*x509.Certificate{
 		"no certificate":      nil,

@@ -27,10 +27,10 @@ Usage: warden list [PATH]
 
   Examples:
 
-    List JWT auth roles:
+    List roles:
 
-      $ warden list auth/jwt/role
-      $ warden list -path=auth/jwt/role
+      $ warden list sys/roles
+      $ warden list -path=sys/roles
 
     List providers:
 

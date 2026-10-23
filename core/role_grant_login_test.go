@@ -51,6 +51,12 @@ func (b *countingBackend) HandleRequest(ctx context.Context, req *logical.Reques
 	return b.Backend.HandleRequest(ctx, req)
 }
 
+// CredentialFormat forwards the wrapped auth method's format: the embedded
+// interface does not promote it.
+func (b *countingBackend) CredentialFormat() logical.CredentialFormat {
+	return b.Backend.(logical.CredentialFormatProvider).CredentialFormat()
+}
+
 // jwtEnv is a core with real jwt auth mounts trusting one signing key, in the
 // root namespace or a child one.
 type jwtEnv struct {
@@ -173,7 +179,7 @@ func (e *jwtEnv) cached(mount, token string) *TokenEntry {
 	e.t.Helper()
 	entry := e.c.router.MatchingMountEntry(e.ctx, "auth/"+mount)
 	require.NotNil(e.t, entry)
-	id := (&JWTRoleTokenType{}).ComputeID((&JWTRoleTokenType{}).LookupValue(token, entry.Accessor))
+	id := identityTokenType.ComputeID(identityTokenType.LookupValue(token, entry.Accessor))
 	te, ok := e.c.tokenStore.byID.Get(id)
 	if !ok {
 		return nil

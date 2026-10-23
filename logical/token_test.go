@@ -14,7 +14,7 @@ func TestTokenEntryCopy_EveryField(t *testing.T) {
 	te := &TokenEntry{
 		ID:             "id",
 		Accessor:       "acc",
-		Type:           "jwt_role",
+		Type:           TokenTypeIdentity,
 		NamespaceID:    "root",
 		NamespacePath:  "team/",
 		CreatedAt:      time.Unix(1, 0),

@@ -14,10 +14,9 @@ import (
 )
 
 // expectedClaims returns what the validator checks a token against: the
-// mount's issuer, and the subject and audiences of role where it sets them,
-// the mount's otherwise. A nil role is the role-free admission: the mount's
-// configuration alone. An empty audience list leaves the audience unchecked.
-func expectedClaims(config *JWTAuthConfig, role *JWTRole) jwt.Expected {
+// mount's issuer, subject and audiences. An empty audience list leaves the
+// audience unchecked.
+func expectedClaims(config *JWTAuthConfig) jwt.Expected {
 	expected := jwt.Expected{
 		SigningAlgorithms: []jwt.Alg{jwt.RS256, jwt.RS384, jwt.RS512, jwt.ES256, jwt.ES384, jwt.ES512},
 		Issuer:            config.BoundIssuer,
@@ -25,14 +24,6 @@ func expectedClaims(config *JWTAuthConfig, role *JWTRole) jwt.Expected {
 	}
 	if len(config.BoundAudiences) > 0 {
 		expected.Audiences = config.BoundAudiences
-	}
-	if role != nil {
-		if role.BoundSubject != "" {
-			expected.Subject = role.BoundSubject
-		}
-		if len(role.BoundAudiences) > 0 {
-			expected.Audiences = role.BoundAudiences
-		}
 	}
 	return expected
 }
@@ -80,7 +71,7 @@ func admitToken(ctx context.Context, config *JWTAuthConfig, token string, now ti
 	if err := helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences); err != nil {
 		return nil, err
 	}
-	claims, err := config.validator.Validate(ctx, token, expectedClaims(config, nil))
+	claims, err := config.validator.Validate(ctx, token, expectedClaims(config))
 	if err != nil {
 		return nil, fmt.Errorf("validation: %w", err)
 	}

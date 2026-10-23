@@ -76,7 +76,7 @@ func handleLogical(c *core.Core, log *logger.GatedLogger, forwarder *standbyForw
 				return
 			}
 
-			respondError(w, statusCode, err.Error())
+			respondErr(w, statusCode, err)
 			return
 		}
 
@@ -186,7 +186,7 @@ func writeLogicalResponse(w http.ResponseWriter, resp *logical.Response) {
 	} else if resp.Err != nil {
 		// Serialize error to JSON
 		w.Header().Set("Content-Type", "application/json")
-		jsonBody, err := json.Marshal(map[string]any{"errors": []string{resp.Err.Error()}})
+		jsonBody, err := json.Marshal(map[string]any{"errors": logical.ErrorMessages(resp.Err)})
 		if err == nil {
 			body = jsonBody
 		}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/hashicorp/go-multierror"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 )
@@ -188,6 +189,34 @@ func GetErrorCode(err error) int {
 // IsNotFound returns true if the error is a 404 Not Found CodedError.
 func IsNotFound(err error) bool {
 	return GetErrorCode(err) == http.StatusNotFound
+}
+
+// ErrorMessages is err as the messages a response carries, one per error.
+//
+// Request handling gathers some failures in a multierror, whose own text is a
+// bulleted list ("1 error occurred:\n\t* permission denied\n\n") meant for a
+// log line, not a client. Each gathered error is kept as a message of its own,
+// so none is lost and a single one reads as itself. Only err itself is
+// unpacked: an error that wraps a multierror keeps its full text, context and
+// all. Returns nil for a nil err.
+func ErrorMessages(err error) []string {
+	if err == nil {
+		return nil
+	}
+	merr, ok := err.(*multierror.Error)
+	if !ok || len(merr.Errors) == 0 {
+		return []string{err.Error()}
+	}
+	msgs := make([]string, 0, len(merr.Errors))
+	for _, e := range merr.Errors {
+		if e != nil {
+			msgs = append(msgs, ErrorMessages(e)...)
+		}
+	}
+	if len(msgs) == 0 {
+		return []string{err.Error()}
+	}
+	return msgs
 }
 
 // ErrorResponse creates a Response from a CodedError.

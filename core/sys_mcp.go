@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -75,11 +76,17 @@ const sysMCPTimeout = 10 * time.Minute
 // rather than folding it in with a read failure.
 var errSysMCPBodyTooLarge = errors.New("sys/mcp request body too large")
 
-// bufferMCPRequestBody reads r's body into memory and puts it back, so the
-// request can be handed to a handler that may hold the response open
-// indefinitely without a connection read deadline still being armed. A body
-// over the cap is refused rather than truncated — a truncated JSON-RPC body
-// would surface as a confusing parse error.
+// maxSysMCPBatch caps the messages in one JSON-RPC batch. Batches survive only
+// for clients on protocol revisions before 2025-06-18, and each call in one is
+// answered in full, so without a count cap the body cap alone bounds the work:
+// a body of small list_roles calls fans out into a response tens of times its
+// size. No client batches anywhere near this many discovery calls.
+const maxSysMCPBatch = 50
+
+// jsonRPCCodeInvalidRequest is the JSON-RPC 2.0 code for a payload that is
+// valid JSON but not an acceptable request.
+const jsonRPCCodeInvalidRequest = -32600
+
 // sysMCPContext builds the context one discovery request runs under: the
 // caller's namespace and the raw request threaded through for the tool
 // handlers, bounded by sysMCPTimeout. The caller must call the returned
@@ -91,20 +98,70 @@ func sysMCPContext(r *http.Request, ns *namespace.Namespace) (context.Context, c
 	return ctx, cancel
 }
 
-func bufferMCPRequestBody(r *http.Request) error {
+// bufferMCPRequestBody reads r's body into memory and puts it back, so the
+// request can be handed to a handler that may hold the response open
+// indefinitely without a connection read deadline still being armed. A body
+// over the cap is refused rather than truncated — a truncated JSON-RPC body
+// would surface as a confusing parse error. It returns the buffered body.
+func bufferMCPRequestBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil {
-		return nil
+		return nil, nil
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxSysMCPBody+1))
 	_ = r.Body.Close()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(body) > maxSysMCPBody {
-		return errSysMCPBodyTooLarge
+		return nil, errSysMCPBodyTooLarge
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
-	return nil
+	return body, nil
+}
+
+// batchExceedsCap reports whether body is a JSON-RPC batch of more than limit
+// messages. Only a top-level array is counted, so a single request costs one
+// byte scan; counting stops at limit+1, and a value that cannot be counted —
+// malformed JSON — reports false and is left for the SDK to refuse with its
+// own parse error.
+func batchExceedsCap(body []byte, limit int) bool {
+	if first, ok := firstNonWS(body); !ok || first != '[' {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if _, err := dec.Token(); err != nil {
+		return false
+	}
+	var skip json.RawMessage
+	for n := 0; dec.More(); n++ {
+		if n == limit {
+			return true
+		}
+		if err := dec.Decode(&skip); err != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// writeBatchTooLarge refuses an oversized batch as a whole, before any call in
+// it runs: serving part of it would leave the rest unanswered. It answers the
+// way the transport answers input it cannot accept — a 400 whose body may be
+// a JSON-RPC error with no id — and the way the SDK itself refuses a batch
+// (a 400), so a client fails the call at once rather than waiting on
+// responses that will never come. The id is null because a batch has no
+// single id to answer.
+func writeBatchTooLarge(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      nil,
+		"error": map[string]any{
+			"code":    jsonRPCCodeInvalidRequest,
+			"message": fmt.Sprintf("JSON-RPC batch exceeds %d messages", maxSysMCPBatch),
+		},
+	})
 }
 
 // withMCPRequest stashes r in ctx, with an empty discovery memo: every handler
@@ -198,12 +255,17 @@ func (c *Core) MCPServerHandler() http.Handler {
 		// byte. So read the body first — under the deadlines the listener
 		// armed, which is what bounds a dribbling client — and shed them
 		// before handing over to a handler that may never return.
-		if err := bufferMCPRequestBody(r); err != nil {
+		body, err := bufferMCPRequestBody(r)
+		if err != nil {
 			if errors.Is(err, errSysMCPBodyTooLarge) {
 				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 				return
 			}
 			http.Error(w, "could not read request body", http.StatusBadRequest)
+			return
+		}
+		if batchExceedsCap(body, maxSysMCPBatch) {
+			writeBatchTooLarge(w)
 			return
 		}
 		if err := logical.ClearStreamDeadlines(w); err != nil {

@@ -247,7 +247,8 @@ func createHiddenSkill(t *testing.T, port int, name string) {
 	t.Cleanup(func() { h.APIRequest(t, "DELETE", "sys/skills/"+name, port, "") })
 }
 
-// assertUnknownSkill asserts skills/get answers uri with -32602.
+// assertUnknownSkill asserts skills/get and resources/read both answer uri
+// with -32602, and serve none of its body.
 func assertUnknownSkill(t *testing.T, session *mcp.ClientSession, uri string) {
 	t.Helper()
 	_, err := mcp.CallCustomMethod[*skillsGetParams, *skillsGetResult](context.Background(), session, "skills/get",
@@ -255,6 +256,11 @@ func assertUnknownSkill(t *testing.T, session *mcp.ClientSession, uri string) {
 	var rpcErr *jsonrpc.Error
 	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc.CodeInvalidParams {
 		t.Errorf("skills/get %s, which no role of this identity reaches: got %v, want a -32602 error", uri, err)
+	}
+	read, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: uri})
+	rpcErr = nil
+	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc.CodeInvalidParams {
+		t.Errorf("resources/read %s, which no role of this identity reaches: got %v (contents %v), want a -32602 error", uri, err, read)
 	}
 }
 

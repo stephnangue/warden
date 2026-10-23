@@ -37,7 +37,8 @@ func TestX509SVIDLogin_Valid(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NotNil(t, resp.Auth)
 	assert.Equal(t, "spiffe://"+testTD+"/ns/default/sa/api", resp.Auth.PrincipalID)
-	assert.Equal(t, "spiffe_role", resp.Auth.TokenType)
+	assert.Equal(t, logical.TokenTypeIdentity, resp.Auth.TokenType)
+	assert.Equal(t, logical.CredentialFormatSPIFFE, b.CredentialFormat())
 	assert.Nil(t, resp.Auth.Policies, "a login is an admission: no policies")
 	assert.Nil(t, resp.Auth.Metadata, "a login is an admission: no metadata")
 	assert.Nil(t, resp.Auth.Actors)
@@ -131,7 +132,7 @@ func TestJWTSVIDLogin_Valid(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "spiffe://"+testTD+"/ns/default/sa/api", resp.Auth.PrincipalID)
-	assert.Equal(t, "spiffe_role", resp.Auth.TokenType)
+	assert.Equal(t, logical.TokenTypeIdentity, resp.Auth.TokenType)
 	assert.Equal(t, token, resp.Auth.ClientToken)
 	assert.Nil(t, resp.Auth.Policies)
 	assert.Nil(t, resp.Auth.Metadata)

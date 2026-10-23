@@ -1718,7 +1718,7 @@ func TestHandleTransparentAuth(t *testing.T) {
 			autoAuthPath:    "auth/jwt/",
 		}
 		req := &logical.Request{
-			ClientToken: "cws.not-a-jwt-token",
+			ClientToken: "wds.not-a-jwt-token",
 		}
 
 		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
@@ -1727,7 +1727,7 @@ func TestHandleTransparentAuth(t *testing.T) {
 	})
 
 	t.Run("uses existing JWT token when found in cache", func(t *testing.T) {
-		// Create a JWT token using GenerateToken with the jwt_role type.
+		// Create an identity token for the JWT using GenerateToken.
 		// MountAccessor must match the mount's accessor so the cache write and
 		// the subsequent transparent-auth lookup hash to the same key.
 		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.test-sig"
@@ -1738,7 +1738,7 @@ func TestHandleTransparentAuth(t *testing.T) {
 			PrincipalID:   "test-user",
 			ExpireAt:      time.Now().Add(24 * time.Hour),
 		}
-		te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 		require.NoError(t, err)
 		require.NotNil(t, te)
 
@@ -1789,8 +1789,8 @@ func spiffeReqWithCert(cert *x509.Certificate, clientToken string) *logical.Requ
 }
 
 // TestHandleTransparentAuth_Spiffe drives the full performImplicitAuth dispatch
-// for a "spiffe" mount: a pre-seeded spiffe_role cache entry is resolved through
-// the case "spiffe" branch for both the JWT-SVID and the X.509-SVID credential,
+// for a "spiffe" mount: a pre-seeded identity token is resolved through the
+// spiffe credential format branch for both the JWT-SVID and the X.509-SVID credential,
 // including the JWT-wins precedence and the stray-bearer ClientToken reset.
 func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 	core := createTestCore(t)
@@ -1801,7 +1801,7 @@ func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 	}
 	seed := func(t *testing.T, tokenValue string) *TokenEntry {
 		t.Helper()
-		te, err := core.tokenStore.GenerateToken(ctx, TypeSpiffeRole, &AuthData{
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
 			TokenValue: tokenValue, MountAccessor: mount.Accessor,
 			PrincipalID: "spiffe://example.org/sa/api", ExpireAt: time.Now().Add(time.Hour),
 		})
@@ -1875,7 +1875,7 @@ func TestHandleTransparentAuth_Singleflight(t *testing.T) {
 		PrincipalID:   "test-user-singleflight",
 		ExpireAt:      time.Now().Add(24 * time.Hour),
 	}
-	te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+	te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 	require.NoError(t, err)
 	require.NotNil(t, te)
 
@@ -1944,47 +1944,44 @@ func TestHandleTransparentAuth_JWTCacheKey(t *testing.T) {
 
 	t.Run("LookupTransparentToken returns error for non-existent JWT token", func(t *testing.T) {
 		sampleJWT2 := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.test"
-		jwtType := &JWTRoleTokenType{}
 
-		_, err := core.LookupTransparentToken(ctx, jwtType, sampleJWT2, "test-accessor")
+		_, err := core.LookupTransparentToken(ctx, sampleJWT2, "test-accessor")
 		assert.Error(t, err, "Looking up non-existent JWT token should return error")
 	})
 
 	t.Run("LookupValue and ComputeID match token creation ID", func(t *testing.T) {
-		jwtType := &JWTRoleTokenType{}
-
-		// Simulate token creation: Generate stores hash of (accessor, JWT) in entry.Data["jwt"]
+		// Simulate token creation: Generate stores hash of (accessor, JWT) in entry.Data["credential"]
 		entry := &TokenEntry{
 			Data: map[string]string{},
 		}
 		authData := &AuthData{TokenValue: sampleJWT, MountAccessor: "acc1"}
-		jwtType.Generate(context.Background(), authData, entry)
+		_, err := identityTokenType.Generate(context.Background(), authData, entry)
+		require.NoError(t, err)
 
 		// Verify the stored value is a hash of (accessor, JWT) — not raw value
 		expectedHash := sha256.Sum256([]byte("acc1:" + sampleJWT))
-		assert.Equal(t, hex.EncodeToString(expectedHash[:]), entry.Data["jwt"])
+		assert.Equal(t, hex.EncodeToString(expectedHash[:]), entry.Data["credential"])
 
 		// Token ID is computed from the stored hash
-		tokenID := jwtType.ComputeID(entry.Data["jwt"])
+		tokenID := identityTokenType.ComputeID(entry.Data["credential"])
 
 		// Lookup: hash first, then compute ID - should match
-		lookupHash := jwtType.LookupValue(sampleJWT, "acc1")
-		lookupID := jwtType.ComputeID(lookupHash)
+		lookupHash := identityTokenType.LookupValue(sampleJWT, "acc1")
+		lookupID := identityTokenType.ComputeID(lookupHash)
 
 		assert.Equal(t, tokenID, lookupID, "Token creation and lookup should produce same ID")
 	})
 
 	t.Run("same JWT on different mounts produces different token IDs", func(t *testing.T) {
-		jwtType := &JWTRoleTokenType{}
-		hashA := jwtType.LookupValue(sampleJWT, "accessor-A")
-		hashB := jwtType.LookupValue(sampleJWT, "accessor-B")
+		hashA := identityTokenType.LookupValue(sampleJWT, "accessor-A")
+		hashB := identityTokenType.LookupValue(sampleJWT, "accessor-B")
 		assert.NotEqual(t, hashA, hashB, "Same JWT on two mounts must not share a cache entry")
-		assert.NotEqual(t, jwtType.ComputeID(hashA), jwtType.ComputeID(hashB))
+		assert.NotEqual(t, identityTokenType.ComputeID(hashA), identityTokenType.ComputeID(hashB))
 	})
 
 	t.Run("requests for two roles resolve one cached entry", func(t *testing.T) {
 		mount := mountStubAuthMethod(t, core, "jwt-key/", "jwt")
-		te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
 			TokenValue: sampleJWT, MountAccessor: mount.Accessor,
 			PrincipalID: "test-user", ExpireAt: time.Now().Add(time.Hour),
 		})
@@ -2447,7 +2444,7 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 			PrincipalID:   "cached-user",
 			ExpireAt:      time.Now().Add(24 * time.Hour),
 		}
-		te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 		require.NoError(t, err)
 		require.NotNil(t, te)
 
@@ -2551,7 +2548,7 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		// (the fake `prec/` namespace isn't in the namespace store, so token
 		// resolution would fail), but the cache key uses the per-mount
 		// accessor — which is what performImplicitAuth threads in.
-		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
+		_, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
 			TokenValue:    sampleJWT,
 			MountAccessor: precMount.Accessor,
 			PrincipalID:   "prec-user",
@@ -2595,7 +2592,7 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		}
 		// Token namespace is root (the fake `fallback/` namespace isn't in
 		// the namespace store); cache key uses the per-mount accessor.
-		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		_, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 		require.NoError(t, err)
 
 		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)

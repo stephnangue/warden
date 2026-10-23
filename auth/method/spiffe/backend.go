@@ -1,8 +1,8 @@
 // Package spiffe implements the SPIFFE auth method: a first-class relying party
 // that authenticates workloads presenting either a SPIFFE X.509-SVID (a TLS
 // client certificate) or a SPIFFE JWT-SVID (a bearer token) against per-trust-
-// domain bundles. Both SVID types are accepted on one mount and issue the single
-// spiffe_role token type. The trust-domain store, federation, and SVID
+// domain bundles. Both SVID types are accepted on one mount and issue an
+// identity token. The trust-domain store, federation, and SVID
 // verification are provided by the shared auth/spiffe substrate.
 package spiffe
 

@@ -25,6 +25,7 @@ const (
 	ExitServer       ExitCode = 8
 	ExitConflict     ExitCode = 9
 	ExitSealed       ExitCode = 10
+	ExitGone         ExitCode = 11
 )
 
 // ErrorCode is the stable string identifier surfaced in JSON envelopes.
@@ -42,6 +43,7 @@ const (
 	CodeServer       ErrorCode = "server"
 	CodeConflict     ErrorCode = "conflict"
 	CodeSealed       ErrorCode = "sealed"
+	CodeGone         ErrorCode = "gone"
 )
 
 // Sentinel errors. Wrap with fmt.Errorf("context: %w", helpers.ErrXxx) so the
@@ -56,6 +58,7 @@ var (
 	ErrServer       = errors.New("server error")
 	ErrConflict     = errors.New("conflict")
 	ErrSealed       = errors.New("warden is sealed or uninitialized")
+	ErrGone         = errors.New("gone")
 )
 
 // WardenError is the JSON envelope emitted on stderr when -output is json or
@@ -115,6 +118,8 @@ func classify(err error) (ErrorCode, ExitCode) {
 		return CodeConflict, ExitConflict
 	case errors.Is(err, ErrSealed):
 		return CodeSealed, ExitSealed
+	case errors.Is(err, ErrGone):
+		return CodeGone, ExitGone
 	}
 
 	// 3. Network/transport errors (DNS, connection refused, timeout, TLS).
@@ -140,6 +145,10 @@ func classifyHTTPStatus(status int) (ErrorCode, ExitCode) {
 		return CodeNotFound, ExitNotFound
 	case status == 409:
 		return CodeConflict, ExitConflict
+	case status == 410:
+		// Removed, not malformed: the same request will never succeed, and
+		// the server's message names what replaced it.
+		return CodeGone, ExitGone
 	case status >= 500:
 		return CodeServer, ExitServer
 	case status >= 400:
@@ -229,6 +238,8 @@ func DefaultHint(code ErrorCode) string {
 		return "The warden server returned an internal error; check server logs"
 	case CodeConflict:
 		return "The resource already exists or has been modified concurrently"
+	case CodeGone:
+		return "This endpoint was removed; the message names what replaces it"
 	case CodeSealed:
 		return "Unseal warden with `warden operator unseal` (or initialize it with `warden operator init`)"
 	case CodeUsage:

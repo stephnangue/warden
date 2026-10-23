@@ -20,6 +20,14 @@ func (b *jwtAuthBackend) FactNames() []string { return helper.FactNames(b.mountF
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *jwtAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+var _ logical.CredentialFormatProvider = (*jwtAuthBackend)(nil)
+
+// CredentialFormat implements logical.CredentialFormatProvider: the mount
+// admits a JWT bearer, verified against its keys.
+func (b *jwtAuthBackend) CredentialFormat() logical.CredentialFormat {
+	return logical.CredentialFormatJWT
+}
+
 // newAdmission returns what the login verified about token, whose validated
 // claims are claims. The admission adopts claims without copying: the caller
 // must not read or modify them afterwards, and nothing else may hold them.
