@@ -49,10 +49,11 @@ import (
 //	  request.mount_accessor, request.transparent, request.namespace,
 //	  request.data.<k>
 //	agent.present, agent.principal, agent.role, agent.namespace,
-//	  agent.policies (list), agent.metadata.<k>, agent.actors (list of
+//	  agent.policies (list), agent.groups (list, sorted; empty when the
+//	  caller is in no group), agent.metadata.<k>, agent.actors (list of
 //	  {subject, issuer?}), agent.token_type, agent.token_ttl_seconds,
 //	  agent.token_expires_at
-//	user.<same, minus policies>
+//	user.<same, minus policies and groups>
 //	now (timestamp)
 //	call.method, call.tool, call.args.<k>, call.batch_index   (MCP policy only)
 //
@@ -149,6 +150,10 @@ type celPrincipalInput struct {
 	Actors        []logical.ActorRef
 	TTLSeconds    int64
 	ExpiresAtUnix int64
+
+	// Groups are the agent's groups, sorted, from the request's role grant.
+	// Shared with the cached membership: read only. Nil reads as no groups.
+	Groups []string
 }
 
 // principalLeg distinguishes the two principals that share buildPrincipalNS. It
@@ -616,9 +621,10 @@ func buildPrincipalNS(p celPrincipalInput, f fieldSet, leg principalLeg) map[str
 		// has(agent.metadata.x) is false and absent-key access fails closed)
 		// without allocating.
 		//
-		// Safe only because a TokenEntry's Metadata is never mutated post-mint:
-		// the entry is a shared cached pointer, so a post-mint write would be a
-		// data race against concurrent evaluations.
+		// Safe only because a TokenEntry's Metadata map is never mutated: it is
+		// shared with the cached entry, or for an admission token with the
+		// membership every request of the credential reads, so a write would
+		// be a data race against concurrent evaluations.
 		if p.Metadata != nil {
 			m["metadata"] = p.Metadata
 		} else {
@@ -653,6 +659,17 @@ func buildPrincipalNS(p celPrincipalInput, f fieldSet, leg principalLeg) map[str
 			policies = append(policies, pol)
 		}
 		m["policies"] = policies
+	}
+	// Groups, like policies, are the agent's alone: the user leg is granted no
+	// role, so it has no groups to show. Bound by reference (CEL adapts a
+	// []string without copying) and never nil, so 'x' in agent.groups is false
+	// rather than an error when the caller has none.
+	if f.has("groups") && leg != legUser {
+		if p.Groups != nil {
+			m["groups"] = p.Groups
+		} else {
+			m["groups"] = noGroups
+		}
 	}
 	if f.has("token_ttl_seconds") {
 		m["token_ttl_seconds"] = p.TTLSeconds
@@ -879,6 +896,16 @@ func celPrincipalInputFromEntry(te *logical.TokenEntry, now time.Time) celPrinci
 	}
 }
 
+// celAgentInput is celPrincipalInputFromEntry for the request's agent, with
+// the groups its role grant recorded. req may be nil.
+func celAgentInput(req *logical.Request, te *logical.TokenEntry, now time.Time) celPrincipalInput {
+	in := celPrincipalInputFromEntry(te, now)
+	if rg := req.RoleGrant(); rg != nil {
+		in.Groups = rg.Groups
+	}
+	return in
+}
+
 // celUserInputFromPrincipal adapts a *logical.UserPrincipal into the non-secret
 // principal context exposed as `user`. A nil principal — or one carrying no
 // validated token entry — yields {Present: false} rather than a zero value that
@@ -938,7 +965,7 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 	usr := celUserInputFromRequest(req, now)
 	act := newCELActivation(
 		celRequestInputFromRequest(req, nsPath), reqF,
-		celPrincipalInputFromEntry(te, now), agtF,
+		celAgentInput(req, te, now), agtF,
 		usr, usrF,
 		now, nil)
 

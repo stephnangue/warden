@@ -96,7 +96,24 @@ type Request struct {
 	// against it. Set from the token entry at the policy-check seam; never
 	// compiled into the cached CBP, so a CBP shared across tokens with the
 	// same policy set is still matched against each token's own metadata.
+	//
+	// Shared with the token entry it came from, which may share it further (a
+	// cached token's metadata, or a membership rendered for every request of
+	// one credential): read only.
 	TokenMetadata map[string]string
+
+	// roleGrant is the role this request runs under when its token takes its
+	// role per request (an admission token), and hasRoleGrant says whether it
+	// is set. Held by value, so resolving a grant allocates nothing; read it
+	// through RoleGrant.
+	roleGrant    RoleGrant
+	hasRoleGrant bool
+
+	// RequestedRole is the role a transparent request asks for (X-Warden-Role,
+	// the role/<name>/ segment, ?role=, the provider's default_role), set by
+	// implicit auth alongside Transparent and never from client input
+	// directly. Empty when the request named none, or is not transparent.
+	RequestedRole string `json:"-"`
 
 	// Request metadata
 	ClientIP  string
@@ -165,6 +182,30 @@ func (r *Request) TokenEntry() *TokenEntry {
 
 func (r *Request) SetTokenEntry(te *TokenEntry) {
 	r.tokenEntry = te
+}
+
+// RoleGrant returns the role grant core resolved for this request, or nil when
+// none is set: the request's token carries its role itself, or no token was
+// checked. The grant lives inside r, so the pointer is valid as long as r is,
+// and it is r's goroutine's to read.
+func (r *Request) RoleGrant() *RoleGrant {
+	if r == nil || !r.hasRoleGrant {
+		return nil
+	}
+	return &r.roleGrant
+}
+
+// SetRoleGrant stores g as the request's role grant and returns it in place.
+// Core calls it, and ClearRoleGrant, from one place: where it resolves the
+// grant. Neither allocates.
+func (r *Request) SetRoleGrant(g RoleGrant) *RoleGrant {
+	r.roleGrant, r.hasRoleGrant = g, true
+	return &r.roleGrant
+}
+
+// ClearRoleGrant removes the request's role grant.
+func (r *Request) ClearRoleGrant() {
+	r.roleGrant, r.hasRoleGrant = RoleGrant{}, false
 }
 
 // UserPrincipal is a request's secondary (user) principal: a first-class Warden

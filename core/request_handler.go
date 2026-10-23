@@ -221,6 +221,10 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 	return auth, cbp, te, nil
 }
 
+// fetchCBPAndTokenEntry resolves the request's identity in three steps: the
+// token entry (lookupTokenEntry), the role it runs under (resolveRoleGrant,
+// which projects a per-request role onto the entry), then the CBP of the
+// entry's policies (buildCBP). Verdicts stay in performPolicyChecks.
 func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) (*CBP, *logical.TokenEntry, error) {
 	// Ensure there is a client token
 	if req.ClientToken == "" {
@@ -237,7 +241,24 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
 	}
 
-	// Resolve the token policy
+	te, err := c.lookupTokenEntry(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	c.resolveRoleGrant(req, te, time.Now())
+
+	cbp, err := c.buildCBP(ctx, te)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cbp, te, nil
+}
+
+// lookupTokenEntry returns the request's token entry: the one already set on
+// req (implicit auth sets it), or the one req.ClientToken names, which it then
+// sets. Either way it is this request's own copy.
+func (c *Core) lookupTokenEntry(ctx context.Context, req *logical.Request) (*logical.TokenEntry, error) {
 	var te *logical.TokenEntry
 	switch req.TokenEntry() {
 	case nil:
@@ -251,10 +272,10 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 				errors.Is(err, ErrOriginViolation) ||
 				errors.Is(err, ErrTypeNotFound) {
 				c.logger.Warn("token lookup failed", logger.Err(err))
-				return nil, nil, sdklogical.ErrPermissionDenied
+				return nil, sdklogical.ErrPermissionDenied
 			}
 			c.logger.Error("failed to lookup token", logger.Err(err))
-			return nil, nil, ErrInternalError
+			return nil, ErrInternalError
 		}
 		req.SetTokenEntry(te)
 	default:
@@ -263,9 +284,13 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 
 	// Ensure the token is valid
 	if te == nil {
-		return nil, nil, sdklogical.ErrPermissionDenied
+		return nil, sdklogical.ErrPermissionDenied
 	}
+	return te, nil
+}
 
+// buildCBP compiles the CBP of te's policies, in te's namespace.
+func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry) (*CBP, error) {
 	policyNames := make(map[string][]string)
 	// Add tokens policies
 	policyNames[te.NamespaceID] = append(policyNames[te.NamespaceID], te.Policies...)
@@ -273,12 +298,12 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 	tokenNS, err := c.NamespaceByID(ctx, te.NamespaceID)
 	if err != nil {
 		c.logger.Error("failed to fetch token namespace", logger.Err(err))
-		return nil, nil, ErrInternalError
+		return nil, ErrInternalError
 	}
 
 	if tokenNS == nil {
 		c.logger.Error("failed to fetch token namespace", logger.Err(namespace.ErrNoNamespace))
-		return nil, nil, ErrInternalError
+		return nil, ErrInternalError
 	}
 
 	tokenCtx := namespace.ContextWithNamespace(ctx, tokenNS)
@@ -287,15 +312,14 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 	// performed on the token's namespace.
 	if c.policyStore == nil {
 		c.logger.Error("policy store is unavailable")
-		return nil, nil, ErrInternalError
+		return nil, ErrInternalError
 	}
 	cbp, err := c.policyStore.CBP(tokenCtx, policyNames)
 	if err != nil {
 		c.logger.Error("failed to construct CBP", logger.Err(err))
-		return nil, nil, ErrInternalError
+		return nil, ErrInternalError
 	}
-
-	return cbp, te, nil
+	return cbp, nil
 }
 
 func (c *Core) HandleRequest(ctx context.Context, req *logical.Request) (*logical.Response, error) {
@@ -2525,6 +2549,13 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		req.ClientToken = ""
 	}
 	req.SetTokenEntry(te)
+	// The role this request asks for, for CheckToken to grant when the token
+	// takes its role per request (an admission token); a token that carries
+	// its role ignores it. With req.Transparent, set above, it is also what
+	// tells CheckToken the token came from admitting this request's own
+	// credential, not from a Warden token presented explicitly. A string, so a
+	// request whose token carries its role allocates nothing for it.
+	req.RequestedRole = authRole
 	// Ensure ClientToken is set so downstream policy checks (fetchCBPAndTokenEntry)
 	// don't short-circuit on the empty-token guard. For JWT transparent auth the
 	// JWT string is already in ClientToken, but for cert transparent auth there is
@@ -2798,7 +2829,12 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	if err != nil {
 		return nil, false, err
 	}
-	return te, clearClientToken, nil
+	// The flight hands one entry to every request that waited on it. Each gets
+	// its own copy, since a request writes onto its entry (its role, or an
+	// access backend's spec); the copies share the one *Admission, as every
+	// copy of a token entry does. One allocation per waiter on a cache miss
+	// (the flight's shared result is itself a copy).
+	return te.Copy(), clearClientToken, nil
 }
 
 // transparentLoginTimeout bounds an implicit login, which runs detached from the

@@ -583,6 +583,12 @@ func (f *JSONFormat) omitAuthField(auth *Auth, parts []string) {
 		auth.PrincipalID = ""
 	case "role_name":
 		auth.RoleName = ""
+	case "role_granted_by":
+		auth.RoleGrantedBy = ""
+	case "role_denied_reason":
+		auth.RoleDeniedReason = ""
+	case "groups":
+		auth.Groups = nil
 	case "policies":
 		auth.Policies = nil
 	case "policy_results":

@@ -839,6 +839,15 @@ func (c *Core) performPolicyChecks(ctx context.Context, cbp *CBP, te *logical.To
 		req.TokenMetadata = te.Metadata
 	}
 
+	// A token that takes its role per request runs only under a role granted
+	// to it. Refused in every mode, ahead of the CBP; an unauthenticated check
+	// (a login) never evaluates it, as it never evaluates the CBP. The CBP would
+	// refuse anyway: an ungranted admission token carries no policies.
+	if rg := req.RoleGrant(); !opts.Unauth && rg != nil && !rg.Granted() && !testHookSkipRoleVerdict {
+		ret.Error = multierror.Append(ret.Error, roleRefusal(rg, te))
+		return ret
+	}
+
 	// First, perform normal CBP checks if requested.
 	if cbp != nil && !opts.Unauth {
 		ret.CBPResults = cbp.AllowOperation(ctx, req, te, false)

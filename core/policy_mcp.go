@@ -506,7 +506,7 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	if reqF, agtF, usrF, callF, found := mcpConditionFields(sets); found {
 		act = newCELActivation(
 			celRequestInputFromRequest(req, nsPath), reqF,
-			celPrincipalInputFromEntry(te, now), agtF,
+			celAgentInput(req, te, now), agtF,
 			celUserInputFromRequest(req, now), usrF,
 			now, nil)
 		act.callFields = callF

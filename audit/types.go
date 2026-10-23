@@ -92,6 +92,19 @@ type Auth struct {
 	PrincipalID string `json:"principal_id,omitempty"`
 	RoleName    string `json:"role_name,omitempty"`
 
+	// RoleGrantedBy names the group that granted RoleName ("group:<name>")
+	// when the token takes its role per request; empty for a token that
+	// carries its role itself.
+	RoleGrantedBy string `json:"role_granted_by,omitempty"`
+
+	// RoleDeniedReason says why no role was granted (e.g. "not assumable");
+	// set only on a refused grant, so at most one of it and RoleGrantedBy is.
+	RoleDeniedReason string `json:"role_denied_reason,omitempty"`
+
+	// Groups are the caller's groups, sorted, when the token takes its role
+	// per request. Operator-chosen names, not salted.
+	Groups []string `json:"groups,omitempty"`
+
 	// Policies
 	Policies      []string       `json:"policies,omitempty"`
 	PolicyResults *PolicyResults `json:"policy_results,omitempty"`
@@ -346,20 +359,26 @@ func (e *LogEntry) Clone() *LogEntry {
 	// Clone Auth
 	if e.Auth != nil {
 		clone.Auth = &Auth{
-			TokenID:       e.Auth.TokenID,
-			TokenAccessor: e.Auth.TokenAccessor,
-			TokenType:     e.Auth.TokenType,
-			PrincipalID:   e.Auth.PrincipalID,
-			RoleName:      e.Auth.RoleName,
-			TokenTTL:      e.Auth.TokenTTL,
-			ExpiresAt:     e.Auth.ExpiresAt,
-			NamespaceID:   e.Auth.NamespaceID,
-			NamespacePath: e.Auth.NamespacePath,
-			CreatedByIP:   e.Auth.CreatedByIP,
+			TokenID:          e.Auth.TokenID,
+			TokenAccessor:    e.Auth.TokenAccessor,
+			TokenType:        e.Auth.TokenType,
+			PrincipalID:      e.Auth.PrincipalID,
+			RoleName:         e.Auth.RoleName,
+			RoleGrantedBy:    e.Auth.RoleGrantedBy,
+			RoleDeniedReason: e.Auth.RoleDeniedReason,
+			TokenTTL:         e.Auth.TokenTTL,
+			ExpiresAt:        e.Auth.ExpiresAt,
+			NamespaceID:      e.Auth.NamespaceID,
+			NamespacePath:    e.Auth.NamespacePath,
+			CreatedByIP:      e.Auth.CreatedByIP,
 		}
 		if e.Auth.Policies != nil {
 			clone.Auth.Policies = make([]string, len(e.Auth.Policies))
 			copy(clone.Auth.Policies, e.Auth.Policies)
+		}
+		if e.Auth.Groups != nil {
+			clone.Auth.Groups = make([]string, len(e.Auth.Groups))
+			copy(clone.Auth.Groups, e.Auth.Groups)
 		}
 		if e.Auth.PolicyResults != nil {
 			clone.Auth.PolicyResults = &PolicyResults{
