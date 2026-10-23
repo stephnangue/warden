@@ -25,8 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The tests here build admission-only tokens by hand (an admission, a mount
-// accessor, no role): no login produces one yet.
+// The tests here build admission tokens by hand (an admission, a mount
+// accessor, no role), as a login issues them; role_grant_login_test.go drives
+// them through real logins.
 
 const (
 	grantMount    = "auth/jwt/"
@@ -334,14 +335,30 @@ func TestRoleGrant_FailClosedWithoutVerdict(t *testing.T) {
 }
 
 // An unauthenticated check (a login) never evaluates the role verdict, as it
-// never evaluates the CBP.
-func TestRoleGrant_VerdictSkippedUnauth(t *testing.T) {
+// never evaluates the CBP, so it resolves no grant either: its audit entry
+// records no role_denied_reason. The admission token still keeps no policies.
+func TestRoleGrant_SkippedUnauth(t *testing.T) {
 	e := newGrantEnv(t)
-	req := mustTransparent(e, e.token, "other")
-	auth, _, _, err := e.c.CheckToken(e.ctx, req, true)
-	require.NoError(t, err)
-	assert.True(t, auth.PolicyResults.Allowed)
-	assert.Equal(t, logical.RoleDeniedNotAssumable, req.RoleGrant().DeniedReason, "resolved, but not a verdict")
+	for _, token := range []string{e.token, e.issue(e.adm, []string{"deploy"})} {
+		for _, req := range []*logical.Request{
+			mustTransparent(e, token, "other"),
+			{Operation: logical.UpdateOperation, Path: "auth/jwt/login", ClientToken: token},
+		} {
+			auth, _, te, err := e.c.CheckToken(e.ctx, req, true)
+			require.NoError(t, err)
+			assert.True(t, auth.PolicyResults.Allowed)
+			assert.Nil(t, req.RoleGrant(), "no grant resolved under unauth")
+			require.NotNil(t, te)
+			assert.Nil(t, te.Policies)
+			assert.Nil(t, auth.Policies)
+
+			entry := e.c.buildRequestAuditEntry(e.ctx, req, auth, te, nil)
+			raw, err := json.Marshal(entry)
+			require.NoError(t, err)
+			assert.NotContains(t, string(raw), "role_denied_reason")
+			assert.NotContains(t, string(raw), "role_granted_by")
+		}
+	}
 }
 
 // On a steady membership resolving a grant allocates nothing, whatever the
@@ -349,13 +366,12 @@ func TestRoleGrant_VerdictSkippedUnauth(t *testing.T) {
 // membership, role and metadata are shared.
 func TestRoleGrant_ResolveDoesNotAllocate(t *testing.T) {
 	e := newGrantEnv(t)
-	legacy, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
-		PrincipalID:   "agent-1",
-		RoleName:      "reader",
-		MountAccessor: grantAccessor,
-		ExpireAt:      time.Now().Add(time.Hour),
-		Policies:      []string{"deploy"},
-		Admission:     e.adm,
+	// A token no mount issued (as root and tokens created directly are) keeps
+	// the policies it was issued.
+	direct, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
+		PrincipalID: "agent-1",
+		ExpireAt:    time.Now().Add(time.Hour),
+		Policies:    []string{"deploy"},
 	})
 	require.NoError(t, err)
 	noAdmission := e.issue(nil, nil)
@@ -376,7 +392,7 @@ func TestRoleGrant_ResolveDoesNotAllocate(t *testing.T) {
 		{"not assumable", mustTransparent(e, e.token, "other"), logical.RoleDeniedNotAssumable},
 		{"presented explicitly", explicit(), logical.RoleDeniedExplicitAdmission},
 		{"no admission", mustTransparent(e, noAdmission, "deploy"), logical.RoleDeniedNoAdmission},
-		{"token carries its role", mustTransparent(e, legacy.Data["token"], "deploy"), "-"},
+		{"token no mount issued", mustTransparent(e, direct.Data["token"], "deploy"), "-"},
 	}
 	now := time.Now()
 	for _, tc := range cases {
@@ -394,7 +410,8 @@ func TestRoleGrant_ResolveDoesNotAllocate(t *testing.T) {
 			switch tc.reason {
 			case "-":
 				assert.Nil(t, req.RoleGrant())
-				assert.Equal(t, "reader", te.RoleName)
+				assert.Empty(t, te.RoleName)
+				assert.Equal(t, []string{"deploy"}, te.Policies)
 			case "":
 				assert.True(t, req.RoleGrant().Granted())
 				assert.Equal(t, "deploy", te.RoleName)
@@ -792,7 +809,8 @@ func TestRoleGrant_NoNamingNoGroups(t *testing.T) {
 
 // The transparent marker and the requested role are set by implicit auth
 // alone: no other code in core writes them, and neither is decoded from a
-// request body. The grant itself has one writer, resolveRoleGrant.
+// request body. The grant itself is written only where CheckToken resolves it:
+// resolveRoleGrant, or withholdRoleGrant for a check that renders no verdict.
 func TestRoleGrant_SingleWriters(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
@@ -830,7 +848,8 @@ func TestRoleGrant_SingleWriters(t *testing.T) {
 	assert.Equal(t, []string{"performImplicitAuth"}, writers["Transparent"])
 	assert.NotEmpty(t, writers["grant"])
 	for _, w := range writers["grant"] {
-		assert.Equal(t, "resolveRoleGrant", w, "only resolveRoleGrant writes the request's grant")
+		assert.Contains(t, []string{"resolveRoleGrant", "withholdRoleGrant"}, w,
+			"only CheckToken's resolution writes the request's grant")
 	}
 
 	f, ok := reflect.TypeOf(logical.Request{}).FieldByName("RequestedRole")
@@ -891,24 +910,20 @@ func TestRoleGrant_AgentGroups(t *testing.T) {
 	})
 }
 
-// A token that carries its role (every login today) and a root token
-// authorize exactly as before on a transparent request: no grant, the entry
-// is not rewritten, and audit gains no field.
-func TestRoleGrant_LegacyTokensUnchanged(t *testing.T) {
+// A token no mount issued (one created directly) and a root token authorize
+// exactly as before on a transparent request: no grant, the entry is not
+// rewritten, and audit gains no field.
+func TestRoleGrant_TokensNoMountIssuedUnchanged(t *testing.T) {
 	e := newGrantEnv(t)
 	metadata := map[string]string{"team": "platform"}
 	entry, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
-		PrincipalID:    "agent-1",
-		RoleName:       "reader",
-		MountAccessor:  grantAccessor,
-		ExpireAt:       time.Now().Add(time.Hour),
-		Policies:       []string{"deploy"},
-		CredentialSpec: "reader-spec",
-		Metadata:       metadata,
-		Admission:      e.adm, // logins fill it alongside the role today
+		PrincipalID: "agent-1",
+		ExpireAt:    time.Now().Add(time.Hour),
+		Policies:    []string{"deploy"},
+		Metadata:    metadata,
 	})
 	require.NoError(t, err)
-	legacy := entry.Data["token"]
+	direct := entry.Data["token"]
 	root, err := e.c.tokenStore.GenerateRootToken()
 	require.NoError(t, err)
 
@@ -937,14 +952,14 @@ func TestRoleGrant_LegacyTokensUnchanged(t *testing.T) {
 		return string(b)
 	}
 
-	for name, token := range map[string]string{"legacy role token": legacy, "root token": root} {
+	for name, token := range map[string]string{"direct token": direct, "root token": root} {
 		t.Run(name, func(t *testing.T) {
 			plainReq, plainAuth, plainTE, plainErr := run(token, false)
 			req, auth, te, err := run(token, true)
 			require.NoError(t, plainErr)
 			require.NoError(t, err)
 
-			assert.Nil(t, req.RoleGrant(), "no grant for a token that carries its role")
+			assert.Nil(t, req.RoleGrant(), "no grant for a token no mount issued")
 			assert.Equal(t, plainTE, te)
 			assert.Equal(t, plainAuth.Policies, auth.Policies)
 			assert.Equal(t, plainAuth.PolicyResults, auth.PolicyResults)
@@ -954,12 +969,11 @@ func TestRoleGrant_LegacyTokensUnchanged(t *testing.T) {
 		})
 	}
 
-	_, _, te, err := run(legacy, true)
+	_, _, te, err := run(direct, true)
 	require.NoError(t, err)
-	assert.Equal(t, "reader", te.RoleName)
+	assert.Empty(t, te.RoleName)
 	assert.Equal(t, []string{"deploy"}, te.Policies)
-	assert.Equal(t, "reader-spec", te.CredentialSpec)
-	assert.Equal(t, metadata, te.Metadata, "the login's metadata, not the membership's")
+	assert.Equal(t, metadata, te.Metadata, "the token's own metadata, not a membership's")
 }
 
 // Every request that waits on one implicit login gets its own entry, all
@@ -1018,7 +1032,7 @@ func TestResolveTransparentIdentity_EachWaiterGetsItsOwnEntry(t *testing.T) {
 
 	cached, ok := core.tokenStore.byID.Get(results[0].te.ID)
 	require.True(t, ok)
-	assert.Equal(t, "terraform", cached.RoleName, "no request's write reached the cache")
+	assert.Empty(t, cached.RoleName, "no request's write reached the cache")
 	assert.Empty(t, cached.CredentialSpec)
 }
 
@@ -1030,7 +1044,6 @@ func TestGenerateToken_ReturnsCopy(t *testing.T) {
 	authData := func() *AuthData {
 		return &AuthData{
 			PrincipalID:   "agent-1",
-			RoleName:      "reader",
 			MountAccessor: grantAccessor,
 			ExpireAt:      time.Now().Add(time.Hour),
 			TokenValue:    mintK8sJWT(`{"sub":"agent-1"}`),
@@ -1043,11 +1056,11 @@ func TestGenerateToken_ReturnsCopy(t *testing.T) {
 	require.True(t, ok)
 	assert.NotSame(t, cached, first, "a fresh token is handed out as a copy")
 
-	// Same credential, mount and role: the dedupe branch finds the cached one.
+	// Same credential and mount: the dedupe branch finds the cached one.
 	again, err := c.tokenStore.GenerateToken(ctx, TypeJWTRole, authData())
 	require.NoError(t, err)
 	assert.Equal(t, first.ID, again.ID)
 	assert.NotSame(t, cached, again, "the dedupe branch hands out a copy")
 	again.RoleName = "projected"
-	assert.Equal(t, "reader", cached.RoleName)
+	assert.Empty(t, cached.RoleName)
 }

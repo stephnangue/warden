@@ -14,9 +14,11 @@ type BaseConfig struct {
 	AutoAuthPath    string
 	DefaultAuthRole string
 	UserAuthPath    string
-	UserAuthRole    string
-	TLSSkipVerify   bool
-	CAData          string // base64-encoded PEM CA certificate
+	// UserAuthRoleStored: the mount config still names the removed
+	// user_auth_role (framework.HasUserAuthRole).
+	UserAuthRoleStored bool
+	TLSSkipVerify      bool
+	CAData             string // base64-encoded PEM CA certificate
 }
 
 // ParseConfig parses standard configuration fields from a mount config map.
@@ -24,15 +26,15 @@ type BaseConfig struct {
 func ParseConfig(conf map[string]any, urlKey string, defaultURL string, defaultTimeout time.Duration) BaseConfig {
 	tlsSkipVerify, caData := framework.ParseTLSConfig(conf)
 	return BaseConfig{
-		ProviderURL:     framework.GetConfigString(conf, urlKey, defaultURL),
-		MaxBodySize:     framework.ParseMaxBodySize(conf),
-		Timeout:         framework.ParseTimeout(conf, defaultTimeout),
-		AutoAuthPath:    framework.GetConfigString(conf, "auto_auth_path", ""),
-		DefaultAuthRole: framework.GetConfigString(conf, "default_role", ""),
-		UserAuthPath:    framework.GetConfigString(conf, "user_auth_path", ""),
-		UserAuthRole:    framework.GetConfigString(conf, "user_auth_role", ""),
-		TLSSkipVerify:   tlsSkipVerify,
-		CAData:          caData,
+		ProviderURL:        framework.GetConfigString(conf, urlKey, defaultURL),
+		MaxBodySize:        framework.ParseMaxBodySize(conf),
+		Timeout:            framework.ParseTimeout(conf, defaultTimeout),
+		AutoAuthPath:       framework.GetConfigString(conf, "auto_auth_path", ""),
+		DefaultAuthRole:    framework.GetConfigString(conf, "default_role", ""),
+		UserAuthPath:       framework.GetConfigString(conf, "user_auth_path", ""),
+		UserAuthRoleStored: framework.HasUserAuthRole(conf),
+		TLSSkipVerify:      tlsSkipVerify,
+		CAData:             caData,
 	}
 }
 
@@ -52,8 +54,7 @@ func ValidateConfig(conf map[string]any, urlKey string) error {
 	}
 
 	// Validate the secondary (user) auth fields at mount-enable too, not only on
-	// the config-write endpoint, so an invalid role→path pairing is rejected
-	// before it can be parsed and applied.
+	// the config-write endpoint.
 	if err := framework.ValidateUserAuthConfig(conf); err != nil {
 		return err
 	}

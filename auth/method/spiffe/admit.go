@@ -26,16 +26,18 @@ type admittedSVID struct {
 
 var (
 	// errNoBundles: with no trust bundle loaded the mount cannot decide.
-	errNoBundles = errors.New("no SPIFFE trust bundles loaded")
+	errNoBundles = helper.AdmitError(helper.ErrAdmitNoTrustBundle, "no SPIFFE trust bundles loaded")
 	// errNoMountAudiences: with no bound_audiences the mount cannot decide on
 	// any JWT-SVID.
-	errNoMountAudiences = errors.New("bound_audiences is not set: no JWT-SVID can be admitted")
+	errNoMountAudiences = helper.AdmitError(helper.ErrAdmitNoAudiences, "bound_audiences is not set: no JWT-SVID can be admitted")
 )
 
 // admitX509SVID verifies cert as an X.509-SVID against the trust bundles in
 // set alone, with no role: go-spiffe's SVID rules and a chain to the X.509
 // authorities of the SVID's own trust domain. An X.509-SVID carries no
-// audience and no issue time, so neither bound_audiences nor max_age applies.
+// audience and no issue time, so neither bound_audiences nor max_age applies:
+// it is admitted with or without a config, and on an agent mount whose stored
+// config has no bound_audiences.
 // It returns what it verified as an admission of this mount, or why it is not
 // admitted: errNoBundles when the mount cannot decide, any other error when the
 // SVID failed a check.
@@ -60,13 +62,25 @@ func (b *spiffeAuthBackend) admitX509SVID(set *spiffebundle.Set, cert *x509.Cert
 // mount's bound_audiences (a nil config, or one without bound_audiences,
 // admits no JWT-SVID), and the mount's max_age against its iat at now
 // (CheckSVIDMaxAge). It returns what it verified as an admission of this
-// mount, or why it is not admitted: errNoBundles or errNoMountAudiences when
-// the mount cannot decide, any other error when the SVID failed a check.
+// mount, or why it is not admitted: errNoBundles, errNoMountAudiences or
+// helper.ErrAgentAudiencesRequired when the mount cannot decide, any other
+// error when the SVID failed a check.
+//
+// admitJWTSVID and admitX509SVID are the mount's admission checks: login and
+// introspect/admit both call them, so they cannot drift.
 func (b *spiffeAuthBackend) admitJWTSVID(set *spiffebundle.Set, config *SPIFFEAuthConfig, token string, now time.Time) (*admittedSVID, error) {
 	if set == nil || set.Len() == 0 {
 		return nil, errNoBundles
 	}
 	if config == nil || len(config.BoundAudiences) == 0 {
+		// A stored agent config without bound_audiences (written before
+		// audience binding was required) says so; anything else simply has
+		// no audience to verify against.
+		if config != nil {
+			if err := helper.RequireAgentAudiences(config.EntityKind, nil); err != nil {
+				return nil, err
+			}
+		}
 		return nil, errNoMountAudiences
 	}
 	svid, err := spiffelib.VerifyJWTSVIDToken(set, token, config.BoundAudiences)
@@ -74,11 +88,19 @@ func (b *spiffeAuthBackend) admitJWTSVID(set *spiffebundle.Set, config *SPIFFEAu
 		return nil, fmt.Errorf("JWT-SVID verification: %w", err)
 	}
 	adm := newAdmission(svid.ID, svidJWT, svid.Audience, helper.IssuedAt(svid.Claims), b.mountFacts)
+	adm.AudienceBound = true
 	if err := config.CheckSVIDMaxAge(adm, now); err != nil {
 		return nil, fmt.Errorf("max_age: %w", err)
 	}
 	return &admittedSVID{adm: adm, id: svid.ID, expiry: svid.Expiry, claims: svid.Claims}, nil
 }
+
+var _ logical.AudienceBinder = (*spiffeAuthBackend)(nil)
+
+// BindsAudience implements logical.AudienceBinder: the only bearer credential
+// the mount admits is a JWT-SVID, and admitJWTSVID admits none without
+// bound_audiences.
+func (b *spiffeAuthBackend) BindsAudience() bool { return true }
 
 // admit is the mount's helper.AdmitFunc. It picks the SVID as the gateway
 // does (spiffelib.IsJWTSVID): a bearer JWT-SVID first, else the forwarded
@@ -107,7 +129,7 @@ func (b *spiffeAuthBackend) admit(_ context.Context, req *logical.Request, now t
 	} else {
 		got, err = b.admitX509SVID(set, cert)
 	}
-	if errors.Is(err, errNoBundles) || errors.Is(err, errNoMountAudiences) {
+	if errors.Is(err, errNoBundles) || errors.Is(err, errNoMountAudiences) || errors.Is(err, helper.ErrAgentAudiencesRequired) {
 		return nil, err
 	}
 	if err != nil {

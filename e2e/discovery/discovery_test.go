@@ -217,19 +217,22 @@ func TestMCPDiscovery_ToolsAndListRoles(t *testing.T) {
 	}
 }
 
-// createDiscoveryRole creates a JWT role the default identity can assume,
-// wired to the vault provider (the e2e cluster mounts it, which seeds the
-// "vault" skill), and removes it when the test ends.
+// discoveryRole is a role wired to the vault provider (the e2e cluster mounts
+// it, which seeds the "vault" skill).
+var discoveryRole = h.Role{
+	Policies:     []string{"vault-gateway-access"},
+	CredSpec:     "vault-token-reader",
+	Description:  "read app secrets through Vault",
+	ProviderPath: "vault",
+}
+
+// createDiscoveryRole creates a role wired to the vault provider and a group
+// granting it to every agent auth/jwt/ admits, so the default identity can
+// assume it, and removes both when the test ends.
 func createDiscoveryRole(t *testing.T, port int, roleName string) {
 	t.Helper()
-	body := `{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":300,"description":"read app secrets through Vault","provider_path":"vault"}`
-	status, respBody := h.APIRequest(t, "POST", "auth/jwt/role/"+roleName, port, body)
-	if status != 200 && status != 201 && status != 204 {
-		t.Fatalf("create role failed: status %d, body %s", status, string(respBody))
-	}
-	t.Cleanup(func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+roleName, port, "")
-	})
+	h.GrantRole(t, port, "auth/jwt/", roleName, discoveryRole, nil)
+	t.Cleanup(func() { h.RevokeRole(t, port, "auth/jwt/", roleName) })
 }
 
 // createHiddenSkill creates a custom skill no role points at, so no identity
@@ -375,7 +378,7 @@ func TestMCPDiscovery_RoleDiscoveryFields(t *testing.T) {
 	const roleName = "e2e-mcp-fields"
 	createDiscoveryRole(t, port, roleName)
 
-	status, body := h.APIRequest(t, "GET", "auth/jwt/role/"+roleName, port, "")
+	status, body := h.APIRequest(t, "GET", "sys/roles/"+roleName, port, "")
 	if status != 200 {
 		t.Fatalf("read role: status %d, body %s", status, body)
 	}
@@ -384,15 +387,58 @@ func TestMCPDiscovery_RoleDiscoveryFields(t *testing.T) {
 	}
 
 	for _, bad := range []string{
-		`{"token_policies":["vault-gateway-access"],"skill":"Gh_Repo"}`,
-		`{"token_policies":["vault-gateway-access"],"provider_path":"/vault"}`,
-		`{"token_policies":["vault-gateway-access"],"provider_path":"a/../vault"}`,
+		`{"policies":["vault-gateway-access"],"skill":"Gh_Repo"}`,
+		`{"policies":["vault-gateway-access"],"provider_path":"/vault"}`,
+		`{"policies":["vault-gateway-access"],"provider_path":"a/../vault"}`,
 	} {
-		status, body := h.APIRequest(t, "POST", "auth/jwt/role/e2e-mcp-bad-fields", port, bad)
+		status, body := h.APIRequest(t, "POST", "sys/roles/e2e-mcp-bad-fields", port, bad)
 		if status != 400 {
 			t.Errorf("write %s: status %d, want 400; body %s", bad, status, body)
-			h.APIRequest(t, "DELETE", "auth/jwt/role/e2e-mcp-bad-fields", port, "")
+			h.APIRequest(t, "DELETE", "sys/roles/e2e-mcp-bad-fields", port, "")
 		}
+	}
+}
+
+// TestMCPDiscovery_ListsOnlyGrantedRoles verifies list_roles shows exactly
+// what groups grant the caller: a role whose group rule the caller's facts
+// miss is absent, with no warning that would reveal it, and becomes visible on
+// the next call once the rule names the caller, with no new login.
+func TestMCPDiscovery_ListsOnlyGrantedRoles(t *testing.T) {
+	port := h.GetLeaderPort(t)
+	const roleName = "e2e-mcp-granted"
+	h.GrantRole(t, port, "auth/jwt/", roleName, discoveryRole, h.Rule{"sub": {"someone-else"}})
+	t.Cleanup(func() { h.RevokeRole(t, port, "auth/jwt/", roleName) })
+
+	listed := func(session *mcp.ClientSession) (bool, []string) {
+		t.Helper()
+		res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
+		if err != nil {
+			t.Fatalf("call list_roles: %v", err)
+		}
+		var roles rolesResult
+		decodeStructured(t, res, &roles)
+		for _, r := range roles.Roles {
+			if r.Name == roleName {
+				return true, roles.Warnings
+			}
+		}
+		return false, roles.Warnings
+	}
+
+	session := connectDiscovery(t)
+	found, warnings := listed(session)
+	if found {
+		t.Fatalf("role %q is listed though its group's rule names another subject", roleName)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, roleName) || strings.Contains(w, "someone-else") {
+			t.Fatalf("a warning reveals the ungranted role or its rule: %s", w)
+		}
+	}
+
+	h.GrantInNS(t, port, "", "auth/jwt/", roleName, h.Rule{"sub": {"e2e-agent"}})
+	if found, warnings := listed(session); !found {
+		t.Fatalf("role %q is not listed once its group names the caller; warnings: %v", roleName, warnings)
 	}
 }
 

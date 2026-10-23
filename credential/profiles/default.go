@@ -52,11 +52,10 @@ import (
 // The claims at each level:
 //   - sub: as above.
 //   - warden_namespace: the user level only.
-//   - warden_role: for the agent, the role it was admitted under — the
+//   - warden_role: the agent level only: the role the agent runs under — the
 //     authorization context an upstream may bind; a role-less agent (a root token)
-//     renders it empty. For the user, the auth role its token was validated under
-//     (the mount's user auth role): not an authorization role, since the user grants
-//     the request no permissions, but the population of users the id belongs to.
+//     renders it empty. A user runs under no role (it grants the request nothing),
+//     so the user level carries none.
 //   - warden_metadata: for the agent, its projected login metadata
 //     (assertion_metadata_claims); for the user, its projected claims
 //     (assertion_user_claims) WITHOUT sub, which would repeat the top-level sub.
@@ -170,11 +169,11 @@ func agentClaims(m map[string]any, agent credential.AssertionIdentity, metadata 
 }
 
 // userClaims writes the user's identity claims into m: its raw id qualified by its
-// namespace, its role, and its metadata when there is any.
+// namespace, and its metadata when there is any. A user runs under no role, so
+// no warden_role is written for it.
 func userClaims(m map[string]any, user credential.AssertionIdentity, metadata map[string]string) {
 	m["sub"] = user.PrincipalID
 	m["warden_namespace"] = credential.NamespaceClaim(user.NamespacePath)
-	m["warden_role"] = user.RoleName
 	if len(metadata) > 0 {
 		m["warden_metadata"] = metadata
 	}

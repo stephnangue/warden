@@ -116,6 +116,7 @@ func TestAdmit_Unconfigured(t *testing.T) {
 	b, _ := createTestBackendWithStorage(t)
 	resp, err := routeAdmit(b, "eyJ.a.b", true)
 	assert.ErrorIs(t, err, errNotConfigured)
+	assert.ErrorIs(t, err, helper.ErrAdmitNotConfigured, "discovery reports the class")
 	assert.Nil(t, resp)
 	assert.Nil(t, admitted(t, admitRequest(t, b, "", true)))
 }
@@ -177,4 +178,30 @@ func TestExpectedClaims(t *testing.T) {
 	e = expectedClaims(&JWTAuthConfig{BoundAudiences: []string{}}, &JWTRole{})
 	assert.Nil(t, e.Audiences, "an empty list leaves the audience unchecked")
 	assert.NotEmpty(t, e.SigningAlgorithms)
+}
+
+func TestExtractJWTFromRequest(t *testing.T) {
+	t.Run("from Authorization header", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+		httpReq.Header.Set("Authorization", "Bearer eyJ.payload.sig")
+		assert.Equal(t, "eyJ.payload.sig", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}))
+	})
+	t.Run("scheme is case-insensitive, as on the gateway", func(t *testing.T) {
+		for _, scheme := range []string{"bearer ", "BEARER ", "bEaReR "} {
+			httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+			httpReq.Header.Set("Authorization", scheme+"eyJ.payload.sig")
+			assert.Equal(t, "eyJ.payload.sig", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}), scheme)
+		}
+	})
+	t.Run("no Bearer prefix → empty", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+		httpReq.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+		assert.Equal(t, "", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}))
+	})
+	t.Run("falls back to ClientToken when no HTTP request", func(t *testing.T) {
+		assert.Equal(t, "eyJ.client.token", extractJWTFromRequest(&logical.Request{ClientToken: "eyJ.client.token"}))
+	})
+	t.Run("empty when neither present", func(t *testing.T) {
+		assert.Equal(t, "", extractJWTFromRequest(&logical.Request{}))
+	})
 }

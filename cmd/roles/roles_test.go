@@ -1,22 +1,24 @@
 package roles
 
 import (
+	"net/http"
 	"reflect"
-	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestProjectRoles_DiscoveryFieldsOnlyWhenSet(t *testing.T) {
 	in := []any{
 		map[string]any{
-			"auth_path":     "jwt/",
 			"name":          "repo-creator",
 			"provider_path": "github/",
 			"skill":         "gh-repo-creator",
 		},
-		map[string]any{"auth_path": "jwt/", "name": "plain"},
+		map[string]any{"name": "plain"},
 	}
-	got := projectRoles(in, "")
+	got := projectRoles(in)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 roles; got %d", len(got))
 	}
@@ -31,90 +33,80 @@ func TestProjectRoles_DiscoveryFieldsOnlyWhenSet(t *testing.T) {
 	}
 }
 
-func TestProjectRoles_PreservesAllFields(t *testing.T) {
+func TestProjectRoles_NoAuthPath(t *testing.T) {
 	in := []any{
 		map[string]any{
-			"auth_path":   "auth/jwt/",
 			"name":        "aws-user",
 			"description": "Read-only AWS access",
+			"auth_path":   "jwt/", // an older server's field is not carried
 		},
 	}
-	got := projectRoles(in, "")
-	if len(got) != 1 {
-		t.Fatalf("expected 1 role; got %d", len(got))
-	}
+	got := projectRoles(in)
+	require.Len(t, got, 1)
 	want := map[string]any{
 		"name":        "aws-user",
 		"description": "Read-only AWS access",
-		"auth_path":   "auth/jwt/",
 	}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Errorf("projectRoles() = %#v; want %#v", got[0], want)
 	}
 }
 
-func TestProjectRoles_AuthPathFilter(t *testing.T) {
-	in := []any{
-		map[string]any{"auth_path": "auth/jwt/", "name": "aws-user"},
-		map[string]any{"auth_path": "auth/jwt2/", "name": "azure-user"},
-		map[string]any{"auth_path": "auth/jwt/", "name": "deployer"},
-	}
-	got := projectRoles(in, "auth/jwt/")
-	names := make([]string, 0, len(got))
-	for _, r := range got {
-		names = append(names, r["name"].(string))
-	}
-	sort.Strings(names)
-	want := []string{"aws-user", "deployer"}
-	if !reflect.DeepEqual(names, want) {
-		t.Errorf("after auth-path filter: names = %v; want %v", names, want)
-	}
-}
-
-func TestProjectRoles_FilterMatchesNothing(t *testing.T) {
-	in := []any{
-		map[string]any{"auth_path": "auth/jwt/", "name": "aws-user"},
-	}
-	got := projectRoles(in, "auth/cert/")
-	if len(got) != 0 {
-		t.Errorf("expected 0 roles; got %d", len(got))
-	}
-}
-
 func TestProjectRoles_SkipsMalformedEntries(t *testing.T) {
-	// The aggregator should never emit malformed entries, but the CLI
-	// shouldn't panic if a future server change introduces one.
+	// The server should never emit malformed entries, but the CLI shouldn't
+	// panic if a future server change introduces one.
 	in := []any{
 		"not a map",
 		nil,
-		map[string]any{"auth_path": "auth/jwt/", "name": "aws-user"},
+		map[string]any{"name": "aws-user"},
 	}
-	got := projectRoles(in, "")
+	got := projectRoles(in)
 	if len(got) != 1 || got[0]["name"] != "aws-user" {
 		t.Errorf("expected 1 well-formed role; got %#v", got)
 	}
 }
 
 func TestProjectRoles_DescriptionOmittedWhenAbsent(t *testing.T) {
-	// Aggregator marks description with `,omitempty` server-side. When
-	// missing, the projection still emits the key with a nil value so the
-	// JSON renderer produces null — agents see a stable shape per record.
-	in := []any{
-		map[string]any{"auth_path": "auth/jwt/", "name": "aws-user"},
-	}
-	got := projectRoles(in, "")
+	// The server omits an empty description. The projection still emits the
+	// key with a nil value so the JSON renderer produces null: agents see a
+	// stable shape per record.
+	got := projectRoles([]any{map[string]any{"name": "aws-user"}})
 	if got[0]["description"] != nil {
 		t.Errorf("description = %v; want nil", got[0]["description"])
 	}
 }
 
-func TestRunList_AuthPathFilterValidation(t *testing.T) {
-	// Reset between cases so they don't leak.
-	t.Cleanup(func() { authPathFilter = "" })
+func TestRolesTable_NoAuthPathColumn(t *testing.T) {
+	headers, rows := rolesTable(projectRoles([]any{
+		map[string]any{"name": "deploy", "description": "Deploys from acme CI", "provider_path": "aws/", "skill": "aws"},
+	}))
+	assert.Equal(t, []string{"Name", "Description", "Provider Path", "Skill"}, headers)
+	assert.Equal(t, [][]any{{"deploy", "Deploys from acme CI", "aws/", "aws"}}, rows)
+}
 
-	authPathFilter = "../etc/passwd"
-	err := runList(nil, nil)
-	if err == nil {
-		t.Fatal("expected validation error for traversal in --auth-path; got nil")
-	}
+func TestListCmd_NoAuthPathFlag(t *testing.T) {
+	assert.Nil(t, ListCmd.Flags().Lookup("auth-path"), "-auth-path is gone")
+	assert.NotContains(t, ListCmd.Long, "-auth-path")
+	assert.NotContains(t, ListCmd.Long, `"auth_path"`)
+	assert.NotContains(t, ListCmd.Long, "name,auth_path")
+}
+
+// The discovered roles render without auth paths, and the response's warnings
+// go to stderr, leaving stdout clean JSON.
+func TestRunList_Discovery(t *testing.T) {
+	f, stdout, stderr := setupFake(t, http.StatusOK, `{"data":{
+		"roles":[
+			{"name":"deploy","description":"Deploys from acme CI","provider_path":"aws/","skill":"aws"},
+			{"name":"recipe","skill":"gh-repo-creator"}
+		],
+		"warnings":["mount \"k8s/\": TokenReview unreachable"]
+	}}`)
+
+	require.NoError(t, runList(nil, nil))
+	assert.Equal(t, "/v1/sys/introspect/roles", f.last(t).path)
+	assert.JSONEq(t, `[
+		{"name":"deploy","description":"Deploys from acme CI","provider_path":"aws/","skill":"aws"},
+		{"name":"recipe","description":null,"skill":"gh-repo-creator"}
+	]`, stdout.String())
+	assert.Equal(t, "warning: mount \"k8s/\": TokenReview unreachable\n", stderr.String())
 }

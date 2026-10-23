@@ -47,10 +47,6 @@ func (b *mcpAWSBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Auth mount that authenticates the secondary (user) principal, marking this mount a protected resource (bearer/JWT format required).",
 			},
-			"user_auth_role": {
-				Type:        framework.TypeString,
-				Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role).",
-			},
 			"tls_skip_verify": {
 				Type:        framework.TypeBool,
 				Description: "Skip TLS certificate verification (dev/test only).",
@@ -89,7 +85,6 @@ func (b *mcpAWSBackend) handleConfigRead(_ context.Context, _ *logical.Request, 
 		"auto_auth_path":  tc.AutoAuthPath,
 		"default_role":    tc.DefaultAuthRole,
 		"user_auth_path":  tc.UserAuthPath,
-		"user_auth_role":  tc.UserAuthRole,
 		"tls_skip_verify": b.tlsSkipVerify,
 		"ca_data":         b.caData,
 	}
@@ -112,11 +107,17 @@ func (b *mcpAWSBackend) handleConfigWrite(ctx context.Context, _ *logical.Reques
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
 
+	// The write stores no user_auth_role, so it also removes one a stored
+	// config still names.
+	if err := framework.RefuseUserAuthRole(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	conf := b.snapshotForMerge()
 
 	for _, k := range []string{
 		"mcp_aws_url", "region", "max_body_size", "timeout", httpproxy.ListenTimeoutKey,
-		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role",
+		"auto_auth_path", "default_role", "user_auth_path",
 		"tls_skip_verify", "ca_data",
 	} {
 		if val, ok := d.GetOk(k); ok {
@@ -197,7 +198,6 @@ func (b *mcpAWSBackend) snapshotForMerge() map[string]any {
 		"auto_auth_path":  tc.AutoAuthPath,
 		"default_role":    tc.DefaultAuthRole,
 		"user_auth_path":  tc.UserAuthPath,
-		"user_auth_role":  tc.UserAuthRole,
 		"tls_skip_verify": b.tlsSkipVerify,
 		"ca_data":         b.caData,
 	}

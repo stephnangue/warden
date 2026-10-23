@@ -15,9 +15,6 @@ type Auth struct {
 	// is associated with.
 	Policies []string `json:"policies" mapstructure:"policies" structs:"policies"`
 
-	// Credential spec as a result of the authentification if any
-	CredentialSpec string
-
 	// ClientToken is the token that is generated for the authentication.
 	ClientToken string `json:"client_token" mapstructure:"client_token" structs:"client_token"`
 
@@ -50,9 +47,10 @@ type Auth struct {
 	// buildAuditAuth into audit.PolicyResults.Condition.
 	Condition *ConditionResult
 
+	// PrincipalID names the caller, as the auth mount's configuration reads it
+	// from the credential. A login carries no role and no credential spec:
+	// every login is an admission, and the role is granted per request.
 	PrincipalID string
-
-	RoleName string
 
 	TokenTTL time.Duration
 
@@ -289,18 +287,16 @@ type ActorRef struct {
 
 // AuthData contains the authentication data used to generate a token.
 type AuthData struct {
-	PrincipalID    string    // Principal identifier
-	RoleName       string    // Associated role
-	ExpireAt       time.Time // Token expiration
-	CredentialSpec string
-	Policies       []string
-	ClientIP       string
-	TokenValue     string // External token value (e.g., JWT for transparent mode)
+	PrincipalID string    // Principal identifier
+	ExpireAt    time.Time // Token expiration
+	Policies    []string
+	ClientIP    string
+	TokenValue  string // External token value (e.g., JWT for transparent mode)
 
 	// MountAccessor is the stable identifier of the auth mount that
 	// issued this login. Transparent token types include it in the cache
-	// key so two mounts of the same auth type with overlapping role
-	// names + the same credential cannot share a cache entry.
+	// key so two mounts of the same auth type presented the same credential
+	// cannot share a cache entry.
 	MountAccessor string
 
 	// Actors carries the verified RFC 8693 "act" delegation chain extracted at

@@ -17,6 +17,9 @@ var _ logical.FactsProvider = (*jwtAuthBackend)(nil)
 // FactNames implements logical.FactsProvider (see helper.FactNames).
 func (b *jwtAuthBackend) FactNames() []string { return helper.FactNames(b.mountFacts) }
 
+// EntityKind implements logical.FactsProvider (see helper.EntityKind).
+func (b *jwtAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
+
 // newAdmission returns what the login verified about token, whose validated
 // claims are claims. The admission adopts claims without copying: the caller
 // must not read or modify them afterwards, and nothing else may hold them.

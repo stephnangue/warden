@@ -38,7 +38,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 		},
 		"bound_audiences": {
 			Type:        framework.TypeCommaStringSlice,
-			Description: "Required audiences for JWT validation",
+			Description: "Audiences a JWT must carry, any one of them. Required when entity_kind is agent.",
 		},
 		"bound_subject": {
 			Type:        framework.TypeString,
@@ -57,24 +57,11 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			Description: "Claim to use as principal identity (default: sub)",
 			Default:     "sub",
 		},
-		"groups_claim": {
-			Type:        framework.TypeString,
-			Description: "JWT claim containing group names for dynamic policy mapping. Empty disables group-based policies.",
-		},
-		"group_policy_prefix": {
-			Type:        framework.TypeString,
-			Description: "Prefix prepended to each group name to form the policy name (default: group-)",
-			Default:     "group-",
-		},
 		"token_ttl": {
 			Type:        framework.TypeDurationSecond,
 			Description: "Token TTL (default: 1h)",
 		},
 		"max_age": helper.MaxAgeFieldSchema(),
-		"default_role": {
-			Type:        framework.TypeString,
-			Description: "Default role for transparent operations when no role is specified",
-		},
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas("a claim name, or a JSON Pointer with a leading / into nested claims"))
 
@@ -99,15 +86,15 @@ endpoint), or 'jwt_validation_pubkeys' (static PEM-encoded RSA/ECDSA keys)
 to configure how token signatures are verified.
 
 Use 'bound_issuer', 'bound_audiences', 'bound_subject', and 'bound_claims'
-to constrain which tokens are accepted. Per-role 'metadata_claims' copies
-JWT claims into token metadata for use in token_metadata policy conditions.
+to constrain which tokens are admitted. 'bound_audiences' is required on a
+mount that admits agents: without it, a token the issuer minted for any other
+relying party would be admitted.
 
 'entity_kind' (agent or human, default agent) names what the mount admits.
 'facts' maps source claims to the fact names the mount publishes beyond its
 built-in facts (sub, iss, aud); a write replaces the whole map.
 'max_age' bounds a JWT's age at admission, from its iat: a JWT older than it,
-or without an iat, is not admitted. It is enforced from the role-free
-admission; role logins keep their role's max_age.`,
+or without an iat, is not admitted.`,
 	}
 }
 
@@ -123,28 +110,24 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 		}, nil
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
-			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
-			"jwks_url":               b.config.JWKSURL,
-			"jwks_ca_pem":            b.config.JWKSCA,
-			"jwt_validation_pubkeys": slices.Clone(b.config.JWTValidationPubKeys),
-			"bound_issuer":           b.config.BoundIssuer,
-			"bound_audiences":        slices.Clone(b.config.BoundAudiences),
-			"bound_subject":          b.config.BoundSubject,
-			"bound_claims":           b.config.BoundClaims,
-			"user_claim":             b.config.UserClaim,
-			"groups_claim":           b.config.GroupsClaim,
-			"group_policy_prefix":    b.config.GroupPolicyPrefix,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"max_age":                b.config.MaxAge.String(),
-			"default_role":           b.config.DefaultRole,
-			"entity_kind":            b.config.EntityKind,
-			"facts":                  maps.Clone(b.config.Facts),
-		},
-	}, nil
+	data := map[string]any{
+		"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
+		"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
+		"jwks_url":               b.config.JWKSURL,
+		"jwks_ca_pem":            b.config.JWKSCA,
+		"jwt_validation_pubkeys": slices.Clone(b.config.JWTValidationPubKeys),
+		"bound_issuer":           b.config.BoundIssuer,
+		"bound_audiences":        slices.Clone(b.config.BoundAudiences),
+		"bound_subject":          b.config.BoundSubject,
+		"bound_claims":           b.config.BoundClaims,
+		"user_claim":             b.config.UserClaim,
+		"token_ttl":              b.config.TokenTTL.String(),
+		"max_age":                b.config.MaxAge.String(),
+		"entity_kind":            b.config.EntityKind,
+		"facts":                  maps.Clone(b.config.Facts),
+	}
+	helper.SetWarnings(data, helper.RemovedConfigWarnings(b.config.removed))
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }
 
 // handleConfigWrite handles writing the configuration.
@@ -156,6 +139,13 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
+
+	// Keys of the role era are refused, not ignored: the write would otherwise
+	// succeed while doing nothing the operator asked for. The stored config
+	// never carries them, so this write also removes any it still did.
+	if err := helper.RefuseRemovedConfigKeys(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 
 	// Build config map from field data
 	conf := make(map[string]any)
@@ -189,11 +179,8 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["bound_subject"] = b.config.BoundSubject
 		conf["bound_claims"] = b.config.BoundClaims
 		conf["user_claim"] = b.config.UserClaim
-		conf["groups_claim"] = b.config.GroupsClaim
-		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["max_age"] = b.config.MaxAge
-		conf["default_role"] = b.config.DefaultRole
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
 	}
@@ -232,6 +219,14 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
+		}, nil
+	}
+	// An agent mount binds an audience; a stored config without one refuses
+	// admission, and a write cannot create one.
+	if helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences) != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        helper.AgentAudiencesWriteError(),
 		}, nil
 	}
 
@@ -285,5 +280,4 @@ authenticated principal identity.
 Configuration:
   POST /auth/{mount}/config   - Configure key source and claim bindings
   GET  /auth/{mount}/config   - Read current configuration
-  POST /auth/{mount}/role/:name - Create roles with per-role claim constraints
 `

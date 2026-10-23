@@ -68,7 +68,9 @@ func setupElasticInlineSource(t *testing.T, stub *elasticClusterStub, source, sp
 	useJWTAgentLeg(t, elasticEnv)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+role, leaderPort, "")
+		if role != "" {
+			h.RevokeRole(t, leaderPort, "auth/jwt/", role)
+		}
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+spec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+source, leaderPort, "")
 	}
@@ -88,11 +90,12 @@ func setupElasticInlineSource(t *testing.T, stub *elasticClusterStub, source, sp
 		"create the inline elastic spec "+spec)
 
 	if role != "" {
-		elasticMustWrite(t, "POST", "auth/jwt/role/"+role, fmt.Sprintf(`{
-			"token_policies":[%q],"cred_spec_name":%q,
-			"user_claim":"sub","token_ttl":%d}`,
-			elasticEnv.Policy(), spec, tokenTTL),
-			"create the inline agent role "+role)
+		h.GrantRole(t, leaderPort, "auth/jwt/", role, h.Role{
+			Policies: []string{elasticEnv.Policy()},
+			CredSpec: spec,
+		}, nil)
+		// A session's lifetime is the mount's to set, not the role's.
+		h.CapMountTokenTTL(t, leaderPort, "auth/jwt/", tokenTTL)
 	}
 }
 
@@ -165,7 +168,7 @@ func TestElasticSource_InlineMintCarriesTheSpecToTheCluster(t *testing.T) {
 // revocable change needs.
 //
 // A minted key is registered for expiry against the SESSION's lifetime, not the
-// key's own — so a role with a short token_ttl brings the revocation forward to
+// key's own — so a JWT mount with a short token_ttl brings the revocation forward to
 // where a test can watch it. The key here asks for 24h; what ends it is the
 // agent's token running out five seconds later.
 //

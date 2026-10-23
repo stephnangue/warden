@@ -44,16 +44,11 @@ func (b *kubernetesAuthBackend) pathConfig() *framework.Path {
 		},
 		"token_ttl": {
 			Type:        framework.TypeDurationSecond,
-			Description: "Default TTL for issued tokens (default: 1h). Per-role token_ttl overrides this.",
-		},
-		"default_role": {
-			Type:        framework.TypeString,
-			Description: "Default role for transparent operations when no role is specified.",
+			Description: "TTL of issued tokens (default: 1h), capped by the workload token's expiry.",
 		},
 		"bound_audiences": {
 			Type: framework.TypeCommaStringSlice,
-			Description: "Audiences a workload token must carry, any one of them. Stored for mount-level audience binding, " +
-				"where it is sent to TokenReview as spec.audiences; logins do not use it yet (a role's audience still applies). " +
+			Description: "Audiences a workload token must carry, any one of them, sent to TokenReview as spec.audiences. " +
 				"No entry may be empty; an empty value clears the list.",
 		},
 		"max_age": helper.MaxAgeFieldSchema(),
@@ -103,23 +98,26 @@ func (b *kubernetesAuthBackend) handleConfigRead(_ context.Context, _ *logical.R
 		maskedReviewer = maskedSecret
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"kubernetes_host":        b.config.KubernetesHost,
-			"kubernetes_ca_cert":     b.config.KubernetesCACert,
-			"token_reviewer_jwt":     maskedReviewer,
-			"tls_skip_verify":        b.config.TLSSkipVerify,
-			"issuer":                 b.config.Issuer,
-			"disable_iss_validation": b.config.DisableIssValidation,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"default_role":           b.config.DefaultRole,
-			"bound_audiences":        slices.Clone(b.config.BoundAudiences),
-			"max_age":                b.config.MaxAge.String(),
-			"entity_kind":            b.config.EntityKind,
-			"facts":                  maps.Clone(b.config.Facts),
-		},
-	}, nil
+	warnings := helper.RemovedConfigWarnings(b.config.removed)
+	if len(b.config.BoundAudiences) == 0 {
+		warnings = append(warnings, noAudiencesWarning)
+	}
+
+	data := map[string]any{
+		"kubernetes_host":        b.config.KubernetesHost,
+		"kubernetes_ca_cert":     b.config.KubernetesCACert,
+		"token_reviewer_jwt":     maskedReviewer,
+		"tls_skip_verify":        b.config.TLSSkipVerify,
+		"issuer":                 b.config.Issuer,
+		"disable_iss_validation": b.config.DisableIssValidation,
+		"token_ttl":              b.config.TokenTTL.String(),
+		"bound_audiences":        slices.Clone(b.config.BoundAudiences),
+		"max_age":                b.config.MaxAge.String(),
+		"entity_kind":            b.config.EntityKind,
+		"facts":                  maps.Clone(b.config.Facts),
+	}
+	helper.SetWarnings(data, warnings)
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }
 
 // handleConfigWrite merges the request fields with the existing config,
@@ -131,6 +129,13 @@ func (b *kubernetesAuthBackend) handleConfigRead(_ context.Context, _ *logical.R
 func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
+
+	// Keys of the role era are refused, not ignored: the write would otherwise
+	// succeed while doing nothing the operator asked for. The stored config
+	// never carries them, so this write also removes any it still did.
+	if err := helper.RefuseRemovedConfigKeys(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 
 	conf := make(map[string]any)
 
@@ -158,7 +163,6 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 		conf["issuer"] = b.config.Issuer
 		conf["disable_iss_validation"] = b.config.DisableIssValidation
 		conf["token_ttl"] = b.config.TokenTTL
-		conf["default_role"] = b.config.DefaultRole
 		conf["bound_audiences"] = b.config.BoundAudiences
 		conf["max_age"] = b.config.MaxAge
 		conf["entity_kind"] = b.config.EntityKind
@@ -212,8 +216,10 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 
 	b.installConfig(cfg)
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data:       map[string]any{"message": "configuration updated"},
-	}, nil
+	// The write warns as the read does, so the operator sees it when acting.
+	data := map[string]any{"message": "configuration updated"}
+	if len(cfg.BoundAudiences) == 0 {
+		helper.SetWarnings(data, []string{noAudiencesWarning})
+	}
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }

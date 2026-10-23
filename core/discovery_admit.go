@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
+	"runtime/debug"
 	"slices"
+	"sync"
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"golang.org/x/sync/errgroup"
 
 	authhelper "github.com/stephnangue/warden/auth/helper"
-	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	lgr "github.com/stephnangue/warden/logger"
@@ -31,14 +31,15 @@ import (
 // Each distinct target mount admits the credential once, through its internal
 // introspect/admit path, and the admission's membership is computed once.
 // Nothing here logs in, caches, or writes: the admissions are fresh and are
-// dropped when the call returns.
+// dropped when the call returns. The credential's format is never guessed: a
+// target that cannot parse it does not admit it.
 //
 // No disclosure: the output names roles only, never a group, a fact, a rule
 // or an auth mount. A credential that a target admits but no group matches,
 // one for which groups exist but none match, and one in a namespace with no
 // groups all yield the same output.
 
-// admittedRole is one role listed by introspectRolesFromAdmissions.
+// admittedRole is one role listed by sys/introspect/roles.
 type admittedRole struct {
 	Name         string `json:"name"`
 	Description  string `json:"description,omitempty"`
@@ -46,18 +47,12 @@ type admittedRole struct {
 	ProviderPath string `json:"provider_path,omitempty"`
 }
 
-// grantedRole is a role a credential was granted at its target mount.
-type grantedRole struct {
-	role *logical.Role // the published role: shared, read only
-	// viaProvider is set when the target was the role's own provider's auth
-	// mount, so the provider's gateway serves the role to this credential.
-	viaProvider bool
-}
-
 // admissionDiscovery is what discoverFromAdmissions found for one credential.
 type admissionDiscovery struct {
-	ns        *namespace.Namespace
-	granted   []grantedRole                // sorted by role name
+	ns *namespace.Namespace
+	// granted are the roles granted at their target mounts, sorted by name:
+	// the published roles, shared and read only.
+	granted   []*logical.Role
 	providers map[string]discoveryProvider // the roles' providers, by mount path
 	warnings  []string                     // one per target mount that failed; never nil
 }
@@ -65,6 +60,48 @@ type admissionDiscovery struct {
 // errDiscoveryNoCredential refuses discovery for a caller that presented no
 // credential.
 var errDiscoveryNoCredential = errors.New("introspection requires a JWT bearer token or TLS client certificate")
+
+// hasDiscoveryCredential reports whether req carries a credential discovery
+// can present to an auth mount: a forwarded TLS client certificate, or an
+// Authorization bearer, its scheme matched case-insensitively as the gateway
+// matches it. It looks at neither: the target mounts verify it.
+func hasDiscoveryCredential(req *logical.Request) bool {
+	if req.HTTPRequest == nil {
+		return false
+	}
+	if listener.ForwardedClientCert(req.HTTPRequest.Context()) != nil {
+		return true
+	}
+	return logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")) != ""
+}
+
+// admitFailureClasses are the classes of the errors an auth mount's admission
+// check returns when it cannot decide, in the order they are matched. Each
+// class's text is the fixed phrase discovery reports for it.
+var admitFailureClasses = []error{
+	authhelper.ErrAdmitNotConfigured,
+	authhelper.ErrAgentAudiencesRequired,
+	authhelper.ErrAdmitNoAudiences,
+	authhelper.ErrAdmitNoTrustBundle,
+	authhelper.ErrAdmitNoTrustedCA,
+	authhelper.ErrAdmitUnverified,
+}
+
+// admitFailureGeneric is the phrase reported for a failure of no known class.
+const admitFailureGeneric = "could not decide"
+
+// admitFailurePhrase returns the fixed phrase discovery reports for a target
+// mount that failed with err: its class's, else admitFailureGeneric. It never
+// returns err's own text: discovery answers any bearer holder, and that text
+// may name the verifier's host, its status, or its reply.
+func admitFailurePhrase(err error) string {
+	for _, class := range admitFailureClasses {
+		if errors.Is(err, class) {
+			return class.Error()
+		}
+	}
+	return admitFailureGeneric
+}
 
 // discoverFromAdmissions finds the roles of the namespace in ctx that the
 // credential req carries (its Authorization bearer or forwarded client
@@ -78,8 +115,11 @@ var errDiscoveryNoCredential = errors.New("introspection requires a JWT bearer t
 // resolveRoleGrant, which projects. A target that fails yields a warning, a
 // target whose live naming is human (or that publishes no naming) grants
 // nothing, and a credential a target does not admit is silent.
+//
+// One call costs at most one admission per distinct target mount, whoever the
+// caller is: the credential is not looked at before a target admits it.
 func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request) (*admissionDiscovery, error) {
-	if detectIntrospectCredentialFormat(req) == "" {
+	if !hasDiscoveryCredential(req) {
 		return nil, errDiscoveryNoCredential
 	}
 	ns, err := namespace.FromContext(ctx)
@@ -102,21 +142,19 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	}
 	nsTarget := c.namespaceAuthTarget(ctx, ns)
 
-	// Each role's target mount, and the distinct targets in first-seen order.
-	type roleTarget struct {
-		mount       string // auth mount path relative to the namespace, without "auth/"
-		viaProvider bool
-	}
-	targetOf := make([]roleTarget, len(roles))
+	// Each role's target mount (auth mount path relative to the namespace,
+	// without "auth/"; "" when it has none), and the distinct targets in
+	// first-seen order.
+	targetOf := make([]string, len(roles))
 	var targets []string
 	for i, r := range roles {
-		t := roleTarget{mount: nsTarget}
+		t := nsTarget
 		if p, ok := providers[r.ProviderPath]; ok && r.ProviderPath != "" && p.authMount != "" {
-			t = roleTarget{mount: p.authMount, viaProvider: true}
+			t = p.authMount
 		}
 		targetOf[i] = t
-		if t.mount != "" && !slices.Contains(targets, t.mount) {
-			targets = append(targets, t.mount)
+		if t != "" && !slices.Contains(targets, t) {
+			targets = append(targets, t)
 		}
 	}
 
@@ -127,7 +165,7 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	}
 	results := make([]admitResult, len(targets))
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(aggregateIntrospectConcurrency)
+	g.SetLimit(discoveryAdmitConcurrency)
 	for i, mount := range targets {
 		g.Go(func() error {
 			adm, err := c.admitAt(gctx, req, mount)
@@ -144,8 +182,9 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	for i, mount := range targets {
 		r := results[i]
 		if r.err != nil {
+			// The log keeps the error verbatim; the caller gets its class.
 			c.logger.Warn("introspect: mount failed", lgr.String("mount", mount), lgr.Err(r.err))
-			warnings = append(warnings, fmt.Sprintf("mount %q: %v", mount, r.err))
+			warnings = append(warnings, fmt.Sprintf("mount %q: %s", mount, admitFailurePhrase(r.err)))
 			continue
 		}
 		if r.adm == nil || r.adm.MountPath == "" {
@@ -160,11 +199,12 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 		grants[mount] = compute(r.adm, n, gs, now).Roles
 	}
 
-	var granted []grantedRole
+	var granted []*logical.Role
 	for i, r := range roles {
-		t := targetOf[i]
-		if _, ok := grants[t.mount][r.Name]; ok && t.mount != "" {
-			granted = append(granted, grantedRole{role: r, viaProvider: t.viaProvider})
+		if t := targetOf[i]; t != "" {
+			if _, ok := grants[t][r.Name]; ok {
+				granted = append(granted, r)
+			}
 		}
 	}
 	return &admissionDiscovery{ns: ns, granted: granted, providers: providers, warnings: warnings}, nil
@@ -191,7 +231,8 @@ func (c *Core) namespaceAuthTarget(ctx context.Context, ns *namespace.Namespace)
 // namespace-relative MountPath set, or nil when the mount did not admit the
 // credential or does not serve the path. An error is the mount failing or
 // unable to decide (unconfigured, no trust anchors, its verifier unreachable),
-// which discovery reports as the mount's warning.
+// which discovery reports as the mount's warning by its class
+// (admitFailurePhrase).
 func (c *Core) admitAt(ctx context.Context, parent *logical.Request, mount string) (*logical.Admission, error) {
 	childReq := &logical.Request{
 		Operation:   logical.ReadOperation,
@@ -222,57 +263,85 @@ func (c *Core) admitAt(ctx context.Context, parent *logical.Request, mount strin
 	return adm, nil
 }
 
-// introspectRolesFromAdmissions is the sys/introspect/roles handler from
-// admissions and groups (see discoverFromAdmissions): {roles, warnings}, each
-// role {name, description, skill, provider_path}, sorted by name. No
-// credential is a 401, as today. Not yet routed.
-func (b *SystemBackend) introspectRolesFromAdmissions(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	d, err := b.core.discoverFromAdmissions(ctx, req)
-	if errors.Is(err, errDiscoveryNoCredential) {
-		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: err}, nil
-	}
-	if err != nil {
-		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
-	}
-	roles := make([]admittedRole, len(d.granted))
-	for i, g := range d.granted {
-		roles[i] = admittedRole{
-			Name:         g.role.Name,
-			Description:  g.role.Description,
-			Skill:        g.role.Skill,
-			ProviderPath: g.role.ProviderPath,
-		}
-	}
-	return b.respondSuccess(map[string]any{
-		"roles":    roles,
-		"warnings": d.warnings,
-	}), nil
+// discoveryMemo holds the discovery of one discovery-server request. Every
+// handler serving that request shares it (a JSON-RPC batch carries several
+// calls, and each skill entry point resolves the visible skills), so a
+// request costs at most one admission per distinct target mount however many
+// calls it carries. It is computed by the first handler that needs it; the
+// others wait for that result.
+type discoveryMemo struct {
+	once sync.Once
+	d    *admissionDiscovery
+	err  error
 }
 
-// resolveDiscoveryFromAdmissionsWith is resolveDiscoveryWith from admissions
-// and groups (see discoverFromAdmissions): the roles the credential is
-// granted, each with its provider type and URL only when it was granted at
-// its own provider's target mount, and its skill URI. Fields that cannot be
-// resolved are left out with the same warnings as today. Not yet wired to
-// list_roles.
-func (c *Core) resolveDiscoveryFromAdmissionsWith(ctx context.Context, skillExists func(name string) bool) ([]mcpRole, []string, error) {
+// errDiscoveryFailed is the error of a discovery that panicked or returned
+// neither a result nor an error. Its text names nothing about the cause, which
+// is logged.
+var errDiscoveryFailed = errors.New("internal: discovery failed")
+
+// get returns the memoised discovery, running discover on the first call; the
+// others wait for that call and share its result. A panic in discover is
+// logged with its stack and becomes errDiscoveryFailed, for this call and every
+// later one, as the shared calls of package flight turn theirs into errors:
+// sync.Once counts a panicking call as done, so without this every later call
+// would get neither a discovery nor an error. It never returns (nil, nil).
+func (m *discoveryMemo) get(log *lgr.GatedLogger, discover func() (*admissionDiscovery, error)) (*admissionDiscovery, error) {
+	m.once.Do(func() {
+		m.err = errDiscoveryFailed // stands when discover panics
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("discovery panicked", lgr.Any("panic", r), lgr.String("stack", string(debug.Stack())))
+			}
+		}()
+		m.d, m.err = discover()
+		if m.d == nil && m.err == nil {
+			m.err = errDiscoveryFailed
+		}
+	})
+	return m.d, m.err
+}
+
+// discoveryMemoKey is the context key of a request's discoveryMemo.
+type discoveryMemoKey struct{}
+
+// requestDiscovery returns the discovery of the discovery-server request in
+// ctx: the memoised one when ctx carries a memo (withMCPRequest puts one
+// there), else a fresh one. It never returns (nil, nil).
+func (c *Core) requestDiscovery(ctx context.Context) (*admissionDiscovery, error) {
 	httpReq := mcpRequestFromContext(ctx)
 	if httpReq == nil {
-		return nil, nil, fmt.Errorf("internal: request context missing")
+		return nil, fmt.Errorf("internal: request context missing")
 	}
-	d, err := c.discoverFromAdmissions(ctx, &logical.Request{
-		HTTPRequest: httpReq,
-		ClientIP:    listener.ClientIP(httpReq),
+	memo, _ := ctx.Value(discoveryMemoKey{}).(*discoveryMemo)
+	if memo == nil {
+		memo = &discoveryMemo{}
+	}
+	return memo.get(c.logger, func() (*admissionDiscovery, error) {
+		return c.discoverFromAdmissions(ctx, &logical.Request{
+			HTTPRequest: httpReq,
+			ClientIP:    listener.ClientIP(httpReq),
+		})
 	})
+}
+
+// resolveDiscoveryWith resolves the discovery of the request in ctx for
+// list_roles: the roles the credential is granted, each with its provider
+// type and URL when it was granted at its own provider's auth mount, and its
+// skill URI, with skillExists answering whether a skill exists. Fields that
+// cannot be resolved are left out, with a warning saying why.
+func (c *Core) resolveDiscoveryWith(ctx context.Context, skillExists func(name string) bool) ([]mcpRole, []string, error) {
+	d, err := c.requestDiscovery(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	if d == nil {
+		return nil, nil, errDiscoveryFailed
+	}
 	warnings := append([]string{}, d.warnings...)
 	roles := make([]mcpRole, len(d.granted))
-	for i, g := range d.granted {
-		r := g.role
-		roles[i], warnings = discoveryEntry(d.ns, r.Name, r.Description, r.Skill, r.ProviderPath, d.providers,
-			func(discoveryProvider) bool { return g.viaProvider }, skillExists, warnings)
+	for i, r := range d.granted {
+		roles[i], warnings = discoveryEntry(d.ns, r, d.providers, skillExists, warnings)
 	}
 	return roles, warnings, nil
 }

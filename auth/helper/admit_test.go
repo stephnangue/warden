@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -14,6 +15,31 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
+
+// An agent mount binds an audience; a human mount may leave it to the
+// request's resource; any other kind is held to the agent rule.
+func TestRequireAgentAudiences(t *testing.T) {
+	for _, kind := range []string{"", logical.EntityKindAgent, "robot"} {
+		assert.ErrorIs(t, RequireAgentAudiences(kind, nil), ErrAgentAudiencesRequired, "kind %q", kind)
+		assert.ErrorIs(t, RequireAgentAudiences(kind, []string{}), ErrAgentAudiencesRequired, "kind %q", kind)
+		assert.NoError(t, RequireAgentAudiences(kind, []string{"warden"}), "kind %q", kind)
+	}
+	assert.NoError(t, RequireAgentAudiences(logical.EntityKindHuman, nil))
+	assert.ErrorIs(t, AgentAudiencesWriteError(), ErrAgentAudiencesRequired)
+}
+
+// An AdmitError keeps its own text and matches its class, also when wrapped
+// with the detail of the failure.
+func TestAdmitError(t *testing.T) {
+	sentinel := AdmitError(ErrAdmitUnverified, "TokenReview call failed")
+	assert.EqualError(t, sentinel, "TokenReview call failed")
+	assert.ErrorIs(t, sentinel, ErrAdmitUnverified)
+	assert.NotErrorIs(t, sentinel, ErrAdmitNotConfigured)
+
+	wrapped := fmt.Errorf("%w: %w", sentinel, errors.New("dial tcp 10.0.0.1:6443: refused"))
+	assert.ErrorIs(t, wrapped, sentinel)
+	assert.ErrorIs(t, wrapped, ErrAdmitUnverified)
+}
 
 func TestAdmitPath(t *testing.T) {
 	var calls int

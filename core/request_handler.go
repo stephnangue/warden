@@ -28,6 +28,7 @@ import (
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/helper/flight"
+	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
@@ -105,7 +106,7 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 	// gather as much info as possible for the audit log
 	if !unauth || (unauth && req.ClientToken != "") {
 		var err error
-		cbp, te, err = c.fetchCBPAndTokenEntry(ctx, req)
+		cbp, te, err = c.fetchCBPAndTokenEntry(ctx, req, unauth)
 		// In the unauth case we don't want to fail the command, since it's
 		// unauth, we just have no information to attach to the request, so
 		// ignore errors...this was best-effort anyways
@@ -225,7 +226,11 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 // token entry (lookupTokenEntry), the role it runs under (resolveRoleGrant,
 // which projects a per-request role onto the entry), then the CBP of the
 // entry's policies (buildCBP). Verdicts stay in performPolicyChecks.
-func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) (*CBP, *logical.TokenEntry, error) {
+//
+// An unauthenticated check (a login) grants no role: no verdict is rendered
+// on it, so none is resolved, and its audit entry records none
+// (withholdRoleGrant).
+func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request, unauth bool) (*CBP, *logical.TokenEntry, error) {
 	// Ensure there is a client token
 	if req.ClientToken == "" {
 		return nil, nil, sdklogical.ErrPermissionDenied
@@ -246,7 +251,11 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request) 
 		return nil, nil, err
 	}
 
-	c.resolveRoleGrant(req, te, time.Now())
+	if unauth {
+		withholdRoleGrant(req, te)
+	} else {
+		c.resolveRoleGrant(req, te, time.Now())
+	}
 
 	cbp, err := c.buildCBP(ctx, te)
 	if err != nil {
@@ -653,12 +662,12 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 	// Parse request body before CheckToken since req.Data may be used during token validation.
 	//
 	// An internal login is exempt: its Data is not the caller's, it is the credential
-	// and role this request's own auth precedence resolved, and the HTTP request it
-	// carries belongs to the gateway call that triggered the login. Parsing here would
-	// merge that caller's query params and body keys into the resolved map — a body of
-	// {"role":"other"} or a ?role=other would pick the role the login authenticates
-	// against, through a channel that never reaches req.Path and so is invisible to
-	// both policy and the audit log.
+	// this request's own implicit auth extracted, and the HTTP request it carries
+	// belongs to the gateway call that triggered the login. Parsing here would merge
+	// that caller's query params and body keys into the resolved map — a body of
+	// {"jwt":"other"} would pick the credential the login admits, through a channel
+	// that never reaches req.Path and so is invisible to both policy and the audit
+	// log.
 	if !isInternalLogin {
 		if err := c.parseRequestBody(req); err != nil {
 			return logical.ErrorResponse(err), nil, nil
@@ -752,7 +761,7 @@ func (c *Core) handleLoginRequest(ctx context.Context, req *logical.Request, isI
 	// transparent auth method does not require touching this guard.
 	if resp != nil && resp.Auth != nil {
 		if !isInternalLogin && c.tokenStore.IsTransparentType(resp.Auth.TokenType) {
-			return logical.ErrorResponse(logical.ErrBadRequest("explicit login is not supported for roles with token_type=transparent; clients authenticate implicitly via gateway requests")), nil, nil
+			return logical.ErrorResponse(logical.ErrBadRequest("explicit login is not supported for transparent auth methods; clients authenticate implicitly via gateway requests")), nil, nil
 		} else {
 			respTokenCreate, errCreateToken := c.LoginCreateToken(ctx, req, resp)
 			if errCreateToken != nil {
@@ -781,8 +790,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 	// req.MountAccessor is populated by handleLoginRequest from the routed
 	// mount entry. Carry it through so transparent token types can fold it
 	// into their cache key (prevents cross-mount cache contamination when
-	// two mounts of the same auth type have overlapping role names + the
-	// same credential).
+	// two mounts of the same auth type are presented the same credential).
 	var mountAccessor string
 	if req != nil {
 		mountAccessor = req.MountAccessor
@@ -792,21 +800,25 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		c.setAdmissionMountPath(ctx, req, auth.Admission)
 	}
 
+	// A login is an admission: the token carries no role and no credential
+	// spec, which are granted per request.
 	now := time.Now()
 	authData := logical.AuthData{
-		PrincipalID:    auth.PrincipalID,
-		RoleName:       auth.RoleName,
-		ExpireAt:       now.Add(auth.TokenTTL),
-		CredentialSpec: auth.CredentialSpec,
-		Policies:       auth.Policies,
-		ClientIP:       auth.ClientIP,
-		TokenValue:     auth.ClientToken,
-		MountAccessor:  mountAccessor,
-		Actors:         auth.Actors,
-		Metadata:       auth.Metadata,
-		Admission:      auth.Admission,
+		PrincipalID:   auth.PrincipalID,
+		ExpireAt:      now.Add(auth.TokenTTL),
+		Policies:      auth.Policies,
+		ClientIP:      auth.ClientIP,
+		TokenValue:    auth.ClientToken,
+		MountAccessor: mountAccessor,
+		Actors:        auth.Actors,
+		Metadata:      auth.Metadata,
+		Admission:     auth.Admission,
 	}
 
+	// The issued entry may not be the one authData describes: a transparent
+	// token already cached for this credential and mount is returned instead,
+	// with its own admission. Anything read after this point is read from
+	// tokenValue, never from auth.
 	tokenValue, err := c.tokenStore.GenerateToken(ctx, auth.TokenType, &authData)
 
 	if err != nil {
@@ -816,10 +828,8 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		fields := []logger.TypedField{
 			logger.Err(err),
 			logger.String("token_type", auth.TokenType),
-			logger.String("role_name", authData.RoleName),
 			logger.String("principal_id", authData.PrincipalID),
 			logger.String("mount_accessor", authData.MountAccessor),
-			logger.String("credential_spec", authData.CredentialSpec),
 		}
 		if ns, nsErr := namespace.FromContext(ctx); nsErr == nil {
 			fields = append(fields, logger.String("namespace", ns.Path))
@@ -836,7 +846,6 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		"token_assessor": tokenValue.Accessor,
 		"namespace":      tokenValue.NamespacePath,
 		"principal_id":   tokenValue.PrincipalID,
-		"role":           tokenValue.RoleName,
 		"data":           tokenValue.Data,
 		"policies":       tokenValue.Policies,
 	}
@@ -923,7 +932,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		provider, authRole, providerAuth := c.providerTransparentSurface(ctx, req, entry)
 		if providerAuth {
 			req.ClientToken, _ = provider.ExtractTokens(req.HTTPRequest, false)
-			if failure := c.authenticateImplicitly(ctx, req, provider, authRole); failure != nil {
+			if failure := c.authenticateImplicitly(ctx, req, provider, authRole, noRoleSelectedAccess); failure != nil {
 				return failure, nil, nil
 			}
 		} else {
@@ -934,7 +943,10 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// Triggered when there's no explicit X-Warden-Token but an auth path
 		// is configured on the namespace. The Authorization: Bearer value is
 		// treated as a JWT credential, not a Warden token.
-		// Auth role precedence: ?role= query param > X-Warden-Role header > auth method default_role.
+		// Role precedence: ?role= query param > X-Warden-Role header; an empty
+		// ?role= selects nothing, so it leaves the header in force. There is
+		// no provider here, so no default_role: a request selecting neither is
+		// refused before its credential is admitted.
 		if !providerAuth && req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
 			var authPath string
 			if ns, _ := namespace.FromContext(ctx); ns != nil {
@@ -942,7 +954,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			}
 			if authPath != "" {
 				var authRole string
-				if role, ok := req.Data["role"].(string); ok {
+				if role, _ := req.Data["role"].(string); role != "" {
 					authRole = role
 				} else {
 					authRole = req.HTTPRequest.Header.Get("X-Warden-Role")
@@ -953,7 +965,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 						logger.String("path", req.Path),
 						logger.String("auth_path", authPath),
 					)
-					return logical.ErrorResponse(logical.ErrUnauthorized(err.Error())), nil, nil
+					return implicitAuthFailure(err, noRoleSelectedOperations), nil, nil
 				}
 			}
 		}
@@ -1036,7 +1048,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// whether this mount is a protected resource decides how the extractor
 		// reads Authorization. On a mount with no effective user_auth_path the
 		// rule collapses to the pre-0.20 behaviour and userCred stays empty.
-		userAuthPath, userAuthRole := c.resolveUserAuthConfig(ctx, matchingBackend)
+		userAuthPath, userAuthRefusal := c.resolveUserAuthConfig(ctx, matchingBackend)
 		userLeg := userAuthPath != ""
 		userLegMount = userLeg
 
@@ -1096,7 +1108,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// Skip if already marked as unauthenticated (handled above)
 		if !req.StreamUnauthenticated {
 			if isTransparent, role := c.isTransparentRequest(req, matchingBackend); isTransparent {
-				if failure := c.authenticateImplicitly(ctx, req, matchingBackend, role); failure != nil {
+				if failure := c.authenticateImplicitly(ctx, req, matchingBackend, role, noRoleSelectedGateway); failure != nil {
 					return failure, nil, nil
 				}
 			}
@@ -1110,18 +1122,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// minting run. Skipped for stream-unauthenticated requests, which bypass
 		// CheckToken, minting, and audit entirely.
 		if !req.StreamUnauthenticated {
-			if err := c.captureUserContext(ctx, req, userAuthPath, userAuthRole, userCred); err != nil {
+			if err := c.captureUserContext(ctx, req, userAuthPath, userAuthRefusal, userCred); err != nil {
 				c.logger.Warn("secondary user authentication failed",
 					logger.Err(err),
 					logger.String("path", req.Path),
 					logger.String("request_id", req.RequestID),
 				)
-				// A user credential WAS presented and rejected, so the challenge
-				// carries error="invalid_token" — the client should replace it
-				// rather than assume it simply forgot to send one.
-				errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
-				c.attachUserChallenge(ctx, req, errResp, true)
-				return errResp, nil, nil
+				return c.userCaptureFailure(ctx, req, err), nil, nil
 			}
 		}
 	}
@@ -1280,6 +1287,20 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 
 	// Route the request
 	resp, routeErr := c.doRouting(ctx, req)
+
+	// A provider's config read also says, ahead of time, when its user leg
+	// would refuse every user credential, or an auth path names a mount of the
+	// wrong kind: only core sees the auth mounts and the protected-resource
+	// configuration that decide it.
+	if entry != nil && entry.Class == mountClassProvider && !req.Streamed &&
+		req.Operation == logical.ReadOperation && req.Path == "config" && resp != nil && resp.Err == nil {
+		if warnings := c.providerConfigWarnings(ctx, entry); len(warnings) > 0 {
+			if resp.Data == nil {
+				resp.Data = map[string]any{}
+			}
+			appendWarnings(resp.Data, warnings...)
+		}
+	}
 
 	// A non-login request should not return an auth block
 	if resp != nil && resp.Auth != nil {
@@ -1641,32 +1662,33 @@ func agentTemplateClaims(projected map[string]string, principalID string) map[st
 }
 
 // projectUserClaims selects the operator-allowlisted keys from the secondary
-// (user) principal's login-derived metadata for the assertion's user level and for
-// per-user secret_path templating. Unlike projectAssertionMetadata it FAILS CLOSED
-// on an absent key: the user's claims scope a security-sensitive downstream
-// path (a templated policy / a per-user secret path), so a named-but-missing claim
-// must deny rather than silently widen the scope. Returns the projected map, which
-// is empty-key → nil.
-func projectUserClaims(md map[string]string, keys []string) (map[string]string, error) {
+// (user) principal's metadata for the assertion's user level and for per-user
+// secret_path templating. Unlike projectAssertionMetadata it FAILS CLOSED on an
+// absent key: the user's claims scope a security-sensitive downstream path (a
+// templated policy / a per-user secret path), so a named-but-missing claim must
+// deny rather than silently widen the scope. Returns the projected map, which is
+// empty-key → nil, and its JSON encoding, the fingerprint the credential cache
+// keys it by ("" when nothing is projected).
+func projectUserClaims(md map[string]string, keys []string) (map[string]string, string, error) {
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, "", nil
 	}
 	projected := make(map[string]string, len(keys))
 	for _, k := range keys {
 		v, ok := md[k]
 		if !ok {
-			return nil, fmt.Errorf("assertion_user_claims names %q but the user token has no such claim", k)
+			return nil, "", fmt.Errorf("assertion_user_claims names %q but the user token has no such claim", k)
 		}
 		projected[k] = v
 	}
 	encoded, err := json.Marshal(projected)
 	if err != nil {
-		return nil, fmt.Errorf("marshal user claims: %w", err)
+		return nil, "", fmt.Errorf("marshal user claims: %w", err)
 	}
 	if len(encoded) > maxAssertionMetadataBytes {
-		return nil, fmt.Errorf("user claims exceed %d bytes", maxAssertionMetadataBytes)
+		return nil, "", fmt.Errorf("user claims exceed %d bytes", maxAssertionMetadataBytes)
 	}
-	return projected, nil
+	return projected, string(encoded), nil
 }
 
 // resolveExchangeInputs derives the token-exchange inputs for the named spec on
@@ -1968,12 +1990,14 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// closed, since the user's claims scope a security-sensitive downstream path.
 	// userClaims (the projected values plus the user's raw principal as "sub") is
 	// surfaced on the setup so a driver can template a per-user path from it.
-	// Per-user cache isolation is the manager's ":u:" token-id dimension, so the
-	// user does not enter cacheIdentity here.
+	// Per-user cache isolation is the manager's ":u:" token-id dimension; the
+	// user's projected claims enter cacheIdentity as well (userFingerprint),
+	// because they are rendered per request from the user mount's naming in
+	// force, so a mapping edit changes them under the same user token id.
 	//
 	// The same opt-in can also DISCLOSE the user to the profile (userIdentity:
-	// namespace, mount, principal, role and the user token's own verified act
-	// chain), which makes the user the assertion's subject and the agent its
+	// namespace, mount, principal and the user token's own verified act chain),
+	// which makes the user the assertion's subject and the agent its
 	// actor. It is disclosed only for the subject slot — an actor token must name
 	// the agent, since the token service builds act from its sub — and only when
 	// the source's verifier can bind claims beyond iss, sub and aud
@@ -1982,6 +2006,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// composite sub, and userClaims still drives templating. Projected once, here,
 	// and snapshotted into the mint closure.
 	var userClaims map[string]string
+	var userFingerprint string
 	var userIdentity *credential.AssertionIdentity
 	if userKeys := credential.AssertionUserClaimKeys(spec.Config); len(userKeys) > 0 {
 		if userTE == nil {
@@ -2002,7 +2027,8 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 				metaKeys = append(metaKeys, k)
 			}
 		}
-		projectedUser, perr := projectUserClaims(userTE.Metadata, metaKeys)
+		projectedUser, fingerprint, perr := projectUserClaims(userTE.Metadata, metaKeys)
+		userFingerprint = fingerprint
 		if perr != nil {
 			return nil, fmt.Errorf("spec %q: %w", specName, perr)
 		}
@@ -2044,9 +2070,9 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// source config, which can change under a fixed specName) and the projected-
 	// metadata fingerprint. Each fragment is appended only when non-empty, so the
 	// no-resource / no-metadata cache keys stay byte-for-byte unchanged; the
-	// fragments carry mutually non-prefix leads — "role=", "res=", "prof=", and the
-	// '{' of the marshalled metadata JSON — so one fragment's start cannot be read
-	// as another's.
+	// fragments carry mutually non-prefix leads — "role=", "res=", "user=",
+	// "prof=", and the '{' of the marshalled metadata JSON — so one fragment's
+	// start cannot be read as another's.
 	//
 	// That disambiguates starts, not contents: a value holding a NUL could spell a
 	// later fragment that is itself absent. Nothing can reach it — role names are
@@ -2075,12 +2101,12 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	//
 	// ONE fragment is enough, and it is worth saying why. Every input a profile can
 	// read is already fingerprinted: identity and audience directly, role via
-	// "role=", resource via "res=", projected metadata via mdFingerprint, and the
-	// user via the Manager's ":u:" token-id dimension. That last one covers the
-	// user's whole IDENTITY, not just its claims: namespace, mount, principal and
-	// act chain are all fixed for the life of the user's token entry, and a
-	// transparent user token's id hashes the very credential the act chain was read
-	// from. (The agent's own act chain is read only to refuse, never rendered, so it
+	// "role=", resource via "res=", projected metadata via mdFingerprint, the
+	// user's projected claims via "user=", and the user via the Manager's ":u:"
+	// token-id dimension. That last one covers the user's IDENTITY: namespace,
+	// mount, principal and act chain are all fixed for the life of the user's token
+	// entry, and a transparent user token's id hashes the very credential the act
+	// chain was read from. (The agent's own act chain is read only to refuse, never rendered, so it
 	// keys nothing.) A profile only changes how those are RENDERED, so its name is
 	// the single new degree of freedom. Should a later profile ever read something
 	// outside that set, it needs a fragment of its own — that is the moment to give
@@ -2103,6 +2129,11 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	}
 	if mdFingerprint != "" {
 		cacheIdentity += "\x00" + mdFingerprint
+	}
+	// The user's projected claims, which can change under one user token id:
+	// they are rendered from the user mount's naming in force.
+	if userFingerprint != "" {
+		cacheIdentity += "\x00user=" + userFingerprint
 	}
 	// Keyed on the RESOLVED profile's Name(), not the config string that selected
 	// it. Identical today, but it keeps an alias possible later: were two config
@@ -2347,7 +2378,7 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 	//   1. X-Warden-Role header
 	//   2. Request-encoded role (URL path segment, query param)
 	//   3. Provider transparent extractor (SigV4 access key, Basic Auth user)
-	//   4. Mount-level default_role
+	//   4. Provider default_role (a namespace role)
 	//
 	// Request-encoded role: path segment for streaming backends, query param
 	// for access backends. The provider decides what counts.
@@ -2361,7 +2392,7 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 		}
 	}
 
-	// Mount-level default_role.
+	// Provider default_role.
 	if authRole == "" {
 		authRole = tmp.GetDefaultAuthRole()
 	}
@@ -2380,8 +2411,9 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 }
 
 // handleTransparentAuth performs implicit authentication for gateway and access requests.
-// It delegates to performImplicitAuth for credential detection and login.
-// The authRole may be empty — the auth method's default_role config provides the fallback.
+// It delegates to performImplicitAuth for credential detection and login. An
+// empty authRole (no role in the request and no provider default_role) is
+// refused there with errNoRoleSelected, before the credential is admitted.
 func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, backend logical.Backend, authRole string) error {
 	tmp := backend.(logical.TransparentModeProvider)
 	autoAuthPath := tmp.GetAutoAuthPath()
@@ -2392,9 +2424,11 @@ func (c *Core) handleTransparentAuth(ctx context.Context, req *logical.Request, 
 // authentication, whichever surface the request arrived on: a streaming gateway
 // path or an access backend's access path. The caller has already decided, via
 // isTransparentRequest, that backend authenticates this request implicitly and
-// under which auth role. It returns nil once the agent is authenticated, or the
-// 401 to answer with when it is not.
-func (c *Core) authenticateImplicitly(ctx context.Context, req *logical.Request, backend logical.Backend, authRole string) *logical.Response {
+// under which role. It returns nil once the agent is authenticated, or the
+// response to answer with when it is not (providerImplicitAuthFailure): 400
+// with noRole (the surface's own wording) for a request that selects no role,
+// 401 for any other failure.
+func (c *Core) authenticateImplicitly(ctx context.Context, req *logical.Request, backend logical.Backend, authRole, noRole string) *logical.Response {
 	err := c.handleTransparentAuth(ctx, req, backend, authRole)
 	if err == nil {
 		return nil
@@ -2405,9 +2439,7 @@ func (c *Core) authenticateImplicitly(ctx context.Context, req *logical.Request,
 		logger.String("operation", string(req.Operation)),
 		logger.String("request_id", req.RequestID),
 	)
-	errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
-	attachGitBasicChallenge(req, errResp)
-	return errResp
+	return providerImplicitAuthFailure(req, err, noRole)
 }
 
 // providerTransparentSurface reports whether a request that takes the
@@ -2458,7 +2490,15 @@ func (c *Core) providerTransparentSurface(ctx context.Context, req *logical.Requ
 // The user credential is supplied by the caller rather than read here: the
 // backend's ExtractTokens already decided which wire slot carries the user for
 // this provider and this request shape, and the two must not disagree.
-func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, userAuthPath, userAuthRole, userCred string) error {
+//
+// The user is admitted like any credential, with no role, and is granted
+// nothing: no role grant, no policies. What it carries is its principal (the
+// user auth mount's claim, from the login) and its metadata, rendered from its
+// admission under the user auth mount's naming in force (userMetadata). Its
+// token's audience must be bound (checkUserAudience), and refusal, the
+// provider's own reason to refuse every user credential, refuses this one.
+// Both of those are a *userLegRefusal when no other credential would pass.
+func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, userAuthPath string, refusal error, userCred string) error {
 	if userAuthPath == "" {
 		return nil // per-user auth not configured — feature off
 	}
@@ -2486,7 +2526,11 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 	// subject_token path.
 	req.HTTPRequest.Header.Del("Authorization")
 
-	userTE, _, err := c.resolveTransparentIdentity(ctx, req, userAuthPath, userAuthRole, userCred)
+	if refusal != nil {
+		return &userLegRefusal{err: refusal}
+	}
+
+	userTE, _, err := c.resolveTransparentIdentity(ctx, req, userAuthPath, userCred)
 	if err != nil {
 		return fmt.Errorf("user authentication failed: %w", err)
 	}
@@ -2494,9 +2538,27 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 	// Cross-namespace guard (defense-in-depth): the user must live in the
 	// request's namespace. resolveTransparentIdentity routes through the mount in
 	// the request namespace, so a mismatch should not arise — fail closed if it does.
-	if ns, nsErr := namespace.FromContext(ctx); nsErr == nil && ns != nil && userTE.NamespaceID != ns.ID {
+	ns, nsErr := namespace.FromContext(ctx)
+	if nsErr != nil || ns == nil {
+		return fmt.Errorf("user authentication failed: no namespace in the request")
+	}
+	if userTE.NamespaceID != ns.ID {
 		return fmt.Errorf("user token namespace %q does not match request namespace %q", userTE.NamespaceID, ns.ID)
 	}
+
+	// Every token the user mount issues is an admission token, and every
+	// decision below reads its admission: one without is refused.
+	adm := userTE.Admission
+	if adm == nil {
+		return errUserNoAdmission
+	}
+	if err := c.checkUserAudience(ctx, adm, ns.Path, req.MountPoint, userAuthPath); err != nil {
+		return err
+	}
+
+	// userTE is this request's own copy, so the metadata set here reaches
+	// this request alone.
+	userTE.Metadata = userMetadata(adm)
 
 	req.User = &logical.UserPrincipal{
 		TokenEntry: userTE,
@@ -2505,10 +2567,107 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 	return nil
 }
 
+// userCaptureFailure is the response to a request whose user credential
+// captureUserContext refused with err.
+func (c *Core) userCaptureFailure(ctx context.Context, req *logical.Request, err error) *logical.Response {
+	// The mount's configuration refuses every user credential: nothing the
+	// client presents instead would pass, so there is no challenge to answer
+	// with.
+	var refused *userLegRefusal
+	if errors.As(err, &refused) {
+		return logical.ErrorResponse(logical.ErrForbidden(err.Error()))
+	}
+	// A user credential WAS presented and rejected, so the challenge carries
+	// error="invalid_token" — the client should replace it rather than assume
+	// it simply forgot to send one.
+	errResp := logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
+	c.attachUserChallenge(ctx, req, errResp, true)
+	return errResp
+}
+
+// userLegRefusal is a user credential refused for the provider's configuration
+// rather than for anything about the credential: no other credential would
+// pass, so the request is refused without a challenge to obtain one.
+type userLegRefusal struct{ err error }
+
+func (r *userLegRefusal) Error() string { return r.err.Error() }
+func (r *userLegRefusal) Unwrap() error { return r.err }
+
+var (
+	// errUserNoAdmission refuses a user token that carries no admission. The
+	// user mount's logins always attach one, so this is defense in depth.
+	errUserNoAdmission = errors.New("user authentication failed: the user token carries no admission")
+
+	// errUserAudienceNotResource refuses a user token minted for another
+	// resource than the one requested.
+	errUserAudienceNotResource = errors.New("user token audience does not name this resource")
+)
+
+// factAudience is the fact naming a credential's audiences.
+const factAudience = "aud"
+
+// checkUserAudience decides whether a user token's audience is bound to this
+// request's resource, in order:
+//
+//  1. the user auth mount checked it against its bound_audiences when it
+//     admitted the token (adm.AudienceBound);
+//  2. otherwise, with protected-resource metadata on (an external base is
+//     configured; the mount opted in by setting user_auth_path), the token's
+//     aud facts must contain this mount's resource identifier exactly
+//     (resourceIDMatches), else errUserAudienceNotResource;
+//  3. otherwise nothing binds it, and the request is refused as a
+//     *userLegRefusal.
+//
+// mountPath is the request's namespace-relative mount ("github/"), nsPath its
+// namespace path. It does not allocate unless it refuses.
+func (c *Core) checkUserAudience(ctx context.Context, adm *logical.Admission, nsPath, mountPath, userAuthPath string) error {
+	if adm.AudienceBound {
+		return nil
+	}
+	base := c.externalBaseURL(ctx)
+	if base == "" {
+		return &userLegRefusal{err: fmt.Errorf("user token audience is not bound: set bound_audiences on %s or enable protected-resource metadata", userAuthPath)}
+	}
+	aud := adm.Lookup(adm.Mount.Load(), factAudience)
+	for {
+		v, ok := aud.Next()
+		if !ok {
+			return errUserAudienceNotResource
+		}
+		if v.Kind == selector.KindString && resourceIDMatches(v.S, base, nsPath, mountPath) {
+			return nil
+		}
+	}
+}
+
+// userMetadata renders the user's metadata from its admission under the user
+// auth mount's naming in force. It is cached on the admission through the
+// membership mechanism, with no groups to match: the steady state is a pointer
+// compare and does not allocate, and a mapping edit on the user mount (facts,
+// entity_kind) renders afresh on the next request. The returned map is shared
+// and must not be modified.
+//
+// It takes no instant and reads no clock: with no groups, nothing in the
+// membership can expire (its ValidUntil is zero) and compute matches no rule,
+// so the zero time decides nothing, and a request reads the clock for a
+// membership once, for the agent leg's grant (resolveRoleGrant).
+//
+// When one agent-kind mount serves as both auto_auth_path and user_auth_path
+// (a configuration its provider's config read warns about), a credential
+// presented on both legs shares one admission, whose cached membership then
+// alternates between the user leg's (no groups) and the agent leg's (the
+// namespace's groups): each leg recomputes on the other's cache and the
+// zero-allocation steady state is lost, but each request still gets the
+// membership of its own leg, so correctness is not affected.
+func userMetadata(adm *logical.Admission) map[string]string {
+	return membership(adm, emptyNSGroups, time.Time{}).Metadata
+}
+
 // resolveUserAuthConfig resolves the secondary (user) auth configuration for a
 // gateway request from the mount's own config (a backend that implements
 // logical.UserAuthConfigProvider). Returns an empty path when per-user auth is
-// not configured on this mount.
+// not configured on this mount, and refusal, the provider's reason to refuse
+// every user credential, when it has one.
 //
 // Deliberately mount-only, unlike auto_auth_path, which also falls back to the
 // namespace's custom metadata. Agent identity genuinely is namespace-scoped —
@@ -2517,14 +2676,83 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 // carries the user rather than the agent, and it binds one resource to one
 // identity provider and audience. A namespace-wide fallback would opt in every
 // mount in the namespace, including ones that never intended to reinterpret
-// Authorization, and would force a single user_auth_role's bound_audiences to
-// cover every resource at once.
-func (c *Core) resolveUserAuthConfig(_ context.Context, backend logical.Backend) (userAuthPath, userAuthRole string) {
+// Authorization, and would bind one audience to every resource at once.
+func (c *Core) resolveUserAuthConfig(_ context.Context, backend logical.Backend) (userAuthPath string, refusal error) {
 	if p, ok := backend.(logical.UserAuthConfigProvider); ok {
 		userAuthPath = p.GetUserAuthPath()
-		userAuthRole = p.GetUserAuthRole()
+		refusal = p.UserAuthRefusal()
 	}
-	return userAuthPath, userAuthRole
+	return userAuthPath, refusal
+}
+
+// providerConfigWarnings returns what the config read of the provider mounted
+// at entry warns about: its user leg (userLegConfigWarnings), and an auth path
+// naming a mount of the wrong kind (authMountKindWarnings).
+func (c *Core) providerConfigWarnings(ctx context.Context, entry *MountEntry) []string {
+	warnings := c.userLegConfigWarnings(ctx, entry)
+	return append(warnings, c.authMountKindWarnings(ctx, c.router.MatchingBackend(ctx, entry.Path))...)
+}
+
+// authMountKindWarnings returns a warning when the provider backend's
+// auto_auth_path names a human auth mount (the agent leg never admits through
+// one, so every gateway request is refused), and one when its user_auth_path
+// names an agent auth mount. Each path is resolved as the request path
+// resolves it; a path naming no mount, or a mount that publishes no naming, is
+// not warned about here.
+func (c *Core) authMountKindWarnings(ctx context.Context, backend logical.Backend) []string {
+	var warnings []string
+	if tmp, ok := backend.(logical.TransparentModeProvider); ok {
+		if path := tmp.GetAutoAuthPath(); path != "" && c.authMountKind(ctx, path) == logical.EntityKindHuman {
+			warnings = append(warnings, fmt.Sprintf("auto_auth_path %q names a human auth mount: "+
+				"agent credentials are never admitted through it, so every gateway request is refused", path))
+		}
+	}
+	if path, _ := c.resolveUserAuthConfig(ctx, backend); path != "" &&
+		c.authMountKind(ctx, normalizeAuthPath(path)) == logical.EntityKindAgent {
+		warnings = append(warnings, fmt.Sprintf("user_auth_path %q names an agent auth mount: "+
+			"user credentials are expected through a human auth mount", path))
+	}
+	return warnings
+}
+
+// authMountKind returns the entity kind the auth mount at path admits under
+// its current configuration, or "" when path names no auth mount or the mount
+// publishes no naming.
+func (c *Core) authMountKind(ctx context.Context, path string) string {
+	if e := c.router.MatchingMountEntry(ctx, path); e == nil || e.Class != mountClassAuth {
+		return ""
+	}
+	if fp, ok := c.router.MatchingBackend(ctx, path).(logical.FactsProvider); ok {
+		return fp.EntityKind()
+	}
+	return ""
+}
+
+// userLegConfigWarnings returns what the config read of the provider mounted
+// at entry warns about its user leg: a stored configuration that refuses every
+// user credential (UserAuthRefusal), or a user token audience nothing binds,
+// neither the user auth mount's bound_audiences nor this mount's resource
+// identifier (checkUserAudience refuses every user credential then). A
+// provider with no user leg warns of nothing.
+func (c *Core) userLegConfigWarnings(ctx context.Context, entry *MountEntry) []string {
+	userAuthPath, refusal := c.resolveUserAuthConfig(ctx, c.router.MatchingBackend(ctx, entry.Path))
+	if userAuthPath == "" {
+		return nil
+	}
+	if refusal != nil {
+		return []string{"user credentials are refused: " + refusal.Error()}
+	}
+	authPath := normalizeAuthPath(userAuthPath)
+	if c.router.MatchingMountEntry(ctx, authPath) != nil {
+		if binder, ok := c.router.MatchingBackend(ctx, authPath).(logical.AudienceBinder); ok && binder.BindsAudience() {
+			return nil
+		}
+	}
+	if c.externalBaseURL(ctx) != "" {
+		return nil
+	}
+	return []string{fmt.Sprintf("user token audience is not bound: set bound_audiences on %s or enable "+
+		"protected-resource metadata; until then every user credential is refused", authPath)}
 }
 
 // performImplicitAuth performs implicit authentication for the PRIMARY principal
@@ -2534,13 +2762,42 @@ func (c *Core) resolveUserAuthConfig(_ context.Context, backend logical.Backend)
 // that mark the resolved token as this request's primary principal
 // (req.Transparent, req.SetTokenEntry, and the ClientToken assignment). Used by
 // both gateway requests and transparent operations.
+//
+// A request that selects no role is refused before the credential is admitted:
+// nothing is logged in and nothing is cached. It is refused with
+// errNoImplicitCredential when it carries no credential at all (the client
+// must authenticate first), else with errNoRoleSelected. A
+// credential admitted through a mount whose entity kind is human is refused
+// with errHumanMountOnAgentLeg before the token is set on req: a human mount
+// may admit without an audience binding of its own, so it never carries the
+// agent leg.
 func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, autoAuthPath, authRole string) error {
+	if authRole == "" {
+		// Presence only, from the request alone: a token or a client
+		// certificate the listener already parsed. Nothing is verified.
+		if req.ClientToken == "" && extractTransparentClientCert(req) == nil {
+			return errNoImplicitCredential
+		}
+		return errNoRoleSelected
+	}
+
 	// Mark request as implicit auth
 	req.Transparent = true
 
-	te, clearClientToken, err := c.resolveTransparentIdentity(ctx, req, autoAuthPath, authRole, "")
+	te, clearClientToken, err := c.resolveTransparentIdentity(ctx, req, autoAuthPath, "")
 	if err != nil {
 		return err
+	}
+
+	// One atomic load of the mount's naming in force: a mount flipped to
+	// agent admits on the next request, one flipped to human is refused on
+	// the next request, whatever its cached admissions. A mount publishing no
+	// naming (facts that do not compile) answers no fact, so no group grants
+	// through it and resolveRoleGrant refuses the request.
+	if te.Admission != nil {
+		if n := te.Admission.Mount.Load(); n != nil && n.Kind == logical.EntityKindHuman {
+			return errHumanMountOnAgentLeg
+		}
 	}
 
 	// The X.509-SVID case authenticates via a forwarded/TLS cert; drop any stray
@@ -2549,12 +2806,11 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		req.ClientToken = ""
 	}
 	req.SetTokenEntry(te)
-	// The role this request asks for, for CheckToken to grant when the token
-	// takes its role per request (an admission token); a token that carries
-	// its role ignores it. With req.Transparent, set above, it is also what
-	// tells CheckToken the token came from admitting this request's own
-	// credential, not from a Warden token presented explicitly. A string, so a
-	// request whose token carries its role allocates nothing for it.
+	// The role this request asks for, for CheckToken to grant: the token is
+	// an admission token, which carries no role of its own. With
+	// req.Transparent, set above, it is also what tells CheckToken the token
+	// came from admitting this request's own credential, not from a Warden
+	// token presented explicitly. A string, so recording it allocates nothing.
 	req.RequestedRole = authRole
 	// Ensure ClientToken is set so downstream policy checks (fetchCBPAndTokenEntry)
 	// don't short-circuit on the empty-token guard. For JWT transparent auth the
@@ -2606,25 +2862,19 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 //	  3. Dispatch on the TokenType's CredentialFormat() to extract the
 //	     credential the mount expects (TLS client cert vs JWT bearer). Reject
 //	     with a specific error if the caller didn't present that credential.
-//	  4. Compute a deterministic cache key from (mountAccessor + credential
-//	     + role) via the TokenType's LookupValue, look up the cached token,
-//	     fall through to an internal login on miss.
+//	  4. Compute a deterministic cache key from (mountAccessor + credential)
+//	     via the TokenType's LookupValue, look up the cached token, fall
+//	     through to an internal login on miss.
 //
-//	Auth role (first match wins, resolved before calling):
-//	  1. X-Warden-Role header
-//	  2. Request-encoded role: URL path /role/{name}/gateway/... (streaming
-//	     backends) or ?role= query param (access backends)
-//	  3. Provider transparent extractor (e.g. SigV4 access key, Basic Auth
-//	     username for Git smart-HTTP)
-//	  4. Provider default_role config
-//	  5. Auth method default_role config (login-time fallback)
+// The token is an admission token: one per credential and mount, whatever role
+// a request asks for. The role is not part of the login, the cache key or the
+// singleflight key; CheckToken grants it per request on the copy returned here
+// (resolveRoleGrant), so requests for two roles share the one admission.
 //
 // Uses singleflight to prevent duplicate token creation when concurrent requests
-// arrive with the same credential+authRole combination.
-//
-// IMPORTANT: The auth role is validated when reusing cached tokens. A token created for
-// credential+Role1 cannot be reused for credential+Role2, as they may have different policies.
-func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Request, autoAuthPath, authRole, credential string) (te *TokenEntry, clearClientToken bool, err error) {
+// arrive with the same credential at the same mount. Every waiter gets its own
+// copy of the entry, sharing the one *Admission.
+func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Request, autoAuthPath, credential string) (te *TokenEntry, clearClientToken bool, err error) {
 	// Inject client IP into context so validateIPBinding can read it
 	// during cached token lookups. Without this, implicitly-authed tokens
 	// bypass IP binding because the context has no client IP.
@@ -2659,7 +2909,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	// singleflight it runs on the login's detached context.
 	var lookupFunc func(ctx context.Context) (*TokenEntry, error)
 	var loginData map[string]any
-	var credKey string // fingerprint or JWT — used for post-login lookup with resolved role
+	var credKey string // fingerprint or JWT — used for the post-login lookup
 
 	// Dispatch by the credential's wire-extraction shape. Cases group by what
 	// the credential looks like on the wire (cert vs JWT bearer), not by the
@@ -2679,9 +2929,9 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		}
 		hash := sha256.Sum256(clientCert.Raw)
 		fingerprint := hex.EncodeToString(hash[:])
-		sfHash := sha256.Sum256([]byte("cert:" + mountAccessor + ":" + fingerprint + ":" + authRole))
+		sfHash := sha256.Sum256([]byte("cert:" + mountAccessor + ":" + fingerprint))
 		singleflightKey = hex.EncodeToString(sfHash[:])
-		loginData = map[string]any{"role": authRole}
+		loginData = map[string]any{}
 		credKey = fingerprint
 		// Authenticate via the client certificate, not any bearer. Signal the
 		// primary caller to drop a stray Authorization bearer (ExtractToken falls
@@ -2690,7 +2940,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		// bearer, not the cert-minted token ID, in ClientToken).
 		clearClientToken = true
 		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-			return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
+			return c.LookupTransparentToken(ctx, ttype, fingerprint, mountAccessor)
 		}
 
 	case "jwt", "k8s_sa_jwt":
@@ -2701,12 +2951,12 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		if !strings.HasPrefix(clientToken, "eyJ") {
 			return nil, false, fmt.Errorf("auth method %q at %q requires a JWT bearer token", authMountEntry.Type, autoAuthPath)
 		}
-		sfHash := sha256.Sum256([]byte("jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
+		sfHash := sha256.Sum256([]byte("jwt:" + mountAccessor + ":" + clientToken))
 		singleflightKey = hex.EncodeToString(sfHash[:])
-		loginData = map[string]any{"jwt": clientToken, "role": authRole}
+		loginData = map[string]any{"jwt": clientToken}
 		credKey = clientToken
 		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-			return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
+			return c.LookupTransparentToken(ctx, ttype, clientToken, mountAccessor)
 		}
 
 	case "spiffe":
@@ -2722,12 +2972,12 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 			clientToken = req.ClientToken
 		}
 		if spiffelib.IsJWTSVID(clientToken) {
-			sfHash := sha256.Sum256([]byte("spiffe-jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
+			sfHash := sha256.Sum256([]byte("spiffe-jwt:" + mountAccessor + ":" + clientToken))
 			singleflightKey = hex.EncodeToString(sfHash[:])
-			loginData = map[string]any{"jwt": clientToken, "role": authRole}
+			loginData = map[string]any{"jwt": clientToken}
 			credKey = clientToken
 			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-				return c.LookupTransparentTokenWithRole(ctx, ttype, clientToken, mountAccessor, authRole)
+				return c.LookupTransparentToken(ctx, ttype, clientToken, mountAccessor)
 			}
 		} else if explicitCred {
 			// The secondary (user) path is bearer-only; an X.509-SVID can't ride a
@@ -2736,16 +2986,16 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		} else if clientCert := extractTransparentClientCert(req); clientCert != nil {
 			hash := sha256.Sum256(clientCert.Raw)
 			fingerprint := hex.EncodeToString(hash[:])
-			sfHash := sha256.Sum256([]byte("spiffe-cert:" + mountAccessor + ":" + fingerprint + ":" + authRole))
+			sfHash := sha256.Sum256([]byte("spiffe-cert:" + mountAccessor + ":" + fingerprint))
 			singleflightKey = hex.EncodeToString(sfHash[:])
-			loginData = map[string]any{"role": authRole}
+			loginData = map[string]any{}
 			credKey = fingerprint
 			// Authenticate via the X.509-SVID, not any bearer. Signal the primary
 			// caller to clear a stray non-SVID bearer so the cert-minted token ID
 			// becomes ClientToken (this function performs no request mutation).
 			clearClientToken = true
 			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-				return c.LookupTransparentTokenWithRole(ctx, ttype, fingerprint, mountAccessor, authRole)
+				return c.LookupTransparentToken(ctx, ttype, fingerprint, mountAccessor)
 			}
 		} else {
 			return nil, false, fmt.Errorf("auth method %q at %q requires an X.509-SVID (TLS/forwarded cert) or a JWT-SVID bearer token", authMountEntry.Type, autoAuthPath)
@@ -2773,7 +3023,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	}
 
 	// Step 2: Token not found — perform the implicit auth, once for every request
-	// presenting this credential and role. transparentAuthFlight runs it detached
+	// presenting this credential to this mount. transparentAuthFlight runs it detached
 	// from the request that started it, so that request's client going away does
 	// not fail the others; the context keeps its values, the client IP set above
 	// among them. Each caller waits on its own ctx.
@@ -2813,13 +3063,10 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 			return nil, fmt.Errorf("implicit auth returned no auth data")
 		}
 
-		// Lookup the newly created token using the resolved role from the login response.
-		// This handles default_role fallback: the original role may be empty, but the
-		// auth method resolves it to default_role. The token is stored with the resolved role.
-		resolvedRole := loginResp.Auth.RoleName
-		var newTE *TokenEntry
-		var postErr error
-		newTE, postErr = c.LookupTransparentTokenWithRole(ctx, ttype, credKey, mountAccessor, resolvedRole)
+		// Look the issued token up by its cache key, so the entry handed out
+		// is the one the cache holds (a concurrent login for this credential
+		// may have issued it), with that entry's admission.
+		newTE, postErr := c.LookupTransparentToken(ctx, ttype, credKey, mountAccessor)
 		if postErr != nil {
 			return nil, fmt.Errorf("failed to lookup created token: %w", postErr)
 		}

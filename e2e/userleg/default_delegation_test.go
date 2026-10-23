@@ -84,12 +84,9 @@ func setupDefaultProfile(t *testing.T, vaultRole, roleBody, spec, userClaims str
 
 	// A JWT agent rather than a certificate: its principal is the Hydra client's
 	// sub, which the test reads off the token, so the expected agent sub is exact.
-	h.APIRequest(t, "DELETE", "auth/jwt/role/"+defaultAgentRole, leaderPort, "")
-	mustWarden("POST", "auth/jwt/role/"+defaultAgentRole, fmt.Sprintf(`{
-		"token_policies":["%s-access"],"cred_spec_name":%q,
-		"user_claim":"sub","token_ttl":3600}`, h.UserLegMount, spec),
-		"create the agent role")
-	t.Cleanup(func() { h.APIRequest(t, "DELETE", "auth/jwt/role/"+defaultAgentRole, leaderPort, "") })
+	h.GrantRole(t, leaderPort, "auth/jwt/", defaultAgentRole,
+		h.Role{Policies: []string{h.UserLegMount + "-access"}, CredSpec: spec}, nil)
+	t.Cleanup(func() { h.RevokeRole(t, leaderPort, "auth/jwt/", defaultAgentRole) })
 
 	h.SetUserLegAgentPath(t, leaderPort, "auth/jwt/", defaultAgentRole)
 	t.Cleanup(func() { restoreEnv(t) })
@@ -155,13 +152,16 @@ func TestDefaultProfile_VaultBindsDelegation(t *testing.T) {
 	for key, want := range map[string]string{
 		"delegated_subject": wantSubject,
 		"subject_namespace": "root",
-		"subject_role":      h.UserLegAuthRole,
 		"current_actor":     wantActor,
 		"actor_role":        defaultAgentRole,
 	} {
 		if got := h.JSONString(t, body, "data.meta."+key); got != want {
 			t.Errorf("Vault read %s = %q, want %q", key, got, want)
 		}
+	}
+	// The user runs under no role: the profile renders no warden_role for it.
+	if got := h.JSONPath(h.ParseJSON(t, body), "data.meta.subject_role"); got != nil {
+		t.Errorf("the user carries no role, but Vault read warden_role = %v", got)
 	}
 }
 

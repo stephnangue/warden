@@ -97,7 +97,9 @@ func setupGrafanaInlineSource(t *testing.T, stub *grafanaStub, source, spec, rol
 	useJWTAgentLeg(t, grafanaEnv)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+role, leaderPort, "")
+		if role != "" {
+			h.RevokeRole(t, leaderPort, "auth/jwt/", role)
+		}
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+spec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+source, leaderPort, "")
 	}
@@ -123,11 +125,12 @@ func setupGrafanaInlineSource(t *testing.T, stub *grafanaStub, source, spec, rol
 		"create the inline grafana spec "+spec)
 
 	if role != "" {
-		grafanaMustWrite(t, "POST", "auth/jwt/role/"+role, fmt.Sprintf(`{
-			"token_policies":[%q],"cred_spec_name":%q,
-			"user_claim":"sub","token_ttl":%d}`,
-			grafanaEnv.Policy(), spec, tokenTTL),
-			"create the inline agent role "+role)
+		h.GrantRole(t, leaderPort, "auth/jwt/", role, h.Role{
+			Policies: []string{grafanaEnv.Policy()},
+			CredSpec: spec,
+		}, nil)
+		// A session's lifetime is the mount's to set, not the role's.
+		h.CapMountTokenTTL(t, leaderPort, "auth/jwt/", tokenTTL)
 	}
 }
 
@@ -263,7 +266,7 @@ func assertGrafanaMintedOn(t *testing.T, stub *grafanaStub, wantAccount string) 
 // token and leaves the account and everything else on it alone.
 //
 // A minted token is registered for expiry against the SESSION's lifetime, not its
-// own — so a role with a short token_ttl brings the revocation forward to where a
+// own — so a JWT mount with a short token_ttl brings the revocation forward to where a
 // test can watch it. The token here asks for an hour; what ends it is the agent's
 // token running out five seconds later.
 func TestGrafanaSource_MintedTokenIsDeletedWhenTheSessionEnds(t *testing.T) {

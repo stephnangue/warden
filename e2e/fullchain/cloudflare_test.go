@@ -91,7 +91,7 @@ func setupCloudflareChain(t *testing.T, subj scalewaySubject) {
 	t.Helper()
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+cloudflareChainAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", cloudflareChainAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+cloudflareChainSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+cloudflareChainSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+cloudflareTokenSecretSpec, leaderPort, "")
@@ -117,10 +117,8 @@ func setupCloudflareChain(t *testing.T, subj scalewaySubject) {
 		t.Errorf("a chained cloudflare spec stores no secret, but its create warned: %s", resp)
 	}
 
-	scalewayMustWrite(t, "POST", "auth/jwt/role/"+cloudflareChainAgentRole, `{
-		"token_policies":["`+cloudflareEnv.Policy()+`"],"cred_spec_name":"`+cloudflareChainSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained cloudflare agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", cloudflareChainAgentRole,
+		h.Role{Policies: []string{cloudflareEnv.Policy()}, CredSpec: cloudflareChainSpec}, nil)
 }
 
 // TestCloudflare_KeylessChainServesVaultHeldToken is the keyless path for

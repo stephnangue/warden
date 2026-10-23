@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/audit"
+	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logical"
@@ -23,23 +25,46 @@ import (
 type mockUserAuthProvider struct {
 	mockTransparentModeProvider
 	userAuthPath string
-	userAuthRole string
+	refusal      error
 }
 
 func (m *mockUserAuthProvider) GetUserAuthPath() string { return m.userAuthPath }
-func (m *mockUserAuthProvider) GetUserAuthRole() string { return m.userAuthRole }
+func (m *mockUserAuthProvider) UserAuthRefusal() error  { return m.refusal }
 
-// seedUserToken caches a transparent JWT-role token on the given mount so a later
-// resolveTransparentIdentity call resolves it from cache without a login.
-func seedUserToken(t *testing.T, core *Core, ctx context.Context, mount *MountEntry, jwt, role, principal string) *TokenEntry {
+// userAdmission is what a jwt-like user mount at mountPath admits of claims:
+// sub, iss and aud built in, "department" mapped to "dept", entity kind human.
+// bound records whether the mount checked the audience at admission. The
+// returned MountFacts is the mount's, for a test to publish a mapping edit.
+func userAdmission(t testing.TB, mountPath string, claims map[string]any, bound bool) (*logical.Admission, *logical.MountFacts) {
+	t.Helper()
+	mf := &logical.MountFacts{}
+	mf.Publish(testNaming(t, logical.EntityKindHuman, map[string]string{"department": "dept"}))
+	return &logical.Admission{
+		MountPath:     mountPath,
+		Facts:         selector.NewClaims(claims),
+		Mount:         mf,
+		AudienceBound: bound,
+	}, mf
+}
+
+// seedUserToken caches a transparent JWT admission token on the given mount so a
+// later resolveTransparentIdentity call resolves it from cache without a login.
+// Its admission's audience was bound by the mount.
+func seedUserToken(t *testing.T, core *Core, ctx context.Context, mount *MountEntry, jwt, principal string) *TokenEntry {
+	t.Helper()
+	adm, _ := userAdmission(t, "auth/"+mount.Path, map[string]any{"sub": principal}, true)
+	return seedUserTokenWith(t, core, ctx, mount, jwt, principal, adm)
+}
+
+// seedUserTokenWith is seedUserToken with the admission given.
+func seedUserTokenWith(t *testing.T, core *Core, ctx context.Context, mount *MountEntry, jwt, principal string, adm *logical.Admission) *TokenEntry {
 	t.Helper()
 	te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
 		TokenValue:    jwt,
 		MountAccessor: mount.Accessor,
-		RoleName:      role,
 		PrincipalID:   principal,
 		ExpireAt:      time.Now().Add(time.Hour),
-		Policies:      []string{"default"},
+		Admission:     adm,
 	})
 	require.NoError(t, err)
 	return te
@@ -55,7 +80,7 @@ func TestResolveTransparentIdentity_NoRequestMutation(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	mount := mountStubAuthMethod(t, core, "user-jwt/", "jwt")
 	userJWT := mintK8sJWT(`{"sub":"alice"}`)
-	userTE := seedUserToken(t, core, ctx, mount, userJWT, "slack-user", "alice")
+	userTE := seedUserToken(t, core, ctx, mount, userJWT, "alice")
 
 	const agentToken = "agent-primary-token" // opaque; resolver never reads it
 	req := &logical.Request{
@@ -63,7 +88,7 @@ func TestResolveTransparentIdentity_NoRequestMutation(t *testing.T) {
 		HTTPRequest: httptest.NewRequest(http.MethodPost, "/v1/slack-mcp/role/agent/gateway", nil),
 	}
 
-	te, clearClientToken, err := core.resolveTransparentIdentity(ctx, req, "auth/user-jwt/", "slack-user", userJWT)
+	te, clearClientToken, err := core.resolveTransparentIdentity(ctx, req, "auth/user-jwt/", userJWT)
 	require.NoError(t, err)
 	require.NotNil(t, te)
 	assert.Equal(t, userTE.ID, te.ID)
@@ -90,7 +115,6 @@ func TestPerformImplicitAuth_CertClearsStrayBearer(t *testing.T) {
 	te, err := core.tokenStore.GenerateToken(ctx, TypeCertRole, &AuthData{
 		TokenValue:    fingerprint,
 		MountAccessor: mount.Accessor,
-		RoleName:      "agent",
 		PrincipalID:   "cn=agent",
 		ExpireAt:      time.Now().Add(time.Hour),
 	})
@@ -115,7 +139,7 @@ func TestCaptureUserContext(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	userMount := mountStubAuthMethod(t, core, "user-jwt/", "jwt")
 	userJWT := mintK8sJWT(`{"sub":"alice"}`)
-	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "slack-user", "alice")
+	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "alice")
 
 	newReq := func(agentToken string, headers map[string]string) *logical.Request {
 		hr := httptest.NewRequest(http.MethodPost, "/v1/slack-mcp/role/agent/gateway", nil)
@@ -127,26 +151,32 @@ func TestCaptureUserContext(t *testing.T) {
 
 	t.Run("feature off when no user_auth_path", func(t *testing.T) {
 		req := newReq("agent-tok", nil)
-		require.NoError(t, core.captureUserContext(ctx, req, "", "", userJWT))
+		require.NoError(t, core.captureUserContext(ctx, req, "", nil, userJWT))
 		assert.Nil(t, req.User, "unconfigured feature is a no-op")
 	})
 
 	t.Run("absent user credential is not an error", func(t *testing.T) {
 		req := newReq("agent-tok", nil)
-		require.NoError(t, core.captureUserContext(ctx, req, "auth/user-jwt/", "", ""))
+		require.NoError(t, core.captureUserContext(ctx, req, "auth/user-jwt/", nil, ""))
 		assert.Nil(t, req.User, "no user credential → req.User stays nil, no error")
 	})
 
 	t.Run("valid user credential attaches req.User (identity only)", func(t *testing.T) {
 		req := newReq("agent-primary-token", map[string]string{"Authorization": "Bearer " + userJWT})
-		require.NoError(t, core.captureUserContext(ctx, req, "auth/user-jwt/", "slack-user", userJWT))
+		require.NoError(t, core.captureUserContext(ctx, req, "auth/user-jwt/", nil, userJWT))
 		require.NotNil(t, req.User)
 		assert.Equal(t, userTE.ID, req.User.TokenEntry.ID)
+		assert.Equal(t, "alice", req.User.TokenEntry.PrincipalID)
 		assert.Equal(t, userJWT, req.User.RawToken)
 		// Identity-only: the primary principal is untouched.
 		assert.Nil(t, req.TokenEntry(), "user capture must not set the primary token entry")
 		assert.False(t, req.Transparent)
 		assert.Equal(t, "agent-primary-token", req.ClientToken)
+		// The user is granted nothing: no role grant, no role, no policies.
+		assert.Nil(t, req.RoleGrant(), "the user leg resolves no role grant")
+		assert.Empty(t, req.User.TokenEntry.RoleName)
+		assert.Empty(t, req.User.TokenEntry.Policies)
+		assert.Empty(t, req.User.TokenEntry.CredentialSpec)
 		// The raw user credential is scrubbed from the request so it can't proxy
 		// upstream or land in an audit header copy (req.User.RawToken retains it).
 		assert.Empty(t, req.HTTPRequest.Header.Get("Authorization"), "Authorization must be stripped after capture")
@@ -158,7 +188,7 @@ func TestCaptureUserContext(t *testing.T) {
 		// Authorization, so the same scrub covers them.
 		req := newReq("agent-cert-token-id", nil)
 		req.HTTPRequest.SetBasicAuth("agent-role", userJWT)
-		require.NoError(t, core.captureUserContext(ctx, req, "auth/user-jwt/", "slack-user", userJWT))
+		require.NoError(t, core.captureUserContext(ctx, req, "auth/user-jwt/", nil, userJWT))
 		require.NotNil(t, req.User)
 		assert.Equal(t, userTE.ID, req.User.TokenEntry.ID)
 		assert.Empty(t, req.HTTPRequest.Header.Get("Authorization"), "the Basic slot carrying the user must be stripped after capture")
@@ -169,7 +199,7 @@ func TestCaptureUserContext(t *testing.T) {
 		// defensively sets both to the same JWT must not have the agent
 		// double-resolved as its own user.
 		req := newReq(userJWT, map[string]string{"Authorization": "Bearer " + userJWT})
-		err := core.captureUserContext(ctx, req, "auth/user-jwt/", "", userJWT)
+		err := core.captureUserContext(ctx, req, "auth/user-jwt/", nil, userJWT)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must differ from the agent credential")
 		assert.Nil(t, req.User)
@@ -177,7 +207,7 @@ func TestCaptureUserContext(t *testing.T) {
 
 	t.Run("non-bearer user credential fails closed", func(t *testing.T) {
 		req := newReq("agent-tok", nil)
-		err := core.captureUserContext(ctx, req, "auth/user-jwt/", "", "not-a-jwt")
+		err := core.captureUserContext(ctx, req, "auth/user-jwt/", nil, "not-a-jwt")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "user authentication failed")
 		assert.Nil(t, req.User)
@@ -186,9 +216,24 @@ func TestCaptureUserContext(t *testing.T) {
 	t.Run("cert-format user mount rejected (bearer required)", func(t *testing.T) {
 		mountStubAuthMethod(t, core, "user-cert/", "cert")
 		req := newReq("agent-tok", nil)
-		err := core.captureUserContext(ctx, req, "auth/user-cert/", "", userJWT)
+		err := core.captureUserContext(ctx, req, "auth/user-cert/", nil, userJWT)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "bearer credential")
+		assert.Nil(t, req.User)
+	})
+
+	t.Run("a user token without an admission fails closed", func(t *testing.T) {
+		bare := mintK8sJWT(`{"sub":"bob"}`)
+		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
+			TokenValue:    bare,
+			MountAccessor: userMount.Accessor,
+			PrincipalID:   "bob",
+			ExpireAt:      time.Now().Add(time.Hour),
+		})
+		require.NoError(t, err)
+		req := newReq("agent-tok", nil)
+		err = core.captureUserContext(ctx, req, "auth/user-jwt/", nil, bare)
+		require.ErrorIs(t, err, errUserNoAdmission)
 		assert.Nil(t, req.User)
 	})
 }
@@ -200,10 +245,10 @@ func TestResolveUserAuthConfig(t *testing.T) {
 
 	t.Run("mount config drives it", func(t *testing.T) {
 		ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
-		backend := &mockUserAuthProvider{userAuthPath: "auth/prov/", userAuthRole: "prov-role"}
-		p, r := core.resolveUserAuthConfig(ctx, backend)
+		backend := &mockUserAuthProvider{userAuthPath: "auth/prov/", refusal: framework.ErrUserAuthRoleRemoved}
+		p, refusal := core.resolveUserAuthConfig(ctx, backend)
 		assert.Equal(t, "auth/prov/", p)
-		assert.Equal(t, "prov-role", r)
+		assert.ErrorIs(t, refusal, framework.ErrUserAuthRoleRemoved)
 	})
 
 	t.Run("namespace metadata is NOT consulted", func(t *testing.T) {
@@ -214,12 +259,11 @@ func TestResolveUserAuthConfig(t *testing.T) {
 		// auto_auth_path, where namespace scope is correct.
 		ns := &namespace.Namespace{ID: "ns1", Path: "ns1/", CustomMetadata: map[string]string{
 			"user_auth_path": "auth/nsuser/",
-			"user_auth_role": "ns-role",
 		}}
 		ctx := namespace.ContextWithNamespace(context.Background(), ns)
-		p, r := core.resolveUserAuthConfig(ctx, &mockUserAuthProvider{}) // mount unset
+		p, refusal := core.resolveUserAuthConfig(ctx, &mockUserAuthProvider{}) // mount unset
 		assert.Empty(t, p, "namespace metadata must not opt a mount into the user leg")
-		assert.Empty(t, r)
+		assert.NoError(t, refusal)
 	})
 
 	t.Run("backend not implementing the interface yields empty", func(t *testing.T) {
@@ -237,7 +281,7 @@ func TestStampUserAttribution(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	userMount := mountStubAuthMethod(t, core, "user-jwt/", "jwt")
 	userJWT := mintK8sJWT(`{"sub":"alice"}`)
-	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "slack-user", "alice")
+	userTE := seedUserToken(t, core, ctx, userMount, userJWT, "alice")
 
 	t.Run("stamps the user identity when req.User is set", func(t *testing.T) {
 		req := &logical.Request{
@@ -252,7 +296,7 @@ func TestStampUserAttribution(t *testing.T) {
 		assert.NotContains(t, entry.Auth.User.Subject, "wid:", "user attribution must be the raw sub, not the wid composite")
 		assert.Equal(t, userTE.ID, entry.Auth.User.TokenID)
 		assert.Equal(t, userTE.NamespaceID, entry.Auth.User.NamespaceID)
-		assert.Equal(t, "slack-user", entry.Auth.User.RoleName, "the user auth role a delegation assertion carries")
+		assert.Empty(t, entry.Auth.User.RoleName, "a user is admitted with no role")
 
 		// The raw user credential must never be serialized into an audit record.
 		blob, err := json.Marshal(entry)
@@ -300,23 +344,32 @@ func TestProjectUserClaims(t *testing.T) {
 	md := map[string]string{"username": "alice", "email": "alice@example.com"}
 
 	t.Run("empty keys projects nothing", func(t *testing.T) {
-		got, err := projectUserClaims(md, nil)
+		got, fingerprint, err := projectUserClaims(md, nil)
 		require.NoError(t, err)
 		assert.Nil(t, got)
+		assert.Empty(t, fingerprint, "nothing projected adds nothing to a cache key")
 	})
 	t.Run("projects named keys", func(t *testing.T) {
-		got, err := projectUserClaims(md, []string{"username"})
+		got, fingerprint, err := projectUserClaims(md, []string{"username"})
 		require.NoError(t, err)
 		assert.Equal(t, map[string]string{"username": "alice"}, got)
+		assert.Equal(t, `{"username":"alice"}`, fingerprint)
+	})
+	t.Run("the fingerprint follows the values", func(t *testing.T) {
+		_, before, err := projectUserClaims(md, []string{"username"})
+		require.NoError(t, err)
+		_, after, err := projectUserClaims(map[string]string{"username": "alice2"}, []string{"username"})
+		require.NoError(t, err)
+		assert.NotEqual(t, before, after)
 	})
 	t.Run("absent key fails closed", func(t *testing.T) {
-		_, err := projectUserClaims(md, []string{"username", "department"})
+		_, _, err := projectUserClaims(md, []string{"username", "department"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "department")
 	})
 	t.Run("oversized projection fails closed", func(t *testing.T) {
 		big := map[string]string{"k": strings.Repeat("x", maxAssertionMetadataBytes)}
-		_, err := projectUserClaims(big, []string{"k"})
+		_, _, err := projectUserClaims(big, []string{"k"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exceed")
 	})

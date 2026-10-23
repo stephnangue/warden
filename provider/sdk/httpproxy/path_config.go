@@ -42,10 +42,6 @@ func (b *proxyBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeString,
 			Description: "Auth mount that authenticates the secondary (user) principal from a second request header (bearer/JWT format required)",
 		},
-		"user_auth_role": {
-			Type:        framework.TypeString,
-			Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role)",
-		},
 		"tls_skip_verify": {
 			Type:        framework.TypeBool,
 			Description: "Skip TLS certificate verification (for dev/test clusters)",
@@ -91,7 +87,6 @@ func (b *proxyBackend) handleConfigRead(_ context.Context, _ *logical.Request, _
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"user_auth_path":    tc.UserAuthPath,
-		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,
 	}
@@ -196,7 +191,6 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		AutoAuthPath:    current.AutoAuthPath,
 		DefaultAuthRole: current.DefaultAuthRole,
 		UserAuthPath:    current.UserAuthPath,
-		UserAuthRole:    current.UserAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -207,9 +201,6 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 	if val, ok := d.GetOk("user_auth_path"); ok {
 		tc.UserAuthPath = val.(string)
 	}
-	if val, ok := d.GetOk("user_auth_role"); ok {
-		tc.UserAuthRole = val.(string)
-	}
 
 	if tc.AutoAuthPath == "" {
 		return &logical.Response{
@@ -218,13 +209,10 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		}, nil
 	}
 
-	// Validate the secondary (user) auth config: types and the
-	// user_auth_role → user_auth_path dependency. The bearer-format check on
-	// the referenced mount is enforced at runtime (fail closed).
-	if err := framework.ValidateUserAuthConfig(map[string]any{
-		"user_auth_path": tc.UserAuthPath,
-		"user_auth_role": tc.UserAuthRole,
-	}); err != nil {
+	// Refuse the removed user_auth_role. The bearer-format check on the user
+	// auth mount is enforced at runtime (fail closed). The write stores no
+	// user_auth_role, so it also removes one a stored config still names.
+	if err := framework.RefuseUserAuthRole(d.Raw); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        logical.ErrBadRequest(err.Error()),
@@ -299,7 +287,6 @@ func (b *proxyBackend) handleConfigWrite(ctx context.Context, _ *logical.Request
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"user_auth_path":    tc.UserAuthPath,
-		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   newSkipVerify,
 		"ca_data":           newCAData,
 	}

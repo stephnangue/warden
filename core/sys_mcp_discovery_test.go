@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -42,34 +41,30 @@ func discoveryProviderFactory(autoAuthPath, suffix string) logical.Factory {
 	}
 }
 
-// mountDiscoveryProvider mounts a provider of type typ at path in the root
-// namespace.
+// mountDiscoveryProvider mounts a provider of type typ at path in the
+// namespace of ctx.
 func mountDiscoveryProvider(t *testing.T, c *Core, ctx context.Context, typ, path, autoAuthPath, suffix string) {
 	t.Helper()
 	c.providers[typ] = discoveryProviderFactory(autoAuthPath, suffix)
 	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassProvider, Type: typ, Path: path}))
 }
 
-// listRolesFor starts the discovery server and returns list_roles' output for
-// a bearer identity.
-func listRolesFor(t *testing.T, c *Core) listRolesOutput {
+// listRolesFor returns list_roles' output for a bearer identity in the env's
+// namespace.
+func listRolesFor(t *testing.T, e *discEnv) listRolesOutput {
 	t.Helper()
-	srv := startMCPTestServer(t, c, nil)
-	session := connectMCP(t, srv, "eyJ.any.token")
-	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
+	roles, warnings, err := e.listRoles("eyJ.any.token")
 	require.NoError(t, err)
-	return decodeListRoles(t, res)
+	return listRolesOutput{Roles: roles, Warnings: warnings}
 }
 
-// setupDiscovery mounts a JWT auth method at jwt/ whose roles the returned
-// mock serves.
-func setupDiscovery(t *testing.T) (*Core, context.Context, *introspectMock) {
+// setupDiscovery returns an env in the namespace team/, whose auto_auth_path
+// is auth/jwt/, with an auth mount at jwt/ admitting every credential.
+func setupDiscovery(t *testing.T) *discEnv {
 	t.Helper()
-	_, ctx, c := setupTestSystemBackend(t)
-	ctrl := newIntrospectMock()
-	c.authMethods["jwt"] = ctrl.factory()
-	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt/"}))
-	return c, ctx, ctrl
+	e := newDiscEnv(t, "team/", "auth/jwt/")
+	e.mountAuth("jwt/")
+	return e
 }
 
 func rolesByName(out listRolesOutput) map[string]mcpRole {
@@ -81,43 +76,45 @@ func rolesByName(out listRolesOutput) map[string]mcpRole {
 }
 
 // Each provider shape yields the URL its gateway accepts, and the skill
-// defaults to the provider type's skill unless the role names its own.
+// defaults to the provider type's skill unless the role names its own. A role
+// without a provider is reached at the namespace's auto_auth_path.
 func TestListRoles_ResolvesSkillAndURL(t *testing.T) {
-	c, ctx, ctrl := setupDiscovery(t)
-	mountDiscoveryProvider(t, c, ctx, "vault", "vault/", "auth/jwt/", "")
-	mountDiscoveryProvider(t, c, ctx, "aws", "aws/", "auth/jwt/", "gateway")
-	mountDiscoveryProvider(t, c, ctx, "rds", "rds-prod/", "auth/jwt/", "access/")
-	mountDiscoveryProvider(t, c, ctx, "mcp_aws", "mcp-aws/", "auth/jwt/", "")
-	seedTestSkill(t, c, ctx, "vault")
-	seedTestSkill(t, c, ctx, "aws")
-	seedTestSkill(t, c, ctx, "rds")
-	seedTestSkill(t, c, ctx, "gh-repo-creator")
-	require.NoError(t, c.skillStore.Create(ctx, &Skill{
+	e := setupDiscovery(t)
+	ctx := e.ctx
+	mountDiscoveryProvider(t, e.c, ctx, "vault", "vault/", "auth/jwt/", "")
+	mountDiscoveryProvider(t, e.c, ctx, "aws", "aws/", "auth/jwt/", "gateway")
+	mountDiscoveryProvider(t, e.c, ctx, "rds", "rds-prod/", "auth/jwt/", "access/")
+	mountDiscoveryProvider(t, e.c, ctx, "mcp_aws", "mcp-aws/", "auth/jwt/", "")
+	seedTestSkill(t, e.c, rootCtx(), "vault")
+	seedTestSkill(t, e.c, rootCtx(), "aws")
+	seedTestSkill(t, e.c, rootCtx(), "rds")
+	seedTestSkill(t, e.c, rootCtx(), "gh-repo-creator")
+	require.NoError(t, e.c.skillStore.Create(rootCtx(), &Skill{
 		Name: "mcp-aws", Description: "aws mcp", Category: SkillCategoryProviderGuide,
 		Provider: "mcp_aws", Body: "# mcp-aws",
 	}))
 
-	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{
-		{"name": "read-secret", "description": "read app secrets", "provider_path": "vault/"},
-		{"name": "repo-creator", "description": "create the repo", "provider_path": "vault/", "skill": "gh-repo-creator"},
-		{"name": "s3-reader", "description": "read S3", "provider_path": "aws/"},
-		{"name": "db-reader", "description": "read the DB", "provider_path": "rds-prod/"},
-		{"name": "aws-mcp", "description": "aws mcp", "provider_path": "mcp-aws/"},
-		{"name": "skill-only", "description": "a recipe, no provider", "skill": "gh-repo-creator"},
-		{"name": "plain", "description": "no discovery fields"},
-	}
+	e.grant("all", []string{"auth/jwt/"},
+		&logical.Role{Name: "read-secret", Description: "read app secrets", ProviderPath: "vault/"},
+		&logical.Role{Name: "repo-creator", Description: "create the repo", ProviderPath: "vault/", Skill: "gh-repo-creator"},
+		&logical.Role{Name: "s3-reader", Description: "read S3", ProviderPath: "aws/"},
+		&logical.Role{Name: "db-reader", Description: "read the DB", ProviderPath: "rds-prod/"},
+		&logical.Role{Name: "aws-mcp", Description: "aws mcp", ProviderPath: "mcp-aws/"},
+		&logical.Role{Name: "skill-only", Description: "a recipe, no provider", Skill: "gh-repo-creator"},
+		&logical.Role{Name: "plain", Description: "no discovery fields"},
+	)
 
-	out := listRolesFor(t, c)
+	out := listRolesFor(t, e)
 	assert.Empty(t, out.Warnings)
 	roles := rolesByName(out)
 
 	assert.Equal(t, mcpRole{Name: "read-secret", Description: "read app secrets", Provider: "vault",
-		Skill: "skill://vault/SKILL.md", URL: "/v1/vault/role/read-secret/gateway/"}, roles["read-secret"])
+		Skill: "skill://vault/SKILL.md", URL: "/v1/team/vault/role/read-secret/gateway/"}, roles["read-secret"])
 	assert.Equal(t, "skill://gh-repo-creator/SKILL.md", roles["repo-creator"].Skill)
-	assert.Equal(t, "/v1/vault/role/repo-creator/gateway/", roles["repo-creator"].URL)
-	assert.Equal(t, "/v1/aws/gateway", roles["s3-reader"].URL)
+	assert.Equal(t, "/v1/team/vault/role/repo-creator/gateway/", roles["repo-creator"].URL)
+	assert.Equal(t, "/v1/team/aws/gateway", roles["s3-reader"].URL)
 	assert.Equal(t, "skill://aws/SKILL.md", roles["s3-reader"].Skill)
-	assert.Equal(t, "/v1/rds-prod/access/", roles["db-reader"].URL)
+	assert.Equal(t, "/v1/team/rds-prod/access/", roles["db-reader"].URL)
 	assert.Equal(t, "mcp_aws", roles["aws-mcp"].Provider)
 	assert.Equal(t, "skill://mcp-aws/SKILL.md", roles["aws-mcp"].Skill, "the default skill is the hyphenated type")
 	assert.Equal(t, mcpRole{Name: "skill-only", Description: "a recipe, no provider",
@@ -125,40 +122,41 @@ func TestListRoles_ResolvesSkillAndURL(t *testing.T) {
 	assert.Equal(t, mcpRole{Name: "plain", Description: "no discovery fields"}, roles["plain"])
 }
 
-// Every way a role's discovery fields can fail to resolve leaves the role
-// listed without the unresolved fields and explains why in a warning.
+// Every way a granted role's discovery fields can fail to resolve leaves the
+// role listed without the unresolved fields and explains why in a warning. A
+// role granted only at a mount its provider does not admit through is not
+// listed at all.
 func TestListRoles_UnresolvedFieldsBecomeWarnings(t *testing.T) {
-	c, ctx, ctrl := setupDiscovery(t)
-	require.NoError(t, c.mount(ctx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt-b/"}))
-	mountDiscoveryProvider(t, c, ctx, "vault", "vault/", "auth/jwt/", "")
-	mountDiscoveryProvider(t, c, ctx, "anthropic", "anthropic/", "auth/jwt/", "")
-	mountDiscoveryProvider(t, c, ctx, "github", "github/", "", "")
+	e := setupDiscovery(t)
+	ctx := e.ctx
+	e.mountAuth("jwt-b/")
+	mountDiscoveryProvider(t, e.c, ctx, "vault", "vault/", "auth/jwt/", "")
+	mountDiscoveryProvider(t, e.c, ctx, "anthropic", "anthropic/", "auth/jwt/", "")
+	mountDiscoveryProvider(t, e.c, ctx, "github", "github/", "", "")
 	// The gateway resolves auto_auth_path verbatim and "auth/jwt" does not
 	// reach the auth/jwt/ mount, so discovery must not vouch for a URL here.
-	mountDiscoveryProvider(t, c, ctx, "slack", "slack/", "auth/jwt", "")
-	seedTestSkill(t, c, ctx, "vault")
-	seedTestSkill(t, c, ctx, "custom")
+	mountDiscoveryProvider(t, e.c, ctx, "slack", "slack/", "auth/jwt", "")
+	seedTestSkill(t, e.c, rootCtx(), "vault")
+	seedTestSkill(t, e.c, rootCtx(), "custom")
 
-	ctrl.rolesByMount["auth/jwt/"] = []map[string]any{
-		{"name": "gone", "provider_path": "vault-old/"},
-		{"name": "no-default-skill", "provider_path": "anthropic/"},
-		{"name": "custom-on-skill-less-type", "provider_path": "anthropic/", "skill": "custom"},
-		{"name": "missing-skill", "provider_path": "vault/", "skill": "nope"},
-		{"name": "no-auto-auth", "provider_path": "github/"},
-		{"name": "slashless-auto-auth", "provider_path": "slack/"},
-	}
-	ctrl.rolesByMount["auth/jwt-b/"] = []map[string]any{
-		{"name": "wrong-auth", "provider_path": "vault/"},
-	}
+	e.grant("all", []string{"auth/jwt/"},
+		&logical.Role{Name: "gone", ProviderPath: "vault-old/"},
+		&logical.Role{Name: "no-default-skill", ProviderPath: "anthropic/"},
+		&logical.Role{Name: "custom-on-skill-less-type", ProviderPath: "anthropic/", Skill: "custom"},
+		&logical.Role{Name: "missing-skill", ProviderPath: "vault/", Skill: "nope"},
+		&logical.Role{Name: "no-auto-auth", ProviderPath: "github/"},
+		&logical.Role{Name: "slashless-auto-auth", ProviderPath: "slack/"},
+	)
+	e.grant("elsewhere", []string{"auth/jwt-b/"}, &logical.Role{Name: "wrong-auth", ProviderPath: "vault/"})
 
-	out := listRolesFor(t, c)
+	out := listRolesFor(t, e)
 	roles := rolesByName(out)
 	warnings := strings.Join(out.Warnings, "\n")
 
 	assert.Equal(t, mcpRole{Name: "gone"}, roles["gone"])
 	assert.Contains(t, warnings, `role "gone": provider_path "vault-old/" is not a provider mount in this namespace`)
 
-	assert.Equal(t, "/v1/anthropic/role/no-default-skill/gateway/", roles["no-default-skill"].URL)
+	assert.Equal(t, "/v1/team/anthropic/role/no-default-skill/gateway/", roles["no-default-skill"].URL)
 	assert.Empty(t, roles["no-default-skill"].Skill, "anthropic ships no skill, and that is not a warning")
 	assert.NotContains(t, warnings, "no-default-skill")
 
@@ -166,7 +164,7 @@ func TestListRoles_UnresolvedFieldsBecomeWarnings(t *testing.T) {
 		"an explicit skill applies whether or not the provider type ships one")
 	assert.NotContains(t, warnings, "custom-on-skill-less-type")
 
-	assert.Equal(t, "/v1/vault/role/missing-skill/gateway/", roles["missing-skill"].URL)
+	assert.Equal(t, "/v1/team/vault/role/missing-skill/gateway/", roles["missing-skill"].URL)
 	assert.Empty(t, roles["missing-skill"].Skill, "a missing explicit skill does not fall back to the default")
 	assert.Contains(t, warnings, `role "missing-skill": skill "nope" does not exist`)
 
@@ -174,30 +172,22 @@ func TestListRoles_UnresolvedFieldsBecomeWarnings(t *testing.T) {
 	assert.Contains(t, warnings, `role "no-auto-auth": provider "github/" has no auto_auth_path`)
 
 	assert.Empty(t, roles["slashless-auto-auth"].URL)
-	assert.Contains(t, warnings, `role "slashless-auto-auth": provider "slack/" does not authenticate through this role's auth mount`)
+	assert.Contains(t, warnings, `role "slashless-auto-auth": provider "slack/": auto_auth_path "auth/jwt" names no auth mount`)
+	assert.NotContains(t, warnings, "does not authenticate through")
 
-	assert.Empty(t, roles["wrong-auth"].URL)
-	assert.Empty(t, roles["wrong-auth"].Provider)
-	assert.Contains(t, warnings, `role "wrong-auth": provider "vault/" does not authenticate through this role's auth mount`)
-
-	// Warnings name roles and provider mounts, never auth mount paths.
-	assert.NotContains(t, warnings, "auth/")
+	assert.NotContains(t, roles, "wrong-auth", "granted only where its provider does not admit")
+	assert.NotContains(t, warnings, "wrong-auth")
 	assert.NotContains(t, warnings, "jwt-b/")
 }
 
 // The URL carries the namespace the caller selected.
 func TestListRoles_URLCarriesNamespace(t *testing.T) {
-	c, ctx, ctrl := setupDiscovery(t)
-	ns := &namespace.Namespace{Path: "team-data/"}
-	require.NoError(t, c.namespaceStore.SetNamespace(ctx, ns))
-	nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
-	require.NoError(t, c.mount(nsCtx, &MountEntry{Class: mountClassAuth, Type: "jwt", Path: "jwt/"}))
-	mountDiscoveryProvider(t, c, nsCtx, "vault", "vault/", "auth/jwt/", "")
-	ctrl.rolesByMount["team-data/auth/jwt/"] = []map[string]any{
-		{"name": "read-secret", "provider_path": "vault/"},
-	}
+	e := newDiscEnv(t, "team-data/", "")
+	e.mountAuth("jwt/")
+	e.provider("vault", "vault/", "auth/jwt/")
+	e.grant("readers", []string{"auth/jwt/"}, &logical.Role{Name: "read-secret", ProviderPath: "vault/"})
 
-	srv := startMCPTestServer(t, c, nil)
+	srv := startMCPTestServer(t, e.c, nil)
 	session := connectMCPWithHeaders(t, srv, map[string]string{
 		"Authorization":      "Bearer eyJ.any.token",
 		"X-Warden-Namespace": "team-data",

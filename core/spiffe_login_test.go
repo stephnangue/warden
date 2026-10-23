@@ -93,10 +93,11 @@ func mountRealSpiffe(t *testing.T, core *Core, ctx context.Context) func(path st
 }
 
 // TestHandleTransparentAuth_Spiffe_LoginOnMiss exercises the full case "spiffe"
-// dispatch on a COLD cache: a real spiffe mount, configured with a trust domain
-// and role, mints a token via the login round-trip for a fresh X.509-SVID. This
-// covers the dispatch loginData/credKey wiring and the cert-branch ClientToken
-// reset that the cache-hit test cannot reach.
+// dispatch on a COLD cache: a real spiffe mount, configured with a trust domain,
+// admits a fresh X.509-SVID via the login round-trip, and a group grants the
+// requested role to its SPIFFE ID. This covers the dispatch loginData/credKey
+// wiring and the cert-branch ClientToken reset that the cache-hit test cannot
+// reach.
 func TestHandleTransparentAuth_Spiffe_LoginOnMiss_X509(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
@@ -104,10 +105,9 @@ func TestHandleTransparentAuth_Spiffe_LoginOnMiss_X509(t *testing.T) {
 
 	caCert, caKey, caPEM := spiffeMintCA(t)
 	write("trust-domain/example.org", map[string]any{"bundle_pem": caPEM})
-	write("role/api", map[string]any{
-		"trust_domain":       "example.org",
-		"allowed_spiffe_ids": "spiffe://example.org/ns/+/sa/+",
-		"token_policies":     "svid",
+	group := grantRole(t, core, ctx, testGrant{
+		Role: "api", Policies: []string{"svid"}, Mount: "auth/spiffe/",
+		Rule: map[string][]string{"trust_domain": {"example.org"}, "spiffe_id": {"spiffe://example.org/ns/*/sa/*"}},
 	})
 
 	provider := &mockTransparentModeProvider{transparentMode: true, autoAuthPath: "auth/spiffe/"}
@@ -119,6 +119,14 @@ func TestHandleTransparentAuth_Spiffe_LoginOnMiss_X509(t *testing.T) {
 	assert.Equal(t, "spiffe://example.org/ns/default/sa/api", req.TokenEntry().PrincipalID)
 	// Cert auth carries no bearer; the cold-login path must set ClientToken to the ID.
 	assert.Equal(t, req.TokenEntry().ID, req.ClientToken)
+	assert.Equal(t, "auth/spiffe/", req.TokenEntry().Admission.MountPath)
+
+	// The role is granted per request, by the group.
+	te := req.TokenEntry()
+	core.resolveRoleGrant(req, te, time.Now())
+	require.True(t, req.RoleGrant().Granted(), "denied: %s", req.RoleGrant().DeniedReason)
+	assert.Equal(t, "group:"+group, req.RoleGrant().GrantedBy)
+	assert.Equal(t, []string{"svid"}, te.Policies)
 }
 
 // spiffeJWTAuthority mints a JWT signing key + its JWKS trust-bundle for tdName.
@@ -160,11 +168,7 @@ func TestHandleTransparentAuth_Spiffe_LoginOnMiss_JWT(t *testing.T) {
 
 	key, kid, jwks := spiffeJWTAuthority(t, "example.org")
 	write("trust-domain/example.org", map[string]any{"bundle_json": jwks})
-	write("role/api", map[string]any{
-		"trust_domain":    "example.org",
-		"bound_audiences": "warden",
-		"token_policies":  "svid",
-	})
+	write("config", map[string]any{"bound_audiences": "warden"})
 
 	provider := &mockTransparentModeProvider{transparentMode: true, autoAuthPath: "auth/spiffe/"}
 	token := spiffeSignJWTSVID(t, key, kid, "spiffe://example.org/ns/default/sa/api", []string{"warden"}, time.Now().Add(30*time.Minute))

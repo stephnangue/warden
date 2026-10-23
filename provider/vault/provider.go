@@ -184,7 +184,8 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			AutoAuthPath:    parsedConfig.AutoAuthPath,
 			DefaultAuthRole: parsedConfig.DefaultAuthRole,
 			UserAuthPath:    parsedConfig.UserAuthPath,
-			UserAuthRole:    parsedConfig.UserAuthRole,
+
+			UserAuthRoleStored: parsedConfig.UserAuthRoleStored,
 		})
 
 		// Update transport if custom TLS config is set
@@ -224,7 +225,6 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 			CAData          string `json:"ca_data"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			UserAuthPath    string `json:"user_auth_path"`
-			UserAuthRole    string `json:"user_auth_role"`
 			DefaultAuthRole string `json:"default_role"`
 		}
 		if err := entry.DecodeJSON(&config); err != nil {
@@ -250,8 +250,9 @@ func (b *vaultBackend) Initialize(ctx context.Context) error {
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    config.AutoAuthPath,
 			UserAuthPath:    config.UserAuthPath,
-			UserAuthRole:    config.UserAuthRole,
 			DefaultAuthRole: config.DefaultAuthRole,
+
+			UserAuthRoleStored: framework.StoredUserAuthRole(entry),
 		})
 	}
 	return nil

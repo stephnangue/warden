@@ -514,14 +514,6 @@ func (f *JSONFormat) saltAuthResultField(ctx context.Context, authResult *AuthRe
 			}
 			authResult.PrincipalID = salted
 		}
-	case "credential_spec":
-		if authResult.CredentialSpec != "" {
-			salted, err := f.saltFn(ctx, authResult.CredentialSpec)
-			if err != nil {
-				return err
-			}
-			authResult.CredentialSpec = salted
-		}
 	}
 
 	return nil
@@ -765,13 +757,9 @@ func (f *JSONFormat) omitAuthResultField(authResult *AuthResult, parts []string)
 		authResult.TokenType = ""
 	case "principal_id":
 		authResult.PrincipalID = ""
-	case "role_name":
-		authResult.RoleName = ""
 	case "policies":
 		authResult.Policies = nil
 	case "token_ttl":
 		authResult.TokenTTL = 0
-	case "credential_spec":
-		authResult.CredentialSpec = ""
 	}
 }

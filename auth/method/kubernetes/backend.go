@@ -47,34 +47,31 @@ type KubernetesAuthConfig struct {
 
 	// Issuer, if set, gates login on the workload JWT's `iss` claim
 	// matching this value (cheap unverified parse, before the TokenReview
-	// round-trip). Per-mount issuer pinning is the right place to do this
-	// — the introspect aggregator stays config-agnostic.
+	// round-trip). It also bounds what discovery costs: without it, any
+	// JWT-shaped bearer costs one TokenReview per kubernetes target mount.
 	Issuer string `json:"issuer,omitempty"`
 
 	// DisableIssValidation lets operators opt out of the `iss` pre-filter
 	// even when Issuer is non-empty.
 	DisableIssValidation bool `json:"disable_iss_validation,omitempty"`
 
-	// TokenTTL is the default TTL for issued Warden tokens; per-role
-	// TokenTTL overrides this.
+	// TokenTTL is how long an admitted workload token is reused before it is
+	// reviewed again, capped by the token's own expiry.
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
 
-	// DefaultRole, if set, is used by transparent-mode flows when the
-	// caller doesn't specify a role.
-	DefaultRole string `json:"default_role,omitempty"`
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
 
 	// BoundAudiences are the audiences a workload token must carry for the
-	// mount to admit it, any one of them. Stored, read back and validated
-	// (no empty entry), but not used by role logins, which still send the
-	// role's audience to TokenReview; the role-free admission sends it as
-	// the TokenReview's spec.audiences.
+	// mount to admit it, any one of them, sent as the TokenReview's
+	// spec.audiences. Validated (no empty entry). Empty, the review checks
+	// the API server's own audience, which a config read warns about.
 	BoundAudiences []string `json:"bound_audiences,omitempty"`
 
 	// MaxAge bounds a workload token's age at admission, from its iat: one
-	// older, or without an iat, is not admitted. Zero is unset. Stored, read
-	// back and validated (not negative), but not used by role logins, which
-	// keep their role's max_age; the role-free admission enforces it, through
-	// helper.CheckMaxAge.
+	// older, or without an iat, is not admitted. Zero is unset. Validated
+	// (not negative) and enforced by admitToken, through helper.CheckMaxAge.
 	MaxAge time.Duration `json:"max_age,omitempty"`
 
 	// Facts: entity_kind, and the TokenReview fields the mount publishes
@@ -125,17 +122,13 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
 				"login",
-				"introspect/roles",
 			},
 		},
-		Paths: []*framework.Path{
+		Paths: append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
-			b.pathIntrospect(),
 			helper.AdmitPath(b.admit),
-		},
+		}, pathRoles()...),
 	}
 
 	// Release the TokenReview client's pooled connections on unmount/seal. The
@@ -177,6 +170,9 @@ func (b *kubernetesAuthBackend) setupConfig(ctx context.Context, conf map[string
 	if err := cfg.FactsConfig.Err(); err != nil {
 		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
 	}
+	if len(cfg.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", cfg.removed))
+	}
 	b.installConfig(cfg)
 	return nil
 }
@@ -207,6 +203,7 @@ func buildConfig(_ context.Context, conf map[string]any) (*KubernetesAuthConfig,
 	if err != nil {
 		return nil, err
 	}
+	cfg.removed = helper.RemovedConfigKeys(conf)
 
 	if cfg.KubernetesHost == "" {
 		return nil, fmt.Errorf("kubernetes_host is required")
@@ -238,7 +235,6 @@ func normalizedConfig(cfg *KubernetesAuthConfig) map[string]any {
 		"issuer":                 cfg.Issuer,
 		"disable_iss_validation": cfg.DisableIssValidation,
 		"token_ttl":              cfg.TokenTTL.String(),
-		"default_role":           cfg.DefaultRole,
 		"bound_audiences":        cfg.BoundAudiences,
 		"max_age":                cfg.MaxAge.String(),
 		"entity_kind":            cfg.EntityKind,

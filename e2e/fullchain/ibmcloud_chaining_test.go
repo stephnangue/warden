@@ -134,7 +134,7 @@ func setupIBMAPIKeyChain(t *testing.T, subj scalewaySubject) {
 	useJWTAgentLeg(t, ibmcloudEnv)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+ibmChainAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", ibmChainAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+ibmChainSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+ibmChainSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+ibmAPIKeySecretSpec, leaderPort, "")
@@ -160,10 +160,10 @@ func setupIBMAPIKeyChain(t *testing.T, subj scalewaySubject) {
 		`{"type":"ibmcloud_keys","source":"`+ibmChainSource+`","config":{}}`,
 		"create the chained bearer spec")
 
-	ibmMustWrite(t, "POST", "auth/jwt/role/"+ibmChainAgentRole, `{
-		"token_policies":["`+ibmcloudEnv.Policy()+`"],"cred_spec_name":"`+ibmChainSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", ibmChainAgentRole, h.Role{
+		Policies: []string{ibmcloudEnv.Policy()},
+		CredSpec: ibmChainSpec,
+	}, nil)
 }
 
 // TestIBMCloudChaining_SourceFetchesTheAPIKeyPerRequest is the whole feature in one

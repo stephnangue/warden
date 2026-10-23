@@ -450,81 +450,32 @@ func TestCertFingerprint(t *testing.T) {
 }
 
 // =============================================================================
-// Default Role Fallback Tests
+// A login selects no role
 // =============================================================================
 
-func TestHandleLogin_DefaultRoleFallback(t *testing.T) {
+// A login neither needs nor reads a role: none, an empty one, or one sent
+// anyway, admits alike.
+func TestHandleLogin_NoRole(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	clientCert := testClientCert(t, caCert, caKey, "test-agent")
 
-	t.Run("uses default_role when role is empty", func(t *testing.T) {
-		storage := newInmemStorage()
-		conf := &logical.BackendConfig{
-			Logger:      testLogger(),
-			StorageView: storage,
-		}
-		backend, err := Factory(context.Background(), conf)
+	b, _ := createTestBackend(t)
+	b.config = &CertAuthConfig{
+		TrustedCAPEM:   caPEM,
+		PrincipalClaim: "cn",
+		TokenTTL:       time.Hour,
+	}
+	b.config.caPool, _ = buildCAPool(caPEM)
+
+	for _, raw := range []map[string]any{{}, {"role": ""}, {"role": "explicit-role"}} {
+		resp, err := b.handleLogin(context.Background(),
+			&logical.Request{HTTPRequest: newCertHTTPRequest(t, clientCert)},
+			&framework.FieldData{Raw: raw, Schema: b.pathLogin().Fields})
 		require.NoError(t, err)
-		b := backend.(*certAuthBackend)
-		b.config = &CertAuthConfig{
-			TrustedCAPEM:   caPEM,
-			PrincipalClaim: "cn",
-			TokenTTL:       time.Hour,
-			DefaultRole:    "fallback-role",
-		}
-		b.config.caPool, _ = buildCAPool(caPEM)
-
-		req := &logical.Request{
-			HTTPRequest: newCertHTTPRequest(t, clientCert),
-		}
-		d := &framework.FieldData{
-			Raw: map[string]any{
-				"role": "",
-			},
-			Schema: b.pathLogin().Fields,
-		}
-
-		resp, err := b.handleLogin(context.Background(), req, d)
-		require.NoError(t, err)
-		require.NotNil(t, resp)
-		// Should NOT get "missing role" — should proceed past role check
-		if resp.Err != nil {
-			assert.NotContains(t, resp.Err.Error(), "missing role")
-		}
-	})
-
-	t.Run("missing role with no default_role returns error", func(t *testing.T) {
-		storage := newInmemStorage()
-		conf := &logical.BackendConfig{
-			Logger:      testLogger(),
-			StorageView: storage,
-		}
-		backend, err := Factory(context.Background(), conf)
-		require.NoError(t, err)
-		b := backend.(*certAuthBackend)
-		b.config = &CertAuthConfig{
-			TrustedCAPEM:   caPEM,
-			PrincipalClaim: "cn",
-			TokenTTL:       time.Hour,
-			DefaultRole:    "",
-		}
-
-		req := &logical.Request{
-			HTTPRequest: newCertHTTPRequest(t, clientCert),
-		}
-		d := &framework.FieldData{
-			Raw: map[string]any{
-				"role": "",
-			},
-			Schema: b.pathLogin().Fields,
-		}
-
-		resp, err := b.handleLogin(context.Background(), req, d)
-		require.NoError(t, err)
-		require.NotNil(t, resp)
-		assert.NotNil(t, resp.Err)
-		assert.Contains(t, resp.Err.Error(), "missing role")
-	})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "login %v: %v", raw, resp.Err)
+		assert.Nil(t, resp.Auth.Policies)
+		assert.NotContains(t, resp.Data, "role")
+	}
 }
 
 // newCertHTTPRequest creates an HTTP request with a client certificate in the
@@ -546,16 +497,10 @@ func TestX509Login_Regression(t *testing.T) {
 		"trusted_ca_pem":  caPEM,
 		"principal_claim": "cn",
 	}))
-	require.NoError(t, b.setRole(ctx, &CertRole{
-		Name:               "inventory",
-		AllowedCommonNames: []string{"inventory-*"},
-		TokenPolicies:      []string{"inv"},
-		TokenTTL:           "1h",
-	}))
 
 	clientCert := testClientCert(t, caCert, caKey, "inventory-svc")
 	req := &logical.Request{HTTPRequest: newCertHTTPRequest(t, clientCert)}
-	d := &framework.FieldData{Raw: map[string]any{"role": "inventory"}, Schema: b.pathLogin().Fields}
+	d := &framework.FieldData{Raw: map[string]any{}, Schema: b.pathLogin().Fields}
 	resp, err := b.handleLogin(ctx, req, d)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -574,10 +519,10 @@ func TestSetupCertConfig_RejectsSpiffeID(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid principal_claim")
 }
 
-// TestHandleLogin_SpiffeIDRoleClaimFailsClosed pins that a legacy role still
-// carrying principal_claim=spiffe_id (persisted via setRole, bypassing
-// validation) now fails closed at login rather than being coerced to uri_san.
-func TestHandleLogin_SpiffeIDRoleClaimFailsClosed(t *testing.T) {
+// TestHandleLogin_LegacyRoleClaimIgnored pins that a legacy role still carrying
+// principal_claim=spiffe_id (persisted via setRole, bypassing validation) is
+// never read: the principal comes from the mount's principal_claim.
+func TestHandleLogin_LegacyRoleClaimIgnored(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	b, ctx := createTestBackend(t)
 	require.NoError(t, b.setupCertConfig(ctx, map[string]any{"trusted_ca_pem": caPEM, "principal_claim": "cn"}))
@@ -596,5 +541,6 @@ func TestHandleLogin_SpiffeIDRoleClaimFailsClosed(t *testing.T) {
 	d := &framework.FieldData{Raw: map[string]any{"role": "legacy"}, Schema: b.pathLogin().Fields}
 	resp, err := b.handleLogin(ctx, req, d)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
+	assert.Equal(t, "agent", resp.Auth.PrincipalID)
 }

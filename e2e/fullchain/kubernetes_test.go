@@ -288,19 +288,15 @@ func TestKubernetes_AgentIdentityForwardsTheAgentsOwnToken(t *testing.T) {
 	agentJWT := h.GetDefaultJWT(t)
 
 	// The mount's own JWT agent role binds its default spec, so this needs one
-	// bound to the agent_identity variant instead.
+	// bound to the agent_identity variant instead, granted to agents of
+	// auth/jwt/. GrantRole fails here rather than as a chain 4xx below, which
+	// would blame the request for a missing fixture.
 	jwtRole := "fc-k8s-agentidentity"
-	// Checked rather than fired and forgotten: a role that failed to create would
-	// surface as a chain 4xx below, blaming the request for a missing fixture.
-	if status, body := h.APIRequest(t, "POST", "auth/jwt/role/"+jwtRole, leaderPort, `{
-		"token_policies":["`+kubernetesEnv.Policy()+`"],
-		"cred_spec_name":"`+kubernetesEnv.VariantSpec(k8sAgentVariant)+`",
-		"user_claim":"sub","token_ttl":3600}`); status >= 400 {
-		t.Fatalf("create the agent_identity jwt role = %d: %s", status, body)
-	}
-	t.Cleanup(func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+jwtRole, leaderPort, "")
-	})
+	h.GrantRole(t, leaderPort, "auth/jwt/", jwtRole, h.Role{
+		Policies: []string{kubernetesEnv.Policy()},
+		CredSpec: kubernetesEnv.VariantSpec(k8sAgentVariant),
+	}, nil)
+	t.Cleanup(func() { h.RevokeRole(t, leaderPort, "auth/jwt/", jwtRole) })
 
 	status, body, _ := h.ChainRequest(t, leaderPort, kubernetesEnv, h.ChainOpts{
 		AgentToken: agentJWT,

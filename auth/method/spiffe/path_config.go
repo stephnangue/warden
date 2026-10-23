@@ -19,22 +19,16 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeDurationSecond,
 			Description: "Default token TTL (default: 1h)",
 		},
-		"default_role": {
-			Type:        framework.TypeString,
-			Description: "Default role for transparent operations when no role is specified",
-		},
 		"bound_audiences": {
 			Type: framework.TypeCommaStringSlice,
-			Description: "Audiences a JWT-SVID must carry, any one of them. Stored for mount-level audience binding; " +
-				"logins do not use it yet (a role's bound_audiences still applies). " +
-				"No entry may be empty; an empty value clears the list.",
+			Description: "Audiences a JWT-SVID must carry, any one of them. Required when entity_kind is agent; " +
+				"X.509-SVIDs carry no audience. No entry may be empty.",
 		},
 		"max_age": {
 			Type: framework.TypeDurationSecond,
 			Description: "Maximum age of an SVID at admission, measured from its issue time (iat): a duration such as 10m, " +
 				"or a number of seconds. Applies to JWT-SVIDs; X.509-SVIDs carry no issue time and are not checked. " +
 				"JWT-SVIDs older than max_age, or without an issue time, are not admitted. " +
-				"Enforced from the role-free admission; role logins do not use it. " +
 				"0 or empty leaves it unset.",
 		},
 	}
@@ -48,27 +42,25 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 			logical.UpdateOperation: &framework.PathOperation{Callback: b.handleConfigWrite, Summary: "Configure SPIFFE authentication"},
 		},
 		HelpSynopsis: "Configure SPIFFE authentication",
-		HelpDescription: `Mount-level defaults. Trust domains are managed under trust-domain/, and roles under role/.
+		HelpDescription: `Mount-level defaults. Trust domains are managed under trust-domain/.
 
 'entity_kind' (agent or human, default agent) names what the mount admits.
 'facts' maps SVID fields to the fact names the mount publishes beyond its
 built-in facts (aud, path, spiffe_id, svid, trust_domain; svid is x509 or jwt,
 and aud holds a JWT-SVID's audiences); a write replaces the whole map.
-'bound_audiences' is stored for mount-level audience binding and not used by
-logins yet.
+'bound_audiences' are the audiences a JWT-SVID must carry; required on a mount
+that admits agents.
 'max_age' bounds a JWT-SVID's age at admission, from its iat: a JWT-SVID older
 than it, or without an iat, is not admitted. It applies to JWT-SVIDs;
-X.509-SVIDs carry no issue time and are not checked. It is enforced from the
-role-free admission, not by role logins.`,
+X.509-SVIDs carry no issue time and are not checked.`,
 	}
 }
 
 // unconfigured is what a mount with no config runs with, as a config read
 // renders it: the agent kind with the built-in facts only (the naming Factory
-// publishes), no audiences, no default role, no max_age, and a token_ttl of
-// zero, which calculateTTL reads as no cap from the mount (the role's TTL and
-// the SVID's lifetime still apply). It is never written, so reads share it
-// without a lock.
+// publishes), no audiences, no max_age, and a token_ttl of zero, which
+// calculateTTL reads as no cap from the mount (the SVID's lifetime still
+// applies). It is never written, so reads share it without a lock.
 var unconfigured = &SPIFFEAuthConfig{FactsConfig: helper.FactsConfig{EntityKind: logical.EntityKindAgent}}
 
 func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -79,16 +71,17 @@ func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.R
 	if config == nil {
 		config = unconfigured
 	}
+	data := map[string]any{
+		"token_ttl":       config.TokenTTL.String(),
+		"bound_audiences": slices.Clone(config.BoundAudiences),
+		"max_age":         config.MaxAge.String(),
+		"entity_kind":     config.EntityKind,
+		"facts":           maps.Clone(config.Facts),
+	}
+	helper.SetWarnings(data, helper.RemovedConfigWarnings(config.removed))
 	return &logical.Response{
 		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"token_ttl":       config.TokenTTL.String(),
-			"default_role":    config.DefaultRole,
-			"bound_audiences": slices.Clone(config.BoundAudiences),
-			"max_age":         config.MaxAge.String(),
-			"entity_kind":     config.EntityKind,
-			"facts":           maps.Clone(config.Facts),
-		},
+		Data:       data,
 	}, nil
 }
 
@@ -99,6 +92,13 @@ func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.R
 func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
+
+	// Keys of the role era are refused, not ignored: the write would otherwise
+	// succeed while doing nothing the operator asked for. The stored config
+	// never carries them, so this write also removes any it still did.
+	if err := helper.RefuseRemovedConfigKeys(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 
 	conf := make(map[string]any)
 
@@ -117,7 +117,6 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 			}
 		}
 		conf["token_ttl"] = b.config.TokenTTL
-		conf["default_role"] = b.config.DefaultRole
 		conf["bound_audiences"] = b.config.BoundAudiences
 		conf["max_age"] = b.config.MaxAge
 		conf["entity_kind"] = b.config.EntityKind
@@ -148,6 +147,11 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 	// load only ever see a config that compiled here.
 	if err := helper.FactsWriteError(&config.FactsConfig, factsTouched); err != nil {
 		return &logical.Response{StatusCode: http.StatusBadRequest, Err: err}, nil
+	}
+	// An agent mount binds an audience; a stored config without one admits
+	// no JWT-SVID, and a write cannot create one.
+	if helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences) != nil {
+		return &logical.Response{StatusCode: http.StatusBadRequest, Err: helper.AgentAudiencesWriteError()}, nil
 	}
 
 	// Persist normalized config before installing it.

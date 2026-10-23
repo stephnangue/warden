@@ -48,8 +48,8 @@ const mcpServerVersion = "1.0.0"
 // header and forwarded client certificate). The SDK does not hand the raw
 // request to handlers — it surfaces only
 // headers via req.Extra.Header and, notably, not the TLS client certificate —
-// so credential detection (detectIntrospectCredentialFormat) needs the
-// request threaded through the context.
+// so discovery, which presents the caller's credential to the auth mounts,
+// needs the request threaded through the context.
 type mcpRequestKey struct{}
 
 // maxSysMCPBody caps a discovery request body. Every request this endpoint
@@ -107,8 +107,11 @@ func bufferMCPRequestBody(r *http.Request) error {
 	return nil
 }
 
+// withMCPRequest stashes r in ctx, with an empty discovery memo: every handler
+// serving r shares one discovery (requestDiscovery).
 func withMCPRequest(ctx context.Context, r *http.Request) context.Context {
-	return context.WithValue(ctx, mcpRequestKey{}, r)
+	ctx = context.WithValue(ctx, mcpRequestKey{}, r)
+	return context.WithValue(ctx, discoveryMemoKey{}, &discoveryMemo{})
 }
 
 // mcpRequestFromContext recovers the inbound *http.Request stashed by the
@@ -164,7 +167,7 @@ func (c *Core) MCPServerHandler() http.Handler {
 		// Resolve the caller's namespace the same way transparent callers
 		// select one: the X-Warden-Namespace header. One fixed route serves
 		// every namespace; a root caller omits the header, a caller in
-		// team-data sends "team-data". The tool handlers' fan-out and
+		// team-data sends "team-data". The tool handlers' discovery and
 		// mount lookups then resolve in this namespace.
 		nsHeader := r.Header.Get("X-Warden-Namespace")
 		ns, _ := c.namespaceStore.ResolveNamespaceFromRequest(nsHeader, "sys/mcp")
@@ -178,7 +181,7 @@ func (c *Core) MCPServerHandler() http.Handler {
 		// detection). The request's own context already carries the
 		// Authorization header and the forwarded client cert — the listener's
 		// certForwardingMiddleware injected the latter before routing — so
-		// stashing r preserves both for detectIntrospectCredentialFormat.
+		// stashing r preserves both for discovery.
 		// JSONResponse does not make every response here a buffered one: the
 		// SDK forces SSE for subscriptions/listen, which has no synchronous
 		// result and stays open until the client cancels, and an SDK client
@@ -218,12 +221,12 @@ type listRolesInput struct{}
 
 // listRolesOutput is the structured output for the list_roles tool.
 type listRolesOutput struct {
-	Roles    []mcpRole `json:"roles" jsonschema:"roles the presented identity can assume across the namespace's auth mounts"`
-	Warnings []string  `json:"warnings" jsonschema:"per-mount failure messages; may be empty"`
+	Roles    []mcpRole `json:"roles" jsonschema:"roles the presented identity can assume in this namespace"`
+	Warnings []string  `json:"warnings" jsonschema:"auth mounts that could not decide, and role fields that could not be resolved; may be empty"`
 }
 
 // registerListRolesTool wires the list_roles tool onto the MCP server. It
-// reuses the sys/introspect/roles aggregator in full and resolves each role's
+// runs the same discovery as sys/introspect/roles and resolves each role's
 // provider_path and skill (resolveDiscovery).
 func (c *Core) registerListRolesTool(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{

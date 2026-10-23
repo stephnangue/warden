@@ -187,8 +187,9 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    parsedConfig.AutoAuthPath,
 			UserAuthPath:    parsedConfig.UserAuthPath,
-			UserAuthRole:    parsedConfig.UserAuthRole,
 			DefaultAuthRole: parsedConfig.DefaultAuthRole,
+
+			UserAuthRoleStored: parsedConfig.UserAuthRoleStored,
 		})
 	}
 
@@ -219,7 +220,6 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			CAData          string `json:"ca_data"`
 			AutoAuthPath    string `json:"auto_auth_path"`
 			UserAuthPath    string `json:"user_auth_path"`
-			UserAuthRole    string `json:"user_auth_role"`
 			DefaultAuthRole string `json:"default_role"`
 			AllowedHosts    any    `json:"allowed_host_suffixes"`
 		}
@@ -260,8 +260,9 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
 			AutoAuthPath:    config.AutoAuthPath,
 			UserAuthPath:    config.UserAuthPath,
-			UserAuthRole:    config.UserAuthRole,
 			DefaultAuthRole: config.DefaultAuthRole,
+
+			UserAuthRoleStored: framework.StoredUserAuthRole(entry),
 		})
 	} else {
 		// No persisted config — persist the defaults so a newly enabled
@@ -276,7 +277,6 @@ func (b *gcpBackend) Initialize(ctx context.Context) error {
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
-			"user_auth_role":  tc.UserAuthRole,
 
 			framework.HostAllowlistKey: b.configuredHostAllowlist(),
 		})
@@ -326,6 +326,8 @@ func (b *gcpBackend) handleTransparentGatewayStreaming(ctx context.Context, req 
 func ValidateConfig(config map[string]any) error {
 	if err := framework.ValidateAllowedKeys(config,
 		"max_body_size", "timeout", "tls_skip_verify", "ca_data",
+		// user_auth_role was removed; a mount enabled with it still loads and
+		// fails closed on user credentials (framework.HasUserAuthRole).
 		"auto_auth_path", "default_role", "user_auth_path", "user_auth_role",
 		framework.HostAllowlistKey); err != nil {
 		return err
@@ -337,8 +339,7 @@ func ValidateConfig(config map[string]any) error {
 		return err
 	}
 	// Validate the secondary (user) auth fields at mount-enable too, not only
-	// on the config-write endpoint, so a role without a path is rejected rather
-	// than silently ignored at runtime.
+	// on the config-write endpoint.
 	if err := framework.ValidateUserAuthConfig(config); err != nil {
 		return err
 	}

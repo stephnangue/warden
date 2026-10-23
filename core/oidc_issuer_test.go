@@ -1126,15 +1126,16 @@ type profileRoster struct {
 // tripwire is blind to exactly the case it exists for.
 var assertionRosters = map[string]profileRoster{
 	// The mint below discloses a user, so this is the DELEGATION branch: the top
-	// level is the user and act the agent. The no-user branch emits a subset of the
-	// same top-level names for the agent (sub, warden_role, warden_metadata), so
-	// each coverage below names both principals where a name serves both.
+	// level is the user and act the agent. The no-user branch emits the agent's
+	// sub and warden_metadata at the top level, so each coverage below names both
+	// principals where a name serves both, and the agent's warden_role, which in
+	// this branch rides act (covered there): a user runs under no role.
 	credential.DefaultAssertionProfileName: {
 		// No warden_sub, warden_user or warden_auth_mount, and no warden_namespace at
 		// the agent's level: its composite sub carries the namespace.
 		claims: []string{
 			"act", "aud", "exp", "iat", "iss", "jti", "nbf", "sub",
-			"warden_metadata", "warden_namespace", "warden_resource", "warden_role",
+			"warden_metadata", "warden_namespace", "warden_resource",
 		},
 		coverage: map[string]string{
 			// Volatile or constant by design — the reason cacheIdentity exists at
@@ -1156,16 +1157,13 @@ var assertionRosters = map[string]profileRoster{
 			"act": "the agent's sub via cacheIdentity's first fragment (wardenSubject), its role via the " +
 				"\"role=\" fragment, its metadata via the metadata fingerprint, the nested user chain via " +
 				"the \":u:\" token-id dimension",
-			// The user's role — a transparent user token's id hashes the role name —
-			// or, with no user, the agent's.
-			"warden_role": "the user via the \":u:\" token-id dimension (the user's role); " +
-				"the agent via cacheIdentity's \"role=\" fragment",
 			// The user's namespace, fixed for the life of the user's token entry.
 			"warden_namespace": "the \":u:\" token-id dimension on the manager's cache keys (the user's namespace)",
 			"warden_resource":  "cacheIdentity's \"res=\" fragment",
-			// The user's projected claims, deliberately not in cacheIdentity (see
+			// The user's projected claims, rendered per request from the user
+			// mount's naming, so keyed by their own fingerprint (see
 			// buildAssertionSetup); with no user, the agent's projected metadata.
-			"warden_metadata": "the user via the \":u:\" token-id dimension on the manager's cache keys; " +
+			"warden_metadata": "the user via cacheIdentity's \"user=\" fragment; " +
 				"the agent via cacheIdentity's metadata fingerprint",
 		},
 	},

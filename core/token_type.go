@@ -71,26 +71,25 @@ type TransparentTokenType interface {
 	TokenType
 
 	// LookupValue produces the deterministic input that ComputeID hashes
-	// into the byID-cache key. Including mountAccessor in the input
+	// into the byID-cache key: one key per (mount, credential), whatever
+	// role a request asks for. Including mountAccessor in the input
 	// prevents cache contamination across two mounts of the same auth
-	// type with overlapping role names + the same credential.
-	LookupValue(credential, mountAccessor, role string) string
+	// type presented the same credential.
+	LookupValue(credential, mountAccessor string) string
 
 	// IsTransparent always returns true; the method exists so the
 	// registry can ask "is this transparent?" without callers needing
 	// to maintain a hardcoded type list.
 	IsTransparent() bool
 
-	// CredentialFormat reports the discovery-level credential kind this
-	// type accepts. Today's values: "jwt" (generic JWT bearer, validated
-	// by JWKS/OIDC discovery), "cert" (TLS client cert), "k8s_sa_jwt"
-	// (Kubernetes SA JWT, validated by TokenReview), future "stsv4"
-	// (AWS IAM signed STS request), etc.
+	// CredentialFormat reports the credential kind this type accepts.
+	// Today's values: "jwt" (generic JWT bearer, validated by JWKS/OIDC
+	// discovery), "cert" (TLS client cert), "k8s_sa_jwt" (Kubernetes SA
+	// JWT, validated by TokenReview), "spiffe" (an X.509-SVID or a
+	// JWT-SVID), future "stsv4" (AWS IAM signed STS request), etc.
 	//
-	// Granularity matters: the introspect aggregator uses exact-match
-	// filtering on this value to avoid fan-out to mounts that can't
-	// authenticate the caller's credential. performImplicitAuth groups
-	// same-wire-format values (e.g. "jwt" and "k8s_sa_jwt" share JWT
-	// bearer extraction) inside its dispatch switch.
+	// performImplicitAuth dispatches on it to extract the credential from
+	// the request, grouping same-wire-format values (e.g. "jwt" and
+	// "k8s_sa_jwt" share JWT bearer extraction).
 	CredentialFormat() string
 }

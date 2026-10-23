@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -8,16 +9,69 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
+// Messages of the refusal of a transparent request that selects no role. The
+// gateway path also reads the provider's default_role; transparent operations
+// on other paths have no provider, so only the query parameter and the header
+// select a role there. An access backend's access paths take the role the same
+// way: it has no default_role.
+const (
+	noRoleSelectedGateway    = "no role selected: put the role in the URL (role/<name>/), set X-Warden-Role, or set the provider's default_role"
+	noRoleSelectedOperations = "no role selected: set the role query parameter (?role=<name>) or X-Warden-Role"
+	noRoleSelectedAccess     = noRoleSelectedOperations
+)
+
+// errNoRoleSelected refuses implicit auth for a request that selects no role,
+// before its credential is admitted. Callers answer it with 400 and the
+// message of their path.
+var errNoRoleSelected = errors.New("no role selected")
+
+// errNoImplicitCredential refuses implicit auth for a request that carries no
+// credential at all (no token, no client certificate). It is answered 401
+// whether or not a role is selected: the client has to authenticate first,
+// and a 401 is what starts that (an OAuth challenge, git's Basic retry).
+var errNoImplicitCredential = errors.New("no credential presented")
+
+// errHumanMountOnAgentLeg refuses implicit auth for the agent through a mount
+// whose entity kind is human.
+var errHumanMountOnAgentLeg = errors.New("agent leg cannot admit through a human mount")
+
+// implicitAuthFailure is the response to a failed implicit auth on the agent
+// leg: 400 for a request that selects no role (noRole is the path's message),
+// 401 for any other failure.
+func implicitAuthFailure(err error, noRole string) *logical.Response {
+	if errors.Is(err, errNoRoleSelected) {
+		return logical.ErrorResponse(logical.ErrBadRequest(noRole))
+	}
+	return logical.ErrorResponse(logical.ErrUnauthorized(err.Error()))
+}
+
+// providerImplicitAuthFailure is implicitAuthFailure on a provider's
+// transparent surface (a gateway path or an access backend's access path),
+// noRole being that surface's message. A git smart-HTTP request that selects
+// no role is answered 401 rather than 400: git sends the role as the Basic
+// username, and only after a challenge, so a 400 would end the exchange where
+// a 401 makes git retry with one. Either way a git request gets the Basic
+// challenge.
+func providerImplicitAuthFailure(req *logical.Request, err error, noRole string) *logical.Response {
+	resp := implicitAuthFailure(err, noRole)
+	if errors.Is(err, errNoRoleSelected) && isGitSmartHTTP(req) {
+		resp = logical.ErrorResponse(logical.ErrUnauthorized(noRole))
+	}
+	attachGitBasicChallenge(req, resp)
+	return resp
+}
+
 // takesRoleGrant reports whether te takes its role per request rather than
-// carrying one: a token an auth mount issued (it names the mount) with no role
-// of its own. Every login that names a role, and every token reloaded from
-// storage, carries the role it was issued for; root and other tokens no mount
-// issued name no mount. Neither qualifies, and both keep authorizing exactly as
-// before.
+// carrying one: a token an auth mount issued (it names the mount). No token is
+// issued with a role; a token reloaded from storage names its mount but has
+// lost its admission, and is refused. Root and other tokens no mount issued
+// name no mount: they do not qualify and keep authorizing with the policies
+// they were issued.
 //
 // A qualifying token is an admission token. One without an admission (a token
-// of that shape built any other way) qualifies too and is refused, never
-// treated as a role token.
+// of that shape built any other way) qualifies too and is refused. A role
+// written on a per-request copy (RoleName) is this function's own result,
+// never an input: the check runs before the projection.
 func takesRoleGrant(te *logical.TokenEntry) bool {
 	return te.MountAccessor != "" && te.RoleName == ""
 }
@@ -98,6 +152,18 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	te.CredentialSpec = role.CredSpecName
 }
 
+// withholdRoleGrant is resolveRoleGrant for a check that renders no verdict (a
+// login): it records no grant on req, and a token that takes its role per
+// request keeps no policies and no spec, as an ungranted one would. te must be
+// this request's own copy of the token entry, as for resolveRoleGrant.
+func withholdRoleGrant(req *logical.Request, te *logical.TokenEntry) {
+	req.ClearRoleGrant()
+	if takesRoleGrant(te) {
+		te.Policies = nil
+		te.CredentialSpec = ""
+	}
+}
+
 // grantGroups returns the published groups of namespace nsID: none when the
 // namespace has none or the store is not loaded (a standby, a sealed node), so
 // nothing is granted there.
@@ -147,7 +213,7 @@ func roleRefusal(rg *logical.RoleGrant, te *logical.TokenEntry) *ErrRoleNotGrant
 	var msg string
 	switch rg.DeniedReason {
 	case logical.RoleDeniedNoRole:
-		msg = "no role selected: put the role in the URL (role/<name>/), set X-Warden-Role, or set the provider's default_role"
+		msg = noRoleSelectedGateway
 	case logical.RoleDeniedNotFound:
 		msg = fmt.Sprintf("role %q not found", rg.RoleName)
 	case logical.RoleDeniedNotAssumable:

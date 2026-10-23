@@ -52,14 +52,33 @@ const (
 	// cannot leave state for each other.
 	FullChainUserAuthMount = "auth/fullchain-user-jwt/"
 
-	// FullChainUserAuthRole is the role user credentials are validated under.
-	FullChainUserAuthRole = "e2e-fullchain-user"
-
-	// FullChainAgentCN is the common name on agent certificates. It must match
-	// the allowed_common_names pattern every full-chain cert role is created
-	// with.
+	// FullChainAgentCN is the common name on agent certificates. Every
+	// full-chain role granted at auth/cert/ is granted to this CN.
 	FullChainAgentCN = "agent-fullchain"
 )
+
+// FullChainAgentRule is the rule every full-chain role granted at auth/cert/
+// carries: the agent certificate's CN.
+var FullChainAgentRule = Rule{"cn": {FullChainAgentCN}}
+
+// WriteFullChainUserAuthConfig writes the full-chain user auth mount's whole
+// configuration: Hydra's issuer, the audience the suites' tokens carry, a human
+// entity kind, and facts (none when nil), which become the user's metadata.
+func WriteFullChainUserAuthConfig(t *testing.T, port int, facts map[string]string) {
+	t.Helper()
+	if facts == nil {
+		facts = map[string]string{}
+	}
+	mustAPI(t, port, "PUT", "auth/fullchain-user-jwt/config", mustJSON(t, map[string]any{
+		"mode":               "oidc",
+		"oidc_discovery_url": HydraIssuer,
+		"bound_issuer":       HydraIssuer,
+		"bound_audiences":    []string{HydraAudience},
+		"user_claim":         "sub",
+		"entity_kind":        "human",
+		"facts":              facts,
+	}), "configure fullchain-user-jwt auth")
+}
 
 // ProviderEnv describes one provider mount under test: where its upstream is,
 // what credential it mints, and which header the mint is expected to land in.
@@ -128,7 +147,7 @@ type ProviderEnv struct {
 	CredConfig map[string]string
 
 	// Variants are additional credential specs on the same mount, each with its
-	// own cert role. A credential extractor with optional fields has several
+	// own role granted to the agent certificate. A credential extractor with optional fields has several
 	// positive branches, and a role binds exactly one spec — so covering them
 	// means several specs, but not several mounts. Keyed by variant name.
 	//
@@ -137,7 +156,7 @@ type ProviderEnv struct {
 	Variants map[string]map[string]string
 }
 
-// CertRole is the cert-auth role the agent authenticates under.
+// CertRole is the role the agent certificate is granted at auth/cert/.
 func (p ProviderEnv) CertRole() string { return p.Mount + "-agent" }
 
 // Policy is the CBP policy granting gateway access to the mount.
@@ -146,17 +165,18 @@ func (p ProviderEnv) Policy() string { return p.Mount + "-access" }
 // Source is the credential source backing the mount.
 func (p ProviderEnv) Source() string { return p.Mount + "-src" }
 
-// Spec is the credential spec the cert role mints from.
+// Spec is the credential spec CertRole mints from.
 func (p ProviderEnv) Spec() string { return p.Mount + "-cred" }
 
 // VariantSpec is the credential spec for a named variant.
 func (p ProviderEnv) VariantSpec(name string) string { return p.Mount + "-cred-" + name }
 
-// VariantRole is the cert role bound to a named variant's spec. Pass it as
+// VariantRole is the role bound to a named variant's spec, granted to the
+// agent certificate. Pass it as
 // ChainOpts.Role to select that variant.
 func (p ProviderEnv) VariantRole(name string) string { return p.Mount + "-agent-" + name }
 
-// DenyRole authenticates the same certificate but carries a policy with no
+// DenyRole is granted to the same certificate but carries a policy with no
 // gateway capability, so a request under it must be refused before it is
 // forwarded. Pass it as ChainOpts.Role.
 func (p ProviderEnv) DenyRole() string { return p.Mount + "-agent-denied" }
@@ -177,8 +197,8 @@ const MCPUnrestricted = `  methods   { allowed = ["*"] }
   resources { allowed = ["*"] }
   prompts   { allowed = ["*"] }`
 
-// JWTAgentRole authenticates the agent by bearer token instead of certificate.
-// Needed for every shape where the agent arrives in a header — the dedicated
+// JWTAgentRole is granted to agents of auth/jwt/, which present a bearer token
+// instead of a certificate. Needed for every shape where the agent arrives in a header — the dedicated
 // agent channel, or a provider's own native channel — because those carry a
 // token, and a mount whose agent leg is auth/cert cannot validate one.
 func (p ProviderEnv) JWTAgentRole() string { return p.Mount + "-jwt-agent" }
@@ -330,19 +350,14 @@ func SetupFullChainCommon(t *testing.T, port int) (caCertPEM string, caKey *ecds
 	mustAPI(t, port, "POST", "sys/auth/fullchain-user-jwt", `{"type":"jwt"}`, "mount fullchain-user-jwt auth")
 	time.Sleep(time.Second)
 
-	mustAPI(t, port, "PUT", "auth/fullchain-user-jwt/config",
-		fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":%q,"bound_issuer":%q}`, HydraIssuer, HydraIssuer),
-		"configure fullchain-user-jwt auth")
-
-	mustAPI(t, port, "POST", "auth/fullchain-user-jwt/role/"+FullChainUserAuthRole,
-		`{"user_claim":"sub","token_ttl":3600}`, "create fullchain user role")
+	WriteFullChainUserAuthConfig(t, port, nil)
 
 	return caCertPEM, caKey
 }
 
 // SetupFullChainProvider builds one provider mount pointed at upstreamURL, with
-// a local credential source so the mint needs no upstream of its own, and a cert
-// role bound to the resulting spec.
+// a local credential source so the mint needs no upstream of its own, and a
+// role bound to the resulting spec, granted to the agent certificate.
 func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p ProviderEnv) {
 	t.Helper()
 
@@ -361,7 +376,6 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 		"tls_skip_verify": true,
 		"auto_auth_path":  "auth/cert/",
 		"user_auth_path":  FullChainUserAuthMount,
-		"user_auth_role":  FullChainUserAuthRole,
 	}
 	for k, v := range p.ExtraConfig {
 		cfg[k] = v
@@ -405,14 +419,8 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 		tokenPolicies = append(tokenPolicies, p.MCPPolicy())
 	}
 
-	mustAPI(t, port, "POST", "auth/cert/role/"+p.CertRole(),
-		mustJSON(t, map[string]any{
-			"allowed_common_names": []string{FullChainAgentCN},
-			"token_policies":       tokenPolicies,
-			"cred_spec_name":       p.Spec(),
-			"token_ttl":            3600,
-		}),
-		"create cert role for "+p.Mount)
+	GrantRole(t, port, "auth/cert/", p.CertRole(),
+		Role{Policies: tokenPolicies, CredSpec: p.Spec()}, FullChainAgentRule)
 
 	// The denial counterpart: same certificate, same credential spec, a policy
 	// that grants an unrelated path. Authentication therefore succeeds and only
@@ -424,26 +432,12 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 		}),
 		"create deny policy for "+p.Mount)
 
-	mustAPI(t, port, "POST", "auth/cert/role/"+p.DenyRole(),
-		mustJSON(t, map[string]any{
-			"allowed_common_names": []string{FullChainAgentCN},
-			"token_policies":       []string{p.DenyPolicy()},
-			"cred_spec_name":       p.Spec(),
-			"token_ttl":            3600,
-		}),
-		"create deny cert role for "+p.Mount)
+	GrantRole(t, port, "auth/cert/", p.DenyRole(),
+		Role{Policies: []string{p.DenyPolicy()}, CredSpec: p.Spec()}, FullChainAgentRule)
 
-	// The bearer-agent counterpart. Recreated rather than created, because
-	// auth/jwt/ is set up by the suite as a whole and survives our teardown.
-	APIRequest(t, "DELETE", "auth/jwt/role/"+p.JWTAgentRole(), port, "")
-	mustAPI(t, port, "POST", "auth/jwt/role/"+p.JWTAgentRole(),
-		mustJSON(t, map[string]any{
-			"token_policies": tokenPolicies,
-			"cred_spec_name": p.Spec(),
-			"user_claim":     "sub",
-			"token_ttl":      3600,
-		}),
-		"create jwt agent role for "+p.Mount)
+	// The bearer-agent counterpart, granted to every agent auth/jwt/ admits.
+	GrantRole(t, port, "auth/jwt/", p.JWTAgentRole(),
+		Role{Policies: tokenPolicies, CredSpec: p.Spec()}, nil)
 
 	for name, cfg := range p.Variants {
 		if p.VariantRole(name) == p.DenyRole() {
@@ -457,14 +451,8 @@ func SetupFullChainProvider(t *testing.T, port int, upstreamURL string, p Provid
 			}),
 			"create credential spec "+name+" for "+p.Mount)
 
-		mustAPI(t, port, "POST", "auth/cert/role/"+p.VariantRole(name),
-			mustJSON(t, map[string]any{
-				"allowed_common_names": []string{FullChainAgentCN},
-				"token_policies":       tokenPolicies,
-				"cred_spec_name":       p.VariantSpec(name),
-				"token_ttl":            3600,
-			}),
-			"create cert role "+name+" for "+p.Mount)
+		GrantRole(t, port, "auth/cert/", p.VariantRole(name),
+			Role{Policies: tokenPolicies, CredSpec: p.VariantSpec(name)}, FullChainAgentRule)
 	}
 }
 
@@ -509,19 +497,11 @@ const JWTAgentPath = "auth/jwt/"
 func SetFullChainLegs(t *testing.T, port int, upstreamURL string, p ProviderEnv, autoAuthPath, userAuthPath string) {
 	t.Helper()
 
-	// user_auth_role is always written, empty when opting out: config writes
-	// merge into the stored config, so clearing the path while leaving a role
-	// behind is rejected as "user_auth_role requires user_auth_path".
-	role := ""
-	if userAuthPath != "" {
-		role = FullChainUserAuthRole
-	}
 	cfg := map[string]any{
 		p.URLKey:          upstreamURL,
 		"tls_skip_verify": true,
 		"auto_auth_path":  autoAuthPath,
 		"user_auth_path":  userAuthPath,
-		"user_auth_role":  role,
 	}
 	for k, v := range p.ExtraConfig {
 		cfg[k] = v
@@ -969,13 +949,13 @@ func FullChainUserJWT(t *testing.T) string {
 func TeardownFullChainProviderBestEffort(port int, p ProviderEnv) {
 	del := bestEffortDeleter(port)
 	for name := range p.Variants {
-		del("auth/cert/role/" + p.VariantRole(name))
+		RevokeRoleBestEffort(port, "auth/cert/", p.VariantRole(name))
 		del("sys/cred/specs/" + p.VariantSpec(name))
 	}
-	del("auth/jwt/role/" + p.JWTAgentRole())
-	del("auth/cert/role/" + p.DenyRole())
+	RevokeRoleBestEffort(port, "auth/jwt/", p.JWTAgentRole())
+	RevokeRoleBestEffort(port, "auth/cert/", p.DenyRole())
 	del("sys/policies/cbp/" + p.DenyPolicy())
-	del("auth/cert/role/" + p.CertRole())
+	RevokeRoleBestEffort(port, "auth/cert/", p.CertRole())
 	del("sys/policies/cbp/" + p.Policy())
 	del("sys/policies/mcp/" + p.MCPPolicy())
 	del("sys/cred/specs/" + p.Spec())
@@ -986,7 +966,6 @@ func TeardownFullChainProviderBestEffort(port int, p ProviderEnv) {
 // TeardownFullChainCommonBestEffort removes the shared auth mounts.
 func TeardownFullChainCommonBestEffort(port int) {
 	del := bestEffortDeleter(port)
-	del("auth/fullchain-user-jwt/role/" + FullChainUserAuthRole)
 	del("sys/auth/fullchain-user-jwt")
 	del("sys/auth/cert")
 	time.Sleep(time.Second)

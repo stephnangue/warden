@@ -40,20 +40,20 @@ func TestTransparentOps_JWTGatewayAccess(t *testing.T) {
 }
 
 // TestTransparentOps_JWTDefaultRole verifies that JWT transparent ops work
-// when no X-Warden-Role is specified, falling back to default_role (T-TO03).
+// when no X-Warden-Role is specified, falling back to the provider's
+// default_role, which names a namespace role (T-TO03).
 func TestTransparentOps_JWTDefaultRole(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)
 
-	// Configure default_role on JWT auth method
-	status, body := h.APIRequest(t, "PUT", "auth/jwt/config", port,
+	// Configure default_role on the provider
+	status, body := h.APIRequest(t, "POST", "vault/config", port,
 		`{"default_role":"e2e-reader"}`)
 	if status != 200 && status != 204 {
 		t.Fatalf("T-TO03: failed to set default_role (status %d): %s", status, string(body))
 	}
 	// Clean up: remove default_role after test
-	defer h.APIRequest(t, "PUT", "auth/jwt/config", port,
-		`{"default_role":""}`)
+	defer h.APIRequest(t, "POST", "vault/config", port, `{"default_role":""}`)
 
 	// Request without X-Warden-Role — should fall back to default_role
 	status, body = h.TransparentOpsRequestNoRole(t, "GET",
@@ -65,22 +65,26 @@ func TestTransparentOps_JWTDefaultRole(t *testing.T) {
 	}
 }
 
-// TestTransparentOps_JWTNoRoleNoDefault verifies that JWT transparent ops fail
-// when no role is specified and no default_role is configured (T-TO03b).
+// TestTransparentOps_JWTNoRoleNoDefault verifies that JWT transparent ops are
+// refused with 400 when no role is selected and the provider has no
+// default_role (T-TO03b).
 func TestTransparentOps_JWTNoRoleNoDefault(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	jwt := h.GetDefaultJWT(t)
 
 	// Ensure no default_role is configured
-	h.APIRequest(t, "PUT", "auth/jwt/config", port, `{"default_role":""}`)
+	h.APIRequest(t, "POST", "vault/config", port, `{"default_role":""}`)
 
 	// Request without X-Warden-Role and no default_role
-	status, _ := h.TransparentOpsRequestNoRole(t, "GET",
+	status, body := h.TransparentOpsRequestNoRole(t, "GET",
 		"vault/gateway/v1/secret/data/e2e/app-config",
 		port, jwt)
 
-	if status != 401 && status != 403 && status != 400 {
-		t.Fatalf("T-TO03b: expected 401/403/400 without role, got %d", status)
+	if status != 400 {
+		t.Fatalf("T-TO03b: expected 400 without role, got %d: %s", status, body)
+	}
+	if !strings.Contains(string(body), "no role selected") {
+		t.Fatalf("T-TO03b: expected \"no role selected\", got: %s", body)
 	}
 }
 
@@ -112,7 +116,8 @@ func TestTransparentOps_CertGatewayAccess(t *testing.T) {
 }
 
 // TestTransparentOps_CertDefaultRole verifies that cert transparent ops work
-// when no X-Warden-Role is specified, falling back to default_role (T-TO05).
+// when no X-Warden-Role is specified, falling back to the provider's
+// default_role (T-TO05).
 func TestTransparentOps_CertDefaultRole(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
@@ -120,9 +125,9 @@ func TestTransparentOps_CertDefaultRole(t *testing.T) {
 	caCertPEM, caKey := h.SetupCertVaultEnv(t, port)
 	defer h.TeardownCertVaultEnv(t, port)
 
-	// Configure default_role on cert auth method
-	status, body := h.APIRequest(t, "PUT", "auth/cert/config", port,
-		`{"default_role":"e2e-cert-reader"}`)
+	// Configure default_role on the provider
+	status, body := h.APIRequest(t, "POST", "vault-cert/config", port,
+		`{"default_role":"`+h.CertReaderRole+`"}`)
 	if status != 200 && status != 204 {
 		t.Fatalf("T-TO05: failed to set default_role (status %d): %s", status, string(body))
 	}
@@ -242,21 +247,25 @@ func TestTransparentOps_StandbyForwarding(t *testing.T) {
 	}
 }
 
-// TestTransparentOps_DefaultRoleConfigReadback verifies that default_role config
-// is persisted and can be read back (T-TO11).
+// TestTransparentOps_DefaultRoleConfigReadback verifies that default_role lives
+// on the provider, persisted and read back, while an auth mount refuses it: a
+// mount admits and selects no role (T-TO11).
 func TestTransparentOps_DefaultRoleConfigReadback(t *testing.T) {
 	port := h.GetLeaderPort(t)
 
-	// Set default_role on JWT auth
-	status, body := h.APIRequest(t, "PUT", "auth/jwt/config", port,
-		`{"default_role":"e2e-reader"}`)
+	status, body := h.APIRequest(t, "PUT", "auth/jwt/config", port, `{"default_role":"e2e-reader"}`)
+	if status != 400 {
+		t.Fatalf("T-TO11: expected 400 for default_role on an auth mount, got %d: %s", status, body)
+	}
+
+	status, body = h.APIRequest(t, "POST", "vault/config", port, `{"default_role":"e2e-reader"}`)
 	if status != 200 && status != 204 {
 		t.Fatalf("T-TO11: failed to set default_role (status %d): %s", status, string(body))
 	}
-	defer h.APIRequest(t, "PUT", "auth/jwt/config", port, `{"default_role":""}`)
+	defer h.APIRequest(t, "POST", "vault/config", port, `{"default_role":""}`)
 
 	// Read config back
-	status, body = h.APIRequest(t, "GET", "auth/jwt/config", port, "")
+	status, body = h.APIRequest(t, "GET", "vault/config", port, "")
 	if status != 200 {
 		t.Fatalf("T-TO11: failed to read config (status %d): %s", status, string(body))
 	}
@@ -298,7 +307,8 @@ func TestTransparentOps_CertWrongCN(t *testing.T) {
 	// Generate cert with CN that doesn't match "agent-*" pattern
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, "server-1")
 
-	// Should be rejected — CN doesn't match allowed pattern
+	// Should be rejected — the CN is admitted by the CA but no group grants it
+	// the role
 	status, _ := h.CertTransparentOpsRequest(t, "GET",
 		"vault-cert/gateway/v1/secret/data/e2e/app-config",
 		port, clientCertPEM, "e2e-cert-reader")

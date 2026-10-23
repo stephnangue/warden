@@ -220,33 +220,45 @@ func BuildXFCCHeader(certPEM string) string {
 	return fmt.Sprintf("Cert=%s", encoded)
 }
 
-// CertLoginRequest performs a cert auth login request with a forwarded client cert.
-func CertLoginRequest(t *testing.T, port int, role string, clientCertPEM string) (int, []byte) {
+// CertLoginRequest performs a cert auth login request with a forwarded client
+// cert. A login admits the certificate and selects no role.
+func CertLoginRequest(t *testing.T, port int, clientCertPEM string) (int, []byte) {
 	t.Helper()
-	return certLoginRequestOnMount(t, port, "auth/cert", role, clientCertPEM)
+	return certLoginRequestOnMount(t, port, "auth/cert", clientCertPEM)
 }
 
-func certLoginRequestOnMount(t *testing.T, port int, mount, role, clientCertPEM string) (int, []byte) {
+func certLoginRequestOnMount(t *testing.T, port int, mount, clientCertPEM string) (int, []byte) {
 	t.Helper()
 	u := fmt.Sprintf("%s/v1/%s/login", NodeURL(port), mount)
 	headers := map[string]string{
 		"Content-Type":      "application/json",
 		"X-SSL-Client-Cert": URLEncodePEM(clientCertPEM),
 	}
-	body := fmt.Sprintf(`{"role":"%s"}`, role)
-	return DoRequest(t, "POST", u, headers, body)
+	return DoRequest(t, "POST", u, headers, "{}")
 }
 
 // CertLoginRequestWithXFCC performs a cert auth login using XFCC header format.
-func CertLoginRequestWithXFCC(t *testing.T, port int, role string, clientCertPEM string) (int, []byte) {
+func CertLoginRequestWithXFCC(t *testing.T, port int, clientCertPEM string) (int, []byte) {
 	t.Helper()
 	u := fmt.Sprintf("%s/v1/auth/cert/login", NodeURL(port))
 	headers := map[string]string{
 		"Content-Type":            "application/json",
 		"X-Forwarded-Client-Cert": BuildXFCCHeader(clientCertPEM),
 	}
-	body := fmt.Sprintf(`{"role":"%s"}`, role)
-	return DoRequest(t, "POST", u, headers, body)
+	return DoRequest(t, "POST", u, headers, "{}")
+}
+
+// CertReaderRole is the role the cert vault environments grant to agent-*
+// certificates at auth/cert/.
+const CertReaderRole = "e2e-cert-reader"
+
+// grantCertReader writes CertReaderRole and grants it to every certificate
+// auth/cert/ admits whose CN starts with agent-.
+func grantCertReader(t *testing.T, port int) {
+	t.Helper()
+	GrantRole(t, port, "auth/cert/", CertReaderRole,
+		Role{Policies: []string{"vault-cert-gateway-access"}, CredSpec: "vault-token-reader"},
+		Rule{"cn": {"agent-*"}})
 }
 
 // SetupCertAuth mounts cert auth, configures trusted CA, and returns the CA cert/key.
@@ -310,9 +322,7 @@ func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.P
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
 		`{"policy":"path \"vault-cert/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}\npath \"vault-cert/role/+/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}"}`)
 
-	// Cert role
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+	grantCertReader(t, port)
 
 	return caCertPEM, caKey
 }
@@ -320,8 +330,7 @@ func SetupCertVaultEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.P
 // TeardownCertVaultEnv removes all resources created by SetupCertVaultEnv.
 func TeardownCertVaultEnv(t *testing.T, port int) {
 	t.Helper()
-	APIRequest(t, "DELETE", "auth/cert/role/e2e-cert-reader", port, "")
-	APIRequest(t, "DELETE", "auth/cert/role/e2e-cert-login", port, "")
+	RevokeRole(t, port, "auth/cert/", CertReaderRole)
 	TeardownCertAuth(t, port)
 	APIRequest(t, "DELETE", "sys/policies/cbp/vault-cert-gateway-access", port, "")
 	APIRequest(t, "DELETE", "sys/providers/vault-cert", port, "")
@@ -416,13 +425,7 @@ func SetupCertVaultEnvWithCA(t *testing.T, port int, caCertPEM string) {
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
 		`{"policy":"path \"vault-cert/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}\npath \"vault-cert/role/+/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}"}`)
 
-	// Cert role
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`)
-
-	// Cert role for explicit login on the transparent cert mount
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-login", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+	grantCertReader(t, port)
 }
 
 // --- mTLS Client CA Helpers ---
@@ -477,30 +480,28 @@ func LoadMTLSClientCA(t *testing.T) (caCertPEM string, caKey *ecdsa.PrivateKey) 
 // CertLoginRequestViaMTLS performs a cert auth login via direct mTLS connection.
 // The client cert is presented during the TLS handshake (not via headers).
 // Warden extracts it from r.TLS.PeerCertificates via the TLS fallback.
-func CertLoginRequestViaMTLS(t *testing.T, port int, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+func CertLoginRequestViaMTLS(t *testing.T, port int, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
-	return certLoginRequestViaMTLSOnMount(t, port, "auth/cert", role, clientCertPEM, clientKeyPEM)
+	return certLoginRequestViaMTLSOnMount(t, port, "auth/cert", clientCertPEM, clientKeyPEM)
 }
 
-func certLoginRequestViaMTLSOnMount(t *testing.T, port int, mount, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+func certLoginRequestViaMTLSOnMount(t *testing.T, port int, mount, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
 	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
 	u := fmt.Sprintf("%s/v1/%s/login", NodeURL(port), mount)
 	headers := map[string]string{"Content-Type": "application/json"}
-	body := fmt.Sprintf(`{"role":"%s"}`, role)
-	return DoMTLSRequest(t, "POST", u, headers, body, cert)
+	return DoMTLSRequest(t, "POST", u, headers, "{}", cert)
 }
 
 // CertLoginRequestViaLBPassthrough performs a cert auth login through the nginx
 // TLS passthrough port. The TLS handshake goes end-to-end to Warden, so
 // r.TLS.PeerCertificates contains the client cert.
-func CertLoginRequestViaLBPassthrough(t *testing.T, role, clientCertPEM, clientKeyPEM string) (int, []byte) {
+func CertLoginRequestViaLBPassthrough(t *testing.T, clientCertPEM, clientKeyPEM string) (int, []byte) {
 	t.Helper()
 	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
 	u := fmt.Sprintf("%s/v1/auth/cert/login", LBPassthroughURL())
 	headers := map[string]string{"Content-Type": "application/json"}
-	body := fmt.Sprintf(`{"role":"%s"}`, role)
-	return DoMTLSRequest(t, "POST", u, headers, body, cert)
+	return DoMTLSRequest(t, "POST", u, headers, "{}", cert)
 }
 
 // VaultCertTransparentRequestViaMTLS makes a transparent vault gateway request
@@ -524,9 +525,9 @@ func VaultCertTransparentRequestViaLBPassthrough(t *testing.T, method, vaultPath
 
 // LoginJWTViaLBPassthrough logs in with a JWT through the LB passthrough port.
 // No client cert — just HTTPS with InsecureSkipVerify.
-func LoginJWTViaLBPassthrough(t *testing.T, jwt, role string) (int, string) {
+func LoginJWTViaLBPassthrough(t *testing.T, jwt string) (int, string) {
 	t.Helper()
-	loginBody := fmt.Sprintf(`{"jwt":"%s","role":"%s"}`, jwt, role)
+	loginBody := fmt.Sprintf(`{"jwt":"%s"}`, jwt)
 	// Use doLBHTTP (which has InsecureSkipVerify) with no client cert
 	status, body := DoLBRequest(t, "POST",
 		fmt.Sprintf("%s/v1/auth/jwt/login", LBPassthroughURL()),
@@ -575,13 +576,7 @@ func SetupCertVaultEnvWithMTLSCA(t *testing.T, port int) {
 	APIRequest(t, "POST", "sys/policies/cbp/vault-cert-gateway-access", port,
 		`{"policy":"path \"vault-cert/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}\npath \"vault-cert/role/+/gateway*\" {\n  capabilities = [\"read\",\"create\",\"update\",\"delete\",\"list\"]\n}"}`)
 
-	// Cert role
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-reader", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`)
-
-	// Cert role for explicit login on the transparent cert mount
-	APIRequest(t, "POST", "auth/cert/role/e2e-cert-login", port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["vault-cert-gateway-access"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`)
+	grantCertReader(t, port)
 }
 
 // --- Cert Transparent Operations Helpers ---
@@ -599,8 +594,8 @@ func CertTransparentOpsRequest(t *testing.T, method, path string, port int, clie
 	return DoRequest(t, method, u, headers, "")
 }
 
-// CertTransparentOpsRequestNoRole makes a transparent operations request using cert implicit auth
-// without specifying a role (relies on default_role configured on the auth method).
+// CertTransparentOpsRequestNoRole makes a transparent operations request using
+// cert implicit auth without selecting a role.
 func CertTransparentOpsRequestNoRole(t *testing.T, method, path string, port int, clientCertPEM string) (int, []byte) {
 	t.Helper()
 	u := fmt.Sprintf("%s/v1/%s", NodeURL(port), path)

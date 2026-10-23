@@ -73,9 +73,9 @@ import (
 //
 // Two caveats worth knowing before writing a `user` condition: the user leg is
 // resolved only for gateway (streaming) requests, so user.present is always
-// false elsewhere; and user.role is the auth-mount role fixed by the mount's
-// user_auth_role — not the person's organisational role — while
-// user.namespace always equals request.namespace. Gate on user.metadata.<k>.
+// false elsewhere; and user.role is always empty — a user runs under no role —
+// while user.namespace always equals request.namespace. Gate on
+// user.metadata.<k>, the user auth mount's mapped facts.
 //
 // Secret material (token value, accessor, client token) is never exposed.
 

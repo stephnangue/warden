@@ -248,7 +248,7 @@ Configuration:
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout duration (default: 60s)
 - auto_auth_path: Auth mount path for implicit authentication of the agent
-- user_auth_path / user_auth_role: Auth mount (and role) the user's Entra access
-  token is validated against, for on_behalf_of
+- user_auth_path: Auth mount the user's Entra access token is validated
+  against, for on_behalf_of
 - default_role: Fallback role when not specified in the URL path
 `

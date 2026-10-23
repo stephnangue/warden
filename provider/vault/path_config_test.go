@@ -340,6 +340,53 @@ func TestHandleConfigWrite_BadCADataRefusedEveryTime(t *testing.T) {
 	assert.Empty(t, storage.data)
 }
 
+// user_auth_role was removed. A stored config that still names it loads, and
+// the provider refuses every user credential until it is gone; its read no
+// longer reports it; a write naming it is refused and changes nothing; any
+// other write stores the config without it, which lifts the refusal.
+func TestUserAuthRole_Removed(t *testing.T) {
+	ctx := context.Background()
+	storage := newInmemStorage()
+	entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
+		"vault_address":  "https://vault.example.com:8200",
+		"auto_auth_path": "auth/jwt/",
+		"user_auth_path": "auth/user-jwt/",
+		"user_auth_role": "slack-user",
+	})
+	require.NoError(t, err)
+	require.NoError(t, storage.Put(ctx, entry))
+	b := configuredBackend(t, storage)
+	require.NoError(t, b.Initialize(ctx))
+
+	assert.Equal(t, "auth/user-jwt/", b.GetUserAuthPath())
+	assert.ErrorIs(t, b.UserAuthRefusal(), framework.ErrUserAuthRoleRemoved)
+	read, err := b.handleConfigRead(ctx, nil, &framework.FieldData{})
+	require.NoError(t, err)
+	assert.NotContains(t, read.Data, "user_auth_role")
+	assert.NotContains(t, b.pathConfig().Fields, "user_auth_role")
+
+	before := b.TransparentConfig()
+	resp := writeConfig(b, map[string]interface{}{"user_auth_role": "slack-user", "timeout": 60})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.EqualError(t, resp.Err, framework.ErrUserAuthRoleRemoved.Error())
+	assert.Same(t, before, b.TransparentConfig(), "a refused write changes nothing")
+	assert.Equal(t, 30*time.Second, b.Timeout())
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]interface{}{"timeout": 60}).StatusCode)
+	assert.NoError(t, b.UserAuthRefusal())
+	assert.Equal(t, "auth/user-jwt/", b.GetUserAuthPath())
+	stored, err := storage.Get(ctx, "config")
+	require.NoError(t, err)
+	assert.False(t, framework.StoredUserAuthRole(stored))
+
+	// A mount enabled with it, before any config was stored, refuses too.
+	enabled := &vaultBackend{StreamingBackend: &framework.StreamingBackend{}}
+	parsed := parseConfig(map[string]any{"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user"})
+	assert.True(t, parsed.UserAuthRoleStored)
+	enabled.SetTransparentConfig(&framework.TransparentConfig{UserAuthPath: parsed.UserAuthPath, UserAuthRoleStored: parsed.UserAuthRoleStored})
+	assert.ErrorIs(t, enabled.UserAuthRefusal(), framework.ErrUserAuthRoleRemoved)
+}
+
 // failingStorage refuses every write.
 type failingStorage struct{ *inmemStorage }
 

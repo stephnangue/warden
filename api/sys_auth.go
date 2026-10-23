@@ -14,6 +14,13 @@ func (c *Sys) ListAuth() (map[string]*AuthMountOutput, error) {
 }
 
 func (c *Sys) ListAuthWithContext(ctx context.Context) (map[string]*AuthMountOutput, error) {
+	mounts, _, err := c.ListAuthWithWarnings(ctx)
+	return mounts, err
+}
+
+// ListAuthWithWarnings is ListAuthWithContext that also returns the listing's
+// non-fatal warnings (nil when there are none).
+func (c *Sys) ListAuthWithWarnings(ctx context.Context) (map[string]*AuthMountOutput, []string, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -23,32 +30,32 @@ func (c *Sys) ListAuthWithContext(ctx context.Context) (map[string]*AuthMountOut
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	resource, err := ParseResource(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resource == nil || resource.Data == nil {
-		return nil, errors.New("data from server response is empty")
+		return nil, nil, errors.New("data from server response is empty")
 	}
 
 	// Extract the mounts field from the response data
 	// The Huma framework returns: {"mounts": {...}, "$schema": "..."}
 	mountsData, ok := resource.Data["mounts"]
 	if !ok {
-		return nil, errors.New("mounts field not found in response")
+		return nil, nil, errors.New("mounts field not found in response")
 	}
 
 	mounts := map[string]*AuthMountOutput{}
 	err = mapstructure.Decode(mountsData, &mounts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return mounts, nil
+	return mounts, parseWarnings(resource.Data["warnings"]), nil
 }
 
 func (c *Sys) EnableAuth(path string, authInfo *AuthMountInput) error {
@@ -78,6 +85,14 @@ func (c *Sys) DisableAuth(path string) error {
 }
 
 func (c *Sys) DisableAuthWithContext(ctx context.Context, path string) error {
+	_, err := c.DisableAuthWithWarnings(ctx, path)
+	return err
+}
+
+// DisableAuthWithWarnings is DisableAuthWithContext that also returns the
+// server's non-fatal warnings (nil when there are none), such as groups whose
+// rules still name the disabled mount.
+func (c *Sys) DisableAuthWithWarnings(ctx context.Context, path string) ([]string, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -87,7 +102,16 @@ func (c *Sys) DisableAuthWithContext(ctx context.Context, path string) error {
 	if resp != nil {
 		defer resp.Body.Close()
 	}
-	return err
+	if err != nil {
+		return nil, err
+	}
+
+	resource, perr := ParseResource(resp.Body)
+	if perr != nil || resource == nil || resource.Data == nil {
+		// The mount is disabled; a body that does not parse only loses warnings.
+		return nil, nil
+	}
+	return parseWarnings(resource.Data["warnings"]), nil
 }
 
 func (c *Sys) AuthInfo(path string) (*AuthMountOutput, error) {
@@ -119,6 +143,7 @@ func (c *Sys) AuthInfoWithContext(ctx context.Context, path string) (*AuthMountO
 	if err != nil {
 		return nil, err
 	}
+	result.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return &result, err
 }

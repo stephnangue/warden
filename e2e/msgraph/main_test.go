@@ -35,7 +35,6 @@ const (
 	oboClient = "11111111-1111-1111-1111-1111111111e3"
 
 	userAuthMount = "obo-user-jwt"
-	userAuthRole  = "obo-user"
 	sourceName    = "e2e-obo-azure"
 	specName      = "e2e-obo-graph"
 	agentRole     = "e2e-obo-agent"
@@ -43,11 +42,12 @@ const (
 	stubMount     = "obo-stub"    // mcp provider pointed at the stub upstream
 	graphMount    = "obo-msgraph" // the msgraph provider, refusals only
 
-	// shortStubMount is stubMount with users validated under shortUserRole, whose
-	// token lives shortUserTTL: the bound a delegated token must not outlive.
-	shortStubMount = "obo-stub-short"
-	shortUserRole  = "obo-user-short"
-	shortUserTTL   = 4 * time.Second
+	// shortStubMount is stubMount with users admitted by shortUserAuthMount,
+	// whose token lives shortUserTTL: the bound a delegated token must not
+	// outlive.
+	shortStubMount     = "obo-stub-short"
+	shortUserAuthMount = "obo-user-jwt-short"
+	shortUserTTL       = 4 * time.Second
 
 	// azureMount is the azure provider, to prove it refuses Graph $batch too.
 	azureMount = "obo-azure"
@@ -231,16 +231,17 @@ func setup(t *testing.T, port int) {
 	t.Helper()
 	teardownBestEffort(port)
 
-	// The user leg: Hydra-issued user tokens, on their own auth mount.
-	mustAPI(t, port, "POST", "sys/auth/"+userAuthMount, `{"type":"jwt"}`, "mount the user auth method")
-	time.Sleep(time.Second)
-	mustAPI(t, port, "PUT", "auth/"+userAuthMount+"/config",
-		fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":%q,"bound_issuer":%q}`, h.HydraIssuer, h.HydraIssuer),
-		"configure the user auth method")
-	mustAPI(t, port, "POST", "auth/"+userAuthMount+"/role/"+userAuthRole,
-		`{"user_claim":"sub","token_ttl":3600}`, "create the user role")
-	mustAPI(t, port, "POST", "auth/"+userAuthMount+"/role/"+shortUserRole,
-		fmt.Sprintf(`{"user_claim":"sub","token_ttl":%d}`, int(shortUserTTL.Seconds())), "create the short-lived user role")
+	// The user leg: Hydra-issued user tokens, on their own auth mounts, which
+	// admit humans only. The short mount keeps an admitted user for
+	// shortUserTTL.
+	for mount, ttl := range map[string]time.Duration{userAuthMount: time.Hour, shortUserAuthMount: shortUserTTL} {
+		mustAPI(t, port, "POST", "sys/auth/"+mount, `{"type":"jwt"}`, "mount the user auth method "+mount)
+		time.Sleep(time.Second)
+		mustAPI(t, port, "PUT", "auth/"+mount+"/config",
+			fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":%q,"bound_issuer":%q,"bound_audiences":[%q],"user_claim":"sub","entity_kind":"human","token_ttl":%d}`,
+				h.HydraIssuer, h.HydraIssuer, h.HydraAudience, int(ttl.Seconds())),
+			"configure the user auth method "+mount)
+	}
 
 	// The keyless source points its token requests at the fake Entra.
 	mustAPI(t, port, "POST", "sys/cred/sources/"+sourceName,
@@ -261,11 +262,9 @@ func setup(t *testing.T, port int) {
 	}
 	mustAPI(t, port, "POST", "sys/policies/cbp/"+policyName,
 		fmt.Sprintf(`{"policy":"%s"}`, strings.Join(rules, `\n`)), "create the policy")
-	mustAPI(t, port, "POST", "auth/jwt/role/"+agentRole,
-		fmt.Sprintf(`{"token_policies":[%q],"cred_spec_name":%q,"user_claim":"sub","token_ttl":3600}`, policyName, specName),
-		"create the agent role")
+	h.GrantRole(t, port, "auth/jwt/", agentRole, h.Role{Policies: []string{policyName}, CredSpec: specName}, nil)
 
-	userLeg := fmt.Sprintf(`"auto_auth_path":"auth/jwt/","user_auth_path":"auth/%s/","user_auth_role":%q`, userAuthMount, userAuthRole)
+	userLeg := fmt.Sprintf(`"auto_auth_path":"auth/jwt/","user_auth_path":"auth/%s/"`, userAuthMount)
 	mustAPI(t, port, "POST", "sys/providers/"+stubMount, `{"type":"mcp","description":"stub Graph"}`, "mount the stub provider")
 	mustAPI(t, port, "POST", "sys/providers/"+graphMount, `{"type":"msgraph","description":"Microsoft Graph"}`, "mount msgraph")
 	time.Sleep(time.Second)
@@ -275,7 +274,7 @@ func setup(t *testing.T, port int) {
 	mustAPI(t, port, "PUT", graphMount+"/config",
 		fmt.Sprintf(`{"timeout":"30s",%s}`, userLeg), "configure msgraph")
 
-	shortUserLeg := fmt.Sprintf(`"auto_auth_path":"auth/jwt/","user_auth_path":"auth/%s/","user_auth_role":%q`, userAuthMount, shortUserRole)
+	shortUserLeg := fmt.Sprintf(`"auto_auth_path":"auth/jwt/","user_auth_path":"auth/%s/"`, shortUserAuthMount)
 	mustAPI(t, port, "POST", "sys/providers/"+shortStubMount, `{"type":"mcp","description":"stub Graph, short-lived users"}`, "mount the short stub provider")
 	mustAPI(t, port, "POST", "sys/providers/"+azureMount, `{"type":"azure","description":"Azure"}`, "mount azure")
 	mustAPI(t, port, "POST", "sys/providers/"+localGraphMount, `{"type":"msgraph","description":"Microsoft Graph (local stub)"}`, "mount local msgraph")
@@ -314,11 +313,12 @@ func teardownBestEffort(port int) {
 	for _, mount := range []string{stubMount, graphMount, shortStubMount, azureMount, localGraphMount} {
 		del("sys/providers/" + mount)
 	}
-	del("auth/jwt/role/" + agentRole)
+	h.RevokeRoleBestEffort(port, "auth/jwt/", agentRole)
 	del("sys/policies/cbp/" + policyName)
 	del("sys/cred/specs/" + specName)
 	del("sys/cred/sources/" + sourceName)
 	del("sys/auth/" + userAuthMount)
+	del("sys/auth/" + shortUserAuthMount)
 }
 
 func rootTokenBestEffort() string {

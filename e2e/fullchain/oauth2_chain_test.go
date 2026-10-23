@@ -123,7 +123,7 @@ func setupOAuth2PerAgentChain(t *testing.T, providerURL string, clientByAgent ma
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+oaPerAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", oaPerAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+oaPerAgentSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+oaPerAgentSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+oaPerAgentSecretSpec, leaderPort, "")
@@ -167,10 +167,10 @@ func setupOAuth2PerAgentChain(t *testing.T, providerURL string, clientByAgent ma
 			"scope":"read"}}`,
 		"create the per-agent consuming spec")
 
-	mustWrite("POST", "auth/jwt/role/"+oaPerAgentRole, `{
-		"token_policies":["`+restEnv.Policy()+`"],"cred_spec_name":"`+oaPerAgentSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the shared per-agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", oaPerAgentRole, h.Role{
+		Policies: []string{restEnv.Policy()},
+		CredSpec: oaPerAgentSpec,
+	}, nil)
 }
 
 // TestOAuth2_PerAgentClientCredential drives two agents through one source, one spec and

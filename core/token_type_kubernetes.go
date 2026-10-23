@@ -8,15 +8,15 @@ import (
 	"time"
 )
 
-// KubernetesRoleTokenType implements Kubernetes ServiceAccount JWT handling
-// with role binding. Used for implicit authentication where clients present
-// a K8s SA JWT directly and Warden authenticates them by calling TokenReview
-// on the issuing kube-apiserver (no JWKS fetch needed on the hub side).
+// KubernetesRoleTokenType implements the admission token of a Kubernetes
+// ServiceAccount JWT. Used for implicit authentication where clients present
+// a K8s SA JWT directly and Warden admits them by calling TokenReview on the
+// issuing kube-apiserver (no JWKS fetch needed on the hub side).
 //
-// The (mountAccessor, JWT, role) tuple is the lookup value; its hash becomes
-// the token ID. mountAccessor prevents cache contamination across two
-// kubernetes mounts that share a role name and an SA token (e.g. workloads
-// in different spoke clusters that happen to use identical role names).
+// The (mountAccessor, JWT) pair is the lookup value; its hash becomes the
+// token ID: one token per SA token and mount, whatever role a request asks
+// for. mountAccessor prevents cache contamination across two kubernetes
+// mounts presented the same SA token (e.g. spokes that trust one issuer).
 type KubernetesRoleTokenType struct{}
 
 func (t *KubernetesRoleTokenType) Metadata() TokenTypeMetadata {
@@ -25,9 +25,9 @@ func (t *KubernetesRoleTokenType) Metadata() TokenTypeMetadata {
 		IDPrefix:    "kubr_",
 		ValuePrefix: "", // MUST be empty: K8s SA tokens are JWTs (eyJ...) but
 		// JWTRoleTokenType owns that prefix in the registry. K8s tokens reach
-		// LookupTransparentTokenWithRole via performImplicitAuth's mount-type
+		// LookupTransparentToken via performImplicitAuth's mount-type
 		// dispatch, not via prefix-based DetectType.
-		Description:    "Kubernetes ServiceAccount token validated via TokenReview, bound to a role",
+		Description:    "Kubernetes ServiceAccount token validated via TokenReview",
 		DefaultTTL:     1 * time.Hour,
 		AuthMethodType: "kubernetes",
 	}
@@ -35,8 +35,8 @@ func (t *KubernetesRoleTokenType) Metadata() TokenTypeMetadata {
 
 func (t *KubernetesRoleTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	// K8s SA tokens come from the workload (just like generic JWTs); Warden
-	// does not mint them. We store a hash of (mountAccessor, JWT, role)
-	// rather than the raw JWT for:
+	// does not mint them. We store a hash of (mountAccessor, JWT) rather
+	// than the raw JWT for:
 	// - Security: SA tokens may carry sensitive bound-claim information.
 	// - ID computation: ComputeID() uses this to derive the token ID.
 	// - Mount isolation: cache entries cannot collide across mounts.
@@ -47,7 +47,7 @@ func (t *KubernetesRoleTokenType) Generate(_ context.Context, authData *AuthData
 	if jwt == "" {
 		return entry.Data, nil
 	}
-	entry.Data["jwt"] = t.LookupValue(jwt, authData.MountAccessor, authData.RoleName)
+	entry.Data["jwt"] = t.LookupValue(jwt, authData.MountAccessor)
 	return entry.Data, nil
 }
 
@@ -72,11 +72,11 @@ func (t *KubernetesRoleTokenType) LookupKey() string {
 	return "jwt"
 }
 
-// LookupValue computes the SHA-256 hash of (mountAccessor, jwt, role) that
+// LookupValue computes the SHA-256 hash of (mountAccessor, jwt) that
 // ComputeID hashes into the byID-cache key. Same shape as
 // JWTRoleTokenType.LookupValue and CertRoleTokenType.LookupValue.
-func (t *KubernetesRoleTokenType) LookupValue(jwt, mountAccessor, role string) string {
-	h := sha256.Sum256([]byte(mountAccessor + ":" + jwt + ":" + role))
+func (t *KubernetesRoleTokenType) LookupValue(jwt, mountAccessor string) string {
+	h := sha256.Sum256([]byte(mountAccessor + ":" + jwt))
 	return hex.EncodeToString(h[:])
 }
 
@@ -87,12 +87,9 @@ func (t *KubernetesRoleTokenType) LookupValue(jwt, mountAccessor, role string) s
 func (t *KubernetesRoleTokenType) IsTransparent() bool { return true }
 
 // CredentialFormat reports "k8s_sa_jwt" — same wire shape as a generic JWT
-// (Authorization: Bearer eyJ...), but a distinct discovery-level kind so
-// the introspect aggregator only fans K8s SA tokens out to kubernetes
-// mounts (avoiding TokenReview round-trips against spokes that cannot
-// authenticate the token). performImplicitAuth groups "jwt" and
-// "k8s_sa_jwt" into a shared extraction case since the wire-level parse
-// is identical.
+// (Authorization: Bearer eyJ...), validated by TokenReview rather than by a
+// key set. performImplicitAuth groups "jwt" and "k8s_sa_jwt" into a shared
+// extraction case since the wire-level parse is identical.
 func (t *KubernetesRoleTokenType) CredentialFormat() string { return "k8s_sa_jwt" }
 
 var _ TransparentTokenType = (*KubernetesRoleTokenType)(nil)

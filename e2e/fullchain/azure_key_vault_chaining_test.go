@@ -267,7 +267,7 @@ func setupAzureKeyVaultChainedSpecs(t *testing.T) {
 	referenced := []string{azkvAgentSecretSpec, azkvWardenSecretSpec, azkvDefaultSecretSpec, azkvTemplatedSecret, azkvPinnedSecret, azkvForbiddenSecret}
 	clear := func() {
 		for _, role := range roles {
-			h.APIRequest(t, "DELETE", "auth/jwt/role/"+role, leaderPort, "")
+			h.RevokeRole(t, leaderPort, "auth/jwt/", role)
 		}
 		for _, spec := range append(append([]string{}, consumers...), referenced...) {
 			h.APIRequest(t, "DELETE", "sys/cred/specs/"+spec, leaderPort, "")
@@ -335,12 +335,10 @@ func setupAzureKeyVaultChainedSpecs(t *testing.T) {
 				"secret_spec":"`+row.secretSpec+`","secret_field":"api_key"}}`,
 			"create the chained consuming spec "+row.spec)
 
-		// The mount's own JWT agent role binds its default spec, so each row needs
-		// one bound to its own chained spec instead.
-		mustWrite("POST", "auth/jwt/role/"+row.role, `{
-			"token_policies":["`+datadogEnv.Policy()+`"],"cred_spec_name":"`+row.spec+`",
-			"user_claim":"sub","token_ttl":3600}`,
-			"create the agent role "+row.role)
+		// The agent role granted at the JWT mount binds its default spec, so each
+		// row needs one bound to its own chained spec instead.
+		h.GrantRole(t, leaderPort, "auth/jwt/", row.role,
+			h.Role{Policies: []string{datadogEnv.Policy()}, CredSpec: row.spec}, nil)
 	}
 }
 

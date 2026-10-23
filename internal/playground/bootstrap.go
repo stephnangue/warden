@@ -12,7 +12,6 @@ import (
 const (
 	AgentAuthMount = "agent"
 	UserAuthMount  = "user"
-	UserRole       = "user"
 
 	MountBank    = "bank"     // the bank's MCP face, agent only
 	MountBankMe  = "bank-me"  // the same face, acting for a person
@@ -44,6 +43,9 @@ const (
 	// an identifier, not a credential: Warden is a public client.
 	wardenClientID = "warden"
 )
+
+// GroupFor names the group that grants role to every playground agent.
+func GroupFor(role string) string { return role + "-agents" }
 
 //go:embed skills/teller.md
 var tellerSkill string
@@ -165,15 +167,27 @@ func restRouteCBP(route, capabilities, condition string) string {
 // Bootstrap returns the writes that build the playground, in order. Order matters:
 // the IdP must be serving before the JWT mounts are configured (configuring one
 // fetches its JWKS), the rest provider must be mounted before the teller skill
-// that requires its skill, and a skill must exist before the role that names it.
+// that requires its skill, a skill must exist before the role that names it, and
+// a role before the group that grants it.
 func Bootstrap(s Settings) []Step {
 	asURL := strings.TrimRight(s.ASURL, "/")
 	caData := (&TLS{CAPEM: s.CAPEM}).CAData()
 
-	jwtConfig := map[string]any{
-		"jwks_url":     asURL + "/jwks",
-		"jwks_ca_pem":  s.CAPEM,
-		"bound_issuer": asURL,
+	// Both mounts trust the same IdP and tell its tokens apart by audience: a
+	// mount admits only the tokens minted for it.
+	jwtConfig := func(kind, audience string, facts map[string]any) map[string]any {
+		config := map[string]any{
+			"jwks_url":        asURL + "/jwks",
+			"jwks_ca_pem":     s.CAPEM,
+			"bound_issuer":    asURL,
+			"bound_audiences": []string{audience},
+			"user_claim":      "sub",
+			"entity_kind":     kind,
+		}
+		if facts != nil {
+			config["facts"] = facts
+		}
+		return config
 	}
 	spec := func(audience string, onBehalf bool) map[string]any {
 		config := map[string]any{
@@ -190,17 +204,32 @@ func Bootstrap(s Settings) []Step {
 	}
 	agentRole := func(description, mount, credSpec string, policies []string, skill string) map[string]any {
 		role := map[string]any{
-			"description":     description,
-			"bound_audiences": []string{AudienceAgent},
-			"user_claim":      "sub",
-			"token_policies":  policies,
-			"cred_spec_name":  credSpec,
-			"provider_path":   mount + "/",
+			"description":    description,
+			"policies":       policies,
+			"cred_spec_name": credSpec,
+			"provider_path":  mount + "/",
 		}
 		if skill != "" {
 			role["skill"] = skill
 		}
 		return role
+	}
+	// Every agent the IdP signs gets every role: the group's one rule trusts
+	// the agent mount alone and any token minted for agents.
+	agentGroup := func(role string) Step {
+		return Step{
+			Path: "sys/identity/group/" + GroupFor(role), Operation: "create",
+			Data: map[string]any{
+				"type":        "virtual",
+				"description": "Every playground agent may assume " + role + ".",
+				"roles":       []string{role},
+				"rules": []map[string][]string{{
+					"mount": {"auth/" + AgentAuthMount + "/"},
+					"aud":   {AudienceAgent},
+				}},
+			},
+			Note: "Who gets the " + role + " role: any agent the playground IdP signs.",
+		}
 	}
 
 	return []Step{
@@ -216,24 +245,22 @@ func Bootstrap(s Settings) []Step {
 			Data: map[string]any{"type": "jwt", "description": "Agent identities, signed by the playground IdP."},
 			Note: "Agents present a JWT from the playground IdP.",
 		},
-		{Path: "auth/" + AgentAuthMount + "/config", Operation: "update", Data: jwtConfig, Note: "Trust the playground IdP's keys."},
+		{
+			Path: "auth/" + AgentAuthMount + "/config", Operation: "update",
+			Data: jwtConfig("agent", AudienceAgent, nil),
+			Note: "Trust the playground IdP's keys, for tokens minted for agents.",
+		},
 		{
 			Path: "sys/auth/" + UserAuthMount, Operation: "create",
 			Data: map[string]any{"type": "jwt", "description": "User identities, signed by the playground IdP."},
 			Note: "People present a JWT from the same IdP, with a different audience.",
 		},
-		{Path: "auth/" + UserAuthMount + "/config", Operation: "update", Data: jwtConfig, Note: "Trust the playground IdP's keys."},
 		{
-			Path: "auth/" + UserAuthMount + "/role/" + UserRole, Operation: "create",
-			Data: map[string]any{
-				"description":     "A person an agent acts for.",
-				"bound_audiences": []string{AudienceUser},
-				"user_claim":      "sub",
-				// Surface may_act so the assistant policy can check it, and the
-				// customer tier its withdrawal limit reads.
-				"metadata_claims": map[string]any{"/may_act/sub": "may_act_sub", "/tier": "tier"},
-			},
-			Note: "The person's token exposes which agent may act for them, and their customer tier.",
+			Path: "auth/" + UserAuthMount + "/config", Operation: "update",
+			// Surface may_act so the assistant policy can check it, and the
+			// customer tier its withdrawal limit reads.
+			Data: jwtConfig("human", AudienceUser, map[string]any{"/may_act/sub": "may_act_sub", "/tier": "tier"}),
+			Note: "Trust the same keys for people; their token exposes which agent may act for them, and their customer tier.",
 		},
 
 		// The bank's faces.
@@ -255,7 +282,7 @@ func Bootstrap(s Settings) []Step {
 			Path: MountBankMe + "/config", Operation: "update",
 			Data: map[string]any{
 				"mcp_url": s.bankMCPURL(), "ca_data": caData, "auto_auth_path": "auth/" + AgentAuthMount + "/",
-				"user_auth_path": "auth/" + UserAuthMount + "/", "user_auth_role": UserRole,
+				"user_auth_path": "auth/" + UserAuthMount + "/",
 			},
 		},
 		{
@@ -328,32 +355,38 @@ func Bootstrap(s Settings) []Step {
 		// client or an API the agent calls itself, so an agent that has one but
 		// not the other can tell which roles it can use now.
 		{
-			Path: "auth/" + AgentAuthMount + "/role/" + RoleATM, Operation: "create",
+			Path: "sys/roles/" + RoleATM, Operation: "create",
 			Data: agentRole("Use your own bank account through the bank's MCP tools, attached to your client: "+
 				"check the balance and recent transactions, deposit, and withdraw up to 100 at a time.",
 				MountBank, SpecBankAgent, []string{"bank-access", "atm-tools"}, ""),
 		},
 		{
-			Path: "auth/" + AgentAuthMount + "/role/" + RoleAssistant, Operation: "create",
+			Path: "sys/roles/" + RoleAssistant, Operation: "create",
 			Data: agentRole("Use a person's bank account on their behalf, through the bank's MCP tools attached to your client, "+
 				"when they have allowed this agent to act for them: "+
 				"check the balance and recent transactions, deposit, and withdraw up to 100 at a time, or 1000 for a premium customer.",
 				MountBankMe, SpecBankOnBehalf, []string{"assistant-on-behalf", "assistant-tools"}, ""),
 		},
 		{
-			Path: "auth/" + AgentAuthMount + "/role/" + RoleTeller, Operation: "create",
+			Path: "sys/roles/" + RoleTeller, Operation: "create",
 			Data: agentRole("The bank's HTTP API for your own account, which you call yourself over HTTP (curl from a shell): "+
 				"balance, deposit, and withdraw up to 100 at a time.",
 				MountBankAPI, SpecBankAPIAgent, []string{"teller-api"}, SkillTeller),
 		},
 		{
-			// Names a spec that does not exist until the reader creates it: a role
-			// is stored without checking it, and discovery lists it all the same.
-			Path: "auth/" + AgentAuthMount + "/role/" + RoleGitHub, Operation: "create",
+			// Names a spec that does not exist until the reader creates it: the
+			// role is stored with a warning, and discovery lists it all the same.
+			Path: "sys/roles/" + RoleGitHub, Operation: "create",
 			Data: agentRole("Read GitHub repositories, issues and pull requests through GitHub's MCP tools, attached to your client, "+
 				"with a GitHub token the operator provides.",
 				MountGitHub, SpecGitHub, []string{"github-access", "github-read"}, ""),
 		},
+
+		// Groups: who may assume each role.
+		agentGroup(RoleATM),
+		agentGroup(RoleAssistant),
+		agentGroup(RoleTeller),
+		agentGroup(RoleGitHub),
 
 		// Last, so the log holds the scenarios rather than the setup.
 		{

@@ -172,12 +172,10 @@ func TestCloneFull(t *testing.T) {
 				Data:         map[string]string{"access_key": "AK", "secret_key": "SK"},
 			},
 			AuthResult: &AuthResult{
-				TokenType:      "service",
-				PrincipalID:    "user1",
-				RoleName:       "admin",
-				Policies:       []string{"pol1", "pol2"},
-				TokenTTL:       7200,
-				CredentialSpec: "spec-1",
+				TokenType:   "service",
+				PrincipalID: "user1",
+				Policies:    []string{"pol1", "pol2"},
+				TokenTTL:    7200,
 			},
 		},
 		Auth: &Auth{

@@ -880,7 +880,6 @@ func TestNamespaceStore_ClearNamespaceResources(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		authData := &AuthData{
 			PrincipalID: "user",
-			RoleName:    "role",
 			ExpireAt:    time.Now().Add(1 * time.Hour),
 			Policies:    []string{"default"},
 		}

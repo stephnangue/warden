@@ -64,6 +64,11 @@ func ErrRequestEntityTooLargef(format string, args ...any) *CodedError {
 	return &CodedError{Status: http.StatusRequestEntityTooLarge, Message: fmt.Sprintf(format, args...)}
 }
 
+// ErrGone creates a 410 Gone error: the path named something that was removed.
+func ErrGone(message string) *CodedError {
+	return &CodedError{Status: http.StatusGone, Message: message}
+}
+
 // ErrConflict creates a 409 Conflict error.
 func ErrConflict(message string) *CodedError {
 	return &CodedError{Status: http.StatusConflict, Message: message}

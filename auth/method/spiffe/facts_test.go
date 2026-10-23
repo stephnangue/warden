@@ -74,8 +74,8 @@ func issueSVID(t testing.TB, ca *x509.Certificate, caKey, key *ecdsa.PrivateKey,
 	return cert
 }
 
-// factsFixture is a backend trusting testTD for both SVID kinds, with a role
-// "api" admitting spiffe://testTD/ns/+/sa/+ and the audience "warden".
+// factsFixture is a backend trusting testTD for both SVID kinds, bound to the
+// audience "warden".
 type factsFixture struct {
 	b     *spiffeAuthBackend
 	ca    *x509.Certificate
@@ -83,23 +83,20 @@ type factsFixture struct {
 	jwt   *jwtAuthority
 }
 
-// newFactsFixture returns a factsFixture, configured with raw unless it is nil.
+// newFactsFixture returns a factsFixture, configured with raw over
+// bound_audiences "warden".
 func newFactsFixture(t *testing.T, raw map[string]any) *factsFixture {
 	t.Helper()
 	ca, caKey, _ := testCA(t)
 	authority := newJWTAuthority(t)
 	b, ctx := createTestBackend(t)
 	registerTD(t, b, ctx, &spiffelib.TrustDomain{Name: testTD, BundleJSON: combinedBundle(t, testTD, ca, authority)})
-	if raw != nil {
-		resp := writeConfig(b, raw)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "config write: %v", resp.Err)
+	conf := map[string]any{"bound_audiences": []string{"warden"}}
+	for k, v := range raw {
+		conf[k] = v
 	}
-	require.NoError(t, b.setRole(ctx, &SPIFFERole{
-		Name: "api", TrustDomain: testTD,
-		AllowedSPIFFEIDs: []string{"spiffe://" + testTD + "/ns/+/sa/+"},
-		BoundAudiences:   []string{"warden"},
-		TokenPolicies:    []string{"read"}, TokenTTL: "1h",
-	}))
+	resp := writeConfig(b, conf)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "config write: %v", resp.Err)
 	return &factsFixture{b: b, ca: ca, caKey: caKey, jwt: authority}
 }
 
@@ -227,29 +224,19 @@ func TestFactNames(t *testing.T) {
 func TestLogin_CarriesAdmission(t *testing.T) {
 	f := newFactsFixture(t, map[string]any{"facts": map[string]any{"spiffe_id": "workload", "svid": "credential"}})
 	ctx := context.Background()
-	require.NoError(t, f.b.setRole(ctx, &SPIFFERole{
-		Name: "meta", TrustDomain: testTD,
-		AllowedSPIFFEIDs: []string{"spiffe://" + testTD + "/ns/+/sa/+"},
-		BoundAudiences:   []string{"warden"},
-		TokenPolicies:    []string{"base"}, TokenTTL: "1h",
-		GroupsClaim:      "groups",
-		MetadataMappings: map[string]string{"path": "p", "trust_domain": "td"},
-		MetadataClaims:   map[string]string{"team": "team"},
-	}))
 	const id = "spiffe://" + testTD + "/ns/prod/sa/ci"
 
 	t.Run("x509", func(t *testing.T) {
 		svid := f.svid(t, id)
-		resp := x509Login(t, f.b, ctx, "meta", svid)
+		resp := x509Login(t, f.b, ctx, svid)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 		auth := resp.Auth
 
-		// Today's role output is untouched.
-		assert.Equal(t, "meta", auth.RoleName)
-		assert.Equal(t, []string{"base"}, auth.Policies)
+		// An admission: no policies, no metadata.
+		assert.Nil(t, auth.Policies)
+		assert.Nil(t, auth.Metadata)
 		assert.Equal(t, id, auth.PrincipalID)
 		assert.Equal(t, helper.CertFingerprint(svid), auth.ClientToken)
-		assert.Equal(t, map[string]string{"p": "/ns/prod/sa/ci", "td": testTD}, auth.Metadata)
 
 		adm := auth.Admission
 		require.NotNil(t, adm)
@@ -272,15 +259,14 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 			"groups": []any{"ops"},
 			"team":   "platform",
 		})
-		resp := jwtLogin(t, f.b, ctx, "meta", token)
+		resp := jwtLogin(t, f.b, ctx, token)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 		auth := resp.Auth
 
-		assert.Equal(t, "meta", auth.RoleName)
-		assert.Equal(t, []string{"base", "group-ops"}, auth.Policies)
+		assert.Nil(t, auth.Policies, "a groups claim grants nothing")
+		assert.Nil(t, auth.Metadata)
 		assert.Equal(t, id, auth.PrincipalID)
 		assert.Equal(t, token, auth.ClientToken)
-		assert.Equal(t, map[string]string{"p": "/ns/prod/sa/ci", "td": testTD, "team": "platform"}, auth.Metadata)
 
 		adm := auth.Admission
 		require.NotNil(t, adm)
@@ -302,16 +288,17 @@ func TestLogin_RefusedCarriesNoAdmission(t *testing.T) {
 	f := newFactsFixture(t, nil)
 	ctx := context.Background()
 
-	resp := x509Login(t, f.b, ctx, "api", f.svid(t, "spiffe://"+testTD+"/other"))
+	rogue, rogueKey, _ := testCA(t)
+	resp := x509Login(t, f.b, ctx, testSVID(t, rogue, rogueKey, "spiffe://"+testTD+"/ns/a/sa/b"))
 	require.Error(t, resp.Err)
 	assert.Nil(t, resp.Auth)
 
 	token := f.jwt.sign(t, "spiffe://"+testTD+"/ns/a/sa/b", []string{"other"}, time.Now().Add(time.Hour), nil)
-	resp = jwtLogin(t, f.b, ctx, "api", token)
+	resp = jwtLogin(t, f.b, ctx, token)
 	require.Error(t, resp.Err)
 	assert.Nil(t, resp.Auth)
 
-	resp = x509Login(t, f.b, ctx, "api", f.svid(t, "spiffe://"+testTD+"/ns/a/sa/b"))
+	resp = x509Login(t, f.b, ctx, f.svid(t, "spiffe://"+testTD+"/ns/a/sa/b"))
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	assert.NotNil(t, resp.Auth.Admission)
 }
@@ -392,7 +379,7 @@ func TestRenderMetadata_AudiencesAndKind(t *testing.T) {
 // =============================================================================
 
 func TestConfigWrite_FactsAndAudiences(t *testing.T) {
-	f := newFactsFixture(t, map[string]any{"default_role": "api"})
+	f := newFactsFixture(t, map[string]any{"max_age": 300})
 	b := f.b
 	ctx := context.Background()
 
@@ -403,7 +390,7 @@ func TestConfigWrite_FactsAndAudiences(t *testing.T) {
 	}
 	assert.Equal(t, logical.EntityKindAgent, read()["entity_kind"], "agent by default")
 	assert.Empty(t, read()["facts"])
-	assert.Empty(t, read()["bound_audiences"])
+	assert.Equal(t, []string{"warden"}, read()["bound_audiences"], "an agent mount carries its audiences")
 
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{
 		"entity_kind":     "human",
@@ -430,7 +417,7 @@ func TestConfigWrite_FactsAndAudiences(t *testing.T) {
 	assert.Equal(t, []string{"where", "workload"}, b.mountFacts.Load().Mapping.Mapped())
 	assert.Equal(t, "human", b.mountFacts.Load().Kind)
 	assert.Equal(t, []string{"warden", "api"}, b.config.BoundAudiences)
-	assert.Equal(t, "api", b.config.DefaultRole)
+	assert.Equal(t, 5*time.Minute, b.config.MaxAge)
 
 	// The stored config reloads into the same naming and audiences.
 	entry, err := b.storageView.Get(ctx, "config")
@@ -479,7 +466,6 @@ func TestConfigRead_UnconfiguredRendersDefaults(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, map[string]any{
 		"token_ttl":       "0s",
-		"default_role":    "",
 		"bound_audiences": []string(nil),
 		"max_age":         "0s",
 		"entity_kind":     logical.EntityKindAgent,
@@ -488,30 +474,41 @@ func TestConfigRead_UnconfiguredRendersDefaults(t *testing.T) {
 	assert.Equal(t, resp.Data["entity_kind"], b.mountFacts.Load().Kind)
 	assert.Equal(t, slices.Sorted(slices.Values(spiffeBuiltinFacts())), b.FactNames(), "it answers the built-ins")
 
-	// No mount cap: a role TTL above an hour applies in full, under the SVID's
-	// lifetime.
+	// No mount cap: the SVID's lifetime applies in full.
 	ca, caKey, caPEM := testCA(t)
 	registerTD(t, b, ctx, &spiffelib.TrustDomain{Name: testTD, BundlePEM: caPEM})
-	require.NoError(t, b.setRole(ctx, &SPIFFERole{Name: "long", TrustDomain: testTD, TokenTTL: "2h"}))
 	svid := testSVID(t, ca, caKey, "spiffe://"+testTD+"/sa/api", func(c *x509.Certificate) {
 		c.NotAfter = time.Now().Add(3 * time.Hour)
 	})
-	login := x509Login(t, b, ctx, "long", svid)
+	login := x509Login(t, b, ctx, svid)
 	require.Equal(t, http.StatusOK, login.StatusCode, "login: %v", login.Err)
-	assert.Equal(t, 2*time.Hour, login.Auth.TokenTTL)
+	assert.Greater(t, login.Auth.TokenTTL, 2*time.Hour+59*time.Minute)
 }
 
-// bound_audiences is stored but not used by logins yet: the role's audience
-// still decides which JWT-SVIDs a login accepts.
-func TestConfigWrite_BoundAudiencesNotUsedByLogins(t *testing.T) {
+// The mount's bound_audiences decide which JWT-SVIDs a login admits; a write
+// that would leave an agent mount without them is refused, a human mount may.
+func TestConfigWrite_BoundAudiencesDecideLogins(t *testing.T) {
 	f := newFactsFixture(t, map[string]any{"bound_audiences": []string{"other"}})
 	ctx := context.Background()
 	const id = "spiffe://" + testTD + "/ns/a/sa/b"
 
-	resp := jwtLogin(t, f.b, ctx, "api", f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil))
-	require.Equal(t, http.StatusOK, resp.StatusCode, "the role's audience admits: %v", resp.Err)
-	resp = jwtLogin(t, f.b, ctx, "api", f.jwt.sign(t, id, []string{"other"}, time.Now().Add(time.Hour), nil))
-	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "the mount's audience does not")
+	resp := jwtLogin(t, f.b, ctx, f.jwt.sign(t, id, []string{"other"}, time.Now().Add(time.Hour), nil))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the mount's audience admits: %v", resp.Err)
+	resp = jwtLogin(t, f.b, ctx, f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil))
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "another relying party's audience does not")
+
+	before := f.b.config
+	resp = writeConfig(f.b, map[string]any{"bound_audiences": ""})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.ErrorIs(t, resp.Err, helper.ErrAgentAudiencesRequired)
+	assert.Same(t, before, f.b.config)
+
+	fresh, _ := createTestBackend(t)
+	resp = writeConfig(fresh, map[string]any{"token_ttl": "1h"})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "an agent mount's first write needs bound_audiences")
+	require.ErrorIs(t, resp.Err, helper.ErrAgentAudiencesRequired)
+	resp = writeConfig(fresh, map[string]any{"entity_kind": "human"})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "a human mount may leave them empty: %v", resp.Err)
 }
 
 func TestConfigWrite_FactsAndAudiencesRefused(t *testing.T) {
@@ -566,7 +563,7 @@ func TestConfigWrite_FactsAndAudiencesRefused(t *testing.T) {
 // admissions. Today's role logins are not affected by facts.
 func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 	ctx := context.Background()
-	bad := map[string]any{"facts": map[string]any{"sub": "sub"}}
+	bad := map[string]any{"facts": map[string]any{"sub": "sub"}, "bound_audiences": []string{"warden"}}
 
 	t.Run("from storage", func(t *testing.T) {
 		f := newFactsFixture(t, nil)
@@ -584,11 +581,10 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 
 		const id = "spiffe://" + testTD + "/ns/a/sa/b"
 		for _, resp := range []*logical.Response{
-			x509Login(t, b, ctx, "api", f.svid(t, id)),
-			jwtLogin(t, b, ctx, "api", f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil)),
+			x509Login(t, b, ctx, f.svid(t, id)),
+			jwtLogin(t, b, ctx, f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil)),
 		} {
-			require.Equal(t, http.StatusOK, resp.StatusCode, "role logins do not read facts: %v", resp.Err)
-			assert.Equal(t, []string{"read"}, resp.Auth.Policies)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "logins do not read facts: %v", resp.Err)
 			adm := resp.Auth.Admission
 			require.NotNil(t, adm)
 			adm.MountPath = "auth/spiffe/"
@@ -600,13 +596,13 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		// A write that leaves the stored facts in place is told how to replace
 		// them, and changes nothing.
 		before := b.config
-		resp := writeConfig(b, map[string]any{"default_role": "api"})
+		resp := writeConfig(b, map[string]any{"token_ttl": 600})
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.EqualError(t, resp.Err, `the stored facts do not compile (facts: source "sub" is not a field of this mount (one of aud, path, spiffe_id, svid, trust_domain)); send facts (and entity_kind) in this write to replace them`)
 		assert.Same(t, before, b.config)
 
 		// Rewriting the facts restores the naming, for an earlier admission too.
-		adm := x509Login(t, b, ctx, "api", f.svid(t, id)).Auth.Admission
+		adm := x509Login(t, b, ctx, f.svid(t, id)).Auth.Admission
 		require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"facts": map[string]any{}}).StatusCode)
 		assert.Equal(t, []string{id}, factstest.Values(adm, adm.Mount.Load(), "spiffe_id"))
 	})

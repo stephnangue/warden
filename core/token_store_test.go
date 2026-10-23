@@ -26,7 +26,6 @@ func TestTokenStore_GenerateToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		Policies:    []string{"default", "admin"},
 		ClientIP:    "192.168.1.100",
@@ -41,7 +40,8 @@ func TestTokenStore_GenerateToken(t *testing.T) {
 	assert.NotEmpty(t, entry.Accessor)
 	assert.Equal(t, TypeWardenToken, entry.Type)
 	assert.Equal(t, "test-user", entry.PrincipalID)
-	assert.Equal(t, "test-role", entry.RoleName)
+	assert.Empty(t, entry.RoleName, "no token is issued with a role")
+	assert.Empty(t, entry.CredentialSpec, "no token is issued with a spec")
 	assert.Equal(t, namespace.RootNamespaceID, entry.NamespaceID)
 	assert.Equal(t, []string{"default", "admin"}, entry.Policies)
 	assert.Equal(t, "192.168.1.100", entry.CreatedByIP)
@@ -65,7 +65,6 @@ func TestTokenStore_GenerateToken_DifferentTypes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			authData := &AuthData{
 				PrincipalID: "test-user-" + tt.tokenType,
-				RoleName:    "test-role",
 				ExpireAt:    time.Now().Add(24 * time.Hour),
 			}
 
@@ -86,7 +85,6 @@ func TestTokenStore_GenerateToken_UnsupportedType(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -114,7 +112,6 @@ func TestTokenStore_GenerateToken_NoNamespace(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -132,7 +129,6 @@ func TestTokenStore_ResolveToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -145,10 +141,9 @@ func TestTokenStore_ResolveToken(t *testing.T) {
 	require.NotEmpty(t, tokenValue)
 
 	// Resolve token
-	principalID, roleName, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+	principalID, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 	assert.Equal(t, "test-user", principalID)
-	assert.Equal(t, "test-role", roleName)
 }
 
 // TestTokenStore_ResolveToken_NotFound tests resolving a non-existent token
@@ -158,7 +153,7 @@ func TestTokenStore_ResolveToken_NotFound(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	_, _, err := core.tokenStore.ResolveToken(ctx, "nonexistent_token")
+	_, err := core.tokenStore.ResolveToken(ctx, "nonexistent_token")
 	require.Error(t, err)
 }
 
@@ -171,7 +166,6 @@ func TestTokenStore_ResolveToken_Expired(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(-1 * time.Hour), // Already expired
 	}
 
@@ -189,7 +183,6 @@ func TestTokenStore_LookupToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		Policies:    []string{"default"},
 	}
@@ -223,7 +216,6 @@ func TestTokenStore_Metadata_RoundTrip(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		Policies:    []string{"default"},
 		Metadata:    map[string]string{"env": "prod", "team": "platform-core"},
@@ -253,7 +245,6 @@ func TestTokenStore_MountAccessor_RoundTrip(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID:   "test-user",
-		RoleName:      "test-role",
 		ExpireAt:      time.Now().Add(24 * time.Hour),
 		Policies:      []string{"default"},
 		MountAccessor: "auth_jwt_abc123",
@@ -292,7 +283,6 @@ func TestTokenStore_LookupToken_Expired(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(50 * time.Millisecond), // Short expiration
 	}
 
@@ -318,7 +308,6 @@ func TestTokenStore_LookupToken_SameOriginViolation(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		ClientIP:    "192.168.1.100",
 	}
@@ -344,7 +333,6 @@ func TestTokenStore_LookupToken_SameOriginPass(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		ClientIP:    "192.168.1.100",
 	}
@@ -370,7 +358,6 @@ func TestTokenStore_LookupToken_NoNamespace(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -394,7 +381,6 @@ func TestTokenStore_LookupByAccessor(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -433,7 +419,6 @@ func TestTokenStore_RevokeByAccessor(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -553,14 +538,14 @@ func TestTokenStore_RootTokenRecognisedAfterRestart(t *testing.T) {
 	assert.False(t, s.rootTokenManager.HasRootToken())
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
-	_, _, err = s.ResolveToken(ctx, rootToken)
+	_, err = s.ResolveToken(ctx, rootToken)
 	require.Error(t, err, "the revoked root must no longer resolve")
 
 	// The revocation reached storage: the root does not come back on the
 	// next restart.
 	simulateRestart(t, s)
 	assert.False(t, s.rootTokenManager.HasRootToken())
-	_, _, err = s.ResolveToken(ctx, rootToken)
+	_, err = s.ResolveToken(ctx, rootToken)
 	require.Error(t, err)
 }
 
@@ -580,7 +565,7 @@ func TestTokenStore_RootTokenReplaceableAfterRestart(t *testing.T) {
 	assert.True(t, s.rootTokenManager.IsRootToken("my-dev-token"))
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
-	_, _, err = s.ResolveToken(ctx, rootToken)
+	_, err = s.ResolveToken(ctx, rootToken)
 	require.Error(t, err, "the replaced root value must no longer resolve")
 
 	simulateRestart(t, s)
@@ -654,7 +639,6 @@ func TestTokenStore_GetMetrics(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		authData := &AuthData{
 			PrincipalID: "test-user",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 		}
 		_, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
@@ -688,7 +672,6 @@ func TestTokenStore_Close(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -707,7 +690,6 @@ func TestTokenStore_Sealed(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -735,7 +717,6 @@ func TestTokenStore_WardenToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "warden-user",
-		RoleName:    "warden-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -749,10 +730,9 @@ func TestTokenStore_WardenToken(t *testing.T) {
 
 	// Resolve by token
 	token := entry.Data["token"]
-	principalID, roleName, err := core.tokenStore.ResolveToken(ctx, token)
+	principalID, err := core.tokenStore.ResolveToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, "warden-user", principalID)
-	assert.Equal(t, "warden-role", roleName)
 }
 
 // TestTokenStore_ConcurrentAccess tests thread safety of the token store
@@ -772,7 +752,6 @@ func TestTokenStore_ConcurrentAccess(t *testing.T) {
 			for j := 0; j < tokensPerGoroutine; j++ {
 				authData := &AuthData{
 					PrincipalID: "user",
-					RoleName:    "role",
 					ExpireAt:    time.Now().Add(24 * time.Hour),
 				}
 
@@ -784,7 +763,7 @@ func TestTokenStore_ConcurrentAccess(t *testing.T) {
 				}
 
 				tokenValue := entry.Data["token"]
-				_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+				_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 				if err != nil {
 					t.Errorf("goroutine %d: failed to resolve token: %v", id, err)
 					done <- false
@@ -815,7 +794,6 @@ func TestTokenStore_TokenWithNoExpiration(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		// No ExpireAt - infinite TTL
 	}
 
@@ -827,7 +805,7 @@ func TestTokenStore_TokenWithNoExpiration(t *testing.T) {
 
 	// Should still be resolvable
 	tokenValue := entry.Data["token"]
-	principalID, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+	principalID, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 	assert.Equal(t, "test-user", principalID)
 }
@@ -842,7 +820,6 @@ func TestTokenStore_LoadFromStorage(t *testing.T) {
 	// Generate a token
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -858,7 +835,7 @@ func TestTokenStore_LoadFromStorage(t *testing.T) {
 
 	// Token should still be accessible
 	tokenValue := entry.Data["token"]
-	principalID, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+	principalID, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 	assert.Equal(t, "test-user", principalID)
 }
@@ -876,7 +853,6 @@ func TestTokenStore_RevokeByExpiration(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -886,7 +862,7 @@ func TestTokenStore_RevokeByExpiration(t *testing.T) {
 
 	// Verify token is accessible
 	tokenValue := entry.Data["token"]
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 
 	// Revoke by expiration (simulates ExpirationManager callback)
@@ -894,7 +870,7 @@ func TestTokenStore_RevokeByExpiration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Token should no longer be accessible
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.Error(t, err)
 	assert.Equal(t, ErrTokenNotFound, err)
 }
@@ -918,7 +894,6 @@ func TestTokenStore_RevokeByExpiration_CleansAccessor(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -950,7 +925,6 @@ func TestTokenStore_RevokeByExpiration_CleansStorage(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -967,7 +941,7 @@ func TestTokenStore_RevokeByExpiration_CleansStorage(t *testing.T) {
 	core.tokenStore.UnloadFromCache()
 
 	// Token should not be found even from storage
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.Error(t, err)
 }
 
@@ -980,7 +954,6 @@ func TestTokenStore_RevokeByExpiration_MultipleTimes(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -1004,7 +977,6 @@ func TestTokenStore_ExpirationManagerRevoker(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -1031,7 +1003,7 @@ func TestTokenStore_ExpirationManagerRevoker(t *testing.T) {
 
 	// Verify token is gone
 	tokenValue := entry.Data["token"]
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.Error(t, err)
 }
 
@@ -1045,7 +1017,6 @@ func TestTokenStore_RevokeByExpiration_JWTToken(t *testing.T) {
 	// Create a JWT role token
 	authData := &AuthData{
 		PrincipalID: "jwt-user",
-		RoleName:    "jwt-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -1077,7 +1048,6 @@ func TestTokenStore_RevokeByExpiration_ConcurrentRevocation(t *testing.T) {
 	for i := 0; i < numTokens; i++ {
 		authData := &AuthData{
 			PrincipalID: "test-user",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 		}
 
@@ -1103,7 +1073,7 @@ func TestTokenStore_RevokeByExpiration_ConcurrentRevocation(t *testing.T) {
 	// Verify all tokens are revoked
 	for _, entry := range entries {
 		tokenValue := entry.Data["token"]
-		_, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+		_, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 		assert.Error(t, err, "token %s should be revoked", entry.ID)
 	}
 }
@@ -1167,7 +1137,6 @@ func TestIPBindingPolicy_Disabled(t *testing.T) {
 	// Create token with IP binding
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		ClientIP:    "192.168.1.100",
 	}
@@ -1196,7 +1165,6 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("both IPs present and match", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-1",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
@@ -1213,7 +1181,6 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("both IPs present but mismatch", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-2",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
@@ -1231,7 +1198,6 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("no creation IP allows any request IP", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-3",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			// No ClientIP
 		}
@@ -1248,7 +1214,6 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("no request IP allows access", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-4",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
@@ -1276,7 +1241,6 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 	t.Run("both IPs present and match succeeds", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-req-1",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
@@ -1293,7 +1257,6 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 	t.Run("no creation IP fails", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-req-2",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			// No ClientIP
 		}
@@ -1311,7 +1274,6 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 	t.Run("no request IP fails", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-req-3",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
@@ -1388,7 +1350,6 @@ func TestTokenStore_RevokeByNamespace(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		authData := &AuthData{
 			PrincipalID: "user",
-			RoleName:    "role",
 			ExpireAt:    time.Now().Add(1 * time.Hour),
 			Policies:    []string{"default"},
 		}
@@ -1399,7 +1360,6 @@ func TestTokenStore_RevokeByNamespace(t *testing.T) {
 	// Generate token in ns2
 	authData := &AuthData{
 		PrincipalID: "user",
-		RoleName:    "role",
 		ExpireAt:    time.Now().Add(1 * time.Hour),
 		Policies:    []string{"default"},
 	}

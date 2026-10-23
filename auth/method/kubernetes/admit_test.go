@@ -56,6 +56,19 @@ func lookup(adm *logical.Admission, name string) []string {
 	return out
 }
 
+// The bearer scheme is matched case-insensitively, as the gateway matches it,
+// so discovery admits whatever the gateway admits.
+func TestExtractJWTFromRequest_SchemeCaseInsensitive(t *testing.T) {
+	for _, scheme := range []string{"Bearer ", "bearer ", "BEARER "} {
+		httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+		httpReq.Header.Set("Authorization", scheme+"eyJ.payload.sig")
+		assert.Equal(t, "eyJ.payload.sig", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}), scheme)
+	}
+	httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	httpReq.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	assert.Empty(t, extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}))
+}
+
 func TestAdmit_RefusedUnlessInternal(t *testing.T) {
 	b := reviewingBackend(t, map[string]any{"bound_audiences": []string{"warden"}})
 	resp := admitRequest(t, b, saToken("default", "myapp", []string{"warden"}, nil), false)
@@ -138,11 +151,13 @@ func TestAdmit_CannotDecide(t *testing.T) {
 	b, ctx := newTestBackend(t)
 	_, err := routeAdmit(b, token, true)
 	assert.ErrorIs(t, err, errNotConfigured)
+	assert.ErrorIs(t, err, helper.ErrAdmitNotConfigured, "discovery reports the class")
 
 	failing := newFakeAPIServer(t, fakeAPIServerOpts{Failures: 100, FailWithStatus: http.StatusForbidden})
 	require.NoError(t, b.setupConfig(ctx, map[string]any{"kubernetes_host": failing.URL, "tls_skip_verify": true}))
 	_, err = routeAdmit(b, token, true)
 	assert.ErrorIs(t, err, errTokenReviewCall)
+	assert.ErrorIs(t, err, helper.ErrAdmitUnverified, "discovery reports the class, not the API server's reply")
 	assert.NotContains(t, err.Error(), "myapp", "the error names the mount's condition, not the credential")
 
 	rejecting := newFakeAPIServer(t, fakeAPIServerOpts{Response: tokenReviewStatus{Error: "token rejected"}})

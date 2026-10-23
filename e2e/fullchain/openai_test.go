@@ -185,7 +185,7 @@ const (
 	openaiAccessTokenType    = "urn:ietf:params:oauth:token-type:access_token"
 )
 
-// openaiWIFTarget is one spec on the keyless source and the cert role binding it.
+// openaiWIFTarget is one spec on the keyless source and the role binding it.
 type openaiWIFTarget struct{ spec, role, account string }
 
 var (
@@ -302,17 +302,18 @@ func openaiOAuthSeenAt() []time.Time {
 	return append([]time.Time(nil), openaiOAuthAt...)
 }
 
-// setupOpenAIWIF builds the keyless source and, per target, a spec and the cert
-// role binding it. Order is load-bearing: a source cannot be deleted while a spec
-// names it, so cleanup runs roles, then specs, then the source — which also clears
-// whatever a killed run left behind before building.
+// setupOpenAIWIF builds the keyless source and, per target, a spec and the role
+// binding it, granted to the agent certificate. Order is load-bearing: a source
+// cannot be deleted while a spec names it, so cleanup runs roles, then specs,
+// then the source — which also clears whatever a killed run left behind before
+// building.
 func setupOpenAIWIF(t *testing.T) {
 	t.Helper()
 
 	targets := []openaiWIFTarget{openaiWIFMain, openaiWIFShort, openaiWIFRejected}
 	clear := func() {
 		for _, tg := range targets {
-			h.APIRequest(t, "DELETE", "auth/cert/role/"+tg.role, leaderPort, "")
+			h.RevokeRole(t, leaderPort, "auth/cert/", tg.role)
 		}
 		for _, tg := range targets {
 			h.APIRequest(t, "DELETE", "sys/cred/specs/"+tg.spec, leaderPort, "")
@@ -344,12 +345,8 @@ func setupOpenAIWIF(t *testing.T) {
 			},
 		}, "create the keyless spec "+tg.spec)
 
-		mustWriteJSON(t, "auth/cert/role/"+tg.role, map[string]any{
-			"allowed_common_names": []string{h.FullChainAgentCN},
-			"token_policies":       []string{openaiEnv.Policy()},
-			"cred_spec_name":       tg.spec,
-			"token_ttl":            3600,
-		}, "create the cert role "+tg.role)
+		h.GrantRole(t, leaderPort, "auth/cert/", tg.role,
+			h.Role{Policies: []string{openaiEnv.Policy()}, CredSpec: tg.spec}, h.FullChainAgentRule)
 	}
 }
 

@@ -130,7 +130,7 @@ func setupTokenExchangePerAgentChain(t *testing.T, stsURL string, clientByAgent 
 	}
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+txPerAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", txPerAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+txPerAgentSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+txPerAgentSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+txPerAgentSecretSpec, leaderPort, "")
@@ -177,10 +177,10 @@ func setupTokenExchangePerAgentChain(t *testing.T, stsURL string, clientByAgent 
 			"audience":"https://api.internal.example.com"}}`,
 		"create the per-agent consuming spec")
 
-	mustWrite("POST", "auth/jwt/role/"+txPerAgentRole, `{
-		"token_policies":["`+restEnv.Policy()+`"],"cred_spec_name":"`+txPerAgentSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the shared per-agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", txPerAgentRole, h.Role{
+		Policies: []string{restEnv.Policy()},
+		CredSpec: txPerAgentSpec,
+	}, nil)
 }
 
 // TestTokenExchange_PerAgentOAuthClient drives two agents through one source, one spec

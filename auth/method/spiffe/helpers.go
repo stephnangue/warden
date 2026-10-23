@@ -54,17 +54,16 @@ func extractClientCert(req *logical.Request) *x509.Certificate {
 	return listener.ForwardedClientCert(req.HTTPRequest.Context())
 }
 
-// extractJWTFromRequest pulls a JWT-SVID off an introspect request, header-first:
-//  1. Direct HTTP call — Authorization: Bearer <jwt>.
-//  2. In-process call from the system-backend aggregator — the raw JWT in
-//     req.ClientToken.
+// extractJWTFromRequest returns the JWT-SVID of an introspect/admit request:
+// the Authorization bearer of the request discovery forwards, its scheme
+// matched case-insensitively as the gateway matches it, else req.ClientToken.
 //
 // Login does NOT use this — the implicit-auth dispatcher delivers the JWT-SVID
 // as the "jwt" body field, read via d.Get("jwt").
 func extractJWTFromRequest(req *logical.Request) string {
 	if req.HTTPRequest != nil {
-		if auth := req.HTTPRequest.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			return strings.TrimPrefix(auth, "Bearer ")
+		if token := logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")); token != "" {
+			return token
 		}
 	}
 	return req.ClientToken

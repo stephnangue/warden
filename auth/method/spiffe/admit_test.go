@@ -58,6 +58,19 @@ func svidKind(adm *logical.Admission) []string {
 	return factstest.Values(adm, adm.Mount.Load(), "svid")
 }
 
+// The bearer scheme is matched case-insensitively, as the gateway matches it,
+// so discovery admits whatever the gateway admits.
+func TestExtractJWTFromRequest_SchemeCaseInsensitive(t *testing.T) {
+	for _, scheme := range []string{"Bearer ", "bearer ", "BEARER "} {
+		httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+		httpReq.Header.Set("Authorization", scheme+"eyJ.payload.sig")
+		assert.Equal(t, "eyJ.payload.sig", extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}), scheme)
+	}
+	httpReq := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	httpReq.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	assert.Empty(t, extractJWTFromRequest(&logical.Request{HTTPRequest: httpReq}))
+}
+
 func TestAdmit_RefusedUnlessInternal(t *testing.T) {
 	f := newFactsFixture(t, map[string]any{"bound_audiences": []string{"warden"}})
 	resp := admitRequest(t, f.b, "", f.svid(t, admitID), false)
@@ -114,17 +127,28 @@ func TestAdmit_JWTSVID(t *testing.T) {
 
 // Without bound_audiences on the mount (or with no config at all), the mount
 // cannot decide on a JWT-SVID: an error, which discovery reports as the mount's
-// warning. X.509-SVIDs are still admitted.
+// warning. A stored agent config without them (written before audience binding
+// was required, since a write now refuses it) says so. X.509-SVIDs are still
+// admitted.
 func TestAdmit_JWTSVIDNeedsMountAudiences(t *testing.T) {
-	for name, raw := range map[string]map[string]any{
-		"no config":          nil,
-		"no bound_audiences": {"token_ttl": "1h"},
+	for name, tc := range map[string]struct {
+		stored map[string]any // installed as storage holds it; nil: no config
+		want   error
+	}{
+		"no config":                {nil, errNoMountAudiences},
+		"stored without audiences": {map[string]any{"token_ttl": "1h"}, helper.ErrAgentAudiencesRequired},
+		"human without audiences":  {map[string]any{"entity_kind": "human"}, errNoMountAudiences},
+		"class reported":           {nil, helper.ErrAdmitNoAudiences},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFactsFixture(t, raw)
+			f := newFactsFixture(t, nil)
+			f.b.config = nil
+			if tc.stored != nil {
+				require.NoError(t, f.b.setupSPIFFEConfig(context.Background(), tc.stored))
+			}
 			token := f.jwt.sign(t, admitID, []string{"warden"}, time.Now().Add(time.Hour), nil)
 			resp, err := routeAdmit(f.b, token, nil, true)
-			assert.ErrorIs(t, err, errNoMountAudiences)
+			assert.ErrorIs(t, err, tc.want)
 			assert.Nil(t, resp)
 			assert.NotNil(t, admitted(t, admitRequest(t, f.b, "", f.svid(t, admitID), true)))
 		})
@@ -170,6 +194,7 @@ func TestAdmit_NoBundles(t *testing.T) {
 	ca, caKey, _ := testCA(t)
 	resp, err := routeAdmit(b, "", testSVID(t, ca, caKey, admitID), true)
 	assert.ErrorIs(t, err, errNoBundles)
+	assert.ErrorIs(t, err, helper.ErrAdmitNoTrustBundle, "discovery reports the class")
 	assert.Nil(t, resp)
 	assert.Nil(t, admitted(t, admitRequest(t, b, "", nil, true)), "no credential: nothing to decide")
 }

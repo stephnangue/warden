@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"sort"
 	"strings"
 
+	authhelper "github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -115,6 +118,11 @@ func (b *SystemBackend) handleAuthCreate(ctx context.Context, req *logical.Reque
 	if err := ValidateMountPath(path); err != nil {
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
 	}
+	// Configuration keys of the role era load ignored (with a warning) from
+	// an existing mount, but a new mount is refused them.
+	if err := authhelper.RefuseRemovedConfigKeys(config); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 
 	b.logger.Info("mounting auth method",
 		logger.String("path", path),
@@ -176,13 +184,17 @@ func (b *SystemBackend) handleAuthRead(ctx context.Context, req *logical.Request
 	// Mask sensitive fields using schema-based approach
 	maskedConfig := b.maskMountConfig(ctx, entry, config)
 
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"type":        entry.Type,
 		"path":        entry.Path,
 		"description": entry.Description,
 		"accessor":    entry.Accessor,
 		"config":      maskedConfig,
-	}), nil
+	}
+	if n := b.core.authRoleLeftoverCount(entry.UUID); n > 0 {
+		appendWarnings(data, authRoleLeftoverWarning(entry.Path, n))
+	}
+	return b.respondSuccess(data), nil
 }
 
 // handleAuthDelete handles DELETE /sys/auth/{path}
@@ -191,14 +203,46 @@ func (b *SystemBackend) handleAuthDelete(ctx context.Context, req *logical.Reque
 
 	b.logger.Info("unmounting auth method", logger.String("path", path))
 
+	// Counted before the unmount, from the group snapshot it does not touch.
+	listed := b.core.groupsListingAuthMount(ctx, path)
+
 	// Unmount via Core
 	if err := b.core.unmount(ctx, path); err != nil {
 		return logical.ErrorResponse(err), nil
 	}
 
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"message": fmt.Sprintf("Successfully unmounted %s", path),
-	}), nil
+	}
+	if listed > 0 {
+		appendWarnings(data, mountDisableGroupsWarning(path, listed))
+	}
+	return b.respondSuccess(data), nil
+}
+
+// groupsListingAuthMount returns how many groups of ctx's namespace have a
+// rule whose mount selector names the auth mount at path (relative to the
+// namespace and to auth/, as sys/auth takes it), exactly or by a pattern.
+func (c *Core) groupsListingAuthMount(ctx context.Context, path string) int {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil || ns == nil {
+		return 0
+	}
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	return len(c.grantGroups(ns.ID).candidates(authRoutePrefix + path))
+}
+
+// mountDisableGroupsWarning is the warning for disabling the auth mount at
+// path while n groups have a rule naming it. It names neither the groups nor
+// their selectors.
+func mountDisableGroupsWarning(path string, n int) string {
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	return fmt.Sprintf("%d group(s) have a rule whose mount selector names %s%s; those rules match nothing "+
+		"until a mount is enabled there again", n, authRoutePrefix, path)
 }
 
 // handleAuthList handles GET /sys/auth
@@ -214,7 +258,11 @@ func (b *SystemBackend) handleAuthList(ctx context.Context, req *logical.Request
 	}
 
 	mounts := make(map[string]any, len(entries))
+	var warnings []string
 	for _, entry := range entries {
+		if n := b.core.authRoleLeftoverCount(entry.UUID); n > 0 {
+			warnings = append(warnings, authRoleLeftoverWarning(entry.Path, n))
+		}
 		// Deep copy config
 		entry.configMu.RLock()
 		config := make(map[string]any)
@@ -232,7 +280,11 @@ func (b *SystemBackend) handleAuthList(ctx context.Context, req *logical.Request
 		}
 	}
 
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"mounts": mounts,
-	}), nil
+	}
+	// Sorted, so the listing reads the same whatever order the table holds.
+	sort.Strings(warnings)
+	appendWarnings(data, warnings...)
+	return b.respondSuccess(data), nil
 }

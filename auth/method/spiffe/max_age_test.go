@@ -32,7 +32,7 @@ func TestConfig_MaxAge(t *testing.T) {
 	resp, err := b.HandleRequest(ctx, &logical.Request{
 		Operation: logical.UpdateOperation,
 		Path:      "config",
-		Data:      map[string]any{"max_age": "10m"},
+		Data:      map[string]any{"max_age": "10m", "bound_audiences": "warden"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "write: %v", resp.Err)
@@ -40,7 +40,7 @@ func TestConfig_MaxAge(t *testing.T) {
 	assert.Equal(t, "10m0s", read()["max_age"])
 
 	// A write that leaves it out keeps it.
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "api"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"token_ttl": 600}).StatusCode)
 	assert.Equal(t, 10*time.Minute, b.config.MaxAge)
 
 	// Storage holds the duration string, and a reload reads it back.
@@ -55,7 +55,7 @@ func TestConfig_MaxAge(t *testing.T) {
 	require.NoError(t, reloaded.Initialize(ctx))
 	t.Cleanup(reloaded.spiffe.Stop)
 	assert.Equal(t, 10*time.Minute, reloaded.config.MaxAge)
-	assert.Equal(t, "api", reloaded.config.DefaultRole)
+	assert.Equal(t, 10*time.Minute, reloaded.config.TokenTTL)
 
 	// Seconds are accepted; zero unsets it.
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"max_age": 90}).StatusCode)
@@ -84,7 +84,7 @@ func TestConfig_MaxAgeRefused(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b, ctx := createTestBackend(t)
-			require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"max_age": "5m"}).StatusCode)
+			require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"max_age": "5m", "bound_audiences": "warden"}).StatusCode)
 			before := b.config
 			beforeEntry, err := b.storageView.Get(ctx, "config")
 			require.NoError(t, err)
@@ -152,41 +152,25 @@ func TestCheckSVIDMaxAge(t *testing.T) {
 	assert.ErrorIs(t, cfg.CheckSVIDMaxAge(jwtAt(time.Time{}), now), helper.ErrNoIssueTime)
 }
 
-// The admissions real logins produce: an X.509-SVID passes whatever max_age
-// is, a JWT-SVID issued before max_age does not.
-func TestCheckSVIDMaxAge_LoginAdmissions(t *testing.T) {
+// The mount's max_age is enforced at login, as at introspect/admit: an
+// X.509-SVID, which has no issue time, is admitted whatever max_age is; a
+// fresh JWT-SVID is admitted; one issued longer ago than max_age is not.
+func TestLogin_EnforcesMountMaxAge(t *testing.T) {
 	f := newFactsFixture(t, map[string]any{"max_age": "1m"})
 	ctx := context.Background()
 	const id = "spiffe://" + testTD + "/ns/a/sa/b"
 
-	resp := x509Login(t, f.b, ctx, "api", f.svid(t, id))
+	resp := x509Login(t, f.b, ctx, f.svid(t, id))
 	require.Equal(t, http.StatusOK, resp.StatusCode, "x509: %v", resp.Err)
+	assert.True(t, resp.Auth.Admission.IssuedAt.IsZero())
 	assert.NoError(t, f.b.config.CheckSVIDMaxAge(resp.Auth.Admission, time.Now()))
 
-	resp = jwtLogin(t, f.b, ctx, "api", f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil))
+	resp = jwtLogin(t, f.b, ctx, f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour), nil))
 	require.Equal(t, http.StatusOK, resp.StatusCode, "fresh jwt: %v", resp.Err)
 	assert.NoError(t, f.b.config.CheckSVIDMaxAge(resp.Auth.Admission, time.Now()))
 
-	resp = jwtLogin(t, f.b, ctx, "api", f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour),
+	resp = jwtLogin(t, f.b, ctx, f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour),
 		map[string]any{"iat": time.Now().Add(-time.Hour).Unix()}))
-	require.Equal(t, http.StatusOK, resp.StatusCode, "stale jwt: %v", resp.Err)
-	assert.ErrorContains(t, f.b.config.CheckSVIDMaxAge(resp.Auth.Admission, time.Now()), "more than max_age 1m0s")
-}
-
-// max_age is stored but not used by role logins: an X.509-SVID, which has no
-// issue time, and a JWT-SVID issued long before max_age are both admitted.
-func TestConfig_MaxAgeNotUsedByLogins(t *testing.T) {
-	f := newFactsFixture(t, map[string]any{"max_age": "1m"})
-	ctx := context.Background()
-	const id = "spiffe://" + testTD + "/ns/a/sa/b"
-
-	resp := x509Login(t, f.b, ctx, "api", f.svid(t, id))
-	require.Equal(t, http.StatusOK, resp.StatusCode, "x509: %v", resp.Err)
-	assert.True(t, resp.Auth.Admission.IssuedAt.IsZero())
-
-	issued := time.Now().Add(-time.Hour)
-	resp = jwtLogin(t, f.b, ctx, "api", f.jwt.sign(t, id, []string{"warden"}, time.Now().Add(time.Hour),
-		map[string]any{"iat": issued.Unix()}))
-	require.Equal(t, http.StatusOK, resp.StatusCode, "jwt: %v", resp.Err)
-	assert.Equal(t, issued.Unix(), resp.Auth.Admission.IssuedAt.Unix())
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "stale jwt")
+	assert.Nil(t, resp.Auth)
 }

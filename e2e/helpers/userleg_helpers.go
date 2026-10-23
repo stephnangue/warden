@@ -36,11 +36,12 @@ const (
 
 	// UserLegAuthMount is the auth mount that authenticates USER credentials.
 	// Deliberately separate from auth/jwt/ (the agent mount) so a token valid
-	// for one leg is not silently valid for the other.
+	// for one leg is not silently valid for the other: it admits humans only.
 	UserLegAuthMount = "auth/user-jwt/"
 
-	// UserLegAuthRole is the role user credentials are validated under.
-	UserLegAuthRole = "e2e-user"
+	// UserLegAgentRole is the role the stock agent-* certificates are granted
+	// on the user-leg mount.
+	UserLegAgentRole = "e2e-userleg-agent"
 
 	// UserLegResourceURL is the external base advertised in metadata. Pinned to
 	// node 1 because the setting is deployment-wide while the cluster has three
@@ -81,12 +82,7 @@ func SetupUserLegEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.Pri
 	mustAPI(t, port, "POST", "sys/auth/user-jwt", `{"type":"jwt"}`, "mount user-jwt auth")
 	time.Sleep(time.Second)
 
-	mustAPI(t, port, "PUT", "auth/user-jwt/config",
-		fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":"%s","bound_issuer":"%s"}`, HydraIssuer, HydraIssuer),
-		"configure user-jwt auth")
-
-	mustAPI(t, port, "POST", "auth/user-jwt/role/"+UserLegAuthRole,
-		`{"user_claim":"sub","token_ttl":3600}`, "create user role")
+	writeUserLegAuthConfig(t, port, nil)
 
 	// Provider mount. The description becomes `resource_name` in metadata.
 	mustAPI(t, port, "POST", "sys/providers/"+UserLegMount,
@@ -98,8 +94,8 @@ func SetupUserLegEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.Pri
 	// config that does not carry auto_auth_path, so they cannot be split.
 	mustAPI(t, port, "PUT", UserLegMount+"/config",
 		fmt.Sprintf(`{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"timeout":"30s",`+
-			`"auto_auth_path":"auth/cert/","user_auth_path":%q,"user_auth_role":%q}`,
-			UserLegAuthMount, UserLegAuthRole),
+			`"auto_auth_path":"auth/cert/","user_auth_path":%q}`,
+			UserLegAuthMount),
 		"configure provider")
 
 	mustAPI(t, port, "POST", "sys/policies/cbp/"+UserLegMount+"-access",
@@ -107,32 +103,47 @@ func SetupUserLegEnv(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.Pri
 			UserLegMount, UserLegMount),
 		"create policy")
 
-	// Cert role for the agent, bound to a credential spec so a successful
-	// request actually mints something.
-	mustAPI(t, port, "POST", "auth/cert/role/e2e-userleg-agent",
-		fmt.Sprintf(`{"allowed_common_names":["agent-*"],"token_policies":["%s-access"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`,
-			UserLegMount),
-		"create cert role")
+	// The agent's role, bound to a credential spec so a successful request
+	// actually mints something, granted to the stock agent-* certificates.
+	GrantRole(t, port, "auth/cert/", UserLegAgentRole,
+		Role{Policies: []string{UserLegMount + "-access"}, CredSpec: "vault-token-reader"},
+		Rule{"cn": {"agent-*"}})
 
 	EnableProtectedResourceMetadata(t, port)
 
 	return caCertPEM, caKey
 }
 
-// UserLegJWTRole is a JWT role scoped to the user-leg mount, for tests that
-// swap the certificate agent for a JWT one. The stock e2e-reader role grants
-// vault/gateway*, so reusing it would fail authorization instead of exercising
-// the agent channel under test.
+// writeUserLegAuthConfig writes the user auth mount's whole configuration:
+// Hydra's issuer, the audience the suites' tokens carry, a human entity kind,
+// and facts (none when nil), which become the user's metadata.
+func writeUserLegAuthConfig(t *testing.T, port int, facts map[string]string) {
+	t.Helper()
+	if facts == nil {
+		facts = map[string]string{}
+	}
+	mustAPI(t, port, "PUT", "auth/user-jwt/config", jsonBody(t, map[string]any{
+		"mode":               "oidc",
+		"oidc_discovery_url": HydraIssuer,
+		"bound_issuer":       HydraIssuer,
+		"bound_audiences":    []string{HydraAudience},
+		"user_claim":         "sub",
+		"entity_kind":        "human",
+		"facts":              facts,
+	}), "configure user-jwt auth")
+}
+
+// UserLegJWTRole is a role scoped to the user-leg mount, granted to agents of
+// auth/jwt/, for tests that swap the certificate agent for a JWT one. The
+// stock e2e-reader role grants vault/gateway*, so reusing it would fail
+// authorization instead of exercising the agent channel under test.
 const UserLegJWTRole = "e2e-userleg-jwt"
 
-// CreateUserLegJWTRole creates that role. Idempotent.
+// CreateUserLegJWTRole creates that role and its grant. Idempotent.
 func CreateUserLegJWTRole(t *testing.T, port int) {
 	t.Helper()
-	APIRequest(t, "DELETE", "auth/jwt/role/"+UserLegJWTRole, port, "")
-	mustAPI(t, port, "POST", "auth/jwt/role/"+UserLegJWTRole,
-		fmt.Sprintf(`{"token_policies":["%s-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}`,
-			UserLegMount),
-		"create user-leg jwt role")
+	GrantRole(t, port, "auth/jwt/", UserLegJWTRole,
+		Role{Policies: []string{UserLegMount + "-access"}, CredSpec: "vault-token-reader"}, nil)
 }
 
 // SetUserLegAgentPath repoints the mount's AGENT leg while leaving the user leg
@@ -140,8 +151,8 @@ func CreateUserLegJWTRole(t *testing.T, port int) {
 // the whole environment.
 func SetUserLegAgentPath(t *testing.T, port int, autoAuthPath, defaultRole string) {
 	t.Helper()
-	body := fmt.Sprintf(`{"auto_auth_path":%q,"user_auth_path":%q,"user_auth_role":%q`,
-		autoAuthPath, UserLegAuthMount, UserLegAuthRole)
+	body := fmt.Sprintf(`{"auto_auth_path":%q,"user_auth_path":%q`,
+		autoAuthPath, UserLegAuthMount)
 	if defaultRole != "" {
 		body += fmt.Sprintf(`,"default_role":%q`, defaultRole)
 	}
@@ -180,10 +191,10 @@ func TeardownUserLegEnvBestEffort(port int) {
 	}
 	TryRequest("POST", fmt.Sprintf("%s/v1/sys/protected-resource/config", NodeURL(port)),
 		map[string]string{"X-Warden-Token": token}, `{"resource_url":""}`)
-	del("auth/cert/role/e2e-userleg-agent")
+	RevokeRoleBestEffort(port, "auth/cert/", UserLegAgentRole)
+	RevokeRoleBestEffort(port, "auth/jwt/", UserLegJWTRole)
 	del("sys/policies/cbp/" + UserLegMount + "-access")
 	del("sys/providers/" + UserLegMount)
-	del("auth/user-jwt/role/" + UserLegAuthRole)
 	del("sys/auth/user-jwt")
 	del("sys/auth/cert")
 	time.Sleep(time.Second)
@@ -260,7 +271,7 @@ func PRMPath(port int, mount string) string {
 // presented as a client certificate and the given headers merged in.
 func UserLegRequest(t *testing.T, port int, agentCertPEM string, headers map[string]string) (int, []byte) {
 	t.Helper()
-	all := map[string]string{"X-Warden-Role": "e2e-userleg-agent"}
+	all := map[string]string{"X-Warden-Role": UserLegAgentRole}
 	if agentCertPEM != "" {
 		all["X-SSL-Client-Cert"] = URLEncodePEM(agentCertPEM)
 	}
@@ -282,8 +293,8 @@ func UserLegRequest(t *testing.T, port int, agentCertPEM string, headers map[str
 // — and differ only in where the compared value came from.
 //
 // When the IdP decided: it attests the pairing with RFC 8693 `act.sub` ("agent A
-// acting for user B"), mapped with a JSON Pointer,
-// metadata_claims { "/act/sub" = "acting_agent" }, and the gateway verifies the
+// acting for user B"), mapped as a fact of the user auth mount with a JSON
+// Pointer, facts { "/act/sub" = "acting_agent" }, and the gateway verifies the
 // agent presenting the request is the one attested.
 //
 // This harness runs the other case. Hydra's client_credentials grant emits no
@@ -299,12 +310,12 @@ const (
 	// unconditioned grant allow everything and the binding would prove nothing.
 	UserLegBindingPolicy = "e2e-userleg-binding"
 
-	// UserLegBoundRole is a cert role whose allowed CN is the value the user's
-	// mapped claim carries, so a certificate minted with that CN satisfies the
-	// binding.
+	// UserLegBoundRole is a role granted to certificates whose CN is the value
+	// the user's mapped claim carries, so a certificate minted with that CN
+	// satisfies the binding.
 	UserLegBoundRole = "e2e-userleg-bound"
 
-	// UserLegUnboundRole is a cert role for the stock `agent-*` certificates.
+	// UserLegUnboundRole is a role granted to the stock `agent-*` certificates.
 	// It carries the same binding policy, so a request through it is denied by
 	// the CONDITION rather than by authorization — which is what makes the deny
 	// case evidence of the binding working.
@@ -314,10 +325,10 @@ const (
 	UserLegActingAgentKey = "acting_agent"
 )
 
-// SetupUserLegBinding installs the binding policy, the two cert roles, and the
-// claim mapping on the user role. actingAgent is the value the user's mapped
-// claim will carry; the caller reads it off the actual user token rather than
-// assuming it, so the fixture cannot drift from what the IdP issues.
+// SetupUserLegBinding installs the binding policy, the two cert-granted roles,
+// and the claim mapping on the user auth mount. actingAgent is the value the
+// user's mapped claim will carry; the caller reads it off the actual user token
+// rather than assuming it, so the fixture cannot drift from what the IdP issues.
 func SetupUserLegBinding(t *testing.T, port int, actingAgent string) {
 	t.Helper()
 
@@ -327,52 +338,49 @@ func SetupUserLegBinding(t *testing.T, port int, actingAgent string) {
 	mustAPI(t, port, "POST", "sys/policies/cbp/"+UserLegBindingPolicy,
 		fmt.Sprintf(`{"policy":"%s"}`, policy), "create binding policy")
 
-	// Map the claim onto the user role. Additive: other tests read the user's
-	// identity, not its metadata, so they are unaffected.
-	//
-	// Role writes are create-only — a POST over an existing role is a 409, not
-	// an update — so every mutation here deletes first. Setup must be
-	// re-runnable: these tests share one role and each installs the fixture.
+	// Map the claim on the user auth mount. Additive: other tests read the
+	// user's identity, not its metadata, so they are unaffected.
 	SetUserLegClaimMapping(t, port, true)
 
-	for role, cns := range map[string]string{
-		UserLegBoundRole:   fmt.Sprintf("%q", actingAgent),
-		UserLegUnboundRole: `"agent-*"`,
+	// The CN is matched exactly; the acting agent's subject holds no glob
+	// character, which GrantRole would read as a pattern.
+	if strings.ContainsAny(actingAgent, `*?\`) {
+		t.Fatalf("acting agent %q holds a glob character", actingAgent)
+	}
+	for role, cn := range map[string]string{
+		UserLegBoundRole:   actingAgent,
+		UserLegUnboundRole: "agent-*",
 	} {
-		APIRequest(t, "DELETE", "auth/cert/role/"+role, port, "")
-		mustAPI(t, port, "POST", "auth/cert/role/"+role,
-			fmt.Sprintf(`{"allowed_common_names":[%s],"token_policies":["%s"],"cred_spec_name":"vault-token-reader","token_ttl":3600}`,
-				cns, UserLegBindingPolicy),
-			"create cert role "+role)
+		GrantRole(t, port, "auth/cert/", role,
+			Role{Policies: []string{UserLegBindingPolicy}, CredSpec: "vault-token-reader"},
+			Rule{"cn": {cn}})
 	}
 }
 
-// SetUserLegClaimMapping rewrites the user role with or without the
-// acting-agent claim mapping, so a test can remove the mapping and watch the
-// binding fail closed.
+// SetUserLegClaimMapping rewrites the user auth mount with or without the
+// acting-agent fact, so a test can remove the mapping and watch the binding
+// fail closed. The mapping applies on the next request: no new login.
 func SetUserLegClaimMapping(t *testing.T, port int, mapped bool) {
 	t.Helper()
-	body := `{"user_claim":"sub","token_ttl":3600}`
+	var facts map[string]string
 	if mapped {
-		body = fmt.Sprintf(`{"user_claim":"sub","metadata_claims":{"sub":%q},"token_ttl":3600}`,
-			UserLegActingAgentKey)
+		facts = map[string]string{"sub": UserLegActingAgentKey}
 	}
-	APIRequest(t, "DELETE", "auth/user-jwt/role/"+UserLegAuthRole, port, "")
-	mustAPI(t, port, "POST", "auth/user-jwt/role/"+UserLegAuthRole, body, "write user role")
+	writeUserLegAuthConfig(t, port, facts)
 }
 
 // TeardownUserLegBinding removes what SetupUserLegBinding created and restores
-// the user role to its unmapped shape.
+// the user auth mount to its unmapped shape.
 func TeardownUserLegBinding(t *testing.T, port int) {
 	t.Helper()
-	APIRequest(t, "DELETE", "auth/cert/role/"+UserLegBoundRole, port, "")
-	APIRequest(t, "DELETE", "auth/cert/role/"+UserLegUnboundRole, port, "")
+	RevokeRole(t, port, "auth/cert/", UserLegBoundRole)
+	RevokeRole(t, port, "auth/cert/", UserLegUnboundRole)
 	APIRequest(t, "DELETE", "sys/policies/cbp/"+UserLegBindingPolicy, port, "")
 	SetUserLegClaimMapping(t, port, false)
 }
 
-// UserLegRequestAs is UserLegRequest against a caller-chosen cert role, so a
-// test can drive the same mount through roles with different bound CNs.
+// UserLegRequestAs is UserLegRequest under a caller-chosen role, so a test can
+// drive the same mount through roles granted to different CNs.
 func UserLegRequestAs(t *testing.T, port int, role, agentCertPEM string, headers map[string]string) (int, []byte) {
 	t.Helper()
 	all := map[string]string{"X-Warden-Role": role}

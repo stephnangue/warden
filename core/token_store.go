@@ -396,22 +396,22 @@ func (s *TokenStore) generateWithCollisionDetection(
 
 	for i := 0; i < maxRetries; i++ {
 		// Create token entry with namespace fields
+		// No token is issued with a role or a credential spec: an admission
+		// token is granted both per request, on that request's copy.
 		entry := &TokenEntry{
-			Type:           meta.Name,
-			NamespaceID:    ns.ID,
-			NamespacePath:  ns.Path,
-			CreatedAt:      time.Now(),
-			PrincipalID:    authData.PrincipalID,
-			RoleName:       authData.RoleName,
-			MountAccessor:  authData.MountAccessor,
-			ExpireAt:       authData.ExpireAt,
-			Data:           make(map[string]string),
-			Policies:       authData.Policies,
-			CredentialSpec: authData.CredentialSpec,
-			CreatedByIP:    authData.ClientIP,
-			Actors:         authData.Actors,
-			Metadata:       authData.Metadata,
-			Admission:      authData.Admission,
+			Type:          meta.Name,
+			NamespaceID:   ns.ID,
+			NamespacePath: ns.Path,
+			CreatedAt:     time.Now(),
+			PrincipalID:   authData.PrincipalID,
+			MountAccessor: authData.MountAccessor,
+			ExpireAt:      authData.ExpireAt,
+			Data:          make(map[string]string),
+			Policies:      authData.Policies,
+			CreatedByIP:   authData.ClientIP,
+			Actors:        authData.Actors,
+			Metadata:      authData.Metadata,
+			Admission:     authData.Admission,
 		}
 
 		// Generate accessor (Tier 2)
@@ -434,8 +434,8 @@ func (s *TokenStore) generateWithCollisionDetection(
 		// Check for existing token with same ID
 		if existingEntry, found := s.byID.Get(entry.ID); found {
 			// Transparent token types use a deterministic ID (hash of credential
-			// + mountAccessor + role). Finding an existing token means this
-			// credential+mount+role already has a valid cache entry — return it
+			// + mountAccessor). Finding an existing token means this
+			// credential+mount already has a valid cache entry — return it
 			// instead of treating it as a collision.
 			//
 			// This returns the shared cached entry itself, whose Admission may
@@ -506,19 +506,20 @@ func (s *TokenStore) generateWithCollisionDetection(
 	return nil, errors.New("failed to generate unique token")
 }
 
-// ResolveToken validates and resolves a token with namespace checking
-func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, string, error) {
+// ResolveToken validates a token with namespace checking and returns its
+// principal.
+func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, error) {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return "", "", ErrStoreClosed
+		return "", ErrStoreClosed
 	}
 	s.mu.RUnlock()
 
 	// Extract namespace from context
 	ns, err := namespace.FromContext(ctx)
 	if err != nil || ns == nil {
-		return "", "", errors.New("namespace not found in context")
+		return "", errors.New("namespace not found in context")
 	}
 
 	// Detect token type
@@ -537,7 +538,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 			tokenID = candidateID
 			_ = s.restoreTokenToCache(ctx, loaded, "ResolveToken-devFallback")
 		} else {
-			return "", "", fmt.Errorf("failed to detect token type: %w", err)
+			return "", fmt.Errorf("failed to detect token type: %w", err)
 		}
 	} else {
 		tokenID = tokenType.ComputeID(tokenValue)
@@ -557,18 +558,18 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		loadedEntry, err := s.loadToken(tokenID)
 		if err != nil {
 			if err == ErrTokenNotFound {
-				return "", "", ErrTokenNotFound
+				return "", ErrTokenNotFound
 			}
 			s.logger.Warn("failed to load token from storage on cache miss",
 				logger.String("token_id", tokenID),
 				logger.String("error", err.Error()))
-			return "", "", ErrTokenNotFound
+			return "", ErrTokenNotFound
 		}
 
 		// Restore to cache with remaining TTL
 		entry = loadedEntry
 		if err := s.restoreTokenToCache(ctx, entry, "ResolveToken"); err != nil {
-			return "", "", err
+			return "", err
 		}
 	} else {
 		if s.config.EnableMetrics {
@@ -584,7 +585,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		s.logger.Warn("token namespace not found",
 			logger.String("token_id", tokenID),
 			logger.String("token_namespace_id", entry.NamespaceID))
-		return "", "", ErrTokenNamespaceMismatch
+		return "", ErrTokenNamespaceMismatch
 	}
 
 	// Check if token's namespace is a parent of (or same as) the request namespace
@@ -599,7 +600,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 			logger.String("token_id", tokenID),
 			logger.String("token_namespace", tokenNs.Path),
 			logger.String("request_namespace", ns.Path))
-		return "", "", ErrTokenNamespaceMismatch
+		return "", ErrTokenNamespaceMismatch
 	}
 
 	// Validate token value matches (defense against hash collisions)
@@ -611,7 +612,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		s.logger.Error("token value mismatch - possible hash collision",
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
-		return "", "", ErrTokenNotFound
+		return "", ErrTokenNotFound
 	}
 
 	// Validate expiration
@@ -619,19 +620,19 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		if s.config.EnableMetrics {
 			s.metrics.IncrementTokensExpired()
 		}
-		return "", "", ErrTokenExpired
+		return "", ErrTokenExpired
 	}
 
 	// Validate same-origin policy (IP binding)
 	if err := s.validateIPBinding(ctx, tokenID, entry); err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	if s.config.EnableMetrics {
 		s.metrics.IncrementTokensResolved()
 	}
 
-	return entry.PrincipalID, entry.RoleName, nil
+	return entry.PrincipalID, nil
 }
 
 // LookupByAccessor looks up a token by its accessor
@@ -993,22 +994,20 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 
 	// Create new entry with custom token value (copy all fields from old entry)
 	newEntry := &TokenEntry{
-		Type:           oldEntry.Type,
-		NamespaceID:    oldEntry.NamespaceID,
-		NamespacePath:  oldEntry.NamespacePath,
-		CreatedAt:      oldEntry.CreatedAt,
-		PrincipalID:    oldEntry.PrincipalID,
-		RoleName:       oldEntry.RoleName,
-		MountAccessor:  oldEntry.MountAccessor,
-		ExpireAt:       oldEntry.ExpireAt,
-		Accessor:       oldEntry.Accessor,
-		Policies:       oldEntry.Policies,
-		CredentialSpec: oldEntry.CredentialSpec,
-		CreatedByIP:    oldEntry.CreatedByIP,
-		Data:           map[string]string{"token": customToken},
-		Actors:         oldEntry.Actors,
-		Metadata:       oldEntry.Metadata,
-		Admission:      oldEntry.Admission,
+		Type:          oldEntry.Type,
+		NamespaceID:   oldEntry.NamespaceID,
+		NamespacePath: oldEntry.NamespacePath,
+		CreatedAt:     oldEntry.CreatedAt,
+		PrincipalID:   oldEntry.PrincipalID,
+		MountAccessor: oldEntry.MountAccessor,
+		ExpireAt:      oldEntry.ExpireAt,
+		Accessor:      oldEntry.Accessor,
+		Policies:      oldEntry.Policies,
+		CreatedByIP:   oldEntry.CreatedByIP,
+		Data:          map[string]string{"token": customToken},
+		Actors:        oldEntry.Actors,
+		Metadata:      oldEntry.Metadata,
+		Admission:     oldEntry.Admission,
 	}
 
 	// Compute new ID from custom token value
@@ -1530,19 +1529,21 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	return entry.Copy(), nil
 }
 
-// LookupTransparentTokenWithRole looks up a cached transparent-auth token
-// keyed by (credential, mountAccessor, role). Used by performImplicitAuth
+// LookupTransparentToken looks up a cached transparent-auth token keyed by
+// (credential, mountAccessor): the admission token of one credential at one
+// mount, whatever role a request asks for. Used by resolveTransparentIdentity
 // for both the cache-check and post-login resolution paths.
 //
 // The cache hash uses tokenType.LookupValue, so each TransparentTokenType
 // controls how its credential collapses into a deterministic cache key.
-// Mount accessor is included so two mounts of the same auth type with
-// overlapping role names + the same credential cannot share an entry.
+// Mount accessor is included so two mounts of the same auth type presented
+// the same credential cannot share an entry.
 //
-// Returns ErrTokenNotFound on cache miss, ErrTokenNamespaceMismatch on
-// namespace boundary violation, ErrTokenExpired on TTL exhaustion,
-// ErrOriginViolation on IP binding violation.
-func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType TransparentTokenType, credential, mountAccessor, role string) (*TokenEntry, error) {
+// It returns a copy of the cached entry, for one request. Returns
+// ErrTokenNotFound on cache miss, ErrTokenNamespaceMismatch on namespace
+// boundary violation, ErrTokenExpired on TTL exhaustion, ErrOriginViolation
+// on IP binding violation.
+func (c *Core) LookupTransparentToken(ctx context.Context, tokenType TransparentTokenType, credential, mountAccessor string) (*TokenEntry, error) {
 	if c.Sealed() {
 		return nil, fmt.Errorf("the core is sealed")
 	}
@@ -1566,8 +1567,8 @@ func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType Tra
 
 	typeName := tokenType.Metadata().Name
 
-	// Hash of (mountAccessor, credential, role) — matches what Generate stored.
-	lookupHash := tokenType.LookupValue(credential, mountAccessor, role)
+	// Hash of (mountAccessor, credential) — matches what Generate stored.
+	lookupHash := tokenType.LookupValue(credential, mountAccessor)
 	tokenID := tokenType.ComputeID(lookupHash)
 
 	// Lookup token in cache only — transparent tokens are not persisted to storage.

@@ -105,6 +105,7 @@ func TestAdmit_NoTrustedCA(t *testing.T) {
 		HTTPRequest: newCertHTTPRequest(t, agentLeaf(t, root, nil)),
 	})
 	assert.ErrorIs(t, err, errNoTrustedCA)
+	assert.ErrorIs(t, err, helper.ErrAdmitNoTrustedCA, "discovery reports the class")
 	assert.Nil(t, resp)
 	assert.Nil(t, admitted(t, admitRequest(t, b, nil, true)))
 }
@@ -126,7 +127,7 @@ func TestAdmit_RevocationSkipped(t *testing.T) {
 	b := factsBackend(t, root, map[string]any{"revocation_mode": "crl"})
 	leaf := agentLeaf(t, root, nil) // no CRL distribution point: the CRL check fails
 
-	resp := certLogin(t, b, leaf, "reader")
+	resp := certLogin(t, b, leaf)
 	require.Error(t, resp.Err, "login checks revocation")
 	assert.NotNil(t, admitted(t, admitRequest(t, b, leaf, true)))
 }

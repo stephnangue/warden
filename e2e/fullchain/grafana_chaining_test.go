@@ -60,7 +60,7 @@ func setupGrafanaChain(t *testing.T, subj scalewaySubject, secretField string, s
 	useJWTAgentLeg(t, grafanaEnv)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+grafanaChainAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", grafanaChainAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+grafanaChainSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+grafanaChainSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+grafanaSecretSpec, leaderPort, "")
@@ -95,11 +95,8 @@ func setupGrafanaChain(t *testing.T, subj scalewaySubject, secretField string, s
 		grafanaChainSource, grafanaAccountViewer),
 		"create the chained grafana spec")
 
-	grafanaMustWrite(t, "POST", "auth/jwt/role/"+grafanaChainAgentRole, fmt.Sprintf(`{
-		"token_policies":[%q],"cred_spec_name":%q,
-		"user_claim":"sub","token_ttl":3600}`,
-		grafanaEnv.Policy(), grafanaChainSpec),
-		"create the chained agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", grafanaChainAgentRole,
+		h.Role{Policies: []string{grafanaEnv.Policy()}, CredSpec: grafanaChainSpec}, nil)
 }
 
 // TestGrafanaChaining_SourceFetchesTheTokenPerRequest is the whole feature in one

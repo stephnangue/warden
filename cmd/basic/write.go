@@ -48,7 +48,7 @@ Usage: warden write [PATH] [DATA]
 
   Use @file to read a value from a file (useful for PEM certificates, large payloads, etc.):
 
-      $ warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem default_role=my-role
+      $ warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem entity_kind=agent
 `,
 		RunE: runWrite,
 	}

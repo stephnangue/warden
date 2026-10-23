@@ -57,19 +57,28 @@ func tokenExpiry(claims map[string]any) (time.Time, error) {
 }
 
 // errNotConfigured refuses admission on a mount with no configuration.
-var errNotConfigured = errors.New("JWT auth backend not configured")
+var errNotConfigured = helper.AdmitError(helper.ErrAdmitNotConfigured, "JWT auth backend not configured")
 
-// admitToken verifies token against the mount's configuration alone, with no
-// role: the signature, the mount's issuer and subject, its bound_audiences
-// (any one of them, when set), its bound_claims, a principal under its
-// user_claim, an exp after now, and its max_age against the token's iat at
-// now. It returns the validated claims, which the caller hands to
-// newAdmission and must not read after, or why the token is not admitted.
+// admitToken verifies token against the mount's configuration alone: the
+// signature, the mount's issuer and subject, its bound_audiences (any one of
+// them; required unless the mount admits humans), its bound_claims, a
+// principal under its user_claim, an exp after now, and its max_age against
+// the token's iat at now. It returns the validated claims, which the caller
+// hands to newAdmission and must not read after, or why the token is not
+// admitted: errNotConfigured or helper.ErrAgentAudiencesRequired when the
+// mount cannot decide, any other error when the token failed a check.
 //
-// It reads config, a snapshot the caller took, and writes nothing.
+// It is the one admission check of the mount: login and introspect/admit both
+// call it, so they cannot drift. It reads config, a snapshot the caller took,
+// and writes nothing.
 func admitToken(ctx context.Context, config *JWTAuthConfig, token string, now time.Time) (map[string]any, error) {
 	if config == nil || config.validator == nil {
 		return nil, errNotConfigured
+	}
+	// An empty audience list leaves the validator's audience check off, which
+	// would admit a token minted for any relying party of the issuer.
+	if err := helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences); err != nil {
+		return nil, err
 	}
 	claims, err := config.validator.Validate(ctx, token, expectedClaims(config, nil))
 	if err != nil {
@@ -94,11 +103,25 @@ func admitToken(ctx context.Context, config *JWTAuthConfig, token string, now ti
 	return claims, nil
 }
 
+// extractJWTFromRequest returns the bearer JWT of an introspect/admit
+// request: the Authorization bearer of the request discovery forwards, its
+// scheme matched case-insensitively as the gateway matches it, else
+// req.ClientToken.
+func extractJWTFromRequest(req *logical.Request) string {
+	if req.HTTPRequest != nil {
+		if token := logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")); token != "" {
+			return token
+		}
+	}
+	return req.ClientToken
+}
+
 // admit is the mount's helper.AdmitFunc: the bearer JWT admitted by
 // admitToken under the config in force, as an admission of this mount. An
-// unconfigured mount cannot decide, which is an error; a token that fails a
-// check is not admitted. Safe for concurrent use: it takes the config under
-// configMu and releases it before validating, as login does.
+// unconfigured mount, or an agent mount without bound_audiences, cannot
+// decide, which is an error; a token that fails a check is not admitted. Safe
+// for concurrent use: it takes the config under configMu and releases it
+// before validating, as login does.
 func (b *jwtAuthBackend) admit(ctx context.Context, req *logical.Request, now time.Time) (*logical.Admission, error) {
 	token := extractJWTFromRequest(req)
 	if token == "" {
@@ -109,12 +132,24 @@ func (b *jwtAuthBackend) admit(ctx context.Context, req *logical.Request, now ti
 	b.configMu.RUnlock()
 
 	claims, err := admitToken(ctx, config, token, now)
-	if errors.Is(err, errNotConfigured) {
+	if errors.Is(err, errNotConfigured) || errors.Is(err, helper.ErrAgentAudiencesRequired) {
 		return nil, err
 	}
 	if err != nil {
 		b.logger.Debug("introspect/admit: JWT not admitted", lgr.Err(err))
 		return nil, nil
 	}
-	return newAdmission(claims, token, b.mountFacts), nil
+	adm := newAdmission(claims, token, b.mountFacts)
+	adm.AudienceBound = len(config.BoundAudiences) > 0
+	return adm, nil
+}
+
+var _ logical.AudienceBinder = (*jwtAuthBackend)(nil)
+
+// BindsAudience implements logical.AudienceBinder: admitToken checks every
+// JWT against bound_audiences when the mount sets them.
+func (b *jwtAuthBackend) BindsAudience() bool {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+	return b.config != nil && len(b.config.BoundAudiences) > 0
 }

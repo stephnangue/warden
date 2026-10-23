@@ -7,10 +7,11 @@ import (
 	"time"
 )
 
-// SpiffeRoleTokenType implements SPIFFE-based transparent token handling with
-// role binding, for the unified spiffe auth method that accepts BOTH an
-// X.509-SVID (TLS client certificate) and a JWT-SVID (bearer token) on one
-// mount.
+// SpiffeRoleTokenType implements the admission token of a SPIFFE SVID, for the
+// unified spiffe auth method that accepts BOTH an X.509-SVID (TLS client
+// certificate) and a JWT-SVID (bearer token) on one mount: one token per SVID
+// and mount, whatever role a request asks for. The role is granted per
+// request.
 //
 // It reports the virtual credential format "spiffe": the implicit-auth
 // dispatcher resolves the actual wire credential per request and feeds either a
@@ -28,7 +29,7 @@ func (t *SpiffeRoleTokenType) Metadata() TokenTypeMetadata {
 		Name:           "spiffe_role",
 		IDPrefix:       "spif_",
 		ValuePrefix:    "",
-		Description:    "SPIFFE X.509-SVID or JWT-SVID with role binding",
+		Description:    "SPIFFE X.509-SVID or JWT-SVID admitted by a spiffe auth mount",
 		DefaultTTL:     1 * time.Hour,
 		AuthMethodType: "spiffe",
 	}
@@ -37,9 +38,9 @@ func (t *SpiffeRoleTokenType) Metadata() TokenTypeMetadata {
 func (t *SpiffeRoleTokenType) Generate(_ context.Context, authData *AuthData, entry *TokenEntry) (map[string]string, error) {
 	// authData.TokenValue is the cert fingerprint (X.509-SVID login) or the raw
 	// JWT (JWT-SVID login), depending on which login branch ran. Both collapse
-	// through the same (mountAccessor, credential, role) hash; including
-	// mountAccessor prevents cache contamination across two spiffe mounts that
-	// share a role name and a credential.
+	// through the same (mountAccessor, credential) hash; including
+	// mountAccessor prevents cache contamination across two spiffe mounts
+	// presented the same credential.
 	if authData == nil {
 		return entry.Data, nil
 	}
@@ -47,7 +48,7 @@ func (t *SpiffeRoleTokenType) Generate(_ context.Context, authData *AuthData, en
 	if cred == "" {
 		return entry.Data, nil
 	}
-	entry.Data["spiffe_cred"] = t.LookupValue(cred, authData.MountAccessor, authData.RoleName)
+	entry.Data["spiffe_cred"] = t.LookupValue(cred, authData.MountAccessor)
 	return entry.Data, nil
 }
 
@@ -68,11 +69,11 @@ func (t *SpiffeRoleTokenType) LookupKey() string {
 	return "spiffe_cred"
 }
 
-// LookupValue computes the SHA-256 hash of (mountAccessor, credential, role)
-// that ComputeID hashes into the byID-cache key. credential is the cert
+// LookupValue computes the SHA-256 hash of (mountAccessor, credential) that
+// ComputeID hashes into the byID-cache key. credential is the cert
 // fingerprint or the raw JWT-SVID. Satisfies TransparentTokenType.
-func (t *SpiffeRoleTokenType) LookupValue(credential, mountAccessor, role string) string {
-	h := sha256.Sum256([]byte(mountAccessor + ":" + credential + ":" + role))
+func (t *SpiffeRoleTokenType) LookupValue(credential, mountAccessor string) string {
+	h := sha256.Sum256([]byte(mountAccessor + ":" + credential))
 	return hex.EncodeToString(h[:])
 }
 

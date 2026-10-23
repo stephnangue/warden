@@ -282,7 +282,7 @@ func setupGCPChainedSpecs(t *testing.T) {
 
 	clear := func() {
 		for _, role := range []string{gcpChainAgentRole, gcpChainWardenRole, gcpChainNoDeclRole, gcpChainTemplatedRole} {
-			h.APIRequest(t, "DELETE", "auth/jwt/role/"+role, leaderPort, "")
+			h.RevokeRole(t, leaderPort, "auth/jwt/", role)
 		}
 		for _, spec := range []string{gcpChainAgentSpec, gcpChainWardenSpec, gcpChainNoDeclSpec, gcpChainTemplatedSpec} {
 			h.APIRequest(t, "DELETE", "sys/cred/specs/"+spec, leaderPort, "")
@@ -340,12 +340,10 @@ func setupGCPChainedSpecs(t *testing.T) {
 				"secret_spec":"`+row.secretSpec+`","secret_field":"api_key"}}`,
 			"create the chained consuming spec "+row.spec)
 
-		// The mount's own JWT agent role binds its default spec, so each row needs one
-		// bound to its own chained spec instead.
-		mustWrite("POST", "auth/jwt/role/"+row.role, `{
-			"token_policies":["`+datadogEnv.Policy()+`"],"cred_spec_name":"`+row.spec+`",
-			"user_claim":"sub","token_ttl":3600}`,
-			"create the agent role "+row.role)
+		// The agent role granted at the JWT mount binds its default spec, so each
+		// row needs one bound to its own chained spec instead.
+		h.GrantRole(t, leaderPort, "auth/jwt/", row.role,
+			h.Role{Policies: []string{datadogEnv.Policy()}, CredSpec: row.spec}, nil)
 	}
 
 	// The control source, identical but for the missing declaration.
@@ -358,10 +356,8 @@ func setupGCPChainedSpecs(t *testing.T) {
 			"secret_spec":"`+gcpChainAgentSecretSpec+`","secret_field":"api_key"}}`,
 		"create the chained spec on the undeclaring source")
 
-	mustWrite("POST", "auth/jwt/role/"+gcpChainNoDeclRole, `{
-		"token_policies":["`+datadogEnv.Policy()+`"],"cred_spec_name":"`+gcpChainNoDeclSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the undeclared agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", gcpChainNoDeclRole,
+		h.Role{Policies: []string{datadogEnv.Policy()}, CredSpec: gcpChainNoDeclSpec}, nil)
 
 	// The per-agent row. {{agent.sub}} needs no assertion_metadata_claims entry — the
 	// principal is not an opt-in disclosure, and it is already inside the cache
@@ -378,10 +374,8 @@ func setupGCPChainedSpecs(t *testing.T) {
 			"secret_spec":"`+gcpChainTemplatedSecret+`","secret_field":"api_key"}}`,
 		"create the templated consuming spec")
 
-	mustWrite("POST", "auth/jwt/role/"+gcpChainTemplatedRole, `{
-		"token_policies":["`+datadogEnv.Policy()+`"],"cred_spec_name":"`+gcpChainTemplatedSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the templated agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", gcpChainTemplatedRole,
+		h.Role{Policies: []string{datadogEnv.Policy()}, CredSpec: gcpChainTemplatedSpec}, nil)
 }
 
 // TestGCPSecretRead_ChainedCredentialCarriesItsDeclaredField is the row this file

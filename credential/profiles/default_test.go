@@ -101,10 +101,10 @@ func TestDefaultProfile_Claims_AgentOnly(t *testing.T) {
 }
 
 // TestDefaultProfile_Claims_Delegation pins the user-disclosed shape: the user at
-// the top level by raw id, qualified by ITS namespace, with its role and its claims
-// minus sub as warden_metadata; the agent in act by composite sub, with its own role
-// and metadata and Warden's iss. No auth mount appears, and the agent level has no
-// warden_namespace.
+// the top level by raw id, qualified by ITS namespace, with its claims minus sub as
+// warden_metadata and no role (a user runs under none, even when its identity names
+// one); the agent in act by composite sub, with its own role and metadata and
+// Warden's iss. No auth mount appears, and the agent level has no warden_namespace.
 func TestDefaultProfile_Claims_Delegation(t *testing.T) {
 	claims, err := Default().Claims(delegationRequest())
 	require.NoError(t, err)
@@ -113,7 +113,6 @@ func TestDefaultProfile_Claims_Delegation(t *testing.T) {
 		"iss":              "https://warden.example.com",
 		"sub":              "alice@example.com",
 		"warden_namespace": "team-payments/orders/",
-		"warden_role":      "users",
 		"warden_metadata":  map[string]string{"username": "alice"},
 		"aud":              "https://orders.internal.example.com",
 		"iat":              int64(1755248400),
@@ -227,8 +226,8 @@ func TestDefaultProfile_Claims_RoleLess(t *testing.T) {
 	assert.Equal(t, "", claims["warden_role"])
 	assert.Equal(t, "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7", claims["sub"])
 
-	// In a delegation the empty role is the agent's, in act; the top-level role
-	// stays the user's.
+	// In a delegation the empty role is the agent's, in act; the user level
+	// carries no role at all.
 	delegated := delegationRequest()
 	delegated.Identity.RoleName = ""
 	claims, err = Default().Claims(delegated)
@@ -236,7 +235,7 @@ func TestDefaultProfile_Claims_RoleLess(t *testing.T) {
 	act := claims["act"].(map[string]any)
 	require.Contains(t, act, "warden_role")
 	assert.Equal(t, "", act["warden_role"])
-	assert.Equal(t, "users", claims["warden_role"])
+	assert.NotContains(t, claims, "warden_role")
 }
 
 // An agent whose own token carries act is refused only when a user is disclosed —

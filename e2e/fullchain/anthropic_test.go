@@ -285,23 +285,13 @@ const (
 	anthropicProfileBeta        = "user-profiles-2026-09-04"
 )
 
-// mapUserSubjectToProfile has the shared user auth role copy each user's sub
-// into verified token metadata under the key the mount reads, and restores the
-// role afterwards so no other test's users gain metadata.
+// mapUserSubjectToProfile has the shared user auth mount map each user's sub as
+// a fact under the key the mount reads, which makes it verified user metadata,
+// and restores the mount afterwards so no other test's users gain metadata.
 func mapUserSubjectToProfile(t *testing.T) {
 	t.Helper()
-	path := "auth/fullchain-user-jwt/role/" + h.FullChainUserAuthRole
-	status, resp := h.APIRequest(t, "PUT", path, leaderPort,
-		`{"metadata_claims": {"sub": "`+anthropicProfileMetadataKey+`"}}`)
-	if status < 200 || status >= 300 {
-		t.Fatalf("map sub on %s: status %d: %s", path, status, resp)
-	}
-	t.Cleanup(func() {
-		status, resp := h.APIRequest(t, "PUT", path, leaderPort, `{"metadata_claims": {}}`)
-		if status < 200 || status >= 300 {
-			t.Errorf("restore %s: status %d: %s", path, status, resp)
-		}
-	})
+	h.WriteFullChainUserAuthConfig(t, leaderPort, map[string]string{"sub": anthropicProfileMetadataKey})
+	t.Cleanup(func() { h.WriteFullChainUserAuthConfig(t, leaderPort, nil) })
 }
 
 // TestAnthropic_ProfileFromUserMetadata drives attribution through the whole
@@ -484,7 +474,7 @@ const (
 	anthropicJWTBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 )
 
-// anthropicWIFTarget is one spec on the keyless source and the cert role binding it.
+// anthropicWIFTarget is one spec on the keyless source and the role binding it.
 type anthropicWIFTarget struct{ spec, role, rule string }
 
 var (
@@ -608,17 +598,18 @@ func mustWriteJSON(t *testing.T, path string, v any, what string) {
 	}
 }
 
-// setupAnthropicWIF builds the keyless source and, per target, a spec and the cert
-// role binding it. Order is load-bearing: a source cannot be deleted while a spec
-// names it, so cleanup runs roles, then specs, then the source — which also clears
-// whatever a killed run left behind before building.
+// setupAnthropicWIF builds the keyless source and, per target, a spec and the
+// role binding it, granted to the agent certificate. Order is load-bearing: a
+// source cannot be deleted while a spec names it, so cleanup runs roles, then
+// specs, then the source — which also clears whatever a killed run left behind
+// before building.
 func setupAnthropicWIF(t *testing.T) {
 	t.Helper()
 
 	targets := []anthropicWIFTarget{anthropicWIFMain, anthropicWIFShort, anthropicWIFRejected}
 	clear := func() {
 		for _, tg := range targets {
-			h.APIRequest(t, "DELETE", "auth/cert/role/"+tg.role, leaderPort, "")
+			h.RevokeRole(t, leaderPort, "auth/cert/", tg.role)
 		}
 		for _, tg := range targets {
 			h.APIRequest(t, "DELETE", "sys/cred/specs/"+tg.spec, leaderPort, "")
@@ -654,12 +645,8 @@ func setupAnthropicWIF(t *testing.T) {
 			},
 		}, "create the keyless spec "+tg.spec)
 
-		mustWriteJSON(t, "auth/cert/role/"+tg.role, map[string]any{
-			"allowed_common_names": []string{h.FullChainAgentCN},
-			"token_policies":       []string{anthropicEnv.Policy()},
-			"cred_spec_name":       tg.spec,
-			"token_ttl":            3600,
-		}, "create the cert role "+tg.role)
+		h.GrantRole(t, leaderPort, "auth/cert/", tg.role,
+			h.Role{Policies: []string{anthropicEnv.Policy()}, CredSpec: tg.spec}, h.FullChainAgentRule)
 	}
 }
 

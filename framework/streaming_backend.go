@@ -64,9 +64,12 @@ type TransparentConfig struct {
 	// disables per-user auth for this provider. See logical.UserAuthConfigProvider.
 	UserAuthPath string
 
-	// UserAuthRole is the role used to authenticate the user credential. Empty
-	// falls back to the user auth mount's own default_role.
-	UserAuthRole string
+	// UserAuthRoleStored reports that the provider's stored configuration
+	// still names the removed user_auth_role (HasUserAuthRole,
+	// StoredUserAuthRole). While it does, every user credential is refused
+	// with ErrUserAuthRoleRemoved; a config write, which never stores the key,
+	// clears it.
+	UserAuthRoleStored bool
 }
 
 // unauthPathsEntry holds parsed unauthenticated paths for efficient matching
@@ -680,8 +683,9 @@ func (b *StreamingBackend) GetDefaultAuthRole() string {
 }
 
 // UserAuthConfigProvider interface implementation. A StreamingBackend always
-// satisfies logical.UserAuthConfigProvider; per-user auth is off (all getters
-// return "") until a provider's config sets the fields on TransparentConfig.
+// satisfies logical.UserAuthConfigProvider; per-user auth is off
+// (GetUserAuthPath returns "") until a provider's config sets the fields on
+// TransparentConfig.
 
 // GetUserAuthPath returns the auth mount that authenticates the secondary (user)
 // principal, or "" when per-user auth is not configured.
@@ -693,14 +697,13 @@ func (b *StreamingBackend) GetUserAuthPath() string {
 	return tc.UserAuthPath
 }
 
-// GetUserAuthRole returns the role used to authenticate the user credential,
-// or "" to fall back to the user auth mount's own default_role.
-func (b *StreamingBackend) GetUserAuthRole() string {
-	tc := b.transparentConfig.Load()
-	if tc == nil {
-		return ""
+// UserAuthRefusal returns ErrUserAuthRoleRemoved while the stored
+// configuration still names user_auth_role, and nil otherwise.
+func (b *StreamingBackend) UserAuthRefusal() error {
+	if tc := b.transparentConfig.Load(); tc != nil && tc.UserAuthRoleStored {
+		return ErrUserAuthRoleRemoved
 	}
-	return tc.UserAuthRole
+	return nil
 }
 
 // RewriteTransparentPath rewrites a transparent path to standard path

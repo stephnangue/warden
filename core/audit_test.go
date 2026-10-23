@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -971,19 +972,16 @@ func TestBuildAuditResponse_WithAuthResult(t *testing.T) {
 	resp := &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
-			TokenType:      "jwt_role",
-			PrincipalID:    "user@example.com",
-			RoleName:       "admin",
-			Policies:       []string{"default", "admin"},
-			TokenTTL:       time.Hour,
-			CredentialSpec: "aws-dev",
+			TokenType:   "jwt_role",
+			PrincipalID: "user@example.com",
+			Policies:    []string{"default", "admin"},
+			TokenTTL:    time.Hour,
 		},
 	}
 	result := buildAuditResponse(resp, nil, nil)
 	require.NotNil(t, result.AuthResult)
 	assert.Equal(t, "jwt_role", result.AuthResult.TokenType)
 	assert.Equal(t, "user@example.com", result.AuthResult.PrincipalID)
-	assert.Equal(t, "admin", result.AuthResult.RoleName)
 	assert.Equal(t, int64(3600), result.AuthResult.TokenTTL)
 }
 
@@ -1045,7 +1043,6 @@ func TestBuildAuditAuth_FromAuth(t *testing.T) {
 		TokenAccessor: "auth-acc",
 		TokenType:     "cert_role",
 		PrincipalID:   "agent-1",
-		RoleName:      "role-1",
 		Policies:      []string{"p1", "p2"},
 		PolicyResults: &sdklogical.PolicyResults{
 			Allowed: true,
@@ -1064,18 +1061,19 @@ func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	assert.Contains(t, result.PolicyResults.GrantingPolicies, "p1")
 }
 
+// The Auth overrides the principal; the role is the token entry's, the role
+// projected onto this request's copy: an Auth carries none.
 func TestBuildAuditAuth_AuthOverridesTE(t *testing.T) {
 	te := &logical.TokenEntry{
 		PrincipalID: "old-user",
-		RoleName:    "old-role",
+		RoleName:    "projected-role",
 	}
 	auth := &logical.Auth{
 		PrincipalID: "new-user",
-		RoleName:    "new-role",
 	}
 	result := buildAuditAuth(auth, te)
 	assert.Equal(t, "new-user", result.PrincipalID)
-	assert.Equal(t, "new-role", result.RoleName)
+	assert.Equal(t, "projected-role", result.RoleName)
 }
 
 func TestBuildAuditAuth_ActorsFromTokenEntry(t *testing.T) {
@@ -1113,19 +1111,24 @@ func TestBuildAuditAuthResult_Nil(t *testing.T) {
 
 func TestBuildAuditAuthResult_Basic(t *testing.T) {
 	auth := &logical.Auth{
-		TokenType:      "jwt_role",
-		PrincipalID:    "user",
-		RoleName:       "admin",
-		Policies:       []string{"default"},
-		TokenTTL:       30 * time.Minute,
-		CredentialSpec: "aws-dev",
+		TokenType:   "jwt_role",
+		PrincipalID: "user",
+		TokenTTL:    30 * time.Minute,
+		Metadata:    map[string]string{"repo": "acme/infra"},
 	}
 	result := buildAuditAuthResult(auth)
 	require.NotNil(t, result)
 	assert.Equal(t, "jwt_role", result.TokenType)
 	assert.Equal(t, "user", result.PrincipalID)
 	assert.Equal(t, int64(1800), result.TokenTTL)
-	assert.Equal(t, "aws-dev", result.CredentialSpec)
+	assert.Nil(t, result.Policies)
+
+	// A login result names no role, no spec and no metadata.
+	raw, err := json.Marshal(result)
+	require.NoError(t, err)
+	for _, key := range []string{"role_name", "credential_spec", "metadata", "acme/infra"} {
+		assert.NotContains(t, string(raw), key)
+	}
 }
 
 // =============================================================================

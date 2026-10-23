@@ -521,22 +521,26 @@ fi
 echo ""
 echo "[8/10] Creating Hydra OAuth2 clients..."
 
+# Every client may ask for the warden-e2e audience, and the suites always do:
+# Warden's agent auth mounts admit only tokens issued for an audience they
+# bind, and a token issued for none carries an empty aud.
+
 # Client for AI agent (transparent mode testing)
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"e2e-agent","client_name":"E2E Agent","client_secret":"agent-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  -d '{"client_id":"e2e-agent","client_name":"E2E Agent","client_secret":"agent-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-agent" || echo "  [SKIP] e2e-agent (already exists?)"
 
 # Client for CI/CD pipeline
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"e2e-pipeline","client_name":"E2E Pipeline","client_secret":"pipeline-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  -d '{"client_id":"e2e-pipeline","client_name":"E2E Pipeline","client_secret":"pipeline-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-pipeline" || echo "  [SKIP] e2e-pipeline (already exists?)"
 
 # Client with 2s token TTL for expired JWT testing
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"e2e-ephemeral","client_name":"E2E Ephemeral","client_secret":"ephemeral-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post","client_credentials_grant_access_token_lifespan":"2s"}' \
+  -d '{"client_id":"e2e-ephemeral","client_name":"E2E Ephemeral","client_secret":"ephemeral-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post","client_credentials_grant_access_token_lifespan":"2s"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-ephemeral (2s TTL)" || echo "  [SKIP] e2e-ephemeral (already exists?)"
 
 # A client of its own for the ovh chained row, so that row can prove WHICH
@@ -547,7 +551,7 @@ curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
 # the minted token names it in its client_id claim.
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"e2e-ovh-chain","client_name":"E2E OVH Chained Service Account","client_secret":"ovh-chain-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  -d '{"client_id":"e2e-ovh-chain","client_name":"E2E OVH Chained Service Account","client_secret":"ovh-chain-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-ovh-chain" || echo "  [SKIP] e2e-ovh-chain (already exists?)"
 
 # A user whose subject is an upstream profile id, for the anthropic attribution
@@ -558,7 +562,7 @@ curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
 # this user and not from somewhere else.
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"uprof_e2e-anthropic-user","client_name":"E2E Anthropic Profiled User","client_secret":"anthropic-user-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  -d '{"client_id":"uprof_e2e-anthropic-user","client_name":"E2E Anthropic Profiled User","client_secret":"anthropic-user-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] uprof_e2e-anthropic-user" || echo "  [SKIP] uprof_e2e-anthropic-user (already exists?)"
 
 # A user whose subject is shaped like a Warden agent subject, for the reserved
@@ -568,14 +572,14 @@ curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
 # for the agent it names.
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"wid:root:e2e:impersonated-agent","client_name":"E2E Agent-Shaped User","client_secret":"agent-shaped-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  -d '{"client_id":"wid:root:e2e:impersonated-agent","client_name":"E2E Agent-Shaped User","client_secret":"agent-shaped-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] wid:root:e2e:impersonated-agent" || echo "  [SKIP] wid:root:e2e:impersonated-agent (already exists?)"
 
 # Verify JWT issuance works
 echo "  Verifying JWT issuance..."
 JWT_RESPONSE=$(curl -s -X POST "$HYDRA_PUBLIC/oauth2/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=e2e-agent&client_secret=agent-secret&scope=api:read api:write" 2>/dev/null)
+  -d "grant_type=client_credentials&client_id=e2e-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden-e2e" 2>/dev/null)
 if echo "$JWT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('access_token','').startswith('eyJ')" 2>/dev/null; then
   echo "  JWT issuance verified."
 else
@@ -601,8 +605,10 @@ vault_api POST "sys/auth/jwt" '{"type":"jwt"}' || true
 vault_api POST "auth/jwt/config" \
   '{"jwks_url":"http://hydra:4444/.well-known/jwks.json","bound_issuer":"http://localhost:4444"}'
 
-# Hydra client-credentials tokens carry an empty aud, so the role binds the
-# subject instead — which for those tokens is the client id.
+# The suites' Hydra tokens are issued for warden-e2e, the audience Warden's
+# auth mounts bind; a token federated as the calling agent reaches Vault with
+# that same audience, so the role binds it, and the subject — which for those
+# tokens is the client id.
 #
 # A list rather than one subject, because a chained secret fetched with
 # agent_identity federates as the calling agent: a row proving two agents resolve
@@ -611,7 +617,7 @@ vault_api POST "auth/jwt/config" \
 # same write on purpose: a role write merges, so leaving it set would silently keep
 # the single-subject restriction in force.
 vault_api POST "auth/jwt/role/warden-e2e-fed" \
-  '{"role_type":"jwt","bound_subject":"","bound_claims":{"sub":["e2e-agent","e2e-pipeline"]},"user_claim":"sub","bound_issuer":"http://localhost:4444","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}'
+  '{"role_type":"jwt","bound_subject":"","bound_audiences":["warden-e2e"],"bound_claims":{"sub":["e2e-agent","e2e-pipeline"]},"user_claim":"sub","bound_issuer":"http://localhost:4444","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}'
 
 # Verify the federation login works, so a later gateway 401 is not mistaken for
 # a chaining bug.
@@ -681,13 +687,19 @@ sleep 1
 
 # 9g. Configure JWT auth with Hydra OIDC discovery
 echo "  Configuring JWT auth with Hydra OIDC..."
+# An agent mount must bind an audience: the suites' Hydra tokens are issued
+# for warden-e2e.
 warden_api PUT "auth/jwt/config" \
-  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\"}"
+  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\",\"bound_audiences\":[\"warden-e2e\"],\"user_claim\":\"sub\",\"token_ttl\":\"1h\"}"
 
-# 9h. Create JWT role linking to credential spec
-echo "  Creating JWT role 'e2e-reader'..."
-warden_api POST "auth/jwt/role/e2e-reader" \
-  '{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
+# 9h. Create the role linking to the credential spec, and the group granting
+# it to every agent the JWT mount admits. The role names the vault provider,
+# whose auto_auth_path is where discovery evaluates it.
+echo "  Creating role 'e2e-reader' and its group..."
+warden_api POST "sys/roles/e2e-reader" \
+  '{"policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","provider_path":"vault/"}'
+warden_api POST "sys/identity/group/e2e-reader--jwt" \
+  '{"type":"virtual","roles":["e2e-reader"],"rules":[{"mount":["auth/jwt/"]}]}'
 
 # 9i. (Transparent mode is configured with the provider, in 9b.)
 

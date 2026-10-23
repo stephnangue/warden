@@ -33,11 +33,11 @@ func writeConfig(b *spiffeAuthBackend, raw map[string]any) *logical.Response {
 // config was live by the time the storage write failed.
 func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
 	b, _ := createTestBackend(t)
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "reader"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"token_ttl": 600, "bound_audiences": "warden"}).StatusCode)
 	before := b.config
 	b.storageView = failingStorage{newInmemStorage()}
 
-	resp := writeConfig(b, map[string]any{"default_role": "admin"})
+	resp := writeConfig(b, map[string]any{"token_ttl": 900})
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	assert.Same(t, before, b.config, "an unpersisted write must not have been installed")
 }
@@ -48,6 +48,7 @@ func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
 func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		b, _ := createTestBackend(t)
+		require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"bound_audiences": "warden"}).StatusCode)
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -55,7 +56,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			writeConfig(b, map[string]any{"default_role": "reader"})
+			writeConfig(b, map[string]any{"max_age": 300})
 		}()
 		go func() {
 			defer wg.Done()
@@ -65,7 +66,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		require.Equal(t, "reader", b.config.DefaultRole, "iteration %d lost the default_role write", i)
+		require.Equal(t, 5*time.Minute, b.config.MaxAge, "iteration %d lost the max_age write", i)
 		require.Equal(t, 10*time.Minute, b.config.TokenTTL, "iteration %d lost the token_ttl write", i)
 	}
 }

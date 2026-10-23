@@ -99,6 +99,7 @@ func TestRenderGatewayFailure_ThroughCore(t *testing.T) {
 	mountGateway(t, c, "fakegw/", p)
 
 	hr := httptest.NewRequest(http.MethodGet, "/v1/fakegw/gateway/thing", nil)
+	hr.Header.Set("X-Warden-Role", "reader") // a role is selected, so admission is attempted
 	resp, err := c.handleCancelableRequest(ctx, &logical.Request{
 		Path: "fakegw/gateway/thing", Operation: logical.ReadOperation,
 		HTTPRequest: hr, RequestID: "req-123",

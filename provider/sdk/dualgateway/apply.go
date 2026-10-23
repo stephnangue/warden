@@ -92,7 +92,6 @@ func (b *dualgatewayBackend) resolveConfig(conf map[string]any) (*resolvedConfig
 	autoAuthPath := framework.GetConfigString(conf, "auto_auth_path", "")
 	defaultRole := framework.GetConfigString(conf, "default_role", "")
 	userAuthPath := framework.GetConfigString(conf, "user_auth_path", "")
-	userAuthRole := framework.GetConfigString(conf, "user_auth_role", "")
 
 	extraKeys := b.extraConfigKeys()
 	extraRaw := make(map[string]any, len(extraKeys))
@@ -114,7 +113,6 @@ func (b *dualgatewayBackend) resolveConfig(conf map[string]any) (*resolvedConfig
 		"auto_auth_path":    autoAuthPath,
 		"default_role":      defaultRole,
 		"user_auth_path":    userAuthPath,
-		"user_auth_role":    userAuthRole,
 		"tls_skip_verify":   parsed.TLSSkipVerify,
 		"ca_data":           parsed.CAData,
 	}
@@ -132,7 +130,8 @@ func (b *dualgatewayBackend) resolveConfig(conf map[string]any) (*resolvedConfig
 			AutoAuthPath:    autoAuthPath,
 			DefaultAuthRole: defaultRole,
 			UserAuthPath:    userAuthPath,
-			UserAuthRole:    userAuthRole,
+
+			UserAuthRoleStored: framework.HasUserAuthRole(conf),
 		},
 		extraRaw:     extraRaw,
 		extraState:   extraState,
@@ -190,7 +189,6 @@ func (b *dualgatewayBackend) snapshotForMerge() map[string]any {
 		"auto_auth_path":    tc.AutoAuthPath,
 		"default_role":      tc.DefaultAuthRole,
 		"user_auth_path":    tc.UserAuthPath,
-		"user_auth_role":    tc.UserAuthRole,
 		"tls_skip_verify":   b.tlsSkipVerify,
 		"ca_data":           b.caData,
 	}

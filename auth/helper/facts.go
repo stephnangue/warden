@@ -250,6 +250,15 @@ func FactNames(mf *logical.MountFacts) []string {
 	return slices.Clone(n.Mapping.Names())
 }
 
+// EntityKind returns the kind of the naming mf holds, or "" when mf is nil or
+// holds no naming. It loads the naming without a lock.
+func EntityKind(mf *logical.MountFacts) string {
+	if n := mf.Load(); n != nil {
+		return n.Kind
+	}
+	return ""
+}
+
 // maxIssuedAt bounds an accepted iat, in seconds since the epoch (about the
 // year 36812): far beyond any real token, and well inside time.Time.
 const maxIssuedAt = 1 << 40

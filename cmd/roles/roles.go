@@ -1,7 +1,7 @@
 // Package roles implements `warden role`. The list subcommand serves both
-// sides: by default it hits /v1/sys/introspect/roles, which fans out to every
-// auth mount of the caller's identity type (JWT or cert) in the current
-// namespace and returns the roles the identity can assume; with -all it lists
+// sides: by default it hits /v1/sys/introspect/roles, which returns the roles
+// of the current namespace a group grants the caller's identity (JWT or cert)
+// at the auth mount each role is reached through; with -all it lists
 // every role of the namespace through /v1/sys/roles. create, read, update and
 // delete manage those roles and need sudo.
 package roles

@@ -45,8 +45,8 @@ func TestSpiffeRoleTokenType_FingerprintAndJWTDoNotCollide(t *testing.T) {
 	fingerprint := strings.Repeat("ab", 32) // 64-hex like a SHA-256 fingerprint
 	jwt := "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJzcGlmZmU6Ly9leC5vcmcvYSJ9.sig"
 
-	fpHash := st.LookupValue(fingerprint, "acc1", "api")
-	jwtHash := st.LookupValue(jwt, "acc1", "api")
+	fpHash := st.LookupValue(fingerprint, "acc1")
+	jwtHash := st.LookupValue(jwt, "acc1")
 	if fpHash == jwtHash {
 		t.Fatal("a cert fingerprint and a JWT must produce distinct cache keys")
 	}
@@ -57,22 +57,19 @@ func TestSpiffeRoleTokenType_FingerprintAndJWTDoNotCollide(t *testing.T) {
 
 func TestSpiffeRoleTokenType_LookupValueDeterministicAndNamespaced(t *testing.T) {
 	st := &SpiffeRoleTokenType{}
-	h := func(cred, acc, role string) string { return st.LookupValue(cred, acc, role) }
+	h := st.LookupValue
 
-	if h("c", "acc1", "api") != h("c", "acc1", "api") {
+	if h("c", "acc1") != h("c", "acc1") {
 		t.Fatal("LookupValue must be deterministic")
 	}
-	if h("c", "acc1", "api") == h("c", "acc1", "reader") {
-		t.Fatal("different roles must produce different hashes")
-	}
-	if h("c", "accA", "api") == h("c", "accB", "api") {
+	if h("c", "accA") == h("c", "accB") {
 		t.Fatal("mount accessor must namespace the cache key")
 	}
 }
 
 func TestSpiffeRoleTokenType_ComputeIDPrefix(t *testing.T) {
 	st := &SpiffeRoleTokenType{}
-	id := st.ComputeID(st.LookupValue("c", "acc1", "api"))
+	id := st.ComputeID(st.LookupValue("c", "acc1"))
 	if !strings.HasPrefix(id, "spif_") {
 		t.Fatalf("token ID must carry the spif_ prefix, got %q", id)
 	}
@@ -83,7 +80,7 @@ func TestSpiffeRoleTokenType_ImplementsTransparentTokenType(t *testing.T) {
 }
 
 // The registry must resolve the "spiffe" mount type to spiffe_role so the
-// implicit-auth dispatcher and the introspect aggregator find it.
+// implicit-auth dispatcher finds it.
 func TestSpiffeRoleTokenType_RegistryWiring(t *testing.T) {
 	reg := NewTokenTypeRegistry()
 	if err := reg.Register(&SpiffeRoleTokenType{}); err != nil {

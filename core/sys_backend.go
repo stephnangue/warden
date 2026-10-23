@@ -63,7 +63,7 @@ func (b *SystemBackend) paths() []*framework.Path {
 	// Auth paths
 	paths = append(paths, b.pathAuth()...)
 
-	// Introspection aggregator — fans out to per-backend introspect/roles
+	// Role discovery from admissions and groups
 	paths = append(paths, b.pathIntrospectRoles()...)
 
 	// Namespace paths

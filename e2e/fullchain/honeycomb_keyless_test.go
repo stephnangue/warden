@@ -102,7 +102,7 @@ func setupHoneycombKeyless(t *testing.T, subj scalewaySubject) {
 	// killed run's leftovers cannot 409 them.
 	clear := func() {
 		for _, role := range []string{honeycombIngestRole, honeycombMgmtRole, honeycombOddRole, honeycombBadFieldRole} {
-			h.APIRequest(t, "DELETE", "auth/jwt/role/"+role, leaderPort, "")
+			h.RevokeRole(t, leaderPort, "auth/jwt/", role)
 		}
 		// honeycombBothSpec is only ever created by a regression — the write that
 		// makes it is supposed to be refused. Cleared anyway: if it ever does get
@@ -179,10 +179,10 @@ func setupHoneycombKeyless(t *testing.T, subj scalewaySubject) {
 		honeycombBadFieldRole: honeycombBadFieldSpec,
 	}
 	for role, spec := range roles {
-		honeycombMustWrite(t, "POST", "auth/jwt/role/"+role, `{
-			"token_policies":["`+honeycombEnv.Policy()+`"],"cred_spec_name":"`+spec+`",
-			"user_claim":"sub","token_ttl":3600}`,
-			"create the agent role for "+spec)
+		h.GrantRole(t, leaderPort, "auth/jwt/", role, h.Role{
+			Policies: []string{honeycombEnv.Policy()},
+			CredSpec: spec,
+		}, nil)
 	}
 }
 

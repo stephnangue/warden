@@ -161,34 +161,27 @@ func compileCertFacts(kind string, facts map[string]string) (*logical.MountNamin
 	return fc.Naming(), fc.Err()
 }
 
-// certLogin logs in with cert under role.
-func certLogin(t *testing.T, b *certAuthBackend, cert *x509.Certificate, role string) *logical.Response {
+// certLogin logs in with cert.
+func certLogin(t *testing.T, b *certAuthBackend, cert *x509.Certificate) *logical.Response {
 	t.Helper()
 	resp, err := b.handleLogin(context.Background(),
 		&logical.Request{HTTPRequest: newCertHTTPRequest(t, cert)},
-		&framework.FieldData{Raw: map[string]any{"role": role}, Schema: b.pathLogin().Fields})
+		&framework.FieldData{Raw: map[string]any{}, Schema: b.pathLogin().Fields})
 	require.NoError(t, err)
 	return resp
 }
 
 // factsBackend returns a backend with storage, configured to trust ca plus
-// extra config keys, and a role "reader" admitting common names agent-*.
+// extra config keys.
 func factsBackend(t *testing.T, ca *authority, extra map[string]any) *certAuthBackend {
 	t.Helper()
-	b, ctx := createTestBackend(t)
+	b, _ := createTestBackend(t)
 	raw := map[string]any{"trusted_ca_pem": ca.pem}
 	for k, v := range extra {
 		raw[k] = v
 	}
 	resp := writeConfig(b, raw)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "config write: %v", resp.Err)
-	require.NoError(t, b.setRole(ctx, &CertRole{
-		Name:               "reader",
-		AllowedCommonNames: []string{"agent-*"},
-		TokenPolicies:      []string{"read"},
-		TokenTTL:           "1h",
-		TokenType:          "cert_role",
-	}))
 	return b
 }
 
@@ -395,41 +388,28 @@ func TestFactNames(t *testing.T) {
 }
 
 // =============================================================================
-// Login carries the admission alongside today's role logic
+// Login is an admission
 // =============================================================================
 
 func TestLogin_CarriesAdmission(t *testing.T) {
 	root := issueCA(t, "Root", newFixtureKey(t), nil)
 	b := factsBackend(t, root, map[string]any{"facts": map[string]any{"cn": "workload", "ca": "anchor"}})
-	ctx := context.Background()
-	require.NoError(t, b.setRole(ctx, &CertRole{
-		Name:               "auditor",
-		AllowedCommonNames: []string{"agent-*"},
-		AllowedDNSSANs:     []string{"*.example.com"},
-		TokenPolicies:      []string{"audit"},
-		TokenTTL:           "1h",
-		TokenType:          "cert_role",
-		MetadataMappings:   map[string]string{"dns_san": "dns", "serial": "serial"},
-	}))
 	leaf := issueLeaf(t, root, newFixtureKey(t), func(c *x509.Certificate) {
 		c.Subject.CommonName = "agent-1"
 		c.DNSNames = []string{"a.example.com", "b.example.com"}
 	})
 
-	resp := certLogin(t, b, leaf, "auditor")
+	resp := certLogin(t, b, leaf)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	auth := resp.Auth
 	require.NotNil(t, auth)
 
-	// Today's role output is untouched.
-	assert.Equal(t, "auditor", auth.RoleName)
-	assert.Equal(t, []string{"audit"}, auth.Policies)
+	// An admission: no policies, no metadata.
+	assert.Nil(t, auth.Policies)
+	assert.Nil(t, auth.Metadata)
+	assert.Equal(t, "cert_role", auth.TokenType)
 	assert.Equal(t, "agent-1", auth.PrincipalID)
 	assert.Equal(t, certFingerprint(leaf), auth.ClientToken)
-	assert.Equal(t, map[string]string{
-		"dns":    "a.example.com,b.example.com",
-		"serial": leaf.SerialNumber.String(),
-	}, auth.Metadata)
 
 	adm := auth.Admission
 	require.NotNil(t, adm)
@@ -446,10 +426,9 @@ func TestLogin_CarriesAdmission(t *testing.T) {
 	assert.Equal(t, []string{fingerprint(root.cert)}, factstest.Values(adm, n, "anchor"))
 }
 
-// The anchors are those of the chains login verified: the role's own CA when it
-// has one, every trusted root the certificate reaches otherwise.
+// The anchors are those of the chains login verified against the mount's pool:
+// every trusted root the certificate reaches.
 func TestLogin_AdmissionAnchors(t *testing.T) {
-	ctx := context.Background()
 	rootKey := newFixtureKey(t)
 	root := issueCA(t, "Root", rootKey, nil)
 	other := issueCA(t, "Other Root", newFixtureKey(t), nil)
@@ -458,21 +437,14 @@ func TestLogin_AdmissionAnchors(t *testing.T) {
 
 	// Both the root and its cross-certificate trusted: two anchors.
 	b := factsBackend(t, &authority{pem: root.pem + cross.pem}, nil)
-	resp := certLogin(t, b, leaf, "reader")
+	resp := certLogin(t, b, leaf)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	adm := resp.Auth.Admission
 	assert.Equal(t, sortedFingerprints(root, cross), factstest.Values(adm, adm.Mount.Load(), "ca"))
 
-	// A role CA replaces the mount's: its anchor alone.
-	require.NoError(t, b.setRole(ctx, &CertRole{
-		Name:               "pinned",
-		AllowedCommonNames: []string{"agent-*"},
-		Certificate:        cross.pem,
-		TokenPolicies:      []string{"p"},
-		TokenTTL:           "1h",
-		TokenType:          "cert_role",
-	}))
-	resp = certLogin(t, b, leaf, "pinned")
+	// Only the cross-certificate trusted: its anchor alone.
+	b = factsBackend(t, &authority{pem: cross.pem}, nil)
+	resp = certLogin(t, b, leaf)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	adm = resp.Auth.Admission
 	assert.Equal(t, []string{fingerprint(cross.cert)}, factstest.Values(adm, adm.Mount.Load(), "ca"))
@@ -485,14 +457,14 @@ func TestLogin_RefusedCarriesNoAdmission(t *testing.T) {
 	b := factsBackend(t, root, nil)
 	key := newFixtureKey(t)
 	for _, leaf := range []*x509.Certificate{
-		issueLeaf(t, root, key, func(c *x509.Certificate) { c.Subject.CommonName = "server-1" }),     // constraint
 		issueLeaf(t, untrusted, key, func(c *x509.Certificate) { c.Subject.CommonName = "agent-1" }), // chain
+		issueLeaf(t, root, key, func(c *x509.Certificate) { c.Subject.CommonName = "" }),             // no principal
 	} {
-		resp := certLogin(t, b, leaf, "reader")
+		resp := certLogin(t, b, leaf)
 		require.Error(t, resp.Err)
 		assert.Nil(t, resp.Auth)
 	}
-	resp := certLogin(t, b, issueLeaf(t, root, key, func(c *x509.Certificate) { c.Subject.CommonName = "agent-1" }), "reader")
+	resp := certLogin(t, b, issueLeaf(t, root, key, func(c *x509.Certificate) { c.Subject.CommonName = "server-1" }))
 	require.Equal(t, http.StatusOK, resp.StatusCode, "login: %v", resp.Err)
 	assert.NotNil(t, resp.Auth.Admission)
 }
@@ -625,7 +597,7 @@ func TestConfigWrite_Facts(t *testing.T) {
 	assert.Equal(t, "workload", b.config.Facts["cn"])
 
 	// A write that leaves them out keeps them.
-	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"default_role": "reader"}).StatusCode)
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"ocsp_timeout": "3s"}).StatusCode)
 	assert.Equal(t, []string{"teams", "workload"}, b.mountFacts.Load().Mapping.Mapped())
 	assert.Equal(t, "human", b.mountFacts.Load().Kind)
 
@@ -706,9 +678,6 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		entry, err := sdklogical.StorageEntryJSON("config", bad)
 		require.NoError(t, err)
 		require.NoError(t, b.storageView.Put(ctx, entry))
-		require.NoError(t, b.setRole(ctx, &CertRole{
-			Name: "reader", AllowedCommonNames: []string{"agent-*"}, TokenPolicies: []string{"read"}, TokenTTL: "1h",
-		}))
 
 		require.NoError(t, b.Initialize(ctx), "a bad mapping does not fail the load")
 		require.NotNil(t, b.config)
@@ -716,9 +685,8 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		assert.Nil(t, b.mountFacts.Load())
 		assert.Empty(t, b.FactNames())
 
-		resp := certLogin(t, b, leaf, "reader")
-		require.Equal(t, http.StatusOK, resp.StatusCode, "role logins do not read facts: %v", resp.Err)
-		assert.Equal(t, []string{"read"}, resp.Auth.Policies)
+		resp := certLogin(t, b, leaf)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "logins do not read facts: %v", resp.Err)
 		adm := resp.Auth.Admission
 		require.NotNil(t, adm)
 		adm.MountPath = "auth/cert/"
@@ -729,7 +697,7 @@ func TestNaming_LoadFailureAnswersNoFacts(t *testing.T) {
 		// A write that leaves the stored facts in place is told how to replace
 		// them, and changes nothing.
 		before := b.config
-		resp = writeConfig(b, map[string]any{"default_role": "reader"})
+		resp = writeConfig(b, map[string]any{"ocsp_timeout": "3s"})
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.EqualError(t, resp.Err, `the stored facts do not compile (facts: source "subject" is not a field of this mount (one of ca, cn, dns_san, email_san, org, ou, serial, uri_san)); send facts (and entity_kind) in this write to replace them`)
 		assert.Same(t, before, b.config)
@@ -814,7 +782,7 @@ func TestNaming_PublishNeverHalfApplied(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for !stop.Load() {
-				resp := certLogin(t, b, leaf, "reader")
+				resp := certLogin(t, b, leaf)
 				if resp.StatusCode != http.StatusOK || resp.Auth == nil || resp.Auth.Admission == nil {
 					report("login failed: %d %v", resp.StatusCode, resp.Err)
 					continue

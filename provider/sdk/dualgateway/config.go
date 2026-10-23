@@ -30,6 +30,8 @@ func parseConfig(spec *ProviderSpec, conf map[string]any) providerConfig {
 func validateConfig(spec *ProviderSpec, config map[string]any) error {
 	allowedKeys := []string{
 		spec.URLConfigKey, "max_body_size", "timeout", "auto_auth_path", "default_role",
+		// user_auth_role was removed; a mount enabled with it still loads and
+		// fails closed on user credentials (framework.HasUserAuthRole).
 		"user_auth_path", "user_auth_role",
 		"tls_skip_verify", "ca_data",
 	}

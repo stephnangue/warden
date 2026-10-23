@@ -13,7 +13,7 @@ import (
 //
 // The MCP server, its tools, and the identity/namespace middleware are built
 // in the core package because they reuse core-internal machinery (the
-// introspection aggregator, the skill store, the namespace store) that is not
+// role discovery, the skill store, the namespace store) that is not
 // exported. This wrapper keeps registration consistent with the other
 // handleXXX(core, log, …) endpoints and builds the handler once, at
 // registration time.

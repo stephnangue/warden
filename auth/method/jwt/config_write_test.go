@@ -36,6 +36,7 @@ func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
 	b, _ := createTestBackendWithStorage(t)
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{
 		"jwt_validation_pubkeys": []string{pemStr}, "bound_issuer": "https://issuer.example.com",
+		"bound_audiences": []string{"warden"},
 	}).StatusCode)
 	before := b.config
 	b.storageView = failingStorage{newInmemStorage()}
@@ -54,6 +55,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		b, _ := createTestBackendWithStorage(t)
 		require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{
 			"jwt_validation_pubkeys": []string{pemStr},
+			"bound_audiences":        []string{"warden"},
 		}).StatusCode)
 
 		start := make(chan struct{})
@@ -62,7 +64,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			writeConfig(b, map[string]any{"default_role": "reader"})
+			writeConfig(b, map[string]any{"user_claim": "email"})
 		}()
 		go func() {
 			defer wg.Done()
@@ -72,7 +74,7 @@ func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		require.Equal(t, "reader", b.config.DefaultRole, "iteration %d lost the default_role write", i)
+		require.Equal(t, "email", b.config.UserClaim, "iteration %d lost the user_claim write", i)
 		require.Equal(t, "https://issuer.example.com", b.config.BoundIssuer, "iteration %d lost the bound_issuer write", i)
 	}
 }

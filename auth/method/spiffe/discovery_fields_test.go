@@ -23,7 +23,7 @@ func TestRole_DiscoveryFields(t *testing.T) {
 	require.Nil(t, resp.Err, "unexpected validation error: %v", resp.Err)
 
 	resp, err := b.handleRoleRead(ctx, &logical.Request{}, &framework.FieldData{
-		Raw: map[string]any{"name": "reader"}, Schema: b.pathRole().Fields,
+		Raw: map[string]any{"name": "reader"}, Schema: b.legacyRolePath().Fields,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "vault", resp.Data["skill"])

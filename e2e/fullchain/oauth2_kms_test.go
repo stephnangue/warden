@@ -77,10 +77,7 @@ func bindOAuth2Chain(t *testing.T, source, spec, role string) {
 	e2eWrite(t, "POST", "sys/cred/specs/"+spec, fmt.Sprintf(`{
 		"type":"oauth_bearer_token","source":%q,"config":{"scope":"api.read"}}`, source),
 		"create the consuming oauth2 spec")
-	e2eWrite(t, "POST", "auth/jwt/role/"+role, fmt.Sprintf(`{
-		"token_policies":["%s"],"cred_spec_name":%q,
-		"user_claim":"sub","token_ttl":3600}`, restEnv.Policy(), spec),
-		"create the consuming role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", role, h.Role{Policies: []string{restEnv.Policy()}, CredSpec: spec}, nil)
 }
 
 // mintThroughRole makes one gateway request under role and fails on anything but 200.
@@ -128,7 +125,7 @@ func TestOAuth2KMSClientAssertion_SignsWithAKeyWardenNeverHolds(t *testing.T) {
 	provisionKMSSignerRole(t)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+oauth2KMSRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", oauth2KMSRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+oauth2KMSSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+oauth2KMSSource, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+oauth2KMSSignerSpec, leaderPort, "")
@@ -199,7 +196,7 @@ func TestOAuth2PrivateKeyJWT_SignsWithTheSourceKey(t *testing.T) {
 	sts, assertions := serveAssertionVerifyingSTS(t, pubPEM)
 
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+oauth2KeyRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", oauth2KeyRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+oauth2KeySpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/sources/"+oauth2KeySource, leaderPort, "")
 	}
