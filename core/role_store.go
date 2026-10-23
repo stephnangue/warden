@@ -485,15 +485,19 @@ func validateObjectMetadata(md map[string]string) error {
 	return nil
 }
 
-// normalizeRolePolicies returns policies trimmed and lower-cased (the form the
-// policy store names them by), sorted and deduplicated. An empty name is
-// refused.
+// normalizeRolePolicies returns policies in canonical form (the form the policy
+// store names them by), sorted and deduplicated. A name with no canonical form
+// is refused: it could name no stored policy, and a "/" or ".." in it must
+// never reach the store.
 func normalizeRolePolicies(policies []string) ([]string, error) {
 	out := make([]string, 0, len(policies))
-	for _, p := range policies {
-		p = strings.ToLower(strings.TrimSpace(p))
-		if p == "" {
+	for _, name := range policies {
+		if strings.TrimSpace(name) == "" {
 			return nil, logical.ErrBadRequest("policy names must not be empty")
+		}
+		p, ok := logical.CanonicalPolicyName(name)
+		if !ok {
+			return nil, logical.ErrBadRequestf("invalid policy name %.64q: %s", name, logical.PolicyNameRule)
 		}
 		out = append(out, p)
 	}

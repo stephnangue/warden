@@ -19,6 +19,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -343,6 +344,73 @@ func TestRoles_RootPolicyRefused(t *testing.T) {
 	r, _, err := c.roleStore.Get(ctx, "ops")
 	require.NoError(t, err)
 	assert.Empty(t, r.Policies)
+}
+
+// TestRoles_PolicyNamesCanonical: a role stores its policies in canonical form,
+// and a name with none — a "/" or ".." that would walk the policy cache into
+// another namespace — is refused before anything is stored.
+func TestRoles_PolicyNamesCanonical(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+
+	for _, name := range []string{
+		"../../00000000-0000-0000-0000-000000000000/cbp/admin",
+		"x/../admin",
+		"a/b",
+		"-deploy",
+	} {
+		resp := roleRequest(t, c, ctx, logical.CreateOperation, "roles/escalate", map[string]any{
+			"policies": []any{"deploy", name},
+		})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%q", name)
+		assert.Contains(t, resp.Err.Error(), "invalid policy name", "%q", name)
+		_, _, err := c.roleStore.Get(ctx, "escalate")
+		assert.ErrorIs(t, err, ErrRoleNotFound, "nothing is stored for %q", name)
+	}
+
+	_, err := c.roleStore.Create(ctx, &logical.Role{Name: "deploy", Policies: []string{" Deploy ", "deploy", "OPS"}})
+	require.NoError(t, err)
+	r, _, err := c.roleStore.Get(ctx, "deploy")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"deploy", "ops"}, r.Policies)
+}
+
+// TestRoles_StoredInvalidPolicyGrantsNothing: a role stored before writes
+// refused non-canonical names still loads, but such a name resolves to no
+// policy, so it grants nothing.
+func TestRoles_StoredInvalidPolicyGrantsNothing(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+
+	p, err := ParseCBPPolicy(namespace.RootNamespace, `path "*" { capabilities = ["read"] }`)
+	require.NoError(t, err)
+	p.Name = "admin"
+	require.NoError(t, c.policyStore.SetPolicy(ctx, p, nil))
+
+	stored := `{"version":1,"role":{"name":"legacy","policies":["x/../admin"]}}`
+	require.NoError(t, c.roleStore.storage.Put(ctx, &sdklogical.StorageEntry{
+		Key:   roleStorageKey(namespace.RootNamespaceUUID, "legacy"),
+		Value: []byte(stored),
+	}))
+	var logs bytes.Buffer
+	c.roleStore.logger, _ = logger.NewGatedLogger(logger.DefaultConfig(),
+		logger.GatedWriterConfig{Underlying: &logs, InitialState: logger.GateOpen})
+	c.teardownRoleStore()
+	require.NoError(t, c.setupRoleStore(ctx, false))
+
+	r, _, err := c.roleStore.Get(ctx, "legacy")
+	require.NoError(t, err)
+	require.Equal(t, []string{"x/../admin"}, r.Policies)
+	got, err := c.policyStore.getPolicyAnyType(ctx, r.Policies[0])
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// Loading it tells the operator which role to fix.
+	out := logs.String()
+	assert.Contains(t, out, "stored role names policies that can never resolve")
+	assert.Contains(t, out, "legacy")
+	assert.Contains(t, out, `x/../admin`)
+	assert.Equal(t, 1, strings.Count(out, "can never resolve"), "one warning for the one role")
 }
 
 // TestValidateAssignablePolicies_CalledFromBothSites pins the one policy check

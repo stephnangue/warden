@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -58,7 +57,7 @@ type PolicyStore struct {
 	// removing a permission did not revoke it. Any future cache here must be keyed
 	// so that no sequence of writes and deletes can produce a stale hit — content,
 	// not identity — and must carry a benchmark showing it earns that risk.
-	tokenPoliciesLRU *lru.TwoQueueCache[string, *Policy]
+	tokenPoliciesLRU *lru.TwoQueueCache[policyCacheKey, *Policy]
 
 	modifyLock *sync.RWMutex
 
@@ -85,7 +84,7 @@ func NewPolicyStore(ctx context.Context, core *Core, logger *logger.GatedLogger)
 		core:       core,
 	}
 
-	cache, _ := lru.New2Q[string, *Policy](policyCacheSize)
+	cache, _ := lru.New2Q[policyCacheKey, *Policy](policyCacheSize)
 	ps.tokenPoliciesLRU = cache
 
 	return ps, nil
@@ -117,45 +116,6 @@ func (c *Core) teardownPolicyStore() error {
 	return nil
 }
 
-func (ps *PolicyStore) invalidateNamespace(ctx context.Context, uuid string) {
-	ps.modifyLock.Lock()
-	defer ps.modifyLock.Unlock()
-
-	for _, key := range ps.tokenPoliciesLRU.Keys() {
-		if strings.HasPrefix(key, uuid) {
-			ps.tokenPoliciesLRU.Remove(key)
-		}
-	}
-}
-
-func (ps *PolicyStore) invalidate(ctx context.Context, name string, policyType PolicyType) error {
-	ns, err := namespace.FromContext(ctx)
-	if err != nil {
-		return err
-	}
-
-	// This may come with a prefixed "/" due to joining the file path
-	saneName := strings.TrimPrefix(name, "/")
-	index := ps.cacheKey(ns, saneName, policyType)
-
-	ps.modifyLock.Lock()
-	defer ps.modifyLock.Unlock()
-
-	// We don't lock before removing from the LRU here because the worst that
-	// can happen is we load again if something since added it
-	switch policyType {
-	case PolicyTypeCBP, PolicyTypeMCP:
-		if ps.tokenPoliciesLRU != nil {
-			ps.tokenPoliciesLRU.Remove(index)
-		}
-
-	default:
-		return fmt.Errorf("unknown policy type %d", policyType)
-	}
-
-	return nil
-}
-
 // SetPolicy is used to create or update the given policy
 func (ps *PolicyStore) SetPolicy(ctx context.Context, p *Policy, casVersion *int) error {
 	if p == nil {
@@ -164,8 +124,11 @@ func (ps *PolicyStore) SetPolicy(ctx context.Context, p *Policy, casVersion *int
 	if p.Name == "" {
 		return errors.New("policy name missing")
 	}
-	// Policies are normalized to lower-case
-	p.Name = ps.sanitizeName(p.Name)
+	name, ok := logical.CanonicalPolicyName(p.Name)
+	if !ok {
+		return logical.ErrBadRequestf("invalid policy name %.64q: %s", p.Name, logical.PolicyNameRule)
+	}
+	p.Name = name
 	if slices.Contains(immutablePolicies, p.Name) {
 		return fmt.Errorf("cannot update %q policy", p.Name)
 	}
@@ -312,11 +275,15 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 		return nil, err
 	}
 
-	// Policies are normalized to lower-case
-	name = ps.sanitizeName(name)
+	// A name with no canonical form names no policy. Refusing it here, before
+	// the cache, is what keeps a crafted name off another policy's entry.
+	name, ok := logical.CanonicalPolicyName(name)
+	if !ok {
+		return nil, nil
+	}
 	index := ps.cacheKey(ns, name, policyType)
 
-	var cache *lru.TwoQueueCache[string, *Policy]
+	var cache *lru.TwoQueueCache[policyCacheKey, *Policy]
 	var view BarrierView
 
 	switch policyType {
@@ -523,8 +490,11 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 		defer ps.modifyLock.Unlock()
 	}
 
-	// Policies are normalized to lower-case
-	name = ps.sanitizeName(name)
+	canonical, ok := logical.CanonicalPolicyName(name)
+	if !ok {
+		return logical.ErrBadRequestf("invalid policy name %.64q: %s", name, logical.PolicyNameRule)
+	}
+	name = canonical
 	index := ps.cacheKey(ns, name, policyType)
 
 	view := ps.getBarrierView(ns, policyType)
@@ -582,7 +552,11 @@ func (ps *PolicyStore) getPolicyAnyType(ctx context.Context, name string) (*Poli
 		return nil, err
 	}
 
-	saneName := ps.sanitizeName(name)
+	saneName, ok := logical.CanonicalPolicyName(name)
+	if !ok {
+		// Grants and restricts nothing, like a name in neither view.
+		return nil, nil
+	}
 
 	if ps.tokenPoliciesLRU != nil {
 		for _, policyType := range []PolicyType{PolicyTypeCBP, PolicyTypeMCP} {
@@ -702,17 +676,20 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 	return cbp, nil
 }
 
-func (ps *PolicyStore) sanitizeName(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
+// policyCacheKey is the LRU key for a policy. Its fields are compared one by
+// one, never joined into a string, so no name can be spelled to equal another
+// namespace's or another type's key. The type is part of the key because CBP
+// and MCP policies live in separate storage views and share one cache —
+// without it, a CBP and an MCP policy of the same name would collide.
+type policyCacheKey struct {
+	nsUUID     string
+	policyType PolicyType
+	name       string
 }
 
-// cacheKey builds the LRU key for a policy. The type is part of the key
-// because CBP and MCP policies live in separate storage views and share one
-// cache — without it, a CBP and an MCP policy of the same name would collide.
-// The namespace UUID stays first so invalidateNamespace's prefix sweep keeps
-// matching every type at once.
-func (ps *PolicyStore) cacheKey(ns *namespace.Namespace, name string, policyType PolicyType) string {
-	return path.Join(ns.UUID, policyType.String(), name)
+// cacheKey builds the LRU key for a policy. name must already be canonical.
+func (ps *PolicyStore) cacheKey(ns *namespace.Namespace, name string, policyType PolicyType) policyCacheKey {
+	return policyCacheKey{nsUUID: ns.UUID, policyType: policyType, name: name}
 }
 
 // loadDefaultPolicies loads default policies for the namespace in the provided context
