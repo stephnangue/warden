@@ -419,20 +419,6 @@ func TestSystemBackend_Introspect_FanOutRunsInParallel(t *testing.T) {
 		"fan-out should run in parallel (%d mounts × %v); got %v", nMounts, perMountDelay, elapsed)
 }
 
-// TestIsSPIFFEJWTSVID covers the unverified JWT-SVID detection the spiffe
-// transparent-auth dispatch uses to prefer a JWT-SVID over an ambient cert.
-func TestIsSPIFFEJWTSVID(t *testing.T) {
-	assert.True(t, isSPIFFEJWTSVID(mintK8sJWT(`{"sub":"spiffe://example.org/ns/default/sa/api"}`)),
-		"a JWT with a spiffe:// sub is a JWT-SVID")
-	assert.False(t, isSPIFFEJWTSVID(mintK8sJWT(`{"sub":"system:serviceaccount:default:app"}`)),
-		"a k8s SA token is not a JWT-SVID")
-	assert.False(t, isSPIFFEJWTSVID(mintK8sJWT(`{"sub":"1234567890"}`)),
-		"a generic OIDC JWT is not a JWT-SVID")
-	assert.False(t, isSPIFFEJWTSVID("not-a-jwt"), "a non-eyJ string is not a JWT")
-	assert.False(t, isSPIFFEJWTSVID(""), "empty is not a JWT")
-	assert.False(t, isSPIFFEJWTSVID("eyJ.garbage.sig"), "an unparseable JWT is rejected")
-}
-
 // TestSystemBackend_Introspect_SpiffeMatchesCertAndJWT pins the aggregator-filter
 // relaxation: a "spiffe" mount (virtual CredentialFormat "spiffe") is fanned out
 // to for BOTH a cert-presented and a JWT-presented introspect, but never for a

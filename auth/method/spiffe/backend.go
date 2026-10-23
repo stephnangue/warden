@@ -29,9 +29,9 @@ type SPIFFEAuthConfig struct {
 
 	// BoundAudiences are the audiences a JWT-SVID must carry for the mount to
 	// admit it, any one of them. Stored, read back and validated (no empty
-	// entry), but not used yet: logins still verify a JWT-SVID against the
-	// role's bound_audiences. From the cutover to mount-level admission it is
-	// the audience every JWT-SVID is verified against.
+	// entry), but not used by role logins, which still verify a JWT-SVID
+	// against the role's bound_audiences; the role-free admission verifies
+	// every JWT-SVID against it.
 	BoundAudiences []string `json:"bound_audiences,omitempty"`
 
 	// MaxAge bounds a JWT-SVID's age at admission, from its iat: one older,
@@ -104,6 +104,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathRole(),
 			b.pathRoleList(),
 			b.pathIntrospect(),
+			helper.AdmitPath(b.admit),
 		}, b.spiffe.Paths()...),
 	}
 

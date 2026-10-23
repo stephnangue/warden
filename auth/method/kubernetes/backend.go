@@ -65,9 +65,9 @@ type KubernetesAuthConfig struct {
 
 	// BoundAudiences are the audiences a workload token must carry for the
 	// mount to admit it, any one of them. Stored, read back and validated
-	// (no empty entry), but not used yet: logins still send the role's
-	// audience to TokenReview. From the cutover to mount-level admission it
-	// is sent as the TokenReview's spec.audiences.
+	// (no empty entry), but not used by role logins, which still send the
+	// role's audience to TokenReview; the role-free admission sends it as
+	// the TokenReview's spec.audiences.
 	BoundAudiences []string `json:"bound_audiences,omitempty"`
 
 	// MaxAge bounds a workload token's age at admission, from its iat: one
@@ -134,6 +134,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 			b.pathRole(),
 			b.pathRoleList(),
 			b.pathIntrospect(),
+			helper.AdmitPath(b.admit),
 		},
 	}
 

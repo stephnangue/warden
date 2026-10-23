@@ -108,67 +108,86 @@ func (c *Core) resolveDiscoveryWith(ctx context.Context, skillExists func(name s
 		}
 	}
 
-	providers, err := c.resolveDiscoveryProviders(ctx, aggregated)
+	providerPaths := make([]string, len(aggregated))
+	for i, r := range aggregated {
+		providerPaths[i] = r.ProviderPath
+	}
+	providers, err := c.resolveDiscoveryProviders(ctx, providerPaths)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	roles := make([]mcpRole, len(aggregated))
 	for i, r := range aggregated {
-		role := mcpRole{Name: r.Name, Description: r.Description}
-		// Warnings name the role only: list_roles does not expose auth mount
-		// paths or provider configuration to the agent.
-		label := fmt.Sprintf("role %q", r.Name)
-
-		skill := r.Skill
-		if r.ProviderPath != "" {
-			p, ok := providers[r.ProviderPath]
-			switch {
-			case !ok:
-				warnings = append(warnings, fmt.Sprintf("%s: provider_path %q is not a provider mount in this namespace",
-					label, r.ProviderPath))
-			case !p.hasAutoAuth:
-				warnings = append(warnings, fmt.Sprintf("%s: provider %q has no auto_auth_path, so no role can be used through it",
-					label, p.path))
-			case p.authMount != r.AuthPath:
-				// The gateway resolves the URL's role segment against the
-				// provider's auth mount, so a URL here would not reach this
-				// role (or would reach a same-named role elsewhere).
-				warnings = append(warnings, fmt.Sprintf("%s: provider %q does not authenticate through this role's auth mount",
-					label, p.path))
-			default:
-				role.Provider = p.typ
-				role.URL = mountURL(ns, p.path) + p.urlSuffix(r.Name)
-				if skill == "" {
-					// The provider's own skill, only when one ships: most
-					// provider types have none, and a URI to nothing would
-					// mislead.
-					if def := logical.SkillNameForProvider(p.typ); skillExists(def) {
-						skill = def
-					}
-				}
-			}
-		}
-		if r.Skill != "" && !skillExists(r.Skill) {
-			warnings = append(warnings, fmt.Sprintf("%s: skill %q does not exist", label, r.Skill))
-			skill = ""
-		}
-		if skill != "" {
-			role.Skill = skillURI(skill)
-		}
-		roles[i] = role
+		// The gateway resolves the URL's role segment against the provider's
+		// auth mount, so a URL is only given when that is the mount that
+		// listed the role (otherwise it would not reach this role, or would
+		// reach a same-named role elsewhere).
+		roles[i], warnings = discoveryEntry(ns, r.Name, r.Description, r.Skill, r.ProviderPath, providers,
+			func(p discoveryProvider) bool { return p.authMount == r.AuthPath }, skillExists, warnings)
 	}
 	return roles, warnings, nil
 }
 
-// resolveDiscoveryProviders returns the namespace's provider mounts that the
-// roles point at, keyed by mount path, each resolved once: its auth mount and
-// its role URL suffix. The mount table lock is held only for the copy.
-func (c *Core) resolveDiscoveryProviders(ctx context.Context, roles []aggregatedRole) (map[string]discoveryProvider, error) {
+// discoveryEntry projects one listed role for list_roles: its provider type
+// and URL when its provider_path resolves to a provider whose gateway can be
+// used for it (reachable reports that for a provider with an auth mount), and
+// its skill URI: the role's own skill when it exists, else the provider type's
+// skill when the role has a URL and that skill ships. A field that cannot be
+// resolved is left out and a warning appended to warnings says why; the
+// warnings, returned, name the role and provider mounts only, never auth mount
+// paths or provider configuration.
+func discoveryEntry(ns *namespace.Namespace, name, description, skill, providerPath string,
+	providers map[string]discoveryProvider, reachable func(discoveryProvider) bool,
+	skillExists func(name string) bool, warnings []string) (mcpRole, []string) {
+	role := mcpRole{Name: name, Description: description}
+	label := fmt.Sprintf("role %q", name)
+
+	resolved := skill
+	if providerPath != "" {
+		p, ok := providers[providerPath]
+		switch {
+		case !ok:
+			warnings = append(warnings, fmt.Sprintf("%s: provider_path %q is not a provider mount in this namespace",
+				label, providerPath))
+		case !p.hasAutoAuth:
+			warnings = append(warnings, fmt.Sprintf("%s: provider %q has no auto_auth_path, so no role can be used through it",
+				label, p.path))
+		case !reachable(p):
+			warnings = append(warnings, fmt.Sprintf("%s: provider %q does not authenticate through this role's auth mount",
+				label, p.path))
+		default:
+			role.Provider = p.typ
+			role.URL = mountURL(ns, p.path) + p.urlSuffix(name)
+			if resolved == "" {
+				// The provider's own skill, only when one ships: most
+				// provider types have none, and a URI to nothing would
+				// mislead.
+				if def := logical.SkillNameForProvider(p.typ); skillExists(def) {
+					resolved = def
+				}
+			}
+		}
+	}
+	if skill != "" && !skillExists(skill) {
+		warnings = append(warnings, fmt.Sprintf("%s: skill %q does not exist", label, skill))
+		resolved = ""
+	}
+	if resolved != "" {
+		role.Skill = skillURI(resolved)
+	}
+	return role, warnings
+}
+
+// resolveDiscoveryProviders returns the namespace's provider mounts named in
+// providerPaths (empty entries ignored), keyed by mount path, each resolved
+// once: its auth mount and its role URL suffix. The mount table lock is held
+// only for the copy.
+func (c *Core) resolveDiscoveryProviders(ctx context.Context, providerPaths []string) (map[string]discoveryProvider, error) {
 	wanted := make(map[string]struct{})
-	for _, r := range roles {
-		if r.ProviderPath != "" {
-			wanted[r.ProviderPath] = struct{}{}
+	for _, path := range providerPaths {
+		if path != "" {
+			wanted[path] = struct{}{}
 		}
 	}
 	out := make(map[string]discoveryProvider, len(wanted))

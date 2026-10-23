@@ -2,6 +2,7 @@ package spiffe
 
 import (
 	"crypto/x509"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -10,6 +11,26 @@ import (
 )
 
 const jwtTD = "prod.example.org"
+
+// unsignedJWT returns a well-formed JWT with payloadJSON and a dummy signature.
+func unsignedJWT(payloadJSON string) string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + enc([]byte(payloadJSON)) + "." + enc([]byte("sig"))
+}
+
+// IsJWTSVID is the unverified detection that prefers a bearer JWT-SVID over a
+// forwarded certificate.
+func TestIsJWTSVID(t *testing.T) {
+	assert.True(t, IsJWTSVID(unsignedJWT(`{"sub":"spiffe://example.org/ns/default/sa/api"}`)),
+		"a JWT with a spiffe:// sub is a JWT-SVID")
+	assert.False(t, IsJWTSVID(unsignedJWT(`{"sub":"system:serviceaccount:default:app"}`)),
+		"a k8s SA token is not a JWT-SVID")
+	assert.False(t, IsJWTSVID(unsignedJWT(`{"sub":"1234567890"}`)),
+		"a generic OIDC JWT is not a JWT-SVID")
+	assert.False(t, IsJWTSVID("not-a-jwt"), "a non-eyJ string is not a JWT")
+	assert.False(t, IsJWTSVID(""), "empty is not a JWT")
+	assert.False(t, IsJWTSVID("eyJ.garbage.sig"), "an unparseable JWT is rejected")
+}
 
 func TestVerifyJWTSVID_Valid(t *testing.T) {
 	auth := newJWTAuthority(t)

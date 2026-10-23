@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/hashicorp/cap/jwt"
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -122,23 +121,7 @@ func extractJWTFromRequest(req *logical.Request) string {
 // constraints (issuer, subject, audiences) — same construction as login.
 // Returns claims on success.
 func validateJWTForRole(ctx context.Context, config *JWTAuthConfig, role *JWTRole, jwtToken string) (map[string]any, error) {
-	expected := jwt.Expected{
-		SigningAlgorithms: []jwt.Alg{jwt.RS256, jwt.RS384, jwt.RS512, jwt.ES256, jwt.ES384, jwt.ES512},
-	}
-	if config.BoundIssuer != "" {
-		expected.Issuer = config.BoundIssuer
-	}
-	if role.BoundSubject != "" {
-		expected.Subject = role.BoundSubject
-	} else if config.BoundSubject != "" {
-		expected.Subject = config.BoundSubject
-	}
-	if len(role.BoundAudiences) > 0 {
-		expected.Audiences = role.BoundAudiences
-	} else if len(config.BoundAudiences) > 0 {
-		expected.Audiences = config.BoundAudiences
-	}
-	return config.validator.Validate(ctx, jwtToken, expected)
+	return config.validator.Validate(ctx, jwtToken, expectedClaims(config, role))
 }
 
 // matchRole runs the post-Validate claim checks from the login flow:

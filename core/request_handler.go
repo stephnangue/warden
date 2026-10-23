@@ -23,10 +23,10 @@ import (
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	authhelper "github.com/stephnangue/warden/auth/helper"
+	spiffelib "github.com/stephnangue/warden/auth/spiffe"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
-	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
@@ -2721,7 +2721,7 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		if clientToken == "" {
 			clientToken = req.ClientToken
 		}
-		if isSPIFFEJWTSVID(clientToken) {
+		if spiffelib.IsJWTSVID(clientToken) {
 			sfHash := sha256.Sum256([]byte("spiffe-jwt:" + mountAccessor + ":" + clientToken + ":" + authRole))
 			singleflightKey = hex.EncodeToString(sfHash[:])
 			loginData = map[string]any{"jwt": clientToken, "role": authRole}
@@ -2857,23 +2857,6 @@ func newTransparentAuthFlight(c *Core) *flight.Group[*TokenEntry] {
 	return flight.New[*TokenEntry]("implicit login", transparentLoginTimeout, c.logger,
 		flight.WithLifetime(func() context.Context { return c.activeContext }),
 		flight.WithMaxDetached(transparentLoginMaxDetached))
-}
-
-// isSPIFFEJWTSVID reports whether token is a JWT whose unverified subject is a
-// SPIFFE ID (a JWT-SVID). The spiffe transparent-auth dispatch uses it to prefer
-// an explicitly-presented JWT-SVID over an ambient mesh-forwarded cert. The
-// signature is NOT verified here — the mount re-verifies the JWT-SVID against
-// the trust-domain bundle at login.
-func isSPIFFEJWTSVID(token string) bool {
-	if !strings.HasPrefix(token, "eyJ") {
-		return false
-	}
-	claims, err := helper.ParseJWTClaimsUnverified(token)
-	if err != nil {
-		return false
-	}
-	sub, _ := claims["sub"].(string)
-	return strings.HasPrefix(sub, "spiffe://")
 }
 
 // extractTransparentClientCert extracts the client certificate from a request.

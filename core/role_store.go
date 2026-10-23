@@ -110,6 +110,22 @@ func (s *roleSnapshot) lookup(nsID, name string) *roleEntry {
 	return nr.byName[name]
 }
 
+// roles returns the published roles of namespace nsID sorted by name, nil when
+// it has none. The slice is fresh; the roles are shared: callers must not write
+// to them. It takes no lock.
+func (s *roleSnapshot) roles(nsID string) []*logical.Role {
+	nr := s.byNS[nsID]
+	if nr == nil || len(nr.byName) == 0 {
+		return nil
+	}
+	out := make([]*logical.Role, 0, len(nr.byName))
+	for _, e := range nr.byName {
+		out = append(out, e.role)
+	}
+	slices.SortFunc(out, func(a, b *logical.Role) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
 // withEntry returns a snapshot in which namespace nsID holds e under name, or no
 // role under name when e is nil. s is left as it was.
 func (s *roleSnapshot) withEntry(nsID, name string, e *roleEntry) *roleSnapshot {
@@ -205,15 +221,14 @@ func (s *RoleStore) List(ctx context.Context) ([]*logical.Role, error) {
 	if err != nil {
 		return nil, ErrNamespaceNotInContext
 	}
-	nr := s.snapshot.Load().byNS[ns.ID]
-	if nr == nil {
+	roles := s.snapshot.Load().roles(ns.ID)
+	if roles == nil {
 		return nil, nil
 	}
-	out := make([]*logical.Role, 0, len(nr.byName))
-	for _, e := range nr.byName {
-		out = append(out, e.role.Clone())
+	out := make([]*logical.Role, len(roles))
+	for i, r := range roles {
+		out[i] = r.Clone()
 	}
-	slices.SortFunc(out, func(a, b *logical.Role) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
 }
 
