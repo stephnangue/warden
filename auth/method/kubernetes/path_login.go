@@ -92,7 +92,8 @@ role's policies.`,
 //  5. match against role's bound_service_account_names/namespaces
 //  6. enforce role.max_age if configured (against iat claim)
 //  7. compute effective TTL = min(role.TokenTTL, jwt-exp-derived-TTL)
-//  8. return auth response with PrincipalID + role + policies
+//  8. return auth response with PrincipalID + role + policies, plus the
+//     admission: the reviewed service account as facts
 //
 // All authentication failures collapse to errAuthFailed in the response
 // to prevent leaking which check failed; detailed reasons are logged
@@ -240,6 +241,11 @@ func (b *kubernetesAuthBackend) handleLogin(ctx context.Context, req *logical.Re
 			// used for transparent-mode lookups.
 			ClientToken: jwtStr,
 			Metadata:    extractK8sMetadata(role.MetadataMappings, saNamespace, saName, status.User.UID, status.User.Username, status.User.Groups),
+			// What the review verified, alongside the role logic above,
+			// which does not read it. claims are the ones the issuer
+			// pre-filter and max_age already parsed, so the iat costs no
+			// extra parse.
+			Admission: newAdmission(status, saNamespace, saName, claims, b.mountFacts),
 		},
 		Data: map[string]any{
 			"principal_id":              status.User.Username,

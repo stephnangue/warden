@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -46,6 +47,33 @@ func TestFactsConfig_Compile(t *testing.T) {
 	badKind.Compile(testBuiltins)
 	assert.NoError(t, badKind.Err())
 	assert.NotNil(t, badKind.Naming())
+}
+
+// A method whose facts are a fixed set of fields maps only those fields.
+func TestFactsConfig_CompileFields(t *testing.T) {
+	fields := []string{"username", "groups", "aud"}
+
+	ok := FactsConfig{Facts: map[string]string{"username": "workload", "groups": "groups"}}
+	ok.CompileFields(fields)
+	require.NoError(t, ok.Err())
+	assert.Equal(t, []string{"groups", "workload"}, ok.Naming().Mapping.Mapped())
+	assert.Equal(t, []string{"aud", "groups", "username", "workload"}, ok.Naming().Mapping.Names())
+
+	for _, source := range []string{"email", "/a/b", "Username"} {
+		c := FactsConfig{Facts: map[string]string{"username": "workload", source: "x"}}
+		c.CompileFields(fields)
+		assert.Nil(t, c.Naming(), "source %q", source)
+		assert.EqualError(t, c.Err(), `facts: source "`+source+`" is not a field of this mount (one of aud, groups, username)`)
+	}
+
+	// Compile's own refusals still apply, and a later success replaces a failure.
+	c := FactsConfig{Facts: map[string]string{"username": "aud"}}
+	c.CompileFields(fields)
+	assert.ErrorContains(t, c.Err(), "built-in")
+	c.Facts = nil
+	c.CompileFields(fields)
+	require.NoError(t, c.Err())
+	assert.NotNil(t, c.Naming())
 }
 
 // Embedded in a config struct, FactsConfig is flattened by encoding/json, and
@@ -107,15 +135,63 @@ func TestParseFactsField(t *testing.T) {
 }
 
 func TestFactsFieldSchemas(t *testing.T) {
-	s := FactsFieldSchemas()
+	s := FactsFieldSchemas("one of the fields: a, b")
 	require.Len(t, s, 2)
 	assert.Equal(t, framework.TypeString, s["entity_kind"].Type)
 	assert.Equal(t, framework.TypeMap, s["facts"].Type)
 	assert.NotEmpty(t, s["entity_kind"].Description)
-	assert.NotEmpty(t, s["facts"].Description)
+	assert.Contains(t, s["facts"].Description, "Map of a source (one of the fields: a, b) to the fact name")
+	assert.NotContains(t, s["facts"].Description, "Pointer", "the source phrase is the method's")
 
 	s["facts"].Description = "changed"
-	assert.NotEqual(t, "changed", FactsFieldSchemas()["facts"].Description, "each call is fresh")
+	assert.NotEqual(t, "changed", FactsFieldSchemas("x")["facts"].Description, "each call is fresh")
+}
+
+func TestParseBoundAudiences(t *testing.T) {
+	cases := []struct {
+		raw  any
+		want []string
+		err  string
+	}{
+		{nil, nil, ""},
+		{"", nil, ""},
+		{[]string{}, nil, ""},
+		{[]any{}, nil, ""},
+		{"warden", []string{"warden"}, ""},
+		{" warden , vault ", []string{"warden", "vault"}, ""},
+		{[]string{"warden", " vault"}, []string{"warden", "vault"}, ""},
+		{[]any{"warden"}, []string{"warden"}, ""},
+		{"warden,,vault", nil, "bound_audiences: entry 1 is empty"},
+		{[]string{"warden", ""}, nil, "bound_audiences: entry 1 is empty"},
+		{[]string{"  "}, nil, "bound_audiences: entry 0 is empty"},
+		{map[string]any{"a": 1}, nil, "bound_audiences: "},
+	}
+	for _, tc := range cases {
+		got, err := ParseBoundAudiences(tc.raw)
+		if tc.err != "" {
+			assert.ErrorContains(t, err, tc.err, "raw %#v", tc.raw)
+			continue
+		}
+		require.NoError(t, err, "raw %#v", tc.raw)
+		assert.Equal(t, tc.want, got, "raw %#v", tc.raw)
+	}
+}
+
+func TestTableValues(t *testing.T) {
+	assert.Equal(t, selector.Field{Name: "uid"}, TableValue("uid", ""))
+	assert.Equal(t, selector.Field{Name: "uid", Values: []string{"u"}}, TableValue("uid", "u"))
+
+	assert.Equal(t, selector.Field{Name: "g"}, TableValues("g", nil))
+	assert.Equal(t, selector.Field{Name: "g", Values: []string{}}, TableValues("g", []string{"", ""}))
+	assert.Equal(t, []string{"a", "b"}, TableValues("g", []string{"", "a", "", "b", ""}).Values)
+
+	vs := []string{"a", "b"}
+	got := TableValues("g", vs)
+	assert.Same(t, &vs[0], &got.Values[0], "a list without empty entries is used as is")
+
+	in := []string{"a", "", "b"}
+	TableValues("g", in)
+	assert.Equal(t, []string{"a", "", "b"}, in, "the input is not modified")
 }
 
 func TestFactNames(t *testing.T) {

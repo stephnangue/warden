@@ -451,6 +451,22 @@ func TestConfigWrite_Facts(t *testing.T) {
 	assert.Equal(t, []string{"aud", "iss", "sub"}, b.FactNames())
 }
 
+// The config read hands out copies: changing one leaves the live config alone.
+// The facts field says what a jwt source is.
+func TestConfigRead_Copies(t *testing.T) {
+	b, _ := factsBackend(t, map[string]any{"facts": map[string]any{"team": "team"}})
+	resp, err := b.handleConfigRead(context.Background(), &logical.Request{}, &framework.FieldData{})
+	require.NoError(t, err)
+	resp.Data["bound_audiences"].([]string)[0] = "changed"
+	resp.Data["jwt_validation_pubkeys"].([]string)[0] = "changed"
+	resp.Data["facts"].(map[string]string)["team"] = "changed"
+	assert.Equal(t, []string{"warden"}, b.config.BoundAudiences)
+	assert.NotEqual(t, "changed", b.config.JWTValidationPubKeys[0])
+	assert.Equal(t, map[string]string{"team": "team"}, b.config.Facts)
+
+	assert.Contains(t, b.pathConfig().Fields["facts"].Description, "a claim name, or a JSON Pointer")
+}
+
 func TestConfigWrite_FactsRefused(t *testing.T) {
 	cases := []struct {
 		name string

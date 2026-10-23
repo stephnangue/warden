@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"net/http"
+	"slices"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
@@ -74,7 +75,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 			Description: "Default role for transparent operations when no role is specified",
 		},
 	}
-	maps.Copy(fields, helper.FactsFieldSchemas())
+	maps.Copy(fields, helper.FactsFieldSchemas("a claim name, or a JSON Pointer with a leading / into nested claims"))
 
 	return &framework.Path{
 		Pattern: "config",
@@ -125,9 +126,9 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
 			"jwks_url":               b.config.JWKSURL,
 			"jwks_ca_pem":            b.config.JWKSCA,
-			"jwt_validation_pubkeys": b.config.JWTValidationPubKeys,
+			"jwt_validation_pubkeys": slices.Clone(b.config.JWTValidationPubKeys),
 			"bound_issuer":           b.config.BoundIssuer,
-			"bound_audiences":        b.config.BoundAudiences,
+			"bound_audiences":        slices.Clone(b.config.BoundAudiences),
 			"bound_subject":          b.config.BoundSubject,
 			"bound_claims":           b.config.BoundClaims,
 			"user_claim":             b.config.UserClaim,

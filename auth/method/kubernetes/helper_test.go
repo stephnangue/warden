@@ -42,6 +42,56 @@ func TestParseSAUsername(t *testing.T) {
 	})
 }
 
+// parseSAUsername splits as the API server does: exactly two parts after the
+// prefix, a DNS-1123 label namespace and a DNS-1123 subdomain name.
+func TestParseSAUsername_LikeTheAPIServer(t *testing.T) {
+	long := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = 'a'
+		}
+		return string(b)
+	}
+	accepted := []struct{ username, ns, name string }{
+		{"system:serviceaccount:default:my.app-1", "default", "my.app-1"},
+		{"system:serviceaccount:0ns:0", "0ns", "0"},
+		{"system:serviceaccount:" + long(63) + ":" + long(253), long(63), long(253)},
+		// Only the subdomain as a whole is bounded, as in the API server.
+		{"system:serviceaccount:ns:" + long(100) + ".b", "ns", long(100) + ".b"},
+	}
+	for _, tc := range accepted {
+		ns, name, ok := parseSAUsername(tc.username)
+		if !ok || ns != tc.ns || name != tc.name {
+			t.Errorf("%q: got ns=%q name=%q ok=%v", tc.username, ns, name, ok)
+		}
+	}
+	refused := []string{
+		"system:serviceaccount:ns:name:extra",
+		"system:serviceaccount:ns::",
+		"system:serviceaccount::",
+		"system:serviceaccount:",
+		"system:serviceaccount:Default:myapp",
+		"system:serviceaccount:default:MyApp",
+		"system:serviceaccount:my.ns:myapp", // a namespace is a label, no dots
+		"system:serviceaccount:-ns:myapp",
+		"system:serviceaccount:ns-:myapp",
+		"system:serviceaccount:ns:app-",
+		"system:serviceaccount:ns:.app",
+		"system:serviceaccount:ns:a..b",
+		"system:serviceaccount:ns:my_app",
+		"system:serviceaccount:" + long(64) + ":myapp",
+		"system:serviceaccount:ns:" + long(254),
+		"system:serviceaccounts:default:myapp",
+		"system:node:worker-1",
+		"oidc:alice@example.com",
+	}
+	for _, username := range refused {
+		if ns, name, ok := parseSAUsername(username); ok || ns != "" || name != "" {
+			t.Errorf("%q: got ns=%q name=%q ok=%v, want refused", username, ns, name, ok)
+		}
+	}
+}
+
 func TestMatchBoundList(t *testing.T) {
 	t.Run("empty list rejects", func(t *testing.T) {
 		if matchBoundList(nil, "anything") {
