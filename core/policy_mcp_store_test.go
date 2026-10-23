@@ -157,11 +157,8 @@ func TestPolicyStore_CacheKeySeparatesTypes(t *testing.T) {
 	cbpKey := ps.cacheKey(namespace.RootNamespace, "same", PolicyTypeCBP)
 	mcpKey := ps.cacheKey(namespace.RootNamespace, "same", PolicyTypeMCP)
 	assert.NotEqual(t, cbpKey, mcpKey)
-
-	// The namespace UUID stays the leading segment so invalidateNamespace's
-	// prefix sweep keeps clearing every type at once.
-	assert.Contains(t, cbpKey, namespace.RootNamespace.UUID)
-	assert.Contains(t, mcpKey, namespace.RootNamespace.UUID)
+	assert.Equal(t, namespace.RootNamespace.UUID, cbpKey.nsUUID)
+	assert.Equal(t, namespace.RootNamespace.UUID, mcpKey.nsUUID)
 }
 
 // TestClearNamespaceResources_ClearsBothPolicyTypes guards against MCP policies

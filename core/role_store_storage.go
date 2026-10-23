@@ -95,6 +95,7 @@ func (s *RoleStore) loadAllLocked(ctx context.Context) (*roleSnapshot, int, erro
 					logger.Err(err))
 				continue
 			}
+			warnInvalidRolePolicies(s.logger, ns.Path, e.role)
 			byName[name] = e
 		}
 		if len(byName) > 0 {
@@ -103,6 +104,25 @@ func (s *RoleStore) loadAllLocked(ctx context.Context) (*roleSnapshot, int, erro
 		}
 	}
 	return snap, count, nil
+}
+
+// warnInvalidRolePolicies logs a stored role's policy names that have no
+// canonical form. Writes refuse them, but a role stored before they did may
+// still hold one. The policy store resolves such a name to nothing, so the role
+// grants nothing through it; the warning tells the operator to fix the role.
+func warnInvalidRolePolicies(log *logger.GatedLogger, nsPath string, role *logical.Role) {
+	var invalid []string
+	for _, p := range role.Policies {
+		if _, ok := logical.CanonicalPolicyName(p); !ok {
+			invalid = append(invalid, fmt.Sprintf("%.64q", p))
+		}
+	}
+	if len(invalid) > 0 {
+		log.Warn("stored role names policies that can never resolve; they grant nothing",
+			logger.String("namespace", nsPath),
+			logger.String("role", role.Name),
+			logger.String("policies", strings.Join(invalid, ", ")))
+	}
 }
 
 // readRole reads and decodes one stored role.

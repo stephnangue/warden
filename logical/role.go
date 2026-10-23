@@ -91,12 +91,18 @@ func IsNonAssignablePolicy(name string) bool {
 	return slices.Contains(nonAssignablePolicies, name)
 }
 
-// ValidateAssignablePolicies refuses a policy list that holds the root policy or
-// a non-assignable one. It is the one check for every place that hands policies
-// to a caller: a login (LoginCreateToken) and a role write. The error is plain;
-// each caller attaches the status it answers with.
+// ValidateAssignablePolicies refuses a policy list that holds a name with no
+// canonical form, the root policy or a non-assignable one. Names are compared
+// in canonical form, the form the policy store resolves them by, so no
+// spelling of "root" gets past. It is the one check for every place that hands
+// policies to a caller: a login (LoginCreateToken) and a role write. The error
+// is plain; each caller attaches the status it answers with.
 func ValidateAssignablePolicies(policies []string) error {
-	for _, p := range policies {
+	for _, name := range policies {
+		p, ok := CanonicalPolicyName(name)
+		if !ok {
+			return fmt.Errorf("invalid policy name %.64q: %s", name, PolicyNameRule)
+		}
 		if p == rootPolicy {
 			return fmt.Errorf("policy %q cannot be assigned: it would grant a root token", rootPolicy)
 		}
