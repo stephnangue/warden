@@ -15,7 +15,6 @@ import (
 	"github.com/aws/smithy-go"
 	smithycbor "github.com/aws/smithy-go/encoding/cbor"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
-	"github.com/hashicorp/go-multierror"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
@@ -268,16 +267,9 @@ func wardenMessage(err error) string {
 	if err == nil {
 		return "Warden: request failed"
 	}
-	// Core collects some failures in a multierror, whose text is a bulleted
-	// list ("1 error occurred:\n\t* permission denied\n\n"); keep the messages.
-	if merr, ok := err.(*multierror.Error); ok && len(merr.Errors) > 0 {
-		msgs := make([]string, len(merr.Errors))
-		for i, e := range merr.Errors {
-			msgs[i] = e.Error()
-		}
-		return "Warden: " + strings.Join(msgs, "; ")
-	}
-	return "Warden: " + err.Error()
+	// Core collects some failures in a multierror; keep the messages, drop
+	// its bulleted list.
+	return "Warden: " + strings.Join(logical.ErrorMessages(err), "; ")
 }
 
 // writeAWSError answers a gateway request the provider failed itself, once

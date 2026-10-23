@@ -209,7 +209,7 @@ func (m *ExpirationManager) Stop() {
 // ============================================================================
 
 // RegisterToken registers a token for expiration.
-// If persist is false, the entry is only tracked in memory (for cache-only tokens like JWT role tokens).
+// If persist is false, the entry is only tracked in memory (for cache-only tokens: identity tokens).
 func (m *ExpirationManager) RegisterToken(ctx context.Context, tokenID string, ttl time.Duration, persist bool) error {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {

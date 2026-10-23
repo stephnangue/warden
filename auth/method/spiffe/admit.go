@@ -16,7 +16,7 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// admittedSVID is what a role-free admission verified about one SVID.
+// admittedSVID is what an admission verified about one SVID.
 type admittedSVID struct {
 	adm    *logical.Admission
 	id     spiffeid.ID

@@ -972,7 +972,7 @@ func TestBuildAuditResponse_WithAuthResult(t *testing.T) {
 	resp := &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
-			TokenType:   "jwt_role",
+			TokenType:   "identity_token",
 			PrincipalID: "user@example.com",
 			Policies:    []string{"default", "admin"},
 			TokenTTL:    time.Hour,
@@ -980,7 +980,7 @@ func TestBuildAuditResponse_WithAuthResult(t *testing.T) {
 	}
 	result := buildAuditResponse(resp, nil, nil)
 	require.NotNil(t, result.AuthResult)
-	assert.Equal(t, "jwt_role", result.AuthResult.TokenType)
+	assert.Equal(t, "identity_token", result.AuthResult.TokenType)
 	assert.Equal(t, "user@example.com", result.AuthResult.PrincipalID)
 	assert.Equal(t, int64(3600), result.AuthResult.TokenTTL)
 }
@@ -1017,7 +1017,7 @@ func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
 	te := &logical.TokenEntry{
 		ID:            "tok-123",
 		Accessor:      "acc-123",
-		Type:          "jwt_role",
+		Type:          "identity_token",
 		PrincipalID:   "user@example.com",
 		RoleName:      "admin",
 		Policies:      []string{"default"},
@@ -1031,6 +1031,7 @@ func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, "tok-123", result.TokenID)
 	assert.Equal(t, "acc-123", result.TokenAccessor)
+	assert.Equal(t, "identity_token", result.TokenType)
 	assert.Equal(t, "user@example.com", result.PrincipalID)
 	assert.Equal(t, "ns-1", result.NamespaceID)
 	assert.Equal(t, "10.0.0.1", result.CreatedByIP)
@@ -1041,7 +1042,7 @@ func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
 func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	auth := &logical.Auth{
 		TokenAccessor: "auth-acc",
-		TokenType:     "cert_role",
+		TokenType:     "service_token",
 		PrincipalID:   "agent-1",
 		Policies:      []string{"p1", "p2"},
 		PolicyResults: &sdklogical.PolicyResults{
@@ -1055,7 +1056,7 @@ func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	result := buildAuditAuth(auth, nil)
 	require.NotNil(t, result)
 	assert.Equal(t, "auth-acc", result.TokenAccessor)
-	assert.Equal(t, "cert_role", result.TokenType)
+	assert.Equal(t, "service_token", result.TokenType)
 	assert.Equal(t, "agent-1", result.PrincipalID)
 	assert.True(t, result.PolicyResults.Allowed)
 	assert.Contains(t, result.PolicyResults.GrantingPolicies, "p1")
@@ -1111,14 +1112,14 @@ func TestBuildAuditAuthResult_Nil(t *testing.T) {
 
 func TestBuildAuditAuthResult_Basic(t *testing.T) {
 	auth := &logical.Auth{
-		TokenType:   "jwt_role",
+		TokenType:   "identity_token",
 		PrincipalID: "user",
 		TokenTTL:    30 * time.Minute,
 		Metadata:    map[string]string{"repo": "acme/infra"},
 	}
 	result := buildAuditAuthResult(auth)
 	require.NotNil(t, result)
-	assert.Equal(t, "jwt_role", result.TokenType)
+	assert.Equal(t, "identity_token", result.TokenType)
 	assert.Equal(t, "user", result.PrincipalID)
 	assert.Equal(t, int64(1800), result.TokenTTL)
 	assert.Nil(t, result.Policies)

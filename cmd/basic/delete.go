@@ -30,10 +30,10 @@ Usage: warden delete [PATH] [flags]
 
   Examples:
 
-    Delete a JWT auth role (with confirmation):
+    Delete a role (with confirmation):
 
-      $ warden delete auth/jwt/role/developer
-      $ warden delete -path=auth/jwt/role/developer
+      $ warden delete sys/roles/developer
+      $ warden delete -path=sys/roles/developer
 
     Delete a provider (skip confirmation):
 

@@ -105,7 +105,7 @@ func (e *grantEnv) updateGroup(g *logical.Group) {
 // builds the admission-token shape with no admission.
 func (e *grantEnv) issue(adm *logical.Admission, policies []string) string {
 	e.t.Helper()
-	entry, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
+	entry, err := e.c.tokenStore.GenerateToken(e.ctx, TypeServiceToken, &AuthData{
 		PrincipalID:   "agent-1",
 		MountAccessor: grantAccessor,
 		ExpireAt:      time.Now().Add(time.Hour),
@@ -252,6 +252,18 @@ func TestRoleGrant_Refusals(t *testing.T) {
 			reason:  logical.RoleDeniedNoAdmission,
 			message: "token carries no admission to grant a role from; present the credential instead",
 		},
+		{
+			// An older version stored the role and its policies on the token;
+			// neither is honoured.
+			name: "a token stored with a role",
+			request: func(e *grantEnv) *logical.Request {
+				req := mustTransparent(e, e.issue(nil, []string{"deploy"}), "deploy")
+				req.TokenEntry().RoleName = "deploy"
+				return req
+			},
+			reason:  logical.RoleDeniedNoAdmission,
+			message: "token carries no admission to grant a role from; present the credential instead",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,6 +273,9 @@ func TestRoleGrant_Refusals(t *testing.T) {
 			rerr := requireDenied(t, req, err, tc.reason)
 			assert.Equal(t, tc.message, rerr.Message)
 			assert.Contains(t, err.Error(), tc.message)
+			// The response body carries the refusal's message alone, not the
+			// bulleted list of the multierror it was gathered in.
+			assert.Equal(t, []string{tc.message}, logical.ErrorMessages(logical.ErrorResponse(err).Err))
 			assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(err))
 			assert.ErrorIs(t, err, sdklogical.ErrPermissionDenied)
 			assert.False(t, auth.PolicyResults.Allowed)
@@ -368,7 +383,7 @@ func TestRoleGrant_ResolveDoesNotAllocate(t *testing.T) {
 	e := newGrantEnv(t)
 	// A token no mount issued (as root and tokens created directly are) keeps
 	// the policies it was issued.
-	direct, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
+	direct, err := e.c.tokenStore.GenerateToken(e.ctx, TypeServiceToken, &AuthData{
 		PrincipalID: "agent-1",
 		ExpireAt:    time.Now().Add(time.Hour),
 		Policies:    []string{"deploy"},
@@ -916,7 +931,7 @@ func TestRoleGrant_AgentGroups(t *testing.T) {
 func TestRoleGrant_TokensNoMountIssuedUnchanged(t *testing.T) {
 	e := newGrantEnv(t)
 	metadata := map[string]string{"team": "platform"}
-	entry, err := e.c.tokenStore.GenerateToken(e.ctx, TypeWardenToken, &AuthData{
+	entry, err := e.c.tokenStore.GenerateToken(e.ctx, TypeServiceToken, &AuthData{
 		PrincipalID: "agent-1",
 		ExpireAt:    time.Now().Add(time.Hour),
 		Policies:    []string{"deploy"},
@@ -1050,14 +1065,14 @@ func TestGenerateToken_ReturnsCopy(t *testing.T) {
 		}
 	}
 
-	first, err := c.tokenStore.GenerateToken(ctx, TypeJWTRole, authData())
+	first, err := c.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData())
 	require.NoError(t, err)
 	cached, ok := c.tokenStore.byID.Get(first.ID)
 	require.True(t, ok)
 	assert.NotSame(t, cached, first, "a fresh token is handed out as a copy")
 
 	// Same credential and mount: the dedupe branch finds the cached one.
-	again, err := c.tokenStore.GenerateToken(ctx, TypeJWTRole, authData())
+	again, err := c.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData())
 	require.NoError(t, err)
 	assert.Equal(t, first.ID, again.ID)
 	assert.NotSame(t, cached, again, "the dedupe branch hands out a copy")

@@ -283,7 +283,6 @@ func principalClaimAllowedValues() []interface{} {
 }
 
 // buildCAPool builds an x509.CertPool from the given PEM string.
-// Used for role-specific CAs that override the global trusted CAs.
 func buildCAPool(caPEM string) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM([]byte(caPEM)) {

@@ -262,7 +262,7 @@ func grantCertReader(t *testing.T, port int) {
 }
 
 // SetupCertAuth mounts cert auth, configures trusted CA, and returns the CA cert/key.
-// The mount defaults to cert_role token type.
+// The mount issues identity tokens.
 func SetupCertAuth(t *testing.T, port int) (caCertPEM string, caKey *ecdsa.PrivateKey) {
 	t.Helper()
 	caCertPEM, caKey = GenerateTestCA(t)

@@ -47,14 +47,14 @@ func TestFederation_HTTPSWeb(t *testing.T) {
 	svid := testSVID(t, caCert, caKey, "spiffe://"+td+"/ns/default/sa/api")
 
 	// Before the first fetch the trust domain has no authorities -> fails closed.
-	_, _, err := VerifyX509SVID(m.SnapshotBundleSet(), []*x509.Certificate{svid}, mustTD(t, td), nil)
+	_, _, err := VerifyX509SVIDChain(m.SnapshotBundleSet(), []*x509.Certificate{svid})
 	require.Error(t, err)
 
 	rr := refreshTrustDomain(t, m, ctx, td)
 	require.Equal(t, http.StatusOK, rr.StatusCode)
 	assert.Equal(t, true, rr.Data["changed"])
 
-	id, _, err := VerifyX509SVID(m.SnapshotBundleSet(), []*x509.Certificate{svid}, mustTD(t, td), nil)
+	id, _, err := VerifyX509SVIDChain(m.SnapshotBundleSet(), []*x509.Certificate{svid})
 	require.NoError(t, err)
 	assert.Equal(t, "spiffe://"+td+"/ns/default/sa/api", id.String())
 }
@@ -77,14 +77,14 @@ func TestFederation_JWTBundle(t *testing.T) {
 	token := auth.sign(t, "spiffe://"+td+"/ns/default/sa/api", []string{"warden"}, time.Now().Add(time.Hour))
 
 	// Before the fetch, no JWT authority is loaded -> fails closed.
-	_, err := VerifyJWTSVID(m.SnapshotBundleSet(), token, []string{"warden"}, mustTD(t, td), nil)
+	_, err := VerifyJWTSVIDToken(m.SnapshotBundleSet(), token, []string{"warden"})
 	require.Error(t, err)
 
 	rr := refreshTrustDomain(t, m, ctx, td)
 	require.Equal(t, http.StatusOK, rr.StatusCode)
 	assert.Equal(t, true, rr.Data["changed"])
 
-	svid, err := VerifyJWTSVID(m.SnapshotBundleSet(), token, []string{"warden"}, mustTD(t, td), nil)
+	svid, err := VerifyJWTSVIDToken(m.SnapshotBundleSet(), token, []string{"warden"})
 	require.NoError(t, err)
 	assert.Equal(t, "spiffe://"+td+"/ns/default/sa/api", svid.ID.String())
 }
@@ -111,7 +111,7 @@ func TestFederation_HTTPSSpiffe(t *testing.T) {
 	assert.Equal(t, true, rr.Data["changed"])
 
 	svid := testSVID(t, caCert, caKey, "spiffe://"+td+"/ns/default/sa/api")
-	_, _, err := VerifyX509SVID(m.SnapshotBundleSet(), []*x509.Certificate{svid}, mustTD(t, td), nil)
+	_, _, err := VerifyX509SVIDChain(m.SnapshotBundleSet(), []*x509.Certificate{svid})
 	require.NoError(t, err)
 }
 
@@ -178,7 +178,7 @@ func TestFederation_EmptyBundleKeepsLastGood(t *testing.T) {
 	require.Equal(t, http.StatusOK, refreshTrustDomain(t, m, ctx, td).StatusCode)
 
 	svid := testSVID(t, caCert, caKey, "spiffe://"+td+"/ns/x/sa/y")
-	_, _, err := VerifyX509SVID(m.SnapshotBundleSet(), []*x509.Certificate{svid}, mustTD(t, td), nil)
+	_, _, err := VerifyX509SVIDChain(m.SnapshotBundleSet(), []*x509.Certificate{svid})
 	require.NoError(t, err) // good bundle is active
 
 	// The endpoint now serves an authority-less bundle: refresh must reject it...
@@ -186,7 +186,7 @@ func TestFederation_EmptyBundleKeepsLastGood(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, refreshTrustDomain(t, m, ctx, td).StatusCode)
 
 	// ...and the last-good bundle must remain active.
-	_, _, err = VerifyX509SVID(m.SnapshotBundleSet(), []*x509.Certificate{svid}, mustTD(t, td), nil)
+	_, _, err = VerifyX509SVIDChain(m.SnapshotBundleSet(), []*x509.Certificate{svid})
 	require.NoError(t, err)
 }
 
@@ -227,7 +227,7 @@ func fastLoopManager(t *testing.T) (*Manager, context.Context, *int64, *x509.Cer
 func requireEventuallyVerifies(t *testing.T, m *Manager, svid *x509.Certificate) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		_, _, err := VerifyX509SVID(m.SnapshotBundleSet(), []*x509.Certificate{svid}, mustTD(t, fedTestTD), nil)
+		_, _, err := VerifyX509SVIDChain(m.SnapshotBundleSet(), []*x509.Certificate{svid})
 		return err == nil
 	}, 2*time.Second, 5*time.Millisecond)
 }
@@ -260,7 +260,7 @@ func TestFederationRefreshDue(t *testing.T) {
 	m.refreshDueTrustDomains(ctx)
 	require.Equal(t, int64(1), atomic.LoadInt64(fetches))
 	svid := testSVID(t, caCert, caKey, "spiffe://"+fedTestTD+"/ns/x/sa/y")
-	_, _, err := VerifyX509SVID(m.SnapshotBundleSet(), []*x509.Certificate{svid}, mustTD(t, fedTestTD), nil)
+	_, _, err := VerifyX509SVIDChain(m.SnapshotBundleSet(), []*x509.Certificate{svid})
 	require.NoError(t, err)
 
 	// Just refreshed (default interval) -> not due -> no second fetch.

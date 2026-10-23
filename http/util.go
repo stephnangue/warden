@@ -16,11 +16,24 @@ type ErrorResponse struct {
 
 // respondError writes an error response with the given status code and message.
 func respondError(w http.ResponseWriter, status int, message string) {
+	respondErrors(w, status, []string{message})
+}
+
+// respondErr writes err as an error response with the given status code, one
+// message per error it gathers (logical.ErrorMessages), so a multierror's
+// bulleted text never reaches the client.
+func respondErr(w http.ResponseWriter, status int, err error) {
+	respondErrors(w, status, logical.ErrorMessages(err))
+}
+
+// respondErrors writes an error response with the given status code and
+// messages.
+func respondErrors(w http.ResponseWriter, status int, messages []string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
 	resp := &ErrorResponse{
-		Errors: []string{message},
+		Errors: messages,
 	}
 
 	json.NewEncoder(w).Encode(resp)

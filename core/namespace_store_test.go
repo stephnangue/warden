@@ -883,7 +883,7 @@ func TestNamespaceStore_ClearNamespaceResources(t *testing.T) {
 			ExpireAt:    time.Now().Add(1 * time.Hour),
 			Policies:    []string{"default"},
 		}
-		_, err := core.tokenStore.GenerateToken(nsCtx, TypeWardenToken, authData)
+		_, err := core.tokenStore.GenerateToken(nsCtx, TypeServiceToken, authData)
 		require.NoError(t, err)
 	}
 

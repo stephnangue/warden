@@ -69,17 +69,16 @@ func (b *kubernetesAuthBackend) pathConfig() *framework.Path {
 			},
 		},
 		HelpSynopsis: "Configure the kubernetes auth method",
-		HelpDescription: `Configures the connection to the kube-apiserver used for TokenReview calls, plus optional issuer pinning and default-role for transparent mode. The token_reviewer_jwt is masked on read.
+		HelpDescription: `Configures the connection to the kube-apiserver used for TokenReview calls, plus optional issuer pinning. The token_reviewer_jwt is masked on read.
 
 'entity_kind' (agent or human, default agent) names what the mount admits.
 'facts' maps TokenReview fields to the fact names the mount publishes beyond its
 built-in facts (service_account_namespace, service_account_name,
 service_account_uid, username, groups, aud); a write replaces the whole map.
-'bound_audiences' is stored for mount-level audience binding and not used by
-logins yet.
+'bound_audiences' are the audiences each TokenReview checks; when empty, the
+API server checks its own audience.
 'max_age' bounds a workload token's age at admission, from its iat: a token
-older than it, or without an iat, is not admitted. It is enforced from the
-role-free admission; role logins keep their role's max_age.`,
+older than it, or without an iat, is not admitted.`,
 	}
 }
 

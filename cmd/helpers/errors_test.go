@@ -22,6 +22,7 @@ func TestClassifyHTTPStatus(t *testing.T) {
 		{403, CodeForbidden, ExitForbidden},
 		{404, CodeNotFound, ExitNotFound},
 		{409, CodeConflict, ExitConflict},
+		{410, CodeGone, ExitGone},
 		{400, CodeInvalidInput, ExitInvalidInput},
 		{422, CodeInvalidInput, ExitInvalidInput},
 		{500, CodeServer, ExitServer},
@@ -67,6 +68,7 @@ func TestClassify_Sentinels(t *testing.T) {
 		{"server", ErrServer, CodeServer, ExitServer},
 		{"conflict", ErrConflict, CodeConflict, ExitConflict},
 		{"sealed", ErrSealed, CodeSealed, ExitSealed},
+		{"gone", ErrGone, CodeGone, ExitGone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -162,6 +164,38 @@ func TestRenderError_JSONEnvelope(t *testing.T) {
 	}
 }
 
+// A 410 is a removed endpoint, not bad input: the envelope says gone and
+// carries the server's message, and the exit code is its own.
+func TestRenderError_GoneEnvelope(t *testing.T) {
+	_, stderr := setupCapture(t)
+	t.Cleanup(func() { SetOutputFormat("") })
+	SetOutputFormat("json")
+
+	const msg = "auth roles were removed; define roles with sys/roles/<name>"
+	apiErr := &api.ResponseError{StatusCode: 410, Errors: []string{msg}}
+
+	exit := RenderError(fmt.Errorf("failed to read from auth/agent/role/foo: %w", apiErr))
+	if exit != ExitGone {
+		t.Fatalf("RenderError exit = %d; want %d", exit, ExitGone)
+	}
+
+	var envelope struct {
+		Error WardenError `json:"error"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+		t.Fatalf("stderr is not valid JSON: %v\noutput: %s", err, stderr.String())
+	}
+	if envelope.Error.Code != CodeGone {
+		t.Errorf("envelope.Error.Code = %q; want %q", envelope.Error.Code, CodeGone)
+	}
+	if envelope.Error.Message != msg {
+		t.Errorf("envelope.Error.Message = %q; want %q", envelope.Error.Message, msg)
+	}
+	if envelope.Error.Hint != DefaultHint(CodeGone) {
+		t.Errorf("envelope.Error.Hint = %q; want %q", envelope.Error.Hint, DefaultHint(CodeGone))
+	}
+}
+
 func TestRenderError_NDJSONIsCompactOneLine(t *testing.T) {
 	_, stderr := setupCapture(t)
 	t.Cleanup(func() { SetOutputFormat("") })
@@ -215,7 +249,7 @@ func TestHumanMessage_PrefersAPIErrorList(t *testing.T) {
 
 func TestDefaultHint_PerCategory(t *testing.T) {
 	// At minimum, the categories with non-empty defaults should produce text.
-	for _, code := range []ErrorCode{CodeAuth, CodeForbidden, CodeNetwork, CodeServer, CodeConflict, CodeSealed, CodeUsage} {
+	for _, code := range []ErrorCode{CodeAuth, CodeForbidden, CodeNetwork, CodeServer, CodeConflict, CodeGone, CodeSealed, CodeUsage} {
 		if DefaultHint(code) == "" {
 			t.Errorf("DefaultHint(%q) returned empty; want non-empty hint", code)
 		}

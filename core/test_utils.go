@@ -599,12 +599,37 @@ func createTestCore(t testing.TB) *Core {
 	return core
 }
 
+// stubCredentialFormats is the credential format each transparent auth method
+// type reports, for stub mounts of that type.
+var stubCredentialFormats = map[string]logical.CredentialFormat{
+	"jwt":        logical.CredentialFormatJWT,
+	"kubernetes": logical.CredentialFormatKubernetesJWT,
+	"cert":       logical.CredentialFormatCert,
+	"spiffe":     logical.CredentialFormatSPIFFE,
+}
+
+// stubTransparentAuth is the backend of a stub mount of a transparent auth
+// method type: it reports that type's credential format, as the real auth
+// method does, and handles no request (a login against it fails as a mount
+// without a backend does).
+type stubTransparentAuth struct {
+	*mockAuthMethod
+	format logical.CredentialFormat
+}
+
+func (s *stubTransparentAuth) CredentialFormat() logical.CredentialFormat { return s.format }
+
+func (s *stubTransparentAuth) HandleRequest(_ context.Context, req *logical.Request) (*logical.Response, error) {
+	return logical.ErrorResponse(logical.ErrNotFoundf("no handler for route %q: stub auth mount", req.Path)), fmt.Errorf("stub auth mount handles no request")
+}
+
 // mountStubAuthMethod registers a stub auth mount at the given mountPath
 // (e.g. "jwt/") with the given mountType (e.g. "jwt", "cert") in the root
 // namespace. See mountStubAuthMethodInNamespace for non-root mounts.
 //
-// The mount has no backend — it exists only so router lookups
-// (MatchingMountEntry) succeed and tests can exercise code paths that
+// The mount's backend does nothing but report the credential format of a
+// transparent auth method type (none for any other type) — the mount exists
+// only so router lookups succeed and tests can exercise code paths that
 // need a real MountEntry (mount accessor, entry.Type) without spinning
 // up the full auth-method factory. Returns the created MountEntry.
 //
@@ -640,8 +665,13 @@ func mountStubAuthMethodInNamespace(t *testing.T, c *Core, mountPath, mountType 
 		namespace:        ns,
 	}
 
+	var backend logical.Backend
+	if format, ok := stubCredentialFormats[mountType]; ok {
+		backend = &stubTransparentAuth{mockAuthMethod: newMockAuthMethod(), format: format}
+	}
+
 	view := NewBarrierView(c.barrier, "auth/"+entry.UUID+"/")
-	require.NoError(t, c.router.Mount(authRoutePrefix+mountPath, nil, entry, view))
+	require.NoError(t, c.router.Mount(authRoutePrefix+mountPath, backend, entry, view))
 
 	// Post-split: auth-class entries live in c.auth, NOT c.mounts.
 	c.authLock.Lock()

@@ -22,12 +22,8 @@ func verifyChain(pool *x509.CertPool, cert *x509.Certificate) ([][]*x509.Certifi
 }
 
 // principalClaimOf returns the certificate field the principal is read from:
-// role's principal_claim, else the mount's, else "cn". A nil role is the
-// role-free admission: the mount's configuration alone.
-func principalClaimOf(config *CertAuthConfig, role *CertRole) string {
-	if role != nil && role.PrincipalClaim != "" {
-		return role.PrincipalClaim
-	}
+// the mount's principal_claim, else "cn".
+func principalClaimOf(config *CertAuthConfig) string {
 	if config != nil && config.PrincipalClaim != "" {
 		return config.PrincipalClaim
 	}
@@ -37,8 +33,8 @@ func principalClaimOf(config *CertAuthConfig, role *CertRole) string {
 // errNoTrustedCA refuses admission on a mount with no trusted CA.
 var errNoTrustedCA = helper.AdmitError(helper.ErrAdmitNoTrustedCA, "no trusted CA certificates configured")
 
-// admitCert verifies cert against the mount's configuration alone, with no
-// role: the chain against the mount's trusted CAs, for client auth, and a
+// admitCert verifies cert against the mount's configuration: the chain
+// against the mount's trusted CAs, for client auth, and a
 // principal in the mount's principal_claim. It returns the verified chains, or
 // why the certificate is not admitted: errNoTrustedCA when the mount has no
 // trusted CA to decide with, any other error when the certificate failed a
@@ -49,7 +45,7 @@ var errNoTrustedCA = helper.AdmitError(helper.ErrAdmitNoTrustedCA, "no trusted C
 // call it, so they cannot drift. It reads config, a snapshot the caller took,
 // and writes nothing.
 func admitCert(config *CertAuthConfig, cert *x509.Certificate) ([][]*x509.Certificate, error) {
-	pool, _ := getCAPool(config, nil) // with no role, the mount's pool: never an error
+	pool := getCAPool(config)
 	if pool == nil {
 		return nil, errNoTrustedCA
 	}
@@ -57,7 +53,7 @@ func admitCert(config *CertAuthConfig, cert *x509.Certificate) ([][]*x509.Certif
 	if err != nil {
 		return nil, fmt.Errorf("certificate verification: %w", err)
 	}
-	if claim := principalClaimOf(config, nil); extractPrincipal(cert, claim) == "" {
+	if claim := principalClaimOf(config); extractPrincipal(cert, claim) == "" {
 		return nil, fmt.Errorf("no principal in %q", claim)
 	}
 	return chains, nil

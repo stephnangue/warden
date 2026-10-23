@@ -48,6 +48,14 @@ func (b *certAuthBackend) FactNames() []string { return helper.FactNames(b.mount
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *certAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+var _ logical.CredentialFormatProvider = (*certAuthBackend)(nil)
+
+// CredentialFormat implements logical.CredentialFormatProvider: the mount
+// admits a TLS client certificate.
+func (b *certAuthBackend) CredentialFormat() logical.CredentialFormat {
+	return logical.CredentialFormatCert
+}
+
 // newAdmission returns what a successful login verified about cert: its
 // subject and SAN fields, and as "ca" the SHA-256 fingerprint (lowercase hex
 // of the DER) of the anchor of every chain in chains, the chains cert was

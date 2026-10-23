@@ -142,47 +142,59 @@ EOF
 
 # test auth methods managment
 
+# The jwt mount admits a caller (issuer, audience, token TTL); roles name what
+# a caller may do; a virtual group grants roles to the callers its rules match.
+# Hydra tokens must carry the "warden" audience (request it with audience=warden).
+
 ./warden auth enable --type=jwt --description="jwt test auth method"
-./warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden write auth/jwt/config \
+    jwks_url=http://localhost:4444/.well-known/jwks.json \
+    bound_issuer=http://localhost:4444 \
+    bound_audiences=warden \
+    user_claim=sub \
+    token_ttl=1h
 ./warden read auth/jwt/config
 ./warden auth enable --type=jwt test-jwt --description="test auth method"
-./warden write auth/test-jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden write auth/test-jwt/config \
+    jwks_url=http://localhost:4444/.well-known/jwks.json \
+    bound_audiences=warden
 ./warden read auth/test-jwt/config
 ./warden auth disable test-jwt
 
-./warden write auth/jwt/role/admin \
-    token_type=warden_token \
-    token_policies="admin-policy,auth-admin" \
-    user_claim=sub \
-    bound_claims='{"iss":"http://localhost:4444"}' \
-    token_ttl=2h
-./warden write auth/jwt/role/reader \
-    token_policies="reader-policy" \
-    user_claim=sub \
-    bound_claims='{"iss":"http://localhost:4444"}' \
-    token_ttl=1h
-./warden write auth/jwt/role/aws-streamer \
-    token_type=aws_access_keys \
-    token_policies="aws-streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_local \
-    token_ttl=1h
-./warden write auth/jwt/role/aws-kv \
-    token_type=aws_access_keys \
-    token_policies="aws-streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_static \
-    token_ttl=1h
-./warden write auth/jwt/role/aws-dynamic \
-    token_type=aws_access_keys \
-    token_policies="aws-streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_dynamic \
-    token_ttl=1h
-./warden list auth/jwt/role
-./warden read auth/jwt/role/admin
-./warden read auth/jwt/role/reader
-./warden delete auth/jwt/role/reader -f
+./warden role create admin -json '{
+    "policies": ["admin-policy", "auth-admin"]
+  }'
+./warden role create reader -json '{
+    "policies": ["reader-policy"]
+  }'
+./warden role create aws-streamer -json '{
+    "policies": ["aws-streaming"],
+    "cred_spec_name": "aws_local"
+  }'
+./warden role create aws-kv -json '{
+    "policies": ["aws-streaming"],
+    "cred_spec_name": "aws_static"
+  }'
+./warden role create aws-dynamic -json '{
+    "policies": ["aws-streaming"],
+    "cred_spec_name": "aws_dynamic"
+  }'
+./warden identity group create hydra-clients -json '{
+    "type": "virtual",
+    "description": "Callers holding a Hydra token",
+    "roles": ["admin", "reader", "aws-streamer", "aws-kv", "aws-dynamic"],
+    "rules": [
+      {
+        "mount": ["auth/jwt/"],
+        "iss": ["http://localhost:4444"]
+      }
+    ]
+  }'
+./warden role list
+./warden role read admin
+./warden role read reader
+./warden role delete reader -f
+./warden identity group read hydra-clients
 
 # test providers management
 
@@ -238,20 +250,21 @@ EOF
   --max-ttl 8h
 
 ./warden -n PROD/SEC auth enable --type=jwt --description="jwt test auth method"
-./warden -n PROD/SEC write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden -n PROD/SEC write auth/jwt/config \
+    jwks_url=http://localhost:4444/.well-known/jwks.json \
+    bound_issuer=http://localhost:4444 \
+    bound_audiences=warden \
+    user_claim=sub \
+    token_ttl=1h
 
-./warden -n PROD/SEC write auth/jwt/role/aws-streamer \
-    token_type=aws_access_keys \
-    token_policies="aws-streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_local \
-    token_ttl=1h
-./warden -n PROD/SEC write auth/jwt/role/aws-kv \
-    token_type=aws_access_keys \
-    token_policies="aws-streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_static \
-    token_ttl=1h
+./warden -n PROD/SEC role create aws-streamer -json '{
+    "policies": ["aws-streaming"],
+    "cred_spec_name": "aws_local"
+  }'
+./warden -n PROD/SEC role create aws-kv -json '{
+    "policies": ["aws-streaming"],
+    "cred_spec_name": "aws_static"
+  }'
 
 ./warden -n PROD/SEC provider enable --type=aws --description="aws provider"
 ./warden -n PROD/SEC write aws/config proxy_domains="localhost,warden"
@@ -275,12 +288,10 @@ EOF
   --min-ttl 600s \
   --max-ttl 2h
 
-./warden -n PROD/SEC write auth/jwt/role/vault-reader \
-    token_type=warden_token \
-    token_policies="vault-streaming" \
-    user_claim=sub \
-    cred_spec_name=vault_reader \
-    token_ttl=1h
+./warden -n PROD/SEC role create vault-reader -json '{
+    "policies": ["vault-streaming"],
+    "cred_spec_name": "vault_reader"
+  }'
 
 ./warden -n PROD/SEC cred spec create full_access \
   --type vault_token \
@@ -290,12 +301,10 @@ EOF
   --min-ttl 600s \
   --max-ttl 2h
 
-./warden -n PROD/SEC write auth/jwt/role/full-access \
-    token_type=warden_token \
-    token_policies="vault-streaming" \
-    user_claim=sub \
-    cred_spec_name=full_access \
-    token_ttl=1h
+./warden -n PROD/SEC role create full-access -json '{
+    "policies": ["vault-streaming"],
+    "cred_spec_name": "full_access"
+  }'
 
 ./warden -n PROD/SEC cred spec create terraform \
   --type vault_token \
@@ -305,12 +314,10 @@ EOF
   --min-ttl 600s \
   --max-ttl 2h
 
-./warden -n PROD/SEC write auth/jwt/role/terraform \
-    token_type=warden_token \
-    token_policies="vault-streaming" \
-    user_claim=sub \
-    cred_spec_name=ephemeral \
-    token_ttl=1h
+./warden -n PROD/SEC role create terraform -json '{
+    "policies": ["vault-streaming"],
+    "cred_spec_name": "terraform"
+  }'
 
   ./warden -n PROD/SEC provider enable --type=vault --description="vault provider"
   ./warden -n PROD/SEC write vault/config vault_address="http://127.0.0.1:8200" tls_skip_verify=true
@@ -329,16 +336,33 @@ EOF
   --min-ttl 600s \
   --max-ttl 1h
 
-./warden -n PROD/SEC write auth/jwt/role/provisionner \
-    token_type=jwt_role \
-    token_policies="vault-streaming" \
-    user_claim=sub \
-    cred_spec_name=provisionner \
-    token_ttl=1h
+./warden -n PROD/SEC role create provisionner -json '{
+    "policies": ["vault-streaming"],
+    "cred_spec_name": "provisionner",
+    "provider_path": "vault-auto/"
+  }'
+
+./warden -n PROD/SEC role create ephemeral -json '{
+    "policies": ["vault-streaming"],
+    "cred_spec_name": "ephemeral",
+    "provider_path": "vault-auto/"
+  }'
+
+./warden -n PROD/SEC identity group create hydra-clients -json '{
+    "type": "virtual",
+    "description": "Callers holding a Hydra token",
+    "roles": ["aws-streamer", "aws-kv", "vault-reader", "full-access", "terraform", "provisionner", "ephemeral"],
+    "rules": [
+      {
+        "mount": ["auth/jwt/"],
+        "iss": ["http://localhost:4444"]
+      }
+    ]
+  }'
 
 export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write&audience=warden' \
   | jq -r '.access_token')
 export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault-auto/role/provisionner/gateway
 
@@ -352,15 +376,9 @@ export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault-auto/role/provisionner
   --min-ttl 600s \
   --max-ttl 1h
 
-./warden -n PROD/SEC write auth/jwt/role/ephemeral \
-    token_type=jwt_role \
-    token_policies="vault-streaming" \
-    user_claim=sub \
-    cred_spec_name=ephemeral
-
 export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write&audience=warden' \
   | jq -r '.access_token')
 export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault-auto/role/ephemeral/gateway
 
@@ -368,7 +386,7 @@ export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault-auto/gateway
 
 export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=gilab-job&client_secret=test@gilab-job&scope=api:read api:write' \
+  -d 'grant_type=client_credentials&client_id=gilab-job&client_secret=test@gilab-job&scope=api:read api:write&audience=warden' \
   | jq -r '.access_token')
 export VAULT_ADDR=http://localhost:8400/v1/PROD/SEC/vault-auto/role/ephemeral/gateway
 
@@ -384,7 +402,12 @@ path "+/role/+/gateway*" {
 EOF
 
 ./warden -n PROD/DEV auth enable --type=jwt --description="jwt test auth method"
-./warden -n PROD/DEV write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden -n PROD/DEV write auth/jwt/config \
+    jwks_url=http://localhost:4444/.well-known/jwks.json \
+    bound_issuer=http://localhost:4444 \
+    bound_audiences=warden \
+    user_claim=sub \
+    token_ttl=1h
 
 ./warden -n PROD/DEV cred spec create provisionner \
   --type vault_token \
@@ -395,21 +418,20 @@ EOF
   --min-ttl 600s \
   --max-ttl 1h
 
-./warden -n PROD/DEV write auth/jwt/role/provisionner \
-    token_type=jwt_role \
-    token_policies="streaming" \
-    user_claim=sub \
-    cred_spec_name=provisionner \
-    token_ttl=1h
+./warden -n PROD/DEV role create provisionner -json '{
+    "policies": ["streaming"],
+    "cred_spec_name": "provisionner",
+    "provider_path": "vault/"
+  }'
 
-./warden -n PROD/DEV provider enable --type=vault --description="vault provider with transparent auth" 
-./warden -n PROD/DEV write vault/config vault_address="http://127.0.0.1:8200" transparent_mode=true auto_auth_path=auth/jwt tls_skip_verify=true default_role=provisioner
+./warden -n PROD/DEV provider enable --type=vault --description="vault provider with transparent auth"
+./warden -n PROD/DEV write vault/config vault_address="http://127.0.0.1:8200" transparent_mode=true auto_auth_path=auth/jwt tls_skip_verify=true default_role=provisionner
 
 export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write&audience=warden' \
   | jq -r '.access_token')
-export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault-auto/role/provisionner/gateway
+export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault/role/provisionner/gateway
 
 ./warden -n PROD/DEV cred spec create aws_static \
   --type aws_access_keys \
@@ -418,18 +440,14 @@ export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault-auto/role/provisionner
   --config kv2_mount=kv_static_secret \
   --config secret_path=aws/prod
 
-./warden -n PROD/DEV write auth/jwt/role/aws-streamer \
-    token_type=aws_access_keys \
-    token_policies="streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_local \
-    token_ttl=1h
-./warden -n PROD/DEV write auth/jwt/role/aws-kv \
-    token_type=aws_access_keys \
-    token_policies="streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_static \
-    token_ttl=1h
+./warden -n PROD/DEV role create aws-streamer -json '{
+    "policies": ["streaming"],
+    "cred_spec_name": "aws_local"
+  }'
+./warden -n PROD/DEV role create aws-kv -json '{
+    "policies": ["streaming"],
+    "cred_spec_name": "aws_static"
+  }'
 
 ./warden -n PROD/DEV provider enable --type=aws --description="aws provider"
 ./warden -n PROD/DEV write aws/config proxy_domains="localhost,warden"
@@ -463,40 +481,47 @@ export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault-auto/role/provisionner
   --min-ttl 600s \
   --max-ttl 1h
 
-./warden -n PROD/DEV write auth/jwt/role/operator \
-    token_type=jwt_role \
-    token_policies="streaming" \
-    user_claim=sub \
-    cred_spec_name=operator \
-    token_ttl=1h
+./warden -n PROD/DEV role create operator -json '{
+    "policies": ["streaming"],
+    "cred_spec_name": "operator",
+    "provider_path": "vault/"
+  }'
+
+./warden -n PROD/DEV role create performer -json '{
+    "policies": ["streaming"],
+    "cred_spec_name": "performer",
+    "provider_path": "aws/"
+  }'
+
+./warden -n PROD/DEV role create github-pat -json '{
+    "policies": ["streaming"],
+    "cred_spec_name": "github-pat",
+    "provider_path": "github/"
+  }'
+
+./warden -n PROD/DEV role create github-app -json '{
+    "policies": ["streaming"],
+    "cred_spec_name": "github-app",
+    "provider_path": "github/"
+  }'
+
+./warden -n PROD/DEV identity group create hydra-clients -json '{
+    "type": "virtual",
+    "description": "Callers holding a Hydra token",
+    "roles": ["provisionner", "aws-streamer", "aws-kv", "operator", "performer", "github-pat", "github-app"],
+    "rules": [
+      {
+        "mount": ["auth/jwt/"],
+        "iss": ["http://localhost:4444"]
+      }
+    ]
+  }'
 
 export VAULT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write&audience=warden' \
   | jq -r '.access_token')
 export VAULT_ADDR=http://localhost:8400/v1/PROD/DEV/vault/role/operator/gateway
-
-
-./warden -n PROD/DEV write auth/jwt/role/performer \
-    token_type=aws_access_keys \
-    token_policies="streaming" \
-    user_claim=sub \
-    cred_spec_name=performer \
-    token_ttl=30m
-
-./warden -n PROD/DEV write auth/jwt/role/github-pat \
-    token_type=jwt_role \
-    token_policies="streaming" \
-    user_claim=sub \
-    cred_spec_name=github-pat \
-    token_ttl=1h
-
-./warden -n PROD/DEV write auth/jwt/role/github-app \
-    token_type=jwt_role \
-    token_policies="streaming" \
-    user_claim=sub \
-    cred_spec_name=github-app \
-    token_ttl=1h
 
 export WARDEN_ADDR="http://127.0.0.1:8400/v1/PROD/DEV/github/role/github-pat/gateway"
 curl "${WARDEN_ADDR}/user/repos" -H "Authorization: Bearer ${JWT_TOKEN}"

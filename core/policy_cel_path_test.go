@@ -377,14 +377,14 @@ func TestCBP_PathCondition_RenamedFields(t *testing.T) {
 	policy := testParsePolicy(t, `
 		path "db/issue-grant" {
 			capabilities = ["create"]
-			condition = "agent.token_type == 'cert_role' && agent.token_ttl_seconds <= 3600 && agent.token_expires_at > 0"
+			condition = "agent.token_type == 'identity_token' && agent.token_ttl_seconds <= 3600 && agent.token_expires_at > 0"
 		}
 	`)
 	cbp, err := NewCBP(ctx, []*Policy{policy})
 	require.NoError(t, err)
 
 	expireAt := time.Now().Add(30 * time.Minute)
-	te := &logical.TokenEntry{Type: "cert_role", ExpireAt: expireAt}
+	te := &logical.TokenEntry{Type: "identity_token", ExpireAt: expireAt}
 	res := cbp.AllowOperation(ctx, &logical.Request{
 		Operation: logical.CreateOperation,
 		Path:      "db/issue-grant",
@@ -395,7 +395,7 @@ func TestCBP_PathCondition_RenamedFields(t *testing.T) {
 	require.NotNil(t, res.Condition.Inputs)
 	// The audit keys carry the new spelling — this is what a salt_fields entry
 	// has to match.
-	assert.Equal(t, "cert_role", res.Condition.Inputs["agent.token_type"])
+	assert.Equal(t, "identity_token", res.Condition.Inputs["agent.token_type"])
 	assert.Contains(t, res.Condition.Inputs, "agent.token_ttl_seconds")
 	assert.Equal(t, strconv.FormatInt(expireAt.Unix(), 10), res.Condition.Inputs["agent.token_expires_at"])
 	// The pre-rename spellings must not appear as audit keys.

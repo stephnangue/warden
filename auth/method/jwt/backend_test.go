@@ -440,7 +440,7 @@ func TestSensitiveConfigFields(t *testing.T) {
 }
 
 // =============================================================================
-// JWTRole Tests
+// Initialize
 // =============================================================================
 
 func TestInitialize_WithStorageView(t *testing.T) {

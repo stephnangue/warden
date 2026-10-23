@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
-
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -80,7 +78,7 @@ func (b *spiffeAuthBackend) handleLogin(ctx context.Context, req *logical.Reques
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
 			PrincipalID: principalID,
-			TokenType:   "spiffe_role",
+			TokenType:   logical.TokenTypeIdentity,
 			TokenTTL:    calculateTTL(config, got.expiry, now),
 			ClientIP:    req.ClientIP,
 			ClientToken: clientToken,
@@ -89,80 +87,6 @@ func (b *spiffeAuthBackend) handleLogin(ctx context.Context, req *logical.Reques
 		},
 		Data: map[string]any{"principal_id": principalID},
 	}, nil
-}
-
-// validSPIFFEMetadataFields lists the SPIFFE-ID component selectors usable in a
-// role's metadata_mappings.
-var validSPIFFEMetadataFields = map[string]bool{
-	"trust_domain": true,
-	"spiffe_id":    true,
-	"path":         true,
-}
-
-// extractSPIFFEIDMetadata builds token metadata from the verified SPIFFE ID
-// using the role's mappings (SPIFFE-ID component -> metadata key, source ->
-// key). Empty values are skipped. Returns nil when nothing was mapped.
-func extractSPIFFEIDMetadata(mappings map[string]string, id spiffeid.ID) map[string]string {
-	if len(mappings) == 0 {
-		return nil
-	}
-	md := make(map[string]string)
-	for source, target := range mappings {
-		var v string
-		switch source {
-		case "trust_domain":
-			v = id.TrustDomain().String()
-		case "spiffe_id":
-			v = id.String()
-		case "path":
-			v = id.Path()
-		}
-		if v != "" {
-			md[target] = v
-		}
-	}
-	if len(md) == 0 {
-		return nil
-	}
-	return md
-}
-
-// mergeStringMaps merges b into a (b wins on key conflict). Returns nil when the
-// result is empty.
-func mergeStringMaps(a, b map[string]string) map[string]string {
-	if len(a) == 0 && len(b) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(a)+len(b))
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
-}
-
-// resolveGroupPolicies appends group-derived policies (JWT-SVID only) to the
-// role's token policies.
-func (b *spiffeAuthBackend) resolveGroupPolicies(role *SPIFFERole, claims map[string]interface{}) []string {
-	policies := role.TokenPolicies
-	if role.GroupsClaim == "" {
-		return policies
-	}
-	groups := extractGroupsClaim(claims, role.GroupsClaim)
-	if len(groups) == 0 {
-		return policies
-	}
-	prefix := role.GroupPolicyPrefix
-	if prefix == "" {
-		prefix = "group-"
-	}
-	groupPolicies := make([]string, len(groups))
-	for i, g := range groups {
-		groupPolicies[i] = prefix + g
-	}
-	return append(append([]string{}, policies...), groupPolicies...)
 }
 
 // calculateTTL caps the token TTL at now by the SVID's expiry (so the token

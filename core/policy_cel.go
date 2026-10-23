@@ -66,10 +66,11 @@ import (
 // dyn-map field types as dyn, so a bare `user.present` is rejected at write
 // time — use it as a guard (as above) or compare it explicitly.
 //
-// The three token_-prefixed fields describe the credential a principal
-// authenticated with, not the principal itself — token_type carries values like
-// jwt_role/cert_role, which name how it authenticated rather than a kind of
-// principal.
+// The three token_-prefixed fields describe the token a principal holds, not
+// the principal itself — token_type is identity_token (admitted by a
+// transparent auth method from a credential it presents) or service_token (a
+// bearer token Warden issued). It does not name the auth method that admitted
+// the principal: groups (whose rules select on the auth mount) and metadata do.
 //
 // Two caveats worth knowing before writing a `user` condition: the user leg is
 // resolved only for gateway (streaming) requests, so user.present is always
@@ -595,9 +596,9 @@ var emptyStringMap = map[string]string{}
 // copy, actors/policies slices) are built only when referenced. metadata is
 // non-nil.
 //
-// The token_-prefixed keys describe the credential rather than the principal:
-// token_type carries values like jwt_role/cert_role, which name how the
-// principal authenticated, not a kind of principal.
+// The token_-prefixed keys describe the token rather than the principal:
+// token_type is identity_token or service_token, a kind of token, not a kind of
+// principal.
 func buildPrincipalNS(p celPrincipalInput, f fieldSet, leg principalLeg) map[string]any {
 	m := make(map[string]any, len(f.fields))
 	if f.has("present") {

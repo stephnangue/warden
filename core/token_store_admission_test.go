@@ -36,7 +36,7 @@ func TestTokenStore_AdmissionSharedAcrossTransparentCopies(t *testing.T) {
 
 	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZ2VudC0xIn0.admission-signature"
 	adm := testAdmission()
-	created, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, &AuthData{
+	created, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
 		TokenValue:    jwt,
 		MountAccessor: "auth_jwt_1",
 		PrincipalID:   "agent-1",
@@ -46,10 +46,9 @@ func TestTokenStore_AdmissionSharedAcrossTransparentCopies(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, adm, created.Admission)
 
-	jwtType := &JWTRoleTokenType{}
-	first, err := core.LookupTransparentToken(ctx, jwtType, jwt, "auth_jwt_1")
+	first, err := core.LookupTransparentToken(ctx, jwt, "auth_jwt_1")
 	require.NoError(t, err)
-	second, err := core.LookupTransparentToken(ctx, jwtType, jwt, "auth_jwt_1")
+	second, err := core.LookupTransparentToken(ctx, jwt, "auth_jwt_1")
 	require.NoError(t, err)
 
 	assert.NotSame(t, first, second, "each lookup returns its own copy")
@@ -64,7 +63,7 @@ func TestTokenStore_AdmissionSharedAcrossAccessorLookups(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	adm := testAdmission()
-	created, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, &AuthData{
+	created, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, &AuthData{
 		PrincipalID: "agent-1",
 		ExpireAt:    time.Now().Add(time.Hour),
 		Policies:    []string{"default"},
@@ -119,7 +118,7 @@ func TestLoginCreateToken_AdmissionMountPath(t *testing.T) {
 			resp := &logical.Response{
 				Data: map[string]any{},
 				Auth: &logical.Auth{
-					TokenType:   TypeWardenToken,
+					TokenType:   TypeServiceToken,
 					PrincipalID: "agent-1",
 					Policies:    []string{"default"},
 					TokenTTL:    time.Hour,
@@ -179,11 +178,40 @@ func TestLoginCreateToken_NoAdmission(t *testing.T) {
 
 	resp := &logical.Response{
 		Data: map[string]any{},
-		Auth: &logical.Auth{TokenType: TypeWardenToken, Policies: []string{"default"}, TokenTTL: time.Hour},
+		Auth: &logical.Auth{TokenType: TypeServiceToken, Policies: []string{"default"}, TokenTTL: time.Hour},
 	}
 	_, err := core.LoginCreateToken(ctx, &logical.Request{MountPoint: "auth/jwt/"}, resp)
 	require.NoError(t, err)
 	entry, found := core.tokenStore.byID.Get(resp.Data["token_id"].(string))
 	require.True(t, found)
 	assert.Nil(t, entry.Admission)
+}
+
+// The login response names the issued token's type as it is, with no alias:
+// identity_token for a transparent login, service_token otherwise.
+func TestLoginCreateToken_TokenType(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	login := func(auth *logical.Auth) map[string]any {
+		t.Helper()
+		resp := &logical.Response{Data: map[string]any{}, Auth: auth}
+		_, err := core.LoginCreateToken(ctx, &logical.Request{MountPoint: "auth/jwt/", MountAccessor: "auth_jwt_1"}, resp)
+		require.NoError(t, err)
+		return resp.Data
+	}
+
+	identity := login(&logical.Auth{
+		TokenType: TypeIdentityToken, PrincipalID: "agent-1", TokenTTL: time.Hour,
+		ClientToken: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZ2VudC0xIn0.sig", Admission: testAdmission(),
+	})
+	assert.Equal(t, "identity_token", identity["token_type"])
+	assert.Regexp(t, `^wdi_[0-9a-f]{32}$`, identity["token_id"])
+	assert.NotContains(t, identity["data"], "token", "no value is handed out for an identity token")
+
+	service := login(&logical.Auth{TokenType: TypeServiceToken, Policies: []string{"default"}, TokenTTL: time.Hour})
+	assert.Equal(t, "service_token", service["token_type"])
+	assert.Regexp(t, `^wds_[0-9a-f]{32}$`, service["token_id"])
+	assert.Regexp(t, `^wds\.`, service["data"].(map[string]string)["token"])
 }

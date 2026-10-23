@@ -415,3 +415,94 @@ func TestSysMCPContext_ImposesItsOwnCeiling(t *testing.T) {
 	assert.Equal(t, namespace.RootNamespaceID, ns.ID)
 	assert.Same(t, r, mcpRequestFromContext(ctx))
 }
+
+// postSysMCPBatch posts a JSON-RPC batch of n list_roles calls to the
+// discovery handler, as a client on a revision that still batches would.
+func postSysMCPBatch(t *testing.T, c *Core, n int) *httptest.ResponseRecorder {
+	t.Helper()
+	calls := make([]string, n)
+	for i := range calls {
+		calls[i] = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`, i+1)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(" ["+strings.Join(calls, ",")+"]"))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	c.MCPServerHandler().ServeHTTP(rec, r)
+	return rec
+}
+
+// A batch at the cap is served whole: every call gets its response.
+func TestMCPServerHandler_BatchAtCapServed(t *testing.T) {
+	c := createTestCore(t)
+
+	rec := postSysMCPBatch(t, c, maxSysMCPBatch)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var responses []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &responses), "body: %s", rec.Body.String())
+	assert.Len(t, responses, maxSysMCPBatch)
+}
+
+// A batch over the cap is refused whole, before any call runs, with a 400
+// carrying a JSON-RPC Invalid Request error with a null id.
+func TestMCPServerHandler_BatchOverCapRefused(t *testing.T) {
+	c := createTestCore(t)
+
+	rec := postSysMCPBatch(t, c, maxSysMCPBatch+1)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	var refusal struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &refusal), "body: %s", rec.Body.String())
+	assert.Equal(t, "2.0", refusal.JSONRPC)
+	assert.Equal(t, "null", string(refusal.ID))
+	assert.Equal(t, jsonRPCCodeInvalidRequest, refusal.Error.Code)
+	assert.Equal(t, fmt.Sprintf("JSON-RPC batch exceeds %d messages", maxSysMCPBatch), refusal.Error.Message)
+}
+
+// A single request is never counted against the batch cap.
+func TestMCPServerHandler_SingleRequestUnaffectedByBatchCap(t *testing.T) {
+	c := createTestCore(t)
+	rec := httptest.NewRecorder()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json, text/event-stream")
+
+	c.MCPServerHandler().ServeHTTP(rec, r)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response), "a single request is answered with a single response")
+	assert.EqualValues(t, 1, response["id"])
+}
+
+func TestBatchExceedsCap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"single object", `{"jsonrpc":"2.0","id":1,"method":"ping"}`, false},
+		{"at the cap", "[" + strings.TrimSuffix(strings.Repeat("{},", 3), ",") + "]", false},
+		{"over the cap", "\n\t[" + strings.TrimSuffix(strings.Repeat("{},", 4), ",") + "]", true},
+		{"non-object elements still count", "[1,2,3,4]", true},
+		{"empty batch", "[]", false},
+		{"malformed before the cap", "[{},{", false},
+		{"malformed after the cap", "[{},{},{},{},{", true},
+		{"empty body", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, batchExceedsCap([]byte(tc.body), 3))
+		})
+	}
+}

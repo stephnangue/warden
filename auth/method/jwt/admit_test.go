@@ -152,30 +152,22 @@ func TestAdmit_MaxAge(t *testing.T) {
 	assert.Nil(t, admitted(t, admitRequest(t, b, noIat, true)))
 }
 
-// Admission uses the mount's bound_audiences, not a role's.
+// Admission uses the mount's bound_audiences, any one of them.
 func TestAdmit_MountAudiences(t *testing.T) {
 	b, key := factsBackend(t, map[string]any{"bound_audiences": []string{"warden", "warden-b"}})
-	require.NoError(t, b.setRole(context.Background(), &JWTRole{
-		Name: "other-aud", BoundAudiences: []string{"role-only"}, TokenPolicies: []string{"x"}, TokenTTL: "1h",
-	}))
 	assert.NotNil(t, admitted(t, admitRequest(t, b, signES256(t, key, baseClaims(map[string]any{"aud": "warden-b"})), true)))
-	assert.Nil(t, admitted(t, admitRequest(t, b, signES256(t, key, baseClaims(map[string]any{"aud": "role-only"})), true)))
+	assert.Nil(t, admitted(t, admitRequest(t, b, signES256(t, key, baseClaims(map[string]any{"aud": "someone-else"})), true)))
 }
 
-// expectedClaims keeps the role login's precedence: the role's subject and
-// audiences over the mount's, the mount's issuer.
+// expectedClaims is the mount's issuer, subject and audiences.
 func TestExpectedClaims(t *testing.T) {
 	config := &JWTAuthConfig{BoundIssuer: "iss", BoundSubject: "msub", BoundAudiences: []string{"maud"}}
-	e := expectedClaims(config, nil)
+	e := expectedClaims(config)
 	assert.Equal(t, "iss", e.Issuer)
 	assert.Equal(t, "msub", e.Subject)
 	assert.Equal(t, []string{"maud"}, e.Audiences)
 
-	e = expectedClaims(config, &JWTRole{BoundSubject: "rsub", BoundAudiences: []string{"raud"}})
-	assert.Equal(t, "rsub", e.Subject)
-	assert.Equal(t, []string{"raud"}, e.Audiences)
-
-	e = expectedClaims(&JWTAuthConfig{BoundAudiences: []string{}}, &JWTRole{})
+	e = expectedClaims(&JWTAuthConfig{BoundAudiences: []string{}})
 	assert.Nil(t, e.Audiences, "an empty list leaves the audience unchecked")
 	assert.NotEmpty(t, e.SigningAlgorithms)
 }

@@ -246,8 +246,7 @@ func TestUserLeg_StoredUserAuthRoleRefused(t *testing.T) {
 	assert.Nil(t, req.User)
 	assert.Empty(t, req.HTTPRequest.Header.Get("Authorization"), "the user credential is still scrubbed")
 
-	ttype := f.core.tokenStore.GetTransparentTokenTypeForAuthMethod("jwt")
-	te, _ := f.core.LookupTransparentToken(f.ctx, ttype, cred, f.mount.Accessor)
+	te, _ := f.core.LookupTransparentToken(f.ctx, cred, f.mount.Accessor)
 	assert.Nil(t, te, "the credential is not admitted at all")
 
 	resp := f.core.userCaptureFailure(f.ctx, req, err)
@@ -318,8 +317,7 @@ func TestUserLeg_Metadata(t *testing.T) {
 
 	// The cached entry holds no metadata of its own: every request renders
 	// onto its own copy.
-	ttype := f.core.tokenStore.GetTransparentTokenTypeForAuthMethod("jwt")
-	cached, err := f.core.LookupTransparentToken(f.ctx, ttype, cred, f.mount.Accessor)
+	cached, err := f.core.LookupTransparentToken(f.ctx, cred, f.mount.Accessor)
 	require.NoError(t, err)
 	assert.Nil(t, cached.Metadata)
 	assert.Empty(t, cached.Policies)

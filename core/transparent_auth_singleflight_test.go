@@ -45,7 +45,7 @@ func (b *blockingLoginBackend) HandleRequest(ctx context.Context, req *logical.R
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
 			PrincipalID: "agent-1",
-			TokenType:   TypeJWTRole,
+			TokenType:   TypeIdentityToken,
 			TokenTTL:    time.Hour,
 			ClientToken: jwt,
 			Admission:   b.adm,
@@ -69,9 +69,12 @@ func (b *blockingLoginBackend) SpecialPaths() *logical.Paths {
 	return &logical.Paths{Unauthenticated: []string{"login"}}
 }
 func (b *blockingLoginBackend) ExtractTokens(*http.Request, bool) (string, string) { return "", "" }
+func (b *blockingLoginBackend) CredentialFormat() logical.CredentialFormat {
+	return logical.CredentialFormatJWT
+}
 
 // mountBlockingLogin mounts a blockingLoginBackend at auth/<mountPath> in the root
-// namespace, as mountStubAuthMethod does with no backend.
+// namespace, as mountStubAuthMethod does with a stub backend.
 func mountBlockingLogin(t *testing.T, c *Core, mountPath string) *blockingLoginBackend {
 	t.Helper()
 	backend := &blockingLoginBackend{entered: make(chan struct{}, 4), release: make(chan struct{})}

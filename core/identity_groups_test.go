@@ -884,7 +884,7 @@ func TestIdentityUsage_NonSudoToken(t *testing.T) {
 		path "sys/identity/group/*" { capabilities = ["read"] }`)
 	p.Name, p.Type = "usage-reader", PolicyTypeCBP
 	require.NoError(t, c.policyStore.SetPolicy(ctx, p, nil))
-	te, err := c.tokenStore.GenerateToken(ctx, TypeWardenToken, &AuthData{
+	te, err := c.tokenStore.GenerateToken(ctx, TypeServiceToken, &AuthData{
 		PrincipalID: "operator",
 		ExpireAt:    time.Now().Add(time.Hour),
 		Policies:    []string{"usage-reader"},

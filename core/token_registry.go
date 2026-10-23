@@ -18,9 +18,8 @@ var (
 // TokenTypeRegistry manages registered token types
 type TokenTypeRegistry struct {
 	mu           sync.RWMutex
-	types        map[string]TokenType            // name -> TokenType
-	prefixToType map[string]TokenType            // valuePrefix -> TokenType
-	authMethod   map[string]TransparentTokenType // AuthMethodType -> TransparentTokenType
+	types        map[string]TokenType // name -> TokenType
+	prefixToType map[string]TokenType // valuePrefix -> TokenType, legacy prefixes included
 }
 
 // NewTokenTypeRegistry creates a new registry
@@ -28,7 +27,6 @@ func NewTokenTypeRegistry() *TokenTypeRegistry {
 	return &TokenTypeRegistry{
 		types:        make(map[string]TokenType),
 		prefixToType: make(map[string]TokenType),
-		authMethod:   make(map[string]TransparentTokenType),
 	}
 }
 
@@ -46,17 +44,11 @@ func (r *TokenTypeRegistry) Register(tokenType TokenType) error {
 
 	r.types[meta.Name] = tokenType
 
-	// Register prefix mapping if prefix exists
-	if meta.ValuePrefix != "" {
-		r.prefixToType[meta.ValuePrefix] = tokenType
-	}
-
-	// Index transparent token types by AuthMethodType so callers (the
-	// implicit-auth dispatcher, the explicit-login guard) can ask "what
-	// TokenType serves mounts of type X?" without a hardcoded switch.
-	if meta.AuthMethodType != "" {
-		if tt, ok := tokenType.(TransparentTokenType); ok {
-			r.authMethod[meta.AuthMethodType] = tt
+	// Register prefix mappings: the current value prefix, and a legacy one
+	// still recognised on presented values.
+	for _, prefix := range []string{meta.ValuePrefix, meta.LegacyValuePrefix} {
+		if prefix != "" {
+			r.prefixToType[prefix] = tokenType
 		}
 	}
 
@@ -65,7 +57,9 @@ func (r *TokenTypeRegistry) Register(tokenType TokenType) error {
 
 // IsTransparent returns true if the named token type implements
 // TransparentTokenType and self-reports as transparent. Returns false for
-// unknown types and for non-transparent types (e.g. warden_token).
+// unknown types and for non-transparent types: a service token, or a type no
+// longer registered (a persisted entry from an earlier release keeps the type
+// name it was stored with, and stays persisted and non-transparent).
 func (r *TokenTypeRegistry) IsTransparent(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -79,15 +73,6 @@ func (r *TokenTypeRegistry) IsTransparent(name string) bool {
 		return false
 	}
 	return tt.IsTransparent()
-}
-
-// GetTransparentTokenTypeForAuthMethod returns the TransparentTokenType
-// registered to serve mounts whose entry.Type equals the given mountType.
-// Returns nil if no transparent type is registered for that mount type.
-func (r *TokenTypeRegistry) GetTransparentTokenTypeForAuthMethod(mountType string) TransparentTokenType {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.authMethod[mountType]
 }
 
 // GetByName retrieves a token type by its name
