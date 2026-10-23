@@ -4,11 +4,14 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -491,6 +494,153 @@ func TestTokenStore_RevokeRootToken(t *testing.T) {
 	err = core.tokenStore.RevokeRootToken()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no root token exists")
+}
+
+// simulateRestart drops everything the token store holds in memory, the root
+// token manager included, and reloads the persisted tokens, as a fresh
+// process does on unseal.
+func simulateRestart(t *testing.T, s *TokenStore) {
+	t.Helper()
+	s.UnloadFromCache()
+	s.rootTokenManager = NewRootTokenManager()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	require.NoError(t, s.LoadFromStorage(ctx))
+}
+
+func TestTokenStore_IsRootTokenEntry(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	tests := []struct {
+		name  string
+		entry *TokenEntry
+		want  bool
+	}{
+		{"root namespace principal", &TokenEntry{Type: TypeWardenToken, PrincipalID: namespace.RootNamespaceUUID}, true},
+		{"earliest releases principal", &TokenEntry{Type: TypeWardenToken, PrincipalID: "root"}, true},
+		{"independent of the type name", &TokenEntry{Type: "renamed_token", PrincipalID: namespace.RootNamespaceUUID}, true},
+		{"issued by an auth mount", &TokenEntry{Type: TypeWardenToken, PrincipalID: namespace.RootNamespaceUUID, MountAccessor: "auth_jwt_1234"}, false},
+		{"issued by an auth mount, literal root", &TokenEntry{Type: TypeWardenToken, PrincipalID: "root", MountAccessor: "auth_jwt_1234"}, false},
+		{"transparent type", &TokenEntry{Type: TypeJWTRole, PrincipalID: namespace.RootNamespaceUUID}, false},
+		{"other principal", &TokenEntry{Type: TypeWardenToken, PrincipalID: "alice"}, false},
+		{"nil entry", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, core.tokenStore.isRootTokenEntry(tt.entry))
+		})
+	}
+}
+
+// The persisted root token is registered with the root token manager again
+// after a restart, so it can still be revoked.
+func TestTokenStore_RootTokenRecognisedAfterRestart(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+
+	rootToken, err := s.GenerateRootToken()
+	require.NoError(t, err)
+	rootID := s.rootTokenManager.GetCurrentRootTokenID()
+
+	simulateRestart(t, s)
+
+	require.True(t, s.rootTokenManager.HasRootToken(), "the persisted root must be recognised after a reload")
+	assert.Equal(t, rootID, s.rootTokenManager.GetCurrentRootTokenID())
+	assert.True(t, s.rootTokenManager.IsRootToken(rootToken))
+
+	require.NoError(t, s.RevokeRootToken())
+	assert.False(t, s.rootTokenManager.HasRootToken())
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	_, _, err = s.ResolveToken(ctx, rootToken)
+	require.Error(t, err, "the revoked root must no longer resolve")
+
+	// The revocation reached storage: the root does not come back on the
+	// next restart.
+	simulateRestart(t, s)
+	assert.False(t, s.rootTokenManager.HasRootToken())
+	_, _, err = s.ResolveToken(ctx, rootToken)
+	require.Error(t, err)
+}
+
+// The reloaded root can be replaced with a custom value, and the old value
+// stops working.
+func TestTokenStore_RootTokenReplaceableAfterRestart(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+
+	rootToken, err := s.GenerateRootToken()
+	require.NoError(t, err)
+
+	simulateRestart(t, s)
+
+	require.NoError(t, s.ReplaceRootTokenValue("my-dev-token"))
+	assert.True(t, s.rootTokenManager.IsRootToken("my-dev-token"))
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	_, _, err = s.ResolveToken(ctx, rootToken)
+	require.Error(t, err, "the replaced root value must no longer resolve")
+
+	simulateRestart(t, s)
+	assert.True(t, s.rootTokenManager.IsRootToken("my-dev-token"), "the replacement is the root after the next restart")
+}
+
+// A token an auth mount issued is never taken for the root, even when its
+// identity provider mapped it to a root-like principal.
+func TestTokenStore_MountIssuedTokenNotRootAfterRestart(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	for _, principal := range []string{namespace.RootNamespaceUUID, "root"} {
+		_, err := s.GenerateToken(ctx, TypeWardenToken, &AuthData{
+			PrincipalID:   principal,
+			MountAccessor: "auth_jwt_1234",
+			ExpireAt:      time.Now().Add(time.Hour),
+		})
+		require.NoError(t, err)
+	}
+
+	simulateRestart(t, s)
+
+	assert.False(t, s.rootTokenManager.HasRootToken())
+}
+
+// When storage holds more than one root candidate, the load warns with both
+// token IDs and keeps the last one loaded.
+func TestTokenStore_SecondRootCandidateWarns(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	_, err := s.GenerateRootToken()
+	require.NoError(t, err)
+	firstID := s.rootTokenManager.GetCurrentRootTokenID()
+
+	second, err := s.GenerateToken(ctx, TypeWardenToken, &AuthData{
+		PrincipalID: namespace.RootNamespaceUUID,
+		Policies:    []string{"root"},
+	})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+	s.logger = log
+
+	simulateRestart(t, s)
+
+	out := buf.String()
+	require.Contains(t, out, "more than one root token found in storage")
+	assert.Contains(t, out, firstID)
+	assert.Contains(t, out, second.ID)
+
+	kept := s.rootTokenManager.GetCurrentRootTokenID()
+	assert.Contains(t, []string{firstID, second.ID}, kept)
+	assert.Equal(t, 1, strings.Count(out, "more than one root token found in storage"))
 }
 
 // TestTokenStore_GetMetrics tests metrics retrieval
