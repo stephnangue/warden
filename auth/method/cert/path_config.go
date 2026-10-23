@@ -2,53 +2,58 @@ package cert
 
 import (
 	"context"
+	"maps"
 	"net/http"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
 
 // pathConfig returns the config path definition
 func (b *certAuthBackend) pathConfig() *framework.Path {
+	fields := map[string]*framework.FieldSchema{
+		"trusted_ca_pem": {
+			Type:        framework.TypeString,
+			Description: "PEM-encoded trusted CA certificates",
+		},
+		"principal_claim": {
+			Type:          framework.TypeString,
+			Description:   "Identity source from certificate: cn (default), dns_san, email_san, uri_san, serial",
+			Default:       "cn",
+			AllowedValues: principalClaimAllowedValues(),
+		},
+		"token_ttl": {
+			Type:        framework.TypeDurationSecond,
+			Description: "Default token TTL (default: 1h)",
+		},
+		"revocation_mode": {
+			Type:        framework.TypeString,
+			Description: "Certificate revocation checking mode: none (default), crl, ocsp, best_effort",
+			Default:     "none",
+		},
+		"crl_cache_ttl": {
+			Type:        framework.TypeString,
+			Description: "CRL cache TTL (default: 1h). Example: 30m, 2h",
+			Default:     "1h",
+		},
+		"ocsp_timeout": {
+			Type:        framework.TypeString,
+			Description: "OCSP request timeout (default: 5s). Example: 3s, 10s",
+			Default:     "5s",
+		},
+		"default_role": {
+			Type:        framework.TypeString,
+			Description: "Default role for transparent operations when no role is specified",
+		},
+	}
+	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
+
 	return &framework.Path{
 		Pattern: "config",
-		Fields: map[string]*framework.FieldSchema{
-			"trusted_ca_pem": {
-				Type:        framework.TypeString,
-				Description: "PEM-encoded trusted CA certificates",
-			},
-			"principal_claim": {
-				Type:          framework.TypeString,
-				Description:   "Identity source from certificate: cn (default), dns_san, email_san, uri_san, serial",
-				Default:       "cn",
-				AllowedValues: principalClaimAllowedValues(),
-			},
-			"token_ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Default token TTL (default: 1h)",
-			},
-			"revocation_mode": {
-				Type:        framework.TypeString,
-				Description: "Certificate revocation checking mode: none (default), crl, ocsp, best_effort",
-				Default:     "none",
-			},
-			"crl_cache_ttl": {
-				Type:        framework.TypeString,
-				Description: "CRL cache TTL (default: 1h). Example: 30m, 2h",
-				Default:     "1h",
-			},
-			"ocsp_timeout": {
-				Type:        framework.TypeString,
-				Description: "OCSP request timeout (default: 5s). Example: 3s, 10s",
-				Default:     "5s",
-			},
-			"default_role": {
-				Type:        framework.TypeString,
-				Description: "Default role for transparent operations when no role is specified",
-			},
-		},
+		Fields:  fields,
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
 				Callback: b.handleConfigRead,
@@ -64,7 +69,13 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 
 Set 'trusted_ca_pem' to the CA bundle that signs client certificates and
 'principal_claim' to the identity field (cn, dns_san, email_san, uri_san, or
-serial).`,
+serial).
+
+'entity_kind' (agent or human, default agent) names what the mount admits.
+'facts' maps certificate fields to the fact names the mount publishes beyond
+its built-in facts (ca, cn, dns_san, email_san, org, ou, serial, uri_san; ca
+is the SHA-256 fingerprint of each trust anchor the certificate verified to); a
+write replaces the whole map.`,
 	}
 }
 
@@ -96,6 +107,8 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 			"crl_cache_ttl":    b.config.CRLCacheTTL,
 			"ocsp_timeout":     b.config.OCSPTimeout,
 			"default_role":     b.config.DefaultRole,
+			"entity_kind":      b.config.EntityKind,
+			"facts":            maps.Clone(b.config.Facts),
 		},
 	}, nil
 }
@@ -113,9 +126,24 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 	// Build config map from field data
 	conf := make(map[string]any)
 
+	_, factsSent := d.GetOk("facts")
+	_, kindSent := d.GetOk("entity_kind")
+	factsTouched := factsSent || kindSent
+
 	// Copy existing config if present
 	b.configMu.RLock()
 	if b.config != nil {
+		// Stored facts that do not compile would fail a write that leaves
+		// them in place, whatever else it changes; say how to replace them.
+		if !factsTouched {
+			if err := helper.FactsWriteError(&b.config.FactsConfig, false); err != nil {
+				b.configMu.RUnlock()
+				return &logical.Response{
+					StatusCode: http.StatusBadRequest,
+					Err:        err,
+				}, nil
+			}
+		}
 		conf["trusted_ca_pem"] = b.config.TrustedCAPEM
 		conf["principal_claim"] = b.config.PrincipalClaim
 		conf["token_ttl"] = b.config.TokenTTL
@@ -123,6 +151,8 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		conf["crl_cache_ttl"] = b.config.CRLCacheTTL
 		conf["ocsp_timeout"] = b.config.OCSPTimeout
 		conf["default_role"] = b.config.DefaultRole
+		conf["entity_kind"] = b.config.EntityKind
+		conf["facts"] = b.config.Facts
 	}
 	b.configMu.RUnlock()
 
@@ -133,9 +163,29 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}
 	}
 
+	// A facts write replaces the whole mapping; every name must be a string.
+	if raw, ok := d.GetOk("facts"); ok {
+		facts, err := helper.ParseFactsField(raw)
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        err,
+			}, nil
+		}
+		conf["facts"] = facts
+	}
+
 	// Build new config
 	config, err := buildCertConfig(ctx, conf)
 	if err != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        err,
+		}, nil
+	}
+	// A write is the one place facts can be refused outright; storage and
+	// load only ever see a config that compiled here.
+	if err := helper.FactsWriteError(&config.FactsConfig, factsTouched); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,

@@ -169,6 +169,10 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 			ClientIP:       req.ClientIP,
 			ClientToken:    fingerprint, // Cert fingerprint for token type caching
 			Metadata:       extractCertMetadata(cert, role.MetadataMappings),
+			// What the login verified, alongside the role logic above, which
+			// does not read it: the leaf's fields, and the anchors of the
+			// chains it verified along.
+			Admission: newAdmission(cert, verifiedChains, b.mountFacts),
 		},
 		Data: map[string]any{
 			"principal_id": principalID,

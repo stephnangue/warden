@@ -2,9 +2,7 @@ package cert
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"sync"
@@ -12,6 +10,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -26,6 +25,14 @@ type CertAuthConfig struct {
 	CRLCacheTTL    string        `json:"crl_cache_ttl,omitempty"`   // CRL cache TTL (default: "1h")
 	OCSPTimeout    string        `json:"ocsp_timeout,omitempty"`    // OCSP request timeout (default: "5s")
 	DefaultRole    string        `json:"default_role,omitempty"`    // Default role for transparent operations
+
+	// Facts: entity_kind, and the certificate fields the mount publishes
+	// under other names beyond its built-in facts. Compiled in
+	// buildCertConfig. A config write refuses facts that do not compile, so
+	// they are never stored; ones that still fail at load (the mount table's,
+	// or storage written under looser rules) are installed with a nil naming:
+	// the mount answers no fact, so nothing that reads facts can match it.
+	helper.FactsConfig
 
 	// Internal — parsed CA pool
 	caPool *x509.CertPool `json:"-"`
@@ -45,6 +52,13 @@ type certAuthBackend struct {
 	configWriteMu sync.Mutex
 	logger        *logger.GatedLogger
 	storageView   sdklogical.Storage
+
+	// mountFacts holds the naming in force and is shared by pointer with
+	// every admission this mount produces. installConfig publishes it under
+	// configMu together with the config it was compiled from, so a reader
+	// holding configMu sees the two agree; admissions and FactNames load it
+	// without a lock and see one published naming, whole.
+	mountFacts *logical.MountFacts
 }
 
 var _ logical.Factory = Factory
@@ -54,6 +68,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b := &certAuthBackend{
 		logger:      conf.Logger,
 		storageView: conf.StorageView,
+		mountFacts:  &logical.MountFacts{},
 	}
 
 	b.Backend = &framework.Backend{
@@ -94,20 +109,31 @@ var validRevocationModes = []string{"", "none", "crl", "ocsp", "best_effort"}
 // validPrincipalClaims lists the allowed values for principal_claim.
 var validPrincipalClaims = []string{"cn", "dns_san", "email_san", "uri_san", "serial"}
 
-// setupCertConfig builds conf and installs it.
+// setupCertConfig builds conf and installs it. It serves the mount table's
+// config when the mount is set up and the stored config when it is loaded,
+// which a failure here would turn into a failed mount (and, at unseal, a
+// failed unseal). Facts that do not compile are therefore logged and installed
+// as a nil naming, which answers no fact: closed for every reader of facts,
+// while logins and the config itself keep working.
 func (b *certAuthBackend) setupCertConfig(ctx context.Context, conf map[string]any) error {
 	config, err := buildCertConfig(ctx, conf)
 	if err != nil {
 		return err
 	}
+	if err := config.FactsConfig.Err(); err != nil {
+		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
+	}
 	b.installConfig(config)
 	return nil
 }
 
-// installConfig makes config the live configuration. It cannot fail.
+// installConfig makes config the live configuration and publishes its naming
+// (nil when it does not compile, which answers no fact) in the same critical
+// section. It cannot fail.
 func (b *certAuthBackend) installConfig(config *CertAuthConfig) {
 	b.configMu.Lock()
 	b.config = config
+	b.mountFacts.Publish(config.Naming())
 	b.configMu.Unlock()
 }
 
@@ -168,6 +194,10 @@ func buildCertConfig(_ context.Context, conf map[string]any) (*CertAuthConfig, e
 		config.revocationChecker = newRevocationChecker(crlCacheTTL, ocspTimeout)
 	}
 
+	// Facts that do not compile are kept on the config, not returned: the
+	// caller decides whether to refuse them or fail closed.
+	config.CompileFields(certBuiltinFacts())
+
 	return config, nil
 }
 
@@ -183,6 +213,8 @@ func normalizedCertConfig(config *CertAuthConfig) map[string]any {
 		"crl_cache_ttl":   config.CRLCacheTTL,
 		"ocsp_timeout":    config.OCSPTimeout,
 		"default_role":    config.DefaultRole,
+		"entity_kind":     config.EntityKind,
+		"facts":           config.Facts,
 	}
 }
 
@@ -258,10 +290,7 @@ func buildCAPool(caPEM string) (*x509.CertPool, error) {
 }
 
 // certFingerprint returns the hex-encoded SHA-256 fingerprint of a certificate's raw DER bytes.
-func certFingerprint(cert *x509.Certificate) string {
-	hash := sha256.Sum256(cert.Raw)
-	return hex.EncodeToString(hash[:])
-}
+func certFingerprint(cert *x509.Certificate) string { return helper.CertFingerprint(cert) }
 
 const certAuthHelp = `
 The certificate auth method authenticates clients using TLS client certificates.
@@ -279,6 +308,8 @@ Configuration:
   GET  /auth/{mount}/config      - Read current configuration
   POST /auth/{mount}/role/:name  - Create roles with certificate constraints
   POST /auth/{mount}/login       - Authenticate with a client certificate
+
+The mount's entity_kind and facts name what it admits.
 `
 
 // parsePEMCertificates returns the number of valid certificates in a PEM bundle
