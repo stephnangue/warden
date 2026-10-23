@@ -70,13 +70,20 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := c.Sys().DeleteRole(name, deleteExpectedHash); err != nil {
+	warnings, err := c.Sys().DeleteRole(name, deleteExpectedHash)
+	if err != nil {
 		return fmt.Errorf("error deleting role %q: %w", name, err)
 	}
-	return helpers.RenderMap(map[string]any{
+	// Groups still listing the role are named on stderr, keeping stdout clean.
+	helpers.PrintWarnings(warnings)
+	out := map[string]any{
 		"name":    name,
 		"deleted": true,
-	}, func() {
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
+	return helpers.RenderMap(out, func() {
 		fmt.Printf("Success! Deleted role: %s\n", name)
 	})
 }

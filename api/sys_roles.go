@@ -153,13 +153,14 @@ func (c *Sys) UpdateRoleWithContext(ctx context.Context, name string, input *Rol
 }
 
 // DeleteRole deletes the role name. A non-empty expectedHash deletes it only if
-// it still has that hash.
-func (c *Sys) DeleteRole(name, expectedHash string) error {
+// it still has that hash. The warnings name the groups that still list the
+// role, which grant nothing through it until it is created again.
+func (c *Sys) DeleteRole(name, expectedHash string) ([]string, error) {
 	return c.DeleteRoleWithContext(context.Background(), name, expectedHash)
 }
 
 // DeleteRoleWithContext deletes the role name with context.
-func (c *Sys) DeleteRoleWithContext(ctx context.Context, name, expectedHash string) error {
+func (c *Sys) DeleteRoleWithContext(ctx context.Context, name, expectedHash string) ([]string, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -169,10 +170,23 @@ func (c *Sys) DeleteRoleWithContext(ctx context.Context, name, expectedHash stri
 	}
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	return nil
+
+	resource, err := ParseResource(resp.Body)
+	if err != nil || resource == nil || resource.Data == nil {
+		// The role is deleted; a body that does not parse only loses warnings.
+		return nil, nil
+	}
+	raw, _ := resource.Data["warnings"].([]any)
+	warnings := make([]string, 0, len(raw))
+	for _, w := range raw {
+		if s, ok := w.(string); ok && s != "" {
+			warnings = append(warnings, s)
+		}
+	}
+	return warnings, nil
 }
 
 // ListRoles lists the roles of the client's namespace, sorted by name. A

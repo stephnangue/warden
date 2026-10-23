@@ -107,6 +107,7 @@ func printRoleTable(data map[string]any) {
 		}
 	}
 	add("Description", data["description"])
+	add("Granted By", data["granted_by"])
 	add("Policies", data["policies"])
 	add("Cred Spec", data["cred_spec_name"])
 	add("Skill", data["skill"])

@@ -28,6 +28,11 @@ type fakeWarden struct {
 	requests []recorded
 	status   int
 	body     string
+
+	// Group listings (the granted-by join) are answered and recorded apart.
+	groupRequests []recorded
+	groupsStatus  int
+	groupsBody    string
 }
 
 type recorded struct {
@@ -82,7 +87,8 @@ func (f *fakeWarden) count() int {
 // writers, and resets the package state afterwards.
 func setupFake(t *testing.T, status int, body string) (*fakeWarden, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
-	f := &fakeWarden{status: status, body: body}
+	f := &fakeWarden{status: status, body: body,
+		groupsStatus: http.StatusOK, groupsBody: `{"data":{"keys":[],"groups":[]}}`}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/sys/schema" {
@@ -90,6 +96,15 @@ func setupFake(t *testing.T, status int, body string) (*fakeWarden, *bytes.Buffe
 			return
 		}
 		rec := recorded{method: r.Method, path: r.URL.Path, query: r.URL.Query()}
+		if r.URL.Path == "/v1/sys/identity/group" {
+			f.mu.Lock()
+			f.groupRequests = append(f.groupRequests, rec)
+			status, body := f.groupsStatus, f.groupsBody
+			f.mu.Unlock()
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+			return
+		}
 		if raw, _ := io.ReadAll(r.Body); len(raw) > 0 {
 			_ = json.Unmarshal(raw, &rec.body)
 		}
@@ -354,6 +369,75 @@ func TestListAll(t *testing.T) {
 	assert.Equal(t, map[string]any{"team": "platform"}, items[0]["metadata"])
 	assert.Equal(t, map[string]any{}, items[1]["metadata"], "a role without metadata lists an empty object")
 	assert.Equal(t, "vault", items[1]["skill"])
+}
+
+const twoGroups = `{"data":{
+	"keys":["admins","ci"],
+	"groups":[
+		{"name":"admins","type":"virtual","roles":["deploy","read-secrets"]},
+		{"name":"ci","type":"virtual","roles":["deploy"]}
+	]
+}}`
+
+// TestListAll_GrantedBy: the inventory fills granted_by from one unfiltered
+// group listing, whatever the number of roles.
+func TestListAll_GrantedBy(t *testing.T) {
+	f, stdout, _ := setupFake(t, http.StatusOK, `{"data":{
+		"keys":["deploy","read-secrets","unused"],
+		"roles":[{"name":"deploy"},{"name":"read-secrets"},{"name":"unused"}]
+	}}`)
+	f.groupsBody = twoGroups
+	listAll = true
+
+	require.NoError(t, runList(ListCmd, nil))
+	require.Len(t, f.groupRequests, 1, "one group listing, not one per role")
+	assert.False(t, f.groupRequests[0].query.Has("role"), "the listing is unfiltered and inverted client-side")
+	assert.Equal(t, "true", f.groupRequests[0].query.Get("warden-list"))
+
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &items))
+	require.Len(t, items, 3)
+	assert.Equal(t, []any{"admins", "ci"}, items[0]["granted_by"])
+	assert.Equal(t, []any{"admins"}, items[1]["granted_by"])
+	assert.Equal(t, []any{}, items[2]["granted_by"], "a role no group lists shows an empty list")
+}
+
+// TestListAll_GrantedByUnavailable: without access to the groups the inventory
+// still lists the roles, warns, and leaves granted_by out.
+func TestListAll_GrantedByUnavailable(t *testing.T) {
+	f, stdout, stderr := setupFake(t, http.StatusOK, `{"data":{"keys":["deploy"],"roles":[{"name":"deploy"}]}}`)
+	f.groupsStatus, f.groupsBody = http.StatusForbidden, `{"errors":["permission denied"]}`
+	listAll = true
+
+	require.NoError(t, runList(ListCmd, nil))
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &items))
+	require.Len(t, items, 1)
+	assert.NotContains(t, items[0], "granted_by")
+	assert.Contains(t, stderr.String(), "cannot list groups to fill granted_by")
+}
+
+func TestRead_GrantedBy(t *testing.T) {
+	f, stdout, _ := setupFake(t, http.StatusOK, cannedRole)
+	f.groupsBody = `{"data":{"keys":["ci"],"groups":[{"name":"ci","roles":["deploy"]}]}}`
+
+	require.NoError(t, runRead(ReadCmd, []string{"deploy"}))
+	require.Len(t, f.groupRequests, 1)
+	assert.Equal(t, "deploy", f.groupRequests[0].query.Get("role"), "one listing filtered to the role")
+	assert.Equal(t, []any{"ci"}, decodeOut(t, stdout)["granted_by"])
+}
+
+func TestDelete_WarnsNamingGroups(t *testing.T) {
+	_, stdout, stderr := setupFake(t, http.StatusOK, `{"data":{"name":"deploy","warnings":[
+		"groups still list \"deploy\": ci (they grant nothing until the role is re-created)"
+	]}}`)
+	deleteForce = true
+
+	require.NoError(t, runDelete(DeleteCmd, []string{"deploy"}))
+	assert.Contains(t, stderr.String(), `warning: groups still list "deploy": ci`)
+	out := decodeOut(t, stdout)
+	assert.Equal(t, true, out["deleted"])
+	assert.Equal(t, []any{`groups still list "deploy": ci (they grant nothing until the role is re-created)`}, out["warnings"])
 }
 
 func TestListAll_FlagCombinations(t *testing.T) {

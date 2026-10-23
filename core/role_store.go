@@ -427,19 +427,8 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 	if len(role.Description) > logical.MaxRoleDescriptionBytes {
 		return nil, logical.ErrBadRequestf("description exceeds %d bytes", logical.MaxRoleDescriptionBytes)
 	}
-	if len(role.Metadata) > logical.MaxRoleMetadataKeys {
-		return nil, logical.ErrBadRequestf("metadata has %d keys; at most %d are allowed",
-			len(role.Metadata), logical.MaxRoleMetadataKeys)
-	}
-	for _, k := range slices.Sorted(maps.Keys(role.Metadata)) {
-		switch {
-		case k == "":
-			return nil, logical.ErrBadRequest("metadata keys must not be empty")
-		case len(k) > logical.MaxRoleMetadataKeyBytes:
-			return nil, logical.ErrBadRequestf("metadata key starting %.32q exceeds %d bytes", k, logical.MaxRoleMetadataKeyBytes)
-		case len(role.Metadata[k]) > logical.MaxRoleMetadataValueBytes:
-			return nil, logical.ErrBadRequestf("metadata value of %q exceeds %d bytes", k, logical.MaxRoleMetadataValueBytes)
-		}
+	if err := validateObjectMetadata(role.Metadata); err != nil {
+		return nil, err
 	}
 	if len(role.Metadata) == 0 {
 		role.Metadata = nil
@@ -458,6 +447,27 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 		warnings = append(warnings, fmt.Sprintf("credential spec %q does not exist yet", role.CredSpecName))
 	}
 	return warnings, nil
+}
+
+// validateObjectMetadata checks the free-form labels of a role or a group: at
+// most MaxRoleMetadataKeys keys, none empty, keys and values within their byte
+// bounds.
+func validateObjectMetadata(md map[string]string) error {
+	if len(md) > logical.MaxRoleMetadataKeys {
+		return logical.ErrBadRequestf("metadata has %d keys; at most %d are allowed",
+			len(md), logical.MaxRoleMetadataKeys)
+	}
+	for _, k := range slices.Sorted(maps.Keys(md)) {
+		switch {
+		case k == "":
+			return logical.ErrBadRequest("metadata keys must not be empty")
+		case len(k) > logical.MaxRoleMetadataKeyBytes:
+			return logical.ErrBadRequestf("metadata key starting %.32q exceeds %d bytes", k, logical.MaxRoleMetadataKeyBytes)
+		case len(md[k]) > logical.MaxRoleMetadataValueBytes:
+			return logical.ErrBadRequestf("metadata value of %q exceeds %d bytes", k, logical.MaxRoleMetadataValueBytes)
+		}
+	}
+	return nil
 }
 
 // normalizeRolePolicies returns policies trimmed and lower-cased (the form the

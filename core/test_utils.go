@@ -513,7 +513,7 @@ func newMockProvider() *mockProvider {
 }
 
 // Helper function to create a test core with all dependencies
-func createTestCore(t *testing.T) *Core {
+func createTestCore(t testing.TB) *Core {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	router := NewRouter(log)
 
@@ -593,6 +593,8 @@ func createTestCore(t *testing.T) *Core {
 	// Initialize and load the role store, as the active node does at unseal.
 	core.roleStore = NewRoleStore(core)
 	_ = core.setupRoleStore(ctx, false)
+	core.identityStore = NewIdentityStore(core)
+	_ = core.setupIdentityStore(ctx, false)
 
 	return core
 }

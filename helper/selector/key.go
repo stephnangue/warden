@@ -1,11 +1,12 @@
 // Package selector matches what an auth mount verified about a credential
-// against operator-written rules, the selectors a group uses to grant roles.
+// against operator-written rules, the rules a group uses to grant roles.
 //
 // A mount verifies a credential into Facts and publishes a Mapping from
-// canonical fact names to the raw keys inside those facts. A compiled Rule asks
-// a Source, facts seen through a mapping, for each name it lists. A rule
-// matches when every name it lists yields at least one value equal to, or
-// matched by, one of the rule's values for that name.
+// canonical fact names to the raw keys inside those facts. A rule is a set of
+// selectors, each a fact name with the values it may take. A compiled Rule
+// asks a Source, facts seen through a mapping, for each name its selectors
+// list, and matches when every selector's name yields at least one value equal
+// to, or matched by, one of that selector's values.
 //
 // Everything here is built once, when a mount or a group is written, and is
 // immutable afterwards, so it is safe to share across goroutines without locks.
@@ -94,9 +95,9 @@ func unescapePointerToken(tok string) (string, error) {
 const (
 	// MaxNameLen bounds a canonical fact name, in bytes.
 	MaxNameLen = 64
-	// MaxRuleNames bounds the names one rule lists.
+	// MaxRuleNames bounds the selectors of one rule (one fact name each).
 	MaxRuleNames = 32
-	// MaxRuleValues bounds the values one rule lists for a name.
+	// MaxRuleValues bounds the values of one selector.
 	MaxRuleValues = 32
 	// MaxValueLen bounds one rule value, in bytes.
 	MaxValueLen = 1024

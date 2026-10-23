@@ -151,13 +151,13 @@ func TestCompile_Refused(t *testing.T) {
 		rule map[string][]string
 		want string
 	}{
-		{"empty rule", map[string][]string{}, "at least one fact"},
-		{"nil rule", nil, "at least one fact"},
+		{"empty rule", map[string][]string{}, "at least one selector"},
+		{"nil rule", nil, "at least one selector"},
 		{"no values", map[string][]string{"repo": {}}, "at least one value"},
 		{"empty value", map[string][]string{"repo": {""}}, "empty value"},
 		{"bad name", map[string][]string{"Repo": {"x"}}, "may contain only"},
 		{"pointer name", map[string][]string{"/repo": {"x"}}, `must not start with "/"`},
-		{"too many names", tooManyNames, "at most 32 facts"},
+		{"too many names", tooManyNames, "at most 32 selectors"},
 		{"too many values", map[string][]string{"repo": tooManyValues}, "at most 32 values"},
 		{"long value", map[string][]string{"repo": {strings.Repeat("v", MaxValueLen+1)}}, "longer than 1024"},
 		{"trailing escape, exact", map[string][]string{"repo": {`a\`}}, "escapes nothing"},

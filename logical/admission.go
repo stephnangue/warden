@@ -29,12 +29,15 @@ func ParseEntityKind(s string) (string, error) {
 // Admission is what an auth mount verified about one credential. The auth
 // method builds a fresh one for each login and core completes it in
 // LoginCreateToken (it sets MountPath) before the token is stored; from then on
-// it is never written.
+// its exported fields are never written.
 //
 // One *Admission is shared by pointer: the token store keeps it on the stored
 // TokenEntry, and every per-request copy of that entry holds the same pointer.
-// Readers on any number of goroutines need no lock because nothing in it
-// changes after LoginCreateToken.
+// Readers on any number of goroutines need no lock: the exported fields do not
+// change after LoginCreateToken, and the one field that does, the cached
+// membership, is an atomic pointer to an immutable Membership, replaced whole
+// (LoadMembership, CompareAndSwapMembership). An Admission must not be copied
+// by value.
 type Admission struct {
 	// MountPath is the admitting mount's path relative to its namespace
 	// ("auth/jwt/", never "ns1/auth/jwt/"), answered as the fact "mount". Only
@@ -58,6 +61,72 @@ type Admission struct {
 	// strings of a table), set by the auth method that builds the admission.
 	// The token cache counts it in the cost of the entry that holds it.
 	Bytes int64
+
+	// membership caches the groups and roles computed for this admission.
+	// It lives here so the cached token entry and every per-request copy share
+	// it: a recompute on one request is seen by the next.
+	membership atomic.Pointer[Membership]
+}
+
+// LoadMembership returns the cached membership, or nil when none has been
+// computed (or a is nil). It does not allocate.
+func (a *Admission) LoadMembership() *Membership {
+	if a == nil {
+		return nil
+	}
+	return a.membership.Load()
+}
+
+// CompareAndSwapMembership caches next if the cached membership is still old,
+// and reports whether it did. Two requests that computed a membership from the
+// same snapshot and naming race benignly: their results are equal, and either
+// may win. Two that straddled a group's valid_until may differ, one still
+// holding the group the other dropped; whichever is kept, its ValidUntil is no
+// later than that instant, so the first request past it computes again: the
+// race heals itself.
+func (a *Admission) CompareAndSwapMembership(old, next *Membership) bool {
+	if a == nil {
+		return false
+	}
+	return a.membership.CompareAndSwap(old, next)
+}
+
+// Membership is what an admission's verified facts earn it in its namespace:
+// the groups one of whose rules matches, and the roles those groups grant. It is
+// computed from one group snapshot (Gen) and one mount naming (Naming), and is
+// immutable once built; a change to either, or the passing of ValidUntil,
+// makes the next request compute a new one.
+type Membership struct {
+	// Gen is the generation of the namespace's group snapshot it was computed
+	// from.
+	Gen uint64
+
+	// Naming is the mount naming it was computed from; pointer identity is the
+	// mapping generation.
+	Naming *MountNaming
+
+	// ValidUntil is the earliest valid_until among the matched groups that set
+	// one, after which that group stops granting; zero when none does. The
+	// membership holds while now <= ValidUntil.
+	ValidUntil time.Time
+
+	// Groups are the names of the matched groups, sorted. Never nil, and shared:
+	// callers must not modify it.
+	Groups []string
+
+	// Roles maps each granted role name to the group that grants it: the first
+	// granting group in name order. Nil when no role is granted.
+	Roles map[string]GroupGrant
+
+	// Metadata are the mount's mapped facts rendered as strings, under Naming.
+	// Nil when nothing is rendered.
+	Metadata map[string]string
+}
+
+// GroupGrant names the group a role is granted through.
+type GroupGrant struct {
+	Group string // the group's name
+	Label string // GroupLabel(Group), built once when the group is compiled
 }
 
 // Size returns the admission's byte estimate for cache accounting: Bytes,
