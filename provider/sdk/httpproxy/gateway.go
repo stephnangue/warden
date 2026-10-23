@@ -10,6 +10,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // defaultAcceptJSON is the Accept value injected when no spec or dispatch
@@ -119,7 +120,7 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	}
 
 	// Build target URL
-	targetURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
+	parsedURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		b.writeInternalFailure(req)
@@ -128,12 +129,6 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 
 	// Prepare request for proxying
 	r := req.HTTPRequest
-	parsedURL, err := url.Parse(targetURL)
-	if err != nil {
-		b.Logger.Error("Failed to parse target URL", logger.Err(err))
-		b.writeInternalFailure(req)
-		return
-	}
 	r.URL = parsedURL
 	r.Host = parsedURL.Host
 	r.RequestURI = "" // Required for outgoing requests
@@ -201,19 +196,21 @@ func (b *proxyBackend) writeInternalFailure(req *logical.Request) {
 	}
 }
 
-// buildTargetURL constructs the target URL from the gateway path.
-func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
+// buildTargetURL constructs the target URL from the gateway path. path is the
+// decoded request path the request was authorized on; it is escaped once on
+// the wire and never decoded again (see package upstream).
+func buildTargetURL(providerURL, path, rawQuery string) (*url.URL, error) {
 	// Providers whose upstream is instance-specific (gitlab, kubernetes,
 	// splunk, mcp, ...) ship an empty DefaultURL and require the operator
 	// to configure one. Guard here so a request to an unconfigured mount fails
 	// with a clear, logged error instead of forwarding to a schemeless URL
 	// that surfaces as an opaque proxy-level 502.
 	if providerURL == "" {
-		return "", fmt.Errorf("upstream URL not configured")
+		return nil, fmt.Errorf("upstream URL not configured")
 	}
 	apiPath, ok := PathAfterGateway(path)
 	if !ok {
-		return "", fmt.Errorf("invalid gateway path: %s", path)
+		return nil, fmt.Errorf("invalid gateway path: %s", path)
 	}
 	// Preserve the client's path after "/gateway" verbatim, including whether it
 	// ended in a slash. A bare ".../gateway" (empty suffix) targets the configured
@@ -222,10 +219,7 @@ func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
 	// trailing slash that strict servers 301-redirect; host-only upstreams are
 	// unaffected since net/http sends an empty path as "/".
 
-	if rawQuery != "" {
-		return providerURL + apiPath + "?" + rawQuery, nil
-	}
-	return providerURL + apiPath, nil
+	return upstream.URL(providerURL, apiPath, rawQuery)
 }
 
 // PathAfterGateway returns the portion of path that follows the first

@@ -427,7 +427,7 @@ func TestHandleConfigWrite_ConcurrentWithRequests(t *testing.T) {
 			for j := 0; j < 50; j++ {
 				u, err := b.buildTargetURL("/v1/vault/gateway/v1/secret/data/x", "")
 				assert.NoError(t, err)
-				assert.True(t, strings.HasPrefix(u, "https://vault"), u)
+				assert.True(t, strings.HasPrefix(u.String(), "https://vault"), u.String())
 				_, _ = b.handleConfigRead(context.Background(), nil, nil)
 			}
 		}()

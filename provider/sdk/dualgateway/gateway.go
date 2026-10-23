@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -14,6 +15,7 @@ import (
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // wardenCredentialHeaders are the inbound channels that carry a credential for
@@ -147,12 +149,14 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 
 	// Build target URL — strip the Warden gateway prefix.
 	// Providers that route to multiple upstream hosts based on the request path
-	// can supply a RewriteAPITarget hook; otherwise we concatenate providerURL + apiPath.
+	// can supply a RewriteAPITarget hook; otherwise apiPath is appended to
+	// providerURL. Either way apiPath, the decoded path the request was
+	// authorized on, is escaped once and never decoded again.
 	apiPath := extractAPIPath(req.HTTPRequest.URL.Path)
-	var targetURL string
+	var target *url.URL
 	if b.spec.RewriteAPITarget != nil {
 		var rewriteErr error
-		targetURL, rewriteErr = b.spec.RewriteAPITarget(snap.providerURL, apiPath, snap.extraState)
+		target, rewriteErr = b.spec.RewriteAPITarget(snap.providerURL, apiPath, snap.extraState)
 		if rewriteErr != nil {
 			b.Logger.Warn("RewriteAPITarget rejected request",
 				logger.String("path", apiPath),
@@ -162,15 +166,23 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 			return
 		}
 	} else {
-		targetURL = strings.TrimRight(snap.providerURL, "/") + apiPath
+		var err error
+		target, err = upstream.URL(strings.TrimRight(snap.providerURL, "/"), apiPath, "")
+		if err != nil {
+			b.Logger.Error("failed to build target URL", logger.Err(err))
+			http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 
-	outReq, err := http.NewRequestWithContext(ctx, req.HTTPRequest.Method, targetURL, nil)
+	outReq, err := http.NewRequestWithContext(ctx, req.HTTPRequest.Method, target.String(), nil)
 	if err != nil {
 		b.Logger.Error("failed to create outgoing request", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	// The URL as built, not a re-parse of its string form.
+	outReq.URL = target
 
 	// Copy headers, strip Warden/proxy headers
 	for k, vv := range req.HTTPRequest.Header {
@@ -207,7 +219,7 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 
 	b.Logger.Trace("API request details",
 		logger.String("method", req.HTTPRequest.Method),
-		logger.String("targetURL", targetURL),
+		logger.String("targetURL", target.Redacted()),
 		logger.String("path", apiPath),
 		logger.String("request_id", req.RequestID),
 	)

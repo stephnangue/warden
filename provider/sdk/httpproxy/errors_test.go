@@ -164,3 +164,31 @@ func TestProxyBackend_RenderGatewayError_DelegatesToHook(t *testing.T) {
 	assert.Same(t, httpReq, gotReq, "the hook gets the HTTP request")
 	assert.Same(t, f, gotFailure)
 }
+
+// TestHandleGateway_UpstreamReceivesTheAuthorizedPath: the path a request was
+// authorized on is the path the upstream decodes. A double-encoded dot segment
+// is authorized as a literal "%2e%2e" segment, so it must not reach the
+// upstream as one it would resolve.
+func TestHandleGateway_UpstreamReceivesTheAuthorizedPath(t *testing.T) {
+	var gotRequestURI, gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI, gotPath = r.RequestURI, r.URL.Path
+	}))
+	defer upstream.Close()
+
+	pb := setupBackend(t, testSpec()).(*proxyBackend)
+	pb.providerURL = upstream.URL
+
+	httpReq := httptest.NewRequest("GET", "/test/gateway/repos/org/public/%252e%252e/secret", nil)
+	require.Equal(t, "/test/gateway/repos/org/public/%2e%2e/secret", httpReq.URL.Path, "what the request is authorized on")
+	rec := httptest.NewRecorder()
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+		Credential:     &credential.Credential{Type: credential.TypeAPIKey, Data: map[string]string{"api_key": "sk-test"}},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/repos/org/public/%252e%252e/secret", gotRequestURI)
+	assert.Equal(t, "/repos/org/public/%2e%2e/secret", gotPath)
+}

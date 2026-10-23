@@ -11,6 +11,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // Headers to remove before proxying
@@ -88,7 +89,7 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	}
 
 	// Build target URL
-	targetURL, err := targetURLFor(address, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
+	parsedURL, err := targetURLFor(address, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
@@ -97,12 +98,6 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 
 	// Prepare request for proxying
 	r := req.HTTPRequest
-	parsedURL, err := url.Parse(targetURL)
-	if err != nil {
-		b.Logger.Error("Failed to parse target URL", logger.Err(err))
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
-		return
-	}
 	r.URL = parsedURL
 	r.Host = r.URL.Host
 	r.RequestURI = "" // Required for outgoing requests
@@ -133,16 +128,18 @@ func (b *vaultBackend) getVaultToken(req *logical.Request) (string, error) {
 }
 
 // buildTargetURL constructs the target Vault URL from the gateway path
-func (b *vaultBackend) buildTargetURL(path, rawQuery string) (string, error) {
+func (b *vaultBackend) buildTargetURL(path, rawQuery string) (*url.URL, error) {
 	return targetURLFor(b.address(), path, rawQuery)
 }
 
 // targetURLFor constructs the target URL at address from the gateway path.
-func targetURLFor(address, path, rawQuery string) (string, error) {
+// path is the decoded request path the request was authorized on; it is
+// escaped once on the wire and never decoded again (see package upstream).
+func targetURLFor(address, path, rawQuery string) (*url.URL, error) {
 	// Find gateway path marker
 	gatewayIdx := strings.Index(path, "/gateway")
 	if gatewayIdx == -1 {
-		return "", fmt.Errorf("invalid gateway path: %s", path)
+		return nil, fmt.Errorf("invalid gateway path: %s", path)
 	}
 
 	// Extract path after "/gateway"
@@ -154,11 +151,7 @@ func targetURLFor(address, path, rawQuery string) (string, error) {
 		vaultPath = "/v1" + vaultPath
 	}
 
-	// Build URL string directly (avoid url.Parse overhead for simple case)
-	if rawQuery != "" {
-		return address + vaultPath + "?" + rawQuery, nil
-	}
-	return address + vaultPath, nil
+	return upstream.URL(address, vaultPath, rawQuery)
 }
 
 // prepareHeaders removes unwanted headers and injects the Vault token (if provided)

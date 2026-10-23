@@ -206,6 +206,8 @@ func TestSynthesizeGatewayPath(t *testing.T) {
 		{"empty middle segment", "gitlab//prod", "r", "p", "", true},
 		{"bare double-dot", "..", "r", "p", "", true},
 		{"trailing double-dot", "gitlab/..", "r", "p", "", true},
+		{"bare dot", ".", "r", "p", "", true},
+		{"dot segment", "gitlab/./prod", "r", "p", "", true},
 		{"whitespace only passes synthesis", "   ", "r", "p", "   /role/r/gateway/p", false},
 	}
 	// Whitespace is not stripped or rejected per-segment; the helper trusts
@@ -368,6 +370,38 @@ func TestApplyRoleHeader(t *testing.T) {
 			got := applyRoleHeader(tc.path, tc.role)
 			assert.Equal(t, tc.want, got)
 		})
+	}
+}
+
+// TestHandleRequest_RoleHeaderMustBeARoleName: X-Warden-Role is spliced into
+// the path policies are matched against, after the HTTP layer checked that
+// path, so a value that adds or walks a segment is refused in both routing
+// modes before anything is rewritten.
+func TestHandleRequest_RoleHeaderMustBeARoleName(t *testing.T) {
+	core := createTestCore(t)
+
+	for _, role := range []string{"..", ".", "a/b", "../../other", "-x"} {
+		for _, provider := range []string{"", "somemount"} {
+			path := "somemount/role/old-role/gateway/v1/secret"
+			target := "/v1/" + path
+			if provider != "" {
+				path, target = "v1/secret", "/v1/v1/secret"
+			}
+			httpReq := httptest.NewRequest(http.MethodGet, target, nil)
+			httpReq.Header.Set("X-Warden-Role", role)
+			if provider != "" {
+				httpReq.Header.Set("X-Warden-Provider", provider)
+			}
+			req := &logical.Request{Path: path, Operation: logical.ReadOperation, HTTPRequest: httpReq}
+
+			resp, err := core.HandleRequest(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "role %q, provider %q", role, provider)
+			require.Error(t, resp.Err)
+			assert.Contains(t, resp.Err.Error(), "invalid X-Warden-Role", "role %q, provider %q", role, provider)
+			assert.Equal(t, path, req.Path, "nothing is rewritten for role %q", role)
+		}
 	}
 }
 

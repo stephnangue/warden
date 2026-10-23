@@ -383,6 +383,15 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 			return
 		}
 
+		// Whether the path arrived percent-encoded, read before the
+		// X-Warden-Provider rewrite clears RawPath. Only such a path is
+		// checked for dot and empty segments below: a literal one is
+		// redirected to the clean path by the router behind this wrapper,
+		// except under CONNECT, which the router does not clean and
+		// handleLogical refuses before building a request from the path.
+		// TestHandler_NoDotSegmentReachesALogicalRequest pins all three.
+		encodedPath := r.URL.RawPath != ""
+
 		// X-Warden-Provider /v1/ exemption. Only rewrites when the
 		// header is non-empty AND the path is missing /v1/. Empty
 		// header values (Header.Get returns "" for both absent and
@@ -410,6 +419,10 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 		// Validate request path
 		if !strings.HasPrefix(r.URL.Path, "/v1/") {
 			respondError(w, http.StatusNotFound, "path must begin with /v1/")
+			return
+		}
+		if encodedPath && !canonicalRequestPath(r.URL.Path) {
+			respondError(w, http.StatusBadRequest, errNonCanonicalPath)
 			return
 		}
 
@@ -521,6 +534,10 @@ func respondStandby(w http.ResponseWriter, r *http.Request, leaderAddr string) {
 		return
 	}
 	target.Path = r.URL.Path
+	// The client's own encoding, so an encoded slash inside a segment (an ARN
+	// in a model path) reaches the leader as one segment, not two. Empty after
+	// the X-Warden-Provider rewrite, which is right for the rewritten path.
+	target.RawPath = r.URL.RawPath
 	target.RawQuery = r.URL.RawQuery
 	http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
 }

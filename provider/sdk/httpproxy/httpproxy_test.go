@@ -1243,7 +1243,7 @@ func TestBuildTargetURL(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				require.NoError(t, err)
-				assert.Equal(t, tc.expected, result)
+				assert.Equal(t, tc.expected, result.String())
 			}
 		})
 	}

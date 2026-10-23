@@ -8,6 +8,7 @@
 package dualgateway
 
 import (
+	"net/url"
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -121,7 +122,7 @@ type ProviderSpec struct {
 	// --- Optional API-mode URL override ---
 
 	// RewriteAPITarget, if non-nil, overrides API-mode target URL construction.
-	// Default behavior (nil): targetURL = providerURL + apiPath.
+	// Default behavior (nil): upstream.URL(providerURL, apiPath).
 	//
 	// Providers that route to multiple upstream hostnames based on the request
 	// path (e.g., IBM Cloud, where each service has a different host) use this
@@ -133,10 +134,13 @@ type ProviderSpec struct {
 	//   state       - the map produced by OnConfigParsed (may be nil)
 	//
 	// Returns:
-	//   full target URL (scheme + host + path + optional query) on success
+	//   the target URL (scheme + host + path) on success, built with
+	//     upstream.URL so apiPath — the decoded path the request was
+	//     authorized on — is never decoded a second time; the request's
+	//     query is set by the caller
 	//   non-nil error to reject the request with HTTP 400
 	//
 	// Only invoked for API-mode requests; SigV4 (S3/COS) requests continue to use
 	// S3Endpoint and are never routed through this hook.
-	RewriteAPITarget func(providerURL, apiPath string, state map[string]any) (string, error)
+	RewriteAPITarget func(providerURL, apiPath string, state map[string]any) (*url.URL, error)
 }
