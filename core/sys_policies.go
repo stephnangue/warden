@@ -116,10 +116,30 @@ func parsePolicyForType(ns *namespace.Namespace, policyText string, policyType P
 	}
 }
 
+// policyPathName returns the policy name the request's path names, exactly as
+// written. The CBP authorized the request on that path, so a spelling other
+// than the canonical one is refused rather than folded: folding it would let
+// sys/policies/cbp/Admin reach a policy that a deny on sys/policies/cbp/admin
+// protects.
+func policyPathName(d *framework.FieldData) (string, error) {
+	name := d.Get("name").(string)
+	canonical, ok := logical.CanonicalPolicyName(name)
+	if !ok {
+		return "", logical.ErrBadRequestf("invalid policy name %.64q: %s", name, logical.PolicyNameRule)
+	}
+	if canonical != name {
+		return "", logical.ErrBadRequestf("policy name %q is not canonical: use %q", name, canonical)
+	}
+	return name, nil
+}
+
 // handlePolicyCreate handles POST /sys/policies/{type}/{name}
 func (b *SystemBackend) handlePolicyCreate(policyType PolicyType) framework.OperationFunc {
 	return func(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-		name := d.Get("name").(string)
+		name, err := policyPathName(d)
+		if err != nil {
+			return logical.ErrorResponse(err), nil
+		}
 		policyText := d.Get("policy").(string)
 
 		b.logger.Info("creating policy", logger.String("name", name), logger.String("type", policyType.String()))
@@ -165,7 +185,10 @@ func (b *SystemBackend) handlePolicyCreate(policyType PolicyType) framework.Oper
 // handlePolicyRead handles GET /sys/policies/{type}/{name}
 func (b *SystemBackend) handlePolicyRead(policyType PolicyType) framework.OperationFunc {
 	return func(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-		name := d.Get("name").(string)
+		name, err := policyPathName(d)
+		if err != nil {
+			return logical.ErrorResponse(err), nil
+		}
 
 		// Get the policy
 		policy, err := b.core.policyStore.GetPolicy(ctx, name, policyType)
@@ -189,7 +212,10 @@ func (b *SystemBackend) handlePolicyRead(policyType PolicyType) framework.Operat
 // handlePolicyUpdate handles PUT /sys/policies/{type}/{name}
 func (b *SystemBackend) handlePolicyUpdate(policyType PolicyType) framework.OperationFunc {
 	return func(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-		name := d.Get("name").(string)
+		name, err := policyPathName(d)
+		if err != nil {
+			return logical.ErrorResponse(err), nil
+		}
 		policyText := d.Get("policy").(string)
 
 		b.logger.Info("updating policy", logger.String("name", name), logger.String("type", policyType.String()))
@@ -235,7 +261,10 @@ func (b *SystemBackend) handlePolicyUpdate(policyType PolicyType) framework.Oper
 // handlePolicyDelete handles DELETE /sys/policies/{type}/{name}
 func (b *SystemBackend) handlePolicyDelete(policyType PolicyType) framework.OperationFunc {
 	return func(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-		name := d.Get("name").(string)
+		name, err := policyPathName(d)
+		if err != nil {
+			return logical.ErrorResponse(err), nil
+		}
 
 		b.logger.Info("deleting policy", logger.String("name", name), logger.String("type", policyType.String()))
 

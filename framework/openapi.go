@@ -1039,9 +1039,6 @@ func convertType(t FieldType) schemaType {
 	case TypeNameString:
 		ret.baseType = "string"
 		ret.pattern = `\w([\w-.]*\w)?`
-	case TypeLowerCaseString:
-		ret.baseType = "string"
-		ret.format = "lowercase"
 	case TypeInt:
 		ret.baseType = "integer"
 	case TypeInt64:
