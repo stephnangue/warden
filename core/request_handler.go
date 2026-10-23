@@ -297,11 +297,27 @@ func (c *Core) lookupTokenEntry(ctx context.Context, req *logical.Request) (*log
 	return te, nil
 }
 
-// buildCBP compiles the CBP of te's policies, in te's namespace.
+// buildCBP compiles the CBP of te's policies, in te's namespace, together with
+// that namespace's built-in policies unless te is a root token.
+//
+// This is the one place the built-ins are attached. A reserved name on the
+// token is dropped first: a built-in it names is attached anyway, by type, and
+// a policy left under another reserved name is given to no request. The names
+// are gathered into a slice of their own, since te.Policies may be a role's
+// shared slice.
 func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry) (*CBP, error) {
-	policyNames := make(map[string][]string)
-	// Add tokens policies
-	policyNames[te.NamespaceID] = append(policyNames[te.NamespaceID], te.Policies...)
+	names := make([]string, 0, len(te.Policies))
+	isRoot := false
+	for _, name := range te.Policies {
+		if canonical, ok := logical.CanonicalPolicyName(name); ok && isReservedPolicyName(canonical) {
+			continue
+		}
+		if name == "root" {
+			isRoot = true
+		}
+		names = append(names, name)
+	}
+	policyNames := map[string][]string{te.NamespaceID: names}
 
 	tokenNS, err := c.NamespaceByID(ctx, te.NamespaceID)
 	if err != nil {
@@ -322,7 +338,20 @@ func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry) (*CBP, erro
 		c.logger.Error("policy store is unavailable")
 		return nil, ErrInternalError
 	}
-	cbp, err := c.policyStore.CBP(tokenCtx, policyNames)
+
+	// Root is the whole grant on its own and admits no other policy beside it.
+	// The built-ins are gathered into a fixed buffer so the slice need not
+	// reach the heap.
+	var buf [2]*Policy
+	builtins := buf[:0]
+	if !isRoot {
+		builtins, err = c.policyStore.appendDefaultPolicies(tokenCtx, builtins)
+		if err != nil {
+			c.logger.Error("failed to fetch built-in policies", logger.Err(err))
+			return nil, ErrInternalError
+		}
+	}
+	cbp, err := c.policyStore.CBP(tokenCtx, policyNames, builtins...)
 	if err != nil {
 		c.logger.Error("failed to construct CBP", logger.Err(err))
 		return nil, ErrInternalError
