@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -573,6 +574,27 @@ func ReadNodeLog(t *testing.T, nodeNum int) string {
 		t.Fatalf("failed to read log for node %d: %v", nodeNum, err)
 	}
 	return string(data)
+}
+
+// NodeLogSize returns the size of a node's log, so a test can read only what
+// the node logs afterwards (NodeLogSince): a restarted node appends to it.
+func NodeLogSize(t *testing.T, nodeNum int) int {
+	t.Helper()
+	return len(ReadNodeLog(t, nodeNum))
+}
+
+// ansiEscape matches the colour codes of the standard log format.
+var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// NodeLogSince returns the lines a node logged after its log had offset bytes
+// (NodeLogSize), colour codes removed.
+func NodeLogSince(t *testing.T, nodeNum, offset int) []string {
+	t.Helper()
+	log := ReadNodeLog(t, nodeNum)
+	if offset > len(log) {
+		offset = 0
+	}
+	return strings.Split(ansiEscape.ReplaceAllString(log[offset:], ""), "\n")
 }
 
 // GrepNodeLog checks if pattern appears in a node's log file.

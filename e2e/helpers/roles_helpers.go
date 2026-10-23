@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stephnangue/warden/audit"
 )
 
 // Role is a namespace role as the suites write it at sys/roles/<name>: what a
@@ -153,6 +155,111 @@ func CapMountTokenTTL(t *testing.T, port int, mount string, seconds int) {
 	t.Cleanup(func() {
 		mustNS(t, port, "", "PUT", path, fmt.Sprintf(`{"token_ttl":%d}`, int(current.Seconds())), "restore the session lifetime of "+path)
 	})
+}
+
+// Group is a virtual group as a test writes it whole: the roles it grants,
+// its rules (each names its mounts under "mount") and, when set, the RFC 3339
+// instant after which it grants nothing.
+type Group struct {
+	Roles      []string
+	Rules      []map[string][]string
+	ValidUntil string
+}
+
+// WriteGroupInNS writes group name in namespace (the root namespace when
+// empty): it creates it, or updates it in place when it exists, as an
+// operator's edit does. It deletes the group when the test ends and returns
+// the write's warnings.
+func WriteGroupInNS(t *testing.T, port int, namespace, name string, g Group) []string {
+	t.Helper()
+	body := map[string]any{"type": "virtual", "roles": g.Roles, "rules": g.Rules}
+	if g.ValidUntil != "" {
+		body["valid_until"] = g.ValidUntil
+	}
+	path := "sys/identity/group/" + name
+	status, resp := nsRequest(t, port, namespace, "POST", path, jsonBody(t, body))
+	if status == 409 {
+		status, resp = nsRequest(t, port, namespace, "PUT", path, jsonBody(t, body))
+	}
+	if status != 200 && status != 201 && status != 204 {
+		t.Fatalf("write group %s (status %d): %s", name, status, resp)
+	}
+	t.Cleanup(func() { nsRequest(t, port, namespace, "DELETE", path, "") })
+	var out struct {
+		Warnings []string `json:"warnings"`
+		Data     struct {
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(resp, &out)
+	return append(out.Warnings, out.Data.Warnings...)
+}
+
+// MustNS issues a request in namespace (the root namespace when empty) with
+// the root token and fails the test unless it succeeded.
+func MustNS(t *testing.T, port int, namespace, method, path, body string) []byte {
+	t.Helper()
+	status, resp := nsRequest(t, port, namespace, method, path, body)
+	switch status {
+	case 200, 201, 204:
+		return resp
+	}
+	t.Fatalf("%s %s (status %d): %s", method, path, status, resp)
+	return nil
+}
+
+// NSRequestBestEffort issues a request in namespace (the root namespace when
+// empty) with the root token and ignores the outcome, for cleanups that must
+// not fail a run.
+func NSRequestBestEffort(port int, namespace, method, path string) {
+	headers := map[string]string{"X-Warden-Token": rootTokenBestEffort()}
+	if namespace != "" {
+		headers["X-Warden-Namespace"] = namespace
+	}
+	TryRequest(method, fmt.Sprintf("%s/v1/%s", NodeURL(port), path), headers, "")
+}
+
+// JSON returns v encoded as JSON.
+func JSON(t *testing.T, v any) string {
+	t.Helper()
+	return jsonBody(t, v)
+}
+
+// ErrorText returns the errors of an error response body joined into one
+// string, unescaped, so a test can look for a message in it; the body itself
+// when it carries none.
+func ErrorText(body []byte) string {
+	var out struct {
+		Errors []string `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || len(out.Errors) == 0 {
+		return string(body)
+	}
+	return strings.Join(out.Errors, "; ")
+}
+
+// AwaitAuditEntries polls a node's audit log until it holds at least n entries
+// whose line contains substr and that match accepts, and returns those. The
+// file device flushes every few seconds, so a test reading the entries of a
+// request it just made has to wait for them.
+func AwaitAuditEntries(t *testing.T, nodeNum int, substr string, n int, match func(audit.LogEntry) bool) []audit.LogEntry {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var got []audit.LogEntry
+		for _, e := range ReadAuditEntries(t, nodeNum, substr) {
+			if match == nil || match(e) {
+				got = append(got, e)
+			}
+		}
+		if len(got) >= n || time.Now().After(deadline) {
+			if len(got) < n {
+				t.Fatalf("node %d audit log: %d matching entries containing %q, want at least %d", nodeNum, len(got), substr, n)
+			}
+			return got
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func nsRequest(t *testing.T, port int, namespace, method, path, body string) (int, []byte) {
