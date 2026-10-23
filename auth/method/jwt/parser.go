@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/stephnangue/warden/auth/helper"
 )
 
 func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
@@ -29,6 +31,17 @@ func mapToJWTAuthConfig(data map[string]any) (*JWTAuthConfig, error) {
 		dataCopy["token_ttl"] = time.Duration(int64(ttl)) * time.Second
 	case time.Duration:
 		// Already a duration, keep as-is
+	}
+
+	// max_age arrives as seconds from a write, a duration string from storage,
+	// a duration from the merge, and either string or number in a mount table
+	// config.
+	if raw, ok := dataCopy["max_age"]; ok {
+		maxAge, err := helper.ParseMaxAge(raw)
+		if err != nil {
+			return nil, err
+		}
+		dataCopy["max_age"] = maxAge
 	}
 
 	jsonData, err := json.Marshal(dataCopy)

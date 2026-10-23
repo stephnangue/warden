@@ -38,11 +38,14 @@ type FactsConfig struct {
 }
 
 // Compile compiles EntityKind and Facts with the method's built-in fact names.
-// On success Naming returns the result and EntityKind is normalized (empty
-// becomes logical.EntityKindAgent); on failure Naming is nil and Err says why,
-// naming the config key at fault.
+// On success Naming returns the result; on failure Naming is nil and Err says
+// why, naming the config key at fault. Either way an empty EntityKind becomes
+// logical.EntityKindAgent, the default it stands for, so a config reads back
+// the same kind whether or not its facts compile; a kind that is set is left
+// as written.
 func (c *FactsConfig) Compile(builtins []string) {
 	c.naming, c.namingErr = nil, nil
+	c.defaultKind()
 	mapping, err := selector.CompileMapping(builtins, c.Facts)
 	if err != nil {
 		c.namingErr = fmt.Errorf("facts: %w", err)
@@ -60,11 +63,13 @@ func (c *FactsConfig) Compile(builtins []string) {
 // CompileFields is Compile for a method whose facts are a fixed set of fields
 // (a selector.Table): fields are its built-in names and the only sources Facts
 // may map, since a Table answers nothing else. A source outside fields fails
-// the compile, naming the fields that exist.
+// the compile, naming the fields that exist; EntityKind is defaulted as
+// Compile defaults it.
 func (c *FactsConfig) CompileFields(fields []string) {
 	sources := slices.Sorted(maps.Keys(c.Facts))
 	for _, source := range sources {
 		if !slices.Contains(fields, source) {
+			c.defaultKind()
 			c.naming = nil
 			c.namingErr = fmt.Errorf("facts: source %q is not a field of this mount (one of %s)",
 				source, strings.Join(slices.Sorted(slices.Values(fields)), ", "))
@@ -72,6 +77,14 @@ func (c *FactsConfig) CompileFields(fields []string) {
 		}
 	}
 	c.Compile(fields)
+}
+
+// defaultKind sets an empty EntityKind to logical.EntityKindAgent, the kind an
+// empty one means.
+func (c *FactsConfig) defaultKind() {
+	if c.EntityKind == "" {
+		c.EntityKind = logical.EntityKindAgent
+	}
 }
 
 // Naming returns the compiled naming, or nil when Compile failed or has not

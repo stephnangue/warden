@@ -42,6 +42,17 @@ func mapToKubernetesAuthConfig(data map[string]any) (*KubernetesAuthConfig, erro
 		dataCopy["bound_audiences"] = auds
 	}
 
+	// max_age arrives as seconds from a write, a duration string from storage,
+	// a duration from the merge, and either string or number in a mount table
+	// config.
+	if raw, ok := dataCopy["max_age"]; ok {
+		maxAge, err := helper.ParseMaxAge(raw)
+		if err != nil {
+			return nil, err
+		}
+		dataCopy["max_age"] = maxAge
+	}
+
 	jsonData, err := json.Marshal(dataCopy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal config map: %w", err)

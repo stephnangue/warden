@@ -46,6 +46,13 @@ type JWTAuthConfig struct {
 	// Token settings
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
 
+	// MaxAge bounds a JWT's age at admission, from its iat: one older, or
+	// without an iat, is not admitted. Zero is unset. Stored, read back and
+	// validated (not negative), but not used by role logins, which keep
+	// their role's max_age; the role-free admission enforces it, through
+	// helper.CheckMaxAge.
+	MaxAge time.Duration `json:"max_age,omitempty"`
+
 	// Default role for transparent operations when no role is specified
 	DefaultRole string `json:"default_role,omitempty"`
 
@@ -257,6 +264,7 @@ func normalizedJWTConfig(config *JWTAuthConfig) map[string]any {
 		"groups_claim":           config.GroupsClaim,
 		"group_policy_prefix":    config.GroupPolicyPrefix,
 		"token_ttl":              config.TokenTTL.String(),
+		"max_age":                config.MaxAge.String(),
 		"default_role":           config.DefaultRole,
 		"entity_kind":            config.EntityKind,
 		"facts":                  config.Facts,

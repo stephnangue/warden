@@ -1,6 +1,7 @@
 package spiffe
 
 import (
+	"crypto/x509"
 	"testing"
 	"time"
 
@@ -143,4 +144,52 @@ func TestVerifyJWTSVID_AllowedSPIFFEIDs(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not allowed by role")
 	})
+}
+
+// Verification alone admits a genuine SVID of any trust domain in the set;
+// CheckRoleBinding alone holds the trust-domain and ID checks, with the errors
+// the combined functions return.
+func TestVerifySplit_VerificationAndRoleBinding(t *testing.T) {
+	authB := newJWTAuthority(t)
+	caB, keyB, pemB := testCA(t)
+	_, _, pemA := testCA(t)
+	s, err := BuildBundleSet([]*TrustDomain{
+		{Name: "a.example.org", BundlePEM: pemA},
+		{Name: "b.example.org", BundleJSON: authB.bundleJSON(t, "b.example.org", 0)},
+	})
+	require.NoError(t, err)
+	sX, err := BuildBundleSet([]*TrustDomain{
+		{Name: "a.example.org", BundlePEM: pemA},
+		{Name: "b.example.org", BundlePEM: pemB},
+	})
+	require.NoError(t, err)
+	tdA, tdB := mustTD(t, "a.example.org"), mustTD(t, "b.example.org")
+
+	token := authB.sign(t, "spiffe://b.example.org/sa/api", []string{"warden"}, time.Now().Add(time.Hour))
+	svid, err := VerifyJWTSVIDToken(s, token, []string{"warden"})
+	require.NoError(t, err)
+	assert.Equal(t, "spiffe://b.example.org/sa/api", svid.ID.String())
+	_, err = VerifyJWTSVIDToken(s, token, nil)
+	assert.ErrorContains(t, err, "audience is required")
+	_, err = VerifyJWTSVIDToken(nil, token, []string{"warden"})
+	assert.ErrorContains(t, err, "no trust bundles loaded")
+
+	cert := testSVID(t, caB, keyB, "spiffe://b.example.org/sa/api")
+	id, chains, err := VerifyX509SVIDChain(sX, []*x509.Certificate{cert})
+	require.NoError(t, err)
+	assert.Equal(t, svid.ID, id)
+	assert.NotEmpty(t, chains)
+	_, _, err = VerifyX509SVIDChain(nil, []*x509.Certificate{cert})
+	assert.ErrorContains(t, err, "no trust bundles loaded")
+
+	require.NoError(t, CheckRoleBinding(id, tdB, nil))
+	require.NoError(t, CheckRoleBinding(id, tdB, []string{"spiffe://b.example.org/+/api"}))
+	err = CheckRoleBinding(id, tdA, nil)
+	assert.EqualError(t, err, `SVID trust domain "b.example.org" does not match role trust domain "a.example.org"`)
+	_, err2 := VerifyJWTSVID(s, token, []string{"warden"}, tdA, nil)
+	assert.Equal(t, err, err2)
+	_, _, err2 = VerifyX509SVID(sX, []*x509.Certificate{cert}, tdA, nil)
+	assert.Equal(t, err, err2)
+	err = CheckRoleBinding(id, tdB, []string{"spiffe://b.example.org/other/*"})
+	assert.EqualError(t, err, `SPIFFE ID "spiffe://b.example.org/sa/api" not allowed by role`)
 }

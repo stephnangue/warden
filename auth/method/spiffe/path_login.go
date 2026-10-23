@@ -8,6 +8,7 @@ import (
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
+	"github.com/stephnangue/warden/auth/helper"
 	spiffelib "github.com/stephnangue/warden/auth/spiffe"
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
@@ -90,7 +91,12 @@ func (b *spiffeAuthBackend) handleX509SVIDLogin(ctx context.Context, req *logica
 	principalID := id.String()
 	fingerprint := certFingerprint(cert)
 	metadata := extractSPIFFEIDMetadata(role.MetadataMappings, id)
-	return b.authResponse(req, role, principalID, calculateTTL(config, cert.NotAfter, role), fingerprint, nil, metadata), nil
+	resp := b.authResponse(req, role, principalID, calculateTTL(config, cert.NotAfter, role), fingerprint, nil, metadata)
+	// What the login verified, alongside the role logic above, which does not
+	// read it: the SPIFFE ID. An X.509-SVID carries no audience and no issue
+	// time.
+	resp.Auth.Admission = newAdmission(id, svidX509, nil, time.Time{}, b.mountFacts)
+	return resp, nil
 }
 
 func (b *spiffeAuthBackend) handleJWTSVIDLogin(ctx context.Context, req *logical.Request, config *SPIFFEAuthConfig, role *SPIFFERole, jwtToken string) (*logical.Response, error) {
@@ -133,6 +139,10 @@ func (b *spiffeAuthBackend) handleJWTSVIDLogin(ctx context.Context, req *logical
 
 	resp := b.authResponse(req, role, svid.ID.String(), calculateTTL(config, svid.Expiry, role), jwtToken, actors, metadata)
 	resp.Auth.Policies = policies
+	// What the login verified, alongside the role logic above, which does not
+	// read it: the SPIFFE ID, the token's audiences (one of which the role's
+	// bound_audiences matched) and its iat. The claims are only read.
+	resp.Auth.Admission = newAdmission(svid.ID, svidJWT, svid.Audience, helper.IssuedAt(svid.Claims), b.mountFacts)
 	return resp, nil
 }
 

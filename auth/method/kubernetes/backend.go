@@ -70,6 +70,13 @@ type KubernetesAuthConfig struct {
 	// is sent as the TokenReview's spec.audiences.
 	BoundAudiences []string `json:"bound_audiences,omitempty"`
 
+	// MaxAge bounds a workload token's age at admission, from its iat: one
+	// older, or without an iat, is not admitted. Zero is unset. Stored, read
+	// back and validated (not negative), but not used by role logins, which
+	// keep their role's max_age; the role-free admission enforces it, through
+	// helper.CheckMaxAge.
+	MaxAge time.Duration `json:"max_age,omitempty"`
+
 	// Facts: entity_kind, and the TokenReview fields the mount publishes
 	// under other names beyond its built-in facts. Compiled in buildConfig. A
 	// config write refuses facts that do not compile, so they are never
@@ -232,6 +239,7 @@ func normalizedConfig(cfg *KubernetesAuthConfig) map[string]any {
 		"token_ttl":              cfg.TokenTTL.String(),
 		"default_role":           cfg.DefaultRole,
 		"bound_audiences":        cfg.BoundAudiences,
+		"max_age":                cfg.MaxAge.String(),
 		"entity_kind":            cfg.EntityKind,
 		"facts":                  cfg.Facts,
 	}

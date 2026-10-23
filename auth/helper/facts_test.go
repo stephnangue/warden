@@ -80,6 +80,42 @@ func TestFactsConfig_CompileFields(t *testing.T) {
 	assert.NotNil(t, c.Naming())
 }
 
+// An empty entity_kind means agent whether or not the facts compile, so a
+// config reads back the same kind either way; a kind that is set is left as
+// written, valid or not.
+func TestFactsConfig_FailedCompileDefaultsKind(t *testing.T) {
+	fields := []string{"username", "groups", "aud"}
+	for name, compile := range map[string]func(*FactsConfig){
+		"unknown source": func(c *FactsConfig) {
+			c.Facts = map[string]string{"email": "email"}
+			c.CompileFields(fields)
+		},
+		"mapping refused": func(c *FactsConfig) {
+			c.Facts = map[string]string{"username": "aud"}
+			c.CompileFields(fields)
+		},
+		"mapping refused by Compile": func(c *FactsConfig) {
+			c.Facts = map[string]string{"path": "mount"}
+			c.Compile(testBuiltins)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			empty := FactsConfig{}
+			compile(&empty)
+			require.Error(t, empty.Err())
+			assert.Nil(t, empty.Naming())
+			assert.Equal(t, logical.EntityKindAgent, empty.EntityKind)
+
+			for _, kind := range []string{logical.EntityKindHuman, "robot"} {
+				set := FactsConfig{EntityKind: kind}
+				compile(&set)
+				require.Error(t, set.Err())
+				assert.Equal(t, kind, set.EntityKind, "a set kind is left as written")
+			}
+		})
+	}
+}
+
 // Embedded in a config struct, FactsConfig is flattened by encoding/json, and
 // its compiled state is neither written nor read.
 func TestFactsConfig_JSON(t *testing.T) {
