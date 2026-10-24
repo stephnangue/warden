@@ -343,10 +343,13 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 
 	// Special case the root policy
 	if policyType == PolicyTypeCBP && name == "root" && ns.ID == namespace.RootNamespaceID {
+		// Paths empty, not nil: nil reads as "never parsed" to CBP(), which
+		// would try to parse root's (empty) body on every root request.
 		p := &Policy{
 			Name:      "root",
 			namespace: namespace.RootNamespace,
 			Type:      PolicyTypeCBP,
+			Paths:     []*PathRules{},
 		}
 		if cache != nil {
 			cache.Add(index, p)

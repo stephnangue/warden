@@ -352,6 +352,12 @@ func parseCBPPolicy(ns *namespace.Namespace, rules string) (*Policy, error) {
 			return nil, fmt.Errorf("failed to parse policy: %w", err)
 		}
 	}
+	// A parsed policy always carries Paths, empty for a body with no stanza:
+	// nil reads as "never parsed" to PolicyStore.CBP, which would parse the
+	// body again on every request that names this policy.
+	if p.Paths == nil {
+		p.Paths = []*PathRules{}
+	}
 
 	return &p, nil
 }

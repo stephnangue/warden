@@ -1204,6 +1204,39 @@ func TestCBP_ParsesAdditionalPolicyWithoutPaths(t *testing.T) {
 		"prefetched policy without Paths must be parsed from Raw")
 }
 
+// A policy with no stanza is parsed once, like any other: its Paths are empty,
+// never nil, which CBP() would read as "never parsed" and parse again on every
+// request. Root is synthesized the same way. An emptied built-in, the
+// documented way to turn discovery off, therefore costs no more to compile
+// than the seeded one.
+func TestCBP_EmptyPolicyParsedOnce(t *testing.T) {
+	empty, err := ParseCBPPolicy(namespace.RootNamespace, "# no stanza\n")
+	require.NoError(t, err)
+	assert.NotNil(t, empty.Paths)
+
+	c := createTestCore(t)
+	ctx := rootCtx()
+	root, err := c.policyStore.GetPolicy(ctx, "root", PolicyTypeCBP)
+	require.NoError(t, err)
+	assert.NotNil(t, root.Paths)
+
+	te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID}
+	compileAllocs := func() float64 {
+		return testing.AllocsPerRun(50, func() {
+			if _, err := c.buildCBP(ctx, te, true); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	seeded := compileAllocs()
+
+	emptied, err := ParseCBPPolicy(namespace.RootNamespace, "# discovery off\n")
+	require.NoError(t, err)
+	emptied.Name, emptied.Type = builtinCBPPolicy, PolicyTypeCBP
+	require.NoError(t, c.policyStore.SetPolicy(ctx, emptied, nil))
+	assert.LessOrEqual(t, compileAllocs(), seeded, "an emptied built-in is not parsed again per request")
+}
+
 // =============================================================================
 // CBP compilation is never served from a stale cache
 // =============================================================================
