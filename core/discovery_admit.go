@@ -63,9 +63,10 @@ type admissionDiscovery struct {
 	// the membership computed for it. The role-less leg names the caller from
 	// the first.
 	admitted []discoveryAdmitted
-	// targets counts the distinct target mounts, failed those that could not
-	// decide: every one failing is an outage, not a refusal.
-	targets, failed int
+	// failed counts the target mounts that could not decide. With no
+	// admission, any one failing makes it an outage, not a refusal: the
+	// credential may be for the mount that failed.
+	failed int
 }
 
 // discoveryAdmitted is one target mount that admitted the credential.
@@ -240,7 +241,7 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	}
 	return &admissionDiscovery{
 		ns: ns, granted: granted, providers: providers, warnings: warnings,
-		admitted: admitted, targets: len(targets), failed: failed,
+		admitted: admitted, failed: failed,
 	}, nil
 }
 

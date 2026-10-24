@@ -44,6 +44,8 @@ var errRolelessNotAdmitted = errors.New("the presented credential is not admitte
 // errRolelessUndecided answers a credential no target mount admitted while
 // some could not decide (unconfigured, or a verifier unreachable). An outage,
 // not a refusal, so a client does not start an authorization flow over it.
+// Unlike the refusals, it names the mounts that failed, each by its fixed
+// phrase: the same warnings discovery has always shown any bearer holder.
 var errRolelessUndecided = errors.New("no auth mount could decide on the presented credential")
 
 // admitRoleless runs the role-less leg for req, a request on an identity path

@@ -188,6 +188,20 @@ func (f *JSONFormat) saltAuthField(ctx context.Context, auth *Auth, parts []stri
 			}
 			auth.PrincipalID = salted
 		}
+		// The principals a discovery request was admitted as are the same
+		// identity: left in clear beside the salted one, they would undo it.
+		if d := auth.Discovery; d != nil {
+			for i := range d.AdmittedBy {
+				if d.AdmittedBy[i].PrincipalID == "" {
+					continue
+				}
+				salted, err := f.saltFn(ctx, d.AdmittedBy[i].PrincipalID)
+				if err != nil {
+					return err
+				}
+				d.AdmittedBy[i].PrincipalID = salted
+			}
+		}
 	case "created_by_ip":
 		if auth.CreatedByIP != "" {
 			salted, err := f.saltFn(ctx, auth.CreatedByIP)
@@ -573,6 +587,11 @@ func (f *JSONFormat) omitAuthField(auth *Auth, parts []string) {
 		auth.TokenType = ""
 	case "principal_id":
 		auth.PrincipalID = ""
+		if d := auth.Discovery; d != nil {
+			for i := range d.AdmittedBy {
+				d.AdmittedBy[i].PrincipalID = ""
+			}
+		}
 	case "role_name":
 		auth.RoleName = ""
 	case "role_granted_by":

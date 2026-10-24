@@ -956,7 +956,11 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// implicit auth and minting are skipped below, and without a service
 	// token the role-less leg admits it before CheckToken. The request and
 	// one discovery memo ride ctx, so the handler reuses those admissions.
-	identityPath := req.HTTPRequest != nil && c.router.IdentityPath(ctx, req.Path)
+	// Only the system backend declares identity paths (validateIdentityPaths),
+	// so every other mount, gateway traffic first, skips the lookup.
+	identityPath := req.HTTPRequest != nil && entry != nil &&
+		(entry.Class == mountClassSystem || entry.Class == mountClassNSSystem) &&
+		c.router.IdentityPath(ctx, req.Path)
 	if identityPath {
 		ctx = withDiscoveryRequest(ctx, req.HTTPRequest)
 	}
