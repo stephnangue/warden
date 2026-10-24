@@ -1,20 +1,18 @@
 package core
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
-	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -23,10 +21,14 @@ import (
 // This file makes Warden answer MCP for its own capabilities so an agent can
 // discover what it may do before it selects a role and drives a gateway.
 //
-// The endpoint is always-on at /v1/sys/mcp (wired in http/handler.go). It is
-// meta-introspection that runs *before* role selection, so it needs no role
-// token; it authorizes on the presented identity alone, exactly like
-// sys/introspect/roles and sys/skills reads.
+// The endpoint is always-on at /v1/sys/mcp, a path of the system backend
+// served through the request path like every other: authorized by the
+// namespace's built-in policies, audited, gated by the MCP policy. It is
+// meta-introspection that runs *before* role selection, so it takes no role:
+// as an identity path, a call whose answer depends on the caller is admitted
+// on the presented identity, exactly like sys/introspect/roles, and one whose
+// answer is the same for everyone (initialize, tools/list, ...) runs
+// anonymously (admitRoleless).
 //
 // Two tools are exposed:
 //   - list_roles: the roles the caller's identity can assume (the agent's
@@ -43,6 +45,10 @@ import (
 // is negotiated by the SDK independently of this string.
 const mcpServerVersion = "1.0.0"
 
+// sysMCPRequestPath is the discovery server's path as the request path sees it
+// before routing, relative to the namespace.
+const sysMCPRequestPath = "sys/mcp"
+
 // maxSysMCPBody caps a discovery request body. Every request this endpoint
 // serves carries at most a skill URI or a cursor, so anything near this is
 // already pathological; the cap exists so buffering the body cannot be
@@ -53,18 +59,11 @@ const maxSysMCPBody = 1 << 20 // 1 MiB
 // listen_timeout: the ceiling on one discovery request once the listener's
 // deadlines have been shed.
 //
-// It has to exist. The endpoint authorizes on the presented identity inside
-// each tool handler, so the SDK accepts and holds a subscriptions/listen
-// stream before any credential is checked — with no ceiling, unauthenticated
-// callers could park goroutines and connections here indefinitely. It is
-// generous because a listen stream is meant to live: Warden's tool list never
-// changes, so such a stream only ever idles, and a client that wants another
-// reconnects.
-const sysMCPTimeout = 10 * time.Minute
-
-// errSysMCPBodyTooLarge marks the oversize case so the handler can answer 413
-// rather than folding it in with a read failure.
-var errSysMCPBodyTooLarge = errors.New("sys/mcp request body too large")
+// It bounds what a subscriptions/listen stream may hold. The server announces
+// no list as changing, so a client opens one only on purpose, and such a
+// stream only ever idles: a short ceiling costs it nothing, and a client that
+// wants another reconnects.
+const sysMCPTimeout = time.Minute
 
 // maxSysMCPBatch caps the messages in one JSON-RPC batch. Batches survive only
 // for clients on protocol revisions before 2025-06-18, and each call in one is
@@ -73,102 +72,47 @@ var errSysMCPBodyTooLarge = errors.New("sys/mcp request body too large")
 // size. No client batches anywhere near this many discovery calls.
 const maxSysMCPBatch = 50
 
+// maxAnonymousListens caps the subscriptions/listen streams callers presenting
+// no identity may hold open at once on one system backend. A stream holds a
+// goroutine and a connection until sysMCPTimeout, and needs no credential, so
+// without a cap anyone who can reach Warden could park them by the thousand.
+const maxAnonymousListens = 64
+
 // jsonRPCCodeInvalidRequest is the JSON-RPC 2.0 code for a payload that is
 // valid JSON but not an acceptable request.
 const jsonRPCCodeInvalidRequest = -32600
 
-// sysMCPContext builds the context one discovery request runs under: the
-// caller's namespace and the raw request threaded through for the tool
-// handlers, bounded by sysMCPTimeout. The caller must call the returned
-// cancel.
-func sysMCPContext(r *http.Request, ns *namespace.Namespace) (context.Context, context.CancelFunc) {
+// discoveryRequestContext builds the context one discovery request runs under
+// outside the request path (the dev playground's self-check): the namespace
+// and the raw request threaded through for the handlers, bounded by
+// sysMCPTimeout. The caller must call the returned cancel.
+func discoveryRequestContext(r *http.Request, ns *namespace.Namespace) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(r.Context(), sysMCPTimeout)
 	ctx = namespace.ContextWithNamespace(ctx, ns)
 	ctx = withDiscoveryRequest(ctx, r)
 	return ctx, cancel
 }
 
-// bufferMCPRequestBody reads r's body into memory and puts it back, so the
-// request can be handed to a handler that may hold the response open
-// indefinitely without a connection read deadline still being armed. A body
-// over the cap is refused rather than truncated — a truncated JSON-RPC body
-// would surface as a confusing parse error. It returns the buffered body.
-func bufferMCPRequestBody(r *http.Request) ([]byte, error) {
-	if r.Body == nil {
-		return nil, nil
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSysMCPBody+1))
-	_ = r.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > maxSysMCPBody {
-		return nil, errSysMCPBodyTooLarge
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return body, nil
-}
-
-// batchExceedsCap reports whether body is a JSON-RPC batch of more than limit
-// messages. Only a top-level array is counted, so a single request costs one
-// byte scan; counting stops at limit+1, and a value that cannot be counted —
-// malformed JSON — reports false and is left for the SDK to refuse with its
-// own parse error.
-func batchExceedsCap(body []byte, limit int) bool {
-	if first, ok := firstNonWS(body); !ok || first != '[' {
-		return false
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if _, err := dec.Token(); err != nil {
-		return false
-	}
-	var skip json.RawMessage
-	for n := 0; dec.More(); n++ {
-		if n == limit {
-			return true
-		}
-		if err := dec.Decode(&skip); err != nil {
-			return false
-		}
-	}
-	return false
-}
-
-// writeBatchTooLarge refuses an oversized batch as a whole, before any call in
-// it runs: serving part of it would leave the rest unanswered. It answers the
-// way the transport answers input it cannot accept — a 400 whose body may be
-// a JSON-RPC error with no id — and the way the SDK itself refuses a batch
-// (a 400), so a client fails the call at once rather than waiting on
-// responses that will never come. The id is null because a batch has no
-// single id to answer.
-func writeBatchTooLarge(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      nil,
-		"error": map[string]any{
-			"code":    jsonRPCCodeInvalidRequest,
-			"message": fmt.Sprintf("JSON-RPC batch exceeds %d messages", maxSysMCPBatch),
-		},
-	})
-}
-
-// mcpServerHandler builds the always-on MCP discovery endpoint served at
-// /v1/sys/mcp. It runs the official SDK's Streamable HTTP transport in
-// stateless JSON mode: each POST is a self-contained request/response with no
-// Mcp-Session-Id affinity, so a standby node can forward it to the active node
-// without session-stickiness concerns.
+// newDiscoveryMCPHandler builds the MCP discovery server served at
+// /v1/sys/mcp: the official SDK's Streamable HTTP transport in stateless JSON
+// mode, so each POST is a self-contained request/response with no
+// Mcp-Session-Id affinity, and a standby node can forward it to the active
+// node without session-stickiness concerns.
 //
 // A modern client needs no handshake to get there — under 2026-07-28 the
 // per-request _meta carries what initialize used to negotiate — while a legacy
 // client's initialize is still answered, with an ephemeral session, so both
 // eras reach the same tools and skills.
-func (c *Core) MCPServerHandler() http.Handler {
+//
+// It is served through the request path (SystemBackend.handleMCPStream),
+// which has authorized and audited the request, admitted its caller, and
+// buffered its body before the server sees it.
+func (c *Core) newDiscoveryMCPHandler() http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "warden",
 		Version: mcpServerVersion,
 	}, &mcp.ServerOptions{Capabilities: discoveryServerCapabilities()})
+	server.AddReceivingMiddleware(discoveryListFilterMiddleware)
 
 	c.registerListRolesTool(server)
 	c.registerReadSkillTool(server)
@@ -179,79 +123,199 @@ func (c *Core) MCPServerHandler() http.Handler {
 		panic(fmt.Sprintf("register MCP skills extension: %v", err))
 	}
 
-	streamable := mcp.NewStreamableHTTPHandler(
+	return mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
 	)
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Reject on a sealed node. This route bypasses HandleRequest (which
-		// guards seal state before any namespace access), so without this
-		// check a POST to a sealed node would dereference c.namespaceStore
-		// after seal has niled it (teardownNamespaceStore). Standby is already
-		// handled upstream: the route is not in standbyAllowedPaths, so
-		// wrapGenericHandler forwards it to the active node.
-		if c.Sealed() {
-			http.Error(w, "Warden is sealed", http.StatusServiceUnavailable)
-			return
-		}
-
-		// Resolve the caller's namespace the same way transparent callers
-		// select one: the X-Warden-Namespace header. One fixed route serves
-		// every namespace; a root caller omits the header, a caller in
-		// team-data sends "team-data". The tool handlers' discovery and
-		// mount lookups then resolve in this namespace.
-		nsHeader := r.Header.Get("X-Warden-Namespace")
-		ns, _ := c.namespaceStore.ResolveNamespaceFromRequest(nsHeader, "sys/mcp")
-		if ns == nil {
-			http.Error(w, "namespace not found", http.StatusNotFound)
-			return
-		}
-
-		// Thread the namespace into the context (used by the tool handlers'
-		// reused core logic) and stash the raw request (used for credential
-		// detection). The request's own context already carries the
-		// Authorization header and the forwarded client cert — the listener's
-		// certForwardingMiddleware injected the latter before routing — so
-		// stashing r preserves both for discovery.
-		// JSONResponse does not make every response here a buffered one: the
-		// SDK forces SSE for subscriptions/listen, which has no synchronous
-		// result and stays open until the client cancels, and an SDK client
-		// opens one during Connect whenever it registers a list-changed
-		// handler the server's capabilities announce (tools here). Under the
-		// listener's deadlines such a stream is severed
-		// seconds in — and not only by the write deadline: once the body is
-		// drained, an armed read deadline cancels the request context, which
-		// is exactly what the SDK blocks on.
-		//
-		// The deadlines cannot be shed reactively, on seeing the response
-		// declare itself an event stream, because the SDK sets that
-		// Content-Type on the header map and then blocks without writing a
-		// byte. So read the body first — under the deadlines the listener
-		// armed, which is what bounds a dribbling client — and shed them
-		// before handing over to a handler that may never return.
-		body, err := bufferMCPRequestBody(r)
-		if err != nil {
-			if errors.Is(err, errSysMCPBodyTooLarge) {
-				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "could not read request body", http.StatusBadRequest)
-			return
-		}
-		if batchExceedsCap(body, maxSysMCPBatch) {
-			writeBatchTooLarge(w)
-			return
-		}
-		if err := logical.ClearStreamDeadlines(w); err != nil {
-			c.logger.Warn("could not clear connection deadlines for sys/mcp", logger.Err(err))
-		}
-
-		ctx, cancel := sysMCPContext(r, ns)
-		defer cancel()
-		streamable.ServeHTTP(w, r.WithContext(ctx))
-	})
 }
+
+// discoveryListFiltersKey is the context key of the list filters the policy
+// layer attached to a discovery request (Request.MCPListFilters).
+type discoveryListFiltersKey struct{}
+
+// discoveryListFilter returns the filter for a list method in ctx, or nil.
+func discoveryListFilter(ctx context.Context, method string) *logical.MCPListFilter {
+	filters, _ := ctx.Value(discoveryListFiltersKey{}).(map[string]*logical.MCPListFilter)
+	return filters[strings.ToLower(method)]
+}
+
+// discoveryListFilterMiddleware drops from a list answer every item the
+// caller's MCP policy would refuse to call, per message, a batch's included:
+// what the caller sees listed is what it may call. A request without filters
+// passes through untouched.
+func discoveryListFilterMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		res, err := next(ctx, method, req)
+		if err != nil || res == nil {
+			return res, err
+		}
+		f := discoveryListFilter(ctx, method)
+		if f == nil {
+			return res, err
+		}
+		switch r := res.(type) {
+		case *mcp.ListToolsResult:
+			r.Tools = keepListed(r.Tools, f, func(t *mcp.Tool) string { return t.Name })
+		case *mcp.ListResourcesResult:
+			r.Resources = keepListed(r.Resources, f, func(x *mcp.Resource) string { return x.URI })
+		case *skillsListResult:
+			r.Skills = keepListed(r.Skills, f, func(e skillEntry) string { return e.URI })
+		}
+		return res, err
+	}
+}
+
+// keepListed returns the items f keeps, by the name name reads. The answer's
+// own slice is never written: the SDK may build it from shared state.
+func keepListed[T any](items []T, f *logical.MCPListFilter, name func(T) string) []T {
+	out := make([]T, 0, len(items))
+	for _, it := range items {
+		if f.Keep(name(it)) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// pathMCP serves the discovery server at sys/mcp: a streaming path, so the
+// request path buffers and checks its JSON-RPC body before routing, and an
+// identity path, so it takes no role (see the backend's PathsSpecial).
+func (b *SystemBackend) pathMCP() []*framework.Path {
+	op := &framework.PathOperation{
+		Callback: b.handleMCPStream,
+		Summary:  "Warden's MCP discovery server",
+		Description: "MCP Streamable HTTP (stateless, JSON). Tools list_roles and read_skill, " +
+			"the skill:// resource template and the Skills extension. Lifecycle calls and " +
+			"tools/list need no credential; every other call authorizes on the presented " +
+			"JWT bearer token or TLS client certificate, under the namespace's built-in policies.",
+	}
+	return []*framework.Path{
+		{
+			Pattern: "mcp",
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: op,
+				logical.UpdateOperation: op,
+				logical.ReadOperation:   op,
+				logical.DeleteOperation: op,
+			},
+			HelpSynopsis: "Warden's MCP discovery server",
+			HelpDescription: "Point an MCP client at /v1/sys/mcp, presenting the agent's identity, " +
+				"to list the roles it may assume and read their skills.",
+		},
+	}
+}
+
+// handleMCPStream hands a discovery request to the MCP server. The request
+// path has already authorized and audited it, admitted its caller (or let it
+// run anonymously), buffered its body and shed the listener's deadlines.
+//
+// The server runs on the request's own context, which carries the discovery
+// memo (the admissions the role-less leg made are reused) and the list
+// filters, bounded by sysMCPTimeout and ended by a seal or a step-down, so no
+// stream outlives the node's active term.
+func (b *SystemBackend) handleMCPStream(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
+	if !req.Streamed || req.HTTPRequest == nil || req.ResponseWriter == nil {
+		return logical.ErrorResponse(logical.ErrBadRequest("sys/mcp is served over HTTP only")), nil
+	}
+
+	if req.Discovery != nil && req.Discovery.Anonymous && callsMethod(req, "subscriptions/listen") {
+		select {
+		case b.anonymousListens <- struct{}{}:
+			defer func() { <-b.anonymousListens }()
+		default:
+			return logical.ErrorResponse(logical.ErrServiceUnavailable("too many anonymous notification streams; retry later")), nil
+		}
+	}
+
+	if len(req.MCPListFilters) > 0 {
+		ctx = context.WithValue(ctx, discoveryListFiltersKey{}, req.MCPListFilters)
+	}
+	ctx, cancel := context.WithTimeout(ctx, sysMCPTimeout)
+	defer cancel()
+	if active := b.core.activeContext; active != nil {
+		stop := context.AfterFunc(active, cancel)
+		defer stop()
+	}
+
+	b.discoveryMCP().ServeHTTP(req.ResponseWriter, req.HTTPRequest.WithContext(ctx))
+	return &logical.Response{Streamed: true}, nil
+}
+
+// discoveryMCP returns the backend's MCP server, built on first use.
+func (b *SystemBackend) discoveryMCP() http.Handler {
+	b.mcpOnce.Do(func() { b.mcpHandler = b.core.newDiscoveryMCPHandler() })
+	return b.mcpHandler
+}
+
+// callsMethod reports whether req's JSON-RPC body calls method.
+func callsMethod(req *logical.Request, method string) bool {
+	if req.MCPDescriptor == nil {
+		return false
+	}
+	for i := range req.MCPDescriptor.Calls {
+		if strings.EqualFold(req.MCPDescriptor.Calls[i].Method, method) {
+			return true
+		}
+	}
+	return false
+}
+
+// ShouldEnforceMCPPolicy implements logical.MCPPolicyEnforced: every POST to
+// the discovery server answers to the MCP gate, its body capped at
+// maxSysMCPBody. A GET or a DELETE carries no JSON-RPC (the server answers it
+// 405), so the capability check alone decides it.
+func (b *SystemBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int64) {
+	return req.HTTPRequest != nil && req.HTTPRequest.Method == http.MethodPost, maxSysMCPBody
+}
+
+// MaxMCPBatch implements logical.MCPInProcessServer: the discovery server
+// answers every call itself, so it filters lists per call and caps batches.
+func (b *SystemBackend) MaxMCPBatch() int { return maxSysMCPBatch }
+
+// RenderGatewayError implements logical.GatewayErrorRenderer for the discovery
+// server, the system backend's one streaming path. A body the server cannot
+// accept (malformed, oversized, a batch it cannot serve) is a transport fault,
+// not an authorization decision: it is answered as the transport answers one,
+// a 400 (413 for an oversized body) whose body is a JSON-RPC error with no id,
+// so a client fails the call at once instead of reading a refusal it might try
+// to authorize its way past. Every other failure keeps Warden's own answer.
+func (b *SystemBackend) RenderGatewayError(_ *logical.Request, f *logical.GatewayFailure) *logical.Response {
+	var denied *ErrMCPPolicyDenied
+	if f == nil || !errors.As(f.Err, &denied) || denied.Decision == nil {
+		return nil
+	}
+	status := http.StatusBadRequest
+	message := BuildMCPDenyDescription(denied.Decision)
+	switch denied.Decision.RuleType {
+	case mcpRuleTypeOversizedBody:
+		status = http.StatusRequestEntityTooLarge
+	case mcpRuleTypeBatchTooLarge:
+		message = fmt.Sprintf("JSON-RPC batch exceeds %d messages", maxSysMCPBatch)
+	case mcpRuleTypeMalformedJSONRPC, mcpRuleTypeDuplicateKey, mcpRuleTypeBatchEmpty,
+		mcpRuleTypeMalformedParams, mcpRuleTypeBatchUnsupported:
+	default:
+		return nil
+	}
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      nil,
+		"error":   map[string]any{"code": jsonRPCCodeInvalidRequest, "message": message},
+	})
+	if err != nil {
+		return nil
+	}
+	return &logical.Response{
+		StatusCode: status,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       body,
+	}
+}
+
+var (
+	_ logical.MCPPolicyEnforced    = (*SystemBackend)(nil)
+	_ logical.MCPInProcessServer   = (*SystemBackend)(nil)
+	_ logical.GatewayErrorRenderer = (*SystemBackend)(nil)
+)
 
 // listRolesInput is the (empty) input for the list_roles tool.
 type listRolesInput struct{}

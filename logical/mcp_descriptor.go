@@ -25,6 +25,11 @@ type MCPRequestDescriptor struct {
 	// modern-era batch rejection has to tell apart.
 	IsBatch bool
 
+	// InProcess records that the backend answers each call itself
+	// (MCPInProcessServer) rather than proxying the body upstream, so a list
+	// call is filtered per call even inside a batch.
+	InProcess bool
+
 	// ClientInfoName and ClientInfoVersion are the client's
 	// self-description, carried for the audit record. Unverified,
 	// unauthenticated, and trivially forged: never consult them in a
@@ -129,6 +134,12 @@ const (
 	// correctly — the two claims it makes about itself simply cannot both
 	// be true.
 	MCPParseKindBatchUnsupported = "batch_unsupported"
+
+	// MCPParseKindBatchTooLarge refuses a batch of more messages than an
+	// in-process server answers (MCPInProcessServer.MaxMCPBatch). Each call is
+	// answered in full, so the body cap alone would let a body of small calls
+	// fan out into a response many times its size.
+	MCPParseKindBatchTooLarge = "batch_too_large"
 )
 
 // Clone returns a deep copy of the MCPRequestDescriptor. Safe to call
@@ -143,6 +154,7 @@ func (d *MCPRequestDescriptor) Clone() *MCPRequestDescriptor {
 	}
 	clone := &MCPRequestDescriptor{
 		IsBatch:           d.IsBatch,
+		InProcess:         d.InProcess,
 		ClientInfoName:    d.ClientInfoName,
 		ClientInfoVersion: d.ClientInfoVersion,
 	}

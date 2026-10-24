@@ -187,6 +187,12 @@ type Request struct {
 	// gateway that sees nil streams the response through verbatim. See
 	// MCPListFilter.
 	MCPListFilter *MCPListFilter `json:"-"`
+
+	// MCPListFilters is MCPListFilter for an in-process MCP server
+	// (MCPInProcessServer): one filter per list method the body calls, keyed
+	// by the lowercased method, so every list call of a batch is filtered.
+	// Nil when no list call needs filtering.
+	MCPListFilters map[string]*MCPListFilter `json:"-"`
 }
 
 func (r *Request) TokenEntry() *TokenEntry {

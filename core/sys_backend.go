@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
@@ -15,13 +16,23 @@ type SystemBackend struct {
 	*framework.Backend
 	core   *Core
 	logger *logger.GatedLogger
+
+	// mcpHandler is the MCP discovery server (sys/mcp), built once, on first
+	// use, by discoveryMCP.
+	mcpOnce    sync.Once
+	mcpHandler http.Handler
+
+	// anonymousListens holds one slot per open anonymous subscriptions/listen
+	// stream, bounding them at maxAnonymousListens.
+	anonymousListens chan struct{}
 }
 
 // NewSystemBackend creates a new system backend using framework.Backend
 func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 	b := &SystemBackend{
-		core:   core,
-		logger: log,
+		core:             core,
+		logger:           log,
+		anonymousListens: make(chan struct{}, maxAnonymousListens),
 	}
 
 	b.Backend = &framework.Backend{
@@ -37,6 +48,14 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 			// under the built-in policies (logical.Paths.Identity).
 			Identity: []string{
 				"introspect/roles",
+				"mcp",
+			},
+			// The discovery server reads its JSON-RPC body raw, under the MCP
+			// gate, and writes its own response, a notification stream
+			// included (logical.Paths.Stream). It proxies nothing and, being
+			// an identity path, mints nothing.
+			Stream: []string{
+				"mcp",
 			},
 			Root: []string{
 				"auth/*",
@@ -70,6 +89,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// Role discovery from admissions and groups
 	paths = append(paths, b.pathIntrospectRoles()...)
+
+	// The MCP discovery server
+	paths = append(paths, b.pathMCP()...)
 
 	// Namespace paths
 	paths = append(paths, b.pathNamespaces()...)

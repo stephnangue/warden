@@ -27,11 +27,20 @@ const (
 	// the active node before timing out, when not explicitly configured.
 	defaultForwardingTimeout = 60 * time.Second
 
-	// sysMCPPath is Warden's own MCP discovery endpoint. It is the one
-	// control-plane route that can answer with an open-ended SSE stream
-	// (subscriptions/listen), so the standby forwarder treats it specially.
+	// sysMCPPath is Warden's own MCP discovery endpoint, served through the
+	// /v1/sys/ catch-all like every system path. It is the one control-plane
+	// path that can answer with an open-ended SSE stream
+	// (subscriptions/listen), so the standby forwarder treats it specially
+	// (isSysMCPPath), in every namespace.
 	sysMCPPath = "/v1/sys/mcp"
 )
+
+// isSysMCPPath reports whether path names the discovery endpoint: in the root
+// namespace, or in a child one by path ("/v1/team/sys/mcp"). The header-named
+// namespace uses the root form.
+func isSysMCPPath(path string) bool {
+	return path == sysMCPPath || (strings.HasPrefix(path, "/v1/") && strings.HasSuffix(path, "/sys/mcp"))
+}
 
 // HandlerProperties contains configuration for the HTTP handler
 type HandlerProperties struct {
@@ -92,12 +101,6 @@ func Handler(props *HandlerProperties) http.Handler {
 	// the resource's own path is appended to the well-known prefix.
 	mux.Handle(prmPath, handlePRM(core, log))
 	mux.Handle(prmPath+"/", handlePRM(core, log))
-
-	// MCP discovery interface — Warden answering MCP for its own
-	// capabilities (list_roles, read_skill). Registered before the /v1/sys/
-	// catch-all. Not in standbyAllowedPaths: it reads live mount/skill/
-	// introspection state, so standby nodes forward it to the active node.
-	mux.Handle(sysMCPPath, handleSysMCP(core, log))
 
 	// System backend endpoints - catch-all for /v1/sys/
 	// Handles providers, auth, namespaces, credentials, etc.
@@ -505,7 +508,7 @@ func forwardToActive(c *core.Core, forwarder *standbyForwarder, w http.ResponseW
 			// body is forwarded, an armed read deadline cancels the request
 			// context and tears down an idle stream. Everything else forwards
 			// under the standby's caps.
-			if isForwardedGatewayRequest(r) || r.URL.Path == sysMCPPath {
+			if isForwardedGatewayRequest(r) || isSysMCPPath(r.URL.Path) {
 				if err := logical.ClearStreamDeadlines(w); err != nil {
 					c.Logger().Warn("could not clear connection deadlines for forwarded request",
 						logger.Err(err),

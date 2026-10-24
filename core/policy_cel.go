@@ -900,6 +900,11 @@ func celPrincipalInputFromEntry(te *logical.TokenEntry, now time.Time) celPrinci
 // celAgentInput is celPrincipalInputFromEntry for the request's agent, with
 // the groups its role grant recorded. req may be nil.
 func celAgentInput(req *logical.Request, te *logical.TokenEntry, now time.Time) celPrincipalInput {
+	// An anonymous discovery request presented no identity: its entry only
+	// carries the built-in policies it runs under, so no agent is present.
+	if req != nil && req.Discovery != nil && req.Discovery.Anonymous {
+		return celPrincipalInput{}
+	}
 	in := celPrincipalInputFromEntry(te, now)
 	if rg := req.RoleGrant(); rg != nil {
 		in.Groups = rg.Groups
