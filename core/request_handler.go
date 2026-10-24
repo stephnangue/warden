@@ -256,7 +256,13 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request, 
 		c.resolveRoleGrant(req, te, time.Now())
 	}
 
-	cbp, err := c.buildCBP(ctx, te)
+	// A refused role grant keeps no policies so that the CBP refuses it, and
+	// that holds for the built-ins too: attached to it, they would authorize a
+	// refused grant wherever they grant.
+	rg := req.RoleGrant()
+	withBuiltins := rg == nil || rg.Granted()
+
+	cbp, err := c.buildCBP(ctx, te, withBuiltins)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -298,21 +304,24 @@ func (c *Core) lookupTokenEntry(ctx context.Context, req *logical.Request) (*log
 }
 
 // buildCBP compiles the CBP of te's policies, in te's namespace, together with
-// that namespace's built-in policies unless te is a root token.
+// that namespace's built-in policies when withBuiltins is set, unless te is a
+// root token.
 //
 // This is the one place the built-ins are attached. A reserved name on the
 // token is dropped first: a built-in it names is attached anyway, by type, and
 // a policy left under another reserved name is given to no request. The names
 // are gathered into a slice of their own, since te.Policies may be a role's
-// shared slice.
-func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry) (*CBP, error) {
+// shared slice. Root is recognised by its canonical name, as the policy store
+// resolves it.
+func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltins bool) (*CBP, error) {
 	names := make([]string, 0, len(te.Policies))
 	isRoot := false
 	for _, name := range te.Policies {
-		if canonical, ok := logical.CanonicalPolicyName(name); ok && isReservedPolicyName(canonical) {
+		canonical, ok := logical.CanonicalPolicyName(name)
+		if ok && isReservedPolicyName(canonical) {
 			continue
 		}
-		if name == "root" {
+		if ok && canonical == "root" {
 			isRoot = true
 		}
 		names = append(names, name)
@@ -344,7 +353,7 @@ func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry) (*CBP, erro
 	// reach the heap.
 	var buf [2]*Policy
 	builtins := buf[:0]
-	if !isRoot {
+	if withBuiltins && !isRoot {
 		builtins, err = c.policyStore.appendDefaultPolicies(tokenCtx, builtins)
 		if err != nil {
 			c.logger.Error("failed to fetch built-in policies", logger.Err(err))

@@ -206,7 +206,7 @@ func TestBuildCBP_AttachesBuiltins(t *testing.T) {
 	putRawPolicy(t, c, namespace.RootNamespace, "default", PolicyTypeCBP, `path "kv/*" { capabilities = ["read"] }`)
 
 	te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{"reader"}}
-	cbp, err := c.buildCBP(ctx, te)
+	cbp, err := c.buildCBP(ctx, te, true)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"create", "read", "delete"}, cbp.Capabilities(ctx, "sys/mcp"))
 	assert.Equal(t, []string{"read"}, cbp.Capabilities(ctx, "sys/introspect/roles"))
@@ -218,7 +218,7 @@ func TestBuildCBP_AttachesBuiltins(t *testing.T) {
 	t.Run("reserved names on the token", func(t *testing.T) {
 		shared := []string{"reader", "default", builtinCBPPolicy, builtinMCPPolicy}
 		te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: shared}
-		cbp, err := c.buildCBP(ctx, te)
+		cbp, err := c.buildCBP(ctx, te, true)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"deny"}, cbp.Capabilities(ctx, "kv/x"), "legacy default is given to no request")
 		assert.Len(t, cbp.mcpRulesForPath("sys/mcp"), 1, "a built-in is attached once")
@@ -226,11 +226,38 @@ func TestBuildCBP_AttachesBuiltins(t *testing.T) {
 	})
 
 	t.Run("root", func(t *testing.T) {
-		te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{"root"}}
-		cbp, err := c.buildCBP(ctx, te)
-		require.NoError(t, err)
-		assert.Equal(t, []string{"root"}, cbp.Capabilities(ctx, "sys/mcp"))
+		for _, name := range []string{"root", "Root", " root "} {
+			te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{name}}
+			cbp, err := c.buildCBP(ctx, te, true)
+			require.NoError(t, err, "%q is root by its canonical name", name)
+			assert.Equal(t, []string{"root"}, cbp.Capabilities(ctx, "sys/mcp"))
+		}
 	})
+}
+
+// A refused role grant keeps no policy, the built-ins included, so the CBP
+// refuses it even on the paths the built-ins grant to everyone else.
+func TestBuildCBP_RefusedGrantGetsNoBuiltins(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+
+	// An admission token presented explicitly is refused its grant.
+	te := &logical.TokenEntry{
+		ID:            "wdi_explicit",
+		Type:          TypeIdentityToken,
+		NamespaceID:   namespace.RootNamespaceID,
+		MountAccessor: "auth_jwt_x",
+	}
+	req := &logical.Request{Path: "sys/mcp", Operation: logical.CreateOperation, ClientToken: te.ID}
+	req.SetTokenEntry(te)
+
+	cbp, got, err := c.fetchCBPAndTokenEntry(ctx, req, false)
+	require.NoError(t, err)
+	require.NotNil(t, req.RoleGrant())
+	require.False(t, req.RoleGrant().Granted())
+	assert.Empty(t, got.Policies)
+	assert.Equal(t, []string{"deny"}, cbp.Capabilities(ctx, "sys/mcp"), "no built-in authorizes a refused grant")
+	assert.Equal(t, []string{"deny"}, cbp.Capabilities(ctx, "sys/introspect/roles"))
 }
 
 // A role is stored without reserved names, with a warning for each.
@@ -278,13 +305,13 @@ func BenchmarkBuildCBP_Builtins(b *testing.B) {
 				}
 			}
 			te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{"reader"}}
-			if _, err := c.buildCBP(ctx, te); err != nil {
+			if _, err := c.buildCBP(ctx, te, true); err != nil {
 				b.Fatal(err)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := c.buildCBP(ctx, te); err != nil {
+				if _, err := c.buildCBP(ctx, te, true); err != nil {
 					b.Fatal(err)
 				}
 			}
