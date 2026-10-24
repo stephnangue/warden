@@ -251,6 +251,7 @@ func (ps *PolicyStore) setPolicyLocked(ctx context.Context, p *Policy, casVersio
 			return fmt.Errorf("failed to persist policy: %w", err)
 		}
 
+		p.finalize()
 		if ps.tokenPoliciesLRU != nil {
 			ps.tokenPoliciesLRU.Add(index, p)
 		}
@@ -351,6 +352,7 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 			Type:      PolicyTypeCBP,
 			Paths:     []*PathRules{},
 		}
+		p.finalize()
 		if cache != nil {
 			cache.Add(index, p)
 		}
@@ -456,6 +458,7 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 		return nil, fmt.Errorf("unknown policy type %d", policyEntry.Type)
 	}
 
+	policy.finalize()
 	if cache != nil {
 		// Update the LRU cache
 		cache.Add(index, policy)
@@ -703,6 +706,7 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 			return nil, fmt.Errorf("error parsing policy %q: %w", policy.Name, err)
 		}
 		p.Name = policy.Name
+		p.finalize()
 		allPolicies[i] = p
 	}
 

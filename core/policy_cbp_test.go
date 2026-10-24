@@ -6,6 +6,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -1116,34 +1117,6 @@ func TestPerformPolicyChecks_RootPrivsGranted(t *testing.T) {
 }
 
 // =============================================================================
-// CBPPermissions Clone Tests
-// =============================================================================
-
-func TestCBPPermissions_Clone(t *testing.T) {
-	original := &CBPPermissions{
-		CapabilitiesBitmap:     ReadCapabilityInt | CreateCapabilityInt,
-		PaginationLimit:        100,
-		ResponseKeysFilterPath: "secret/data/{{key}}",
-		GrantingPoliciesMap: map[uint32][]sdklogical.PolicyInfo{
-			ReadCapabilityInt: {{Name: "p1"}},
-		},
-	}
-
-	cloned, err := original.Clone()
-	require.NoError(t, err)
-
-	assert.Equal(t, original.CapabilitiesBitmap, cloned.CapabilitiesBitmap)
-	assert.Equal(t, original.PaginationLimit, cloned.PaginationLimit)
-	assert.Equal(t, original.ResponseKeysFilterPath, cloned.ResponseKeysFilterPath)
-	assert.Equal(t, original.GrantingPoliciesMap, cloned.GrantingPoliciesMap)
-
-	// Deep copy: mutating the original's granting-policies map must not
-	// affect the clone.
-	original.GrantingPoliciesMap[ReadCapabilityInt] = []sdklogical.PolicyInfo{{Name: "mutated"}}
-	assert.Equal(t, "p1", cloned.GrantingPoliciesMap[ReadCapabilityInt][0].Name)
-}
-
-// =============================================================================
 // CBP() re-parse reuse
 // =============================================================================
 
@@ -1534,4 +1507,513 @@ path "secret/shared" {
 
 	assert.Len(t, seen, 1,
 		"the filter path must not depend on the order policies were gathered in, got %v", seen)
+}
+
+// =============================================================================
+// A compile shares the parsed policies it reads, and never writes them
+// =============================================================================
+
+// finalizedPolicy parses rules into a policy of the given name and type,
+// finalized as the policy store finalizes what it caches.
+func finalizedPolicy(t *testing.T, name string, typ PolicyType, rules string) *Policy {
+	t.Helper()
+	var p *Policy
+	if typ == PolicyTypeMCP {
+		p = testParseMCPPolicy(t, rules)
+	} else {
+		p = testParsePolicy(t, rules)
+	}
+	p.Name, p.Type = name, typ
+	p.finalize()
+	return p
+}
+
+// permsSnapshot records everything a compile could write in a parsed stanza:
+// its scalars, the length, capacity and backing array of its slices, and the
+// attribution of its MCP rule-sets.
+type permsSnapshot struct {
+	caps          uint32
+	pagination    int
+	filterPath    string
+	conditions    int
+	conditionsCap int
+	conditionsArr **compiledCondition
+	conditionsAll []*compiledCondition
+	mcp           int
+	mcpCap        int
+	mcpArr        **CBPMCPRules
+	mcpAll        []*CBPMCPRules
+	sources       []string
+	owner         *Policy
+	extra         int
+}
+
+func snapshotPerms(p *CBPPermissions) permsSnapshot {
+	s := permsSnapshot{
+		caps: p.CapabilitiesBitmap, pagination: p.PaginationLimit, filterPath: p.ResponseKeysFilterPath,
+		conditions: len(p.Conditions), conditionsCap: cap(p.Conditions),
+		mcp: len(p.MCP), mcpCap: cap(p.MCP),
+		owner: p.owner, extra: len(p.extra),
+	}
+	// The address of element 0 of the full-capacity slice identifies the
+	// backing array, and its contents up to capacity show an append written
+	// into spare room, which leaves length and array unchanged.
+	if cap(p.Conditions) > 0 {
+		all := p.Conditions[:cap(p.Conditions)]
+		s.conditionsArr, s.conditionsAll = &all[0], slices.Clone(all)
+	}
+	if cap(p.MCP) > 0 {
+		all := p.MCP[:cap(p.MCP)]
+		s.mcpArr, s.mcpAll = &all[0], slices.Clone(all)
+	}
+	for _, m := range p.MCP {
+		s.sources = append(s.sources, m.SourcePolicy)
+	}
+	return s
+}
+
+func snapshotPolicies(policies ...*Policy) []permsSnapshot {
+	var out []permsSnapshot
+	for _, p := range policies {
+		for _, pc := range p.Paths {
+			out = append(out, snapshotPerms(pc.Permissions))
+		}
+	}
+	return out
+}
+
+func grantingNames(in []sdklogical.PolicyInfo) []string {
+	out := make([]string, 0, len(in))
+	for _, p := range in {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// TestCBP_ParsedPoliciesUntouched pins that compiling and evaluating never
+// writes the parsed policies, which the policy cache shares across requests.
+// Every merge a compile performs is exercised: capabilities, a deny collapse,
+// pagination, the filter path and conditions at an exact key, a prefix and a
+// segment wildcard, two MCP policies at one key and one MCP policy with two
+// stanzas at one key.
+func TestCBP_ParsedPoliciesUntouched(t *testing.T) {
+	ctx := testContext()
+	a := finalizedPolicy(t, "a", PolicyTypeCBP, `
+path "secret/x" {
+  capabilities = ["read", "list"]
+  condition = "request.client_ip != ''"
+  pagination_limit = 10
+  list_scan_response_keys_filter_path = "secret/from-a/{{ .key }}"
+}
+path "pre/*" { capabilities = ["read"] }
+path "seg/+/x" { capabilities = ["read"] }
+`)
+	b := finalizedPolicy(t, "b", PolicyTypeCBP, `
+path "secret/x" {
+  capabilities = ["update"]
+  condition = "request.client_ip == '1.1.1.1'"
+  pagination_limit = 5
+}
+path "pre/*" { capabilities = ["deny"] }
+path "seg/+/x" { capabilities = ["update"] }
+`)
+	c := finalizedPolicy(t, "c", PolicyTypeCBP, `path "secret/x" { capabilities = ["delete"] }`)
+	m1 := finalizedPolicy(t, "m1", PolicyTypeMCP, `
+path "mcp/x" {
+  methods {
+    allowed = ["tools/call"]
+  }
+  tools {
+    allowed = ["a"]
+  }
+}
+path "mcp/x" {
+  methods {
+    allowed = ["tools/call"]
+  }
+  tools {
+    allowed = ["b"]
+  }
+}
+`)
+	m2 := finalizedPolicy(t, "m2", PolicyTypeMCP, `
+path "mcp/x" {
+  methods {
+    allowed = ["tools/call"]
+  }
+  tools {
+    allowed = ["c"]
+  }
+}
+`)
+
+	// The parser sizes its slices exactly, so an append into one reallocates
+	// anyway. Spare room makes an append written in place observable.
+	for _, p := range []*Policy{a, m1} {
+		for _, pc := range p.Paths {
+			pc.Permissions.Conditions = slices.Grow(pc.Permissions.Conditions, 2)
+			pc.Permissions.MCP = slices.Grow(pc.Permissions.MCP, 2)
+		}
+	}
+
+	before := snapshotPolicies(a, b, c, m1, m2)
+	for i := 0; i < 3; i++ {
+		cbp, err := NewCBP(ctx, []*Policy{a, b, c, m1, m2})
+		require.NoError(t, err)
+		cbp.AllowOperation(ctx, &logical.Request{Operation: logical.UpdateOperation, Path: "secret/x", ClientIP: "1.1.1.1"}, nil, false)
+		cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "pre/zz"}, nil, false)
+		cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "seg/q/x"}, nil, false)
+		sets := cbp.mcpRulesForPath("mcp/x")
+		require.Len(t, sets, 3)
+		assert.Equal(t, []string{"m1", "m1", "m2"}, []string{sets[0].SourcePolicy, sets[1].SourcePolicy, sets[2].SourcePolicy})
+		assert.True(t, mcpListItemAllowed(sets, "tools/call", "c"))
+
+		for _, order := range [][]*Policy{{m2, m1}, {m1}} {
+			_, err := NewCBP(ctx, order)
+			require.NoError(t, err)
+		}
+	}
+	assert.Equal(t, before, snapshotPolicies(a, b, c, m1, m2))
+}
+
+// TestCBP_GrantingPoliciesByCapability pins which policies a merged path names:
+// those that granted the requested capability, owner first, whatever else the
+// path's other policies grant.
+func TestCBP_GrantingPoliciesByCapability(t *testing.T) {
+	ctx := testContext()
+	a := finalizedPolicy(t, "a", PolicyTypeCBP, `
+path "secret/x" { capabilities = ["read", "update"] }
+path "pre/*" { capabilities = ["read"] }
+`)
+	b := finalizedPolicy(t, "b", PolicyTypeCBP, `
+path "secret/x" { capabilities = ["update", "delete"] }
+path "pre/*" { capabilities = ["deny"] }
+`)
+
+	cbp, err := NewCBP(ctx, []*Policy{a, b})
+	require.NoError(t, err)
+	granting := func(op logical.Operation, path string) []string {
+		res := cbp.AllowOperation(ctx, &logical.Request{Operation: op, Path: path}, nil, false)
+		require.True(t, res.Allowed, "%s %s", op, path)
+		return grantingNames(res.GrantingPolicies)
+	}
+	assert.Equal(t, []string{"a"}, granting(logical.ReadOperation, "secret/x"))
+	assert.Equal(t, []string{"a", "b"}, granting(logical.UpdateOperation, "secret/x"))
+	assert.Equal(t, []string{"b"}, granting(logical.DeleteOperation, "secret/x"))
+
+	res := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "pre/zz"}, nil, false)
+	assert.False(t, res.Allowed, "a deny collapses the path")
+	assert.Empty(t, res.GrantingPolicies)
+
+	// The same policy listed twice is named twice, as before.
+	twice, err := NewCBP(ctx, []*Policy{a, a})
+	require.NoError(t, err)
+	res = twice.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "secret/x"}, nil, false)
+	assert.Equal(t, []string{"a", "a"}, grantingNames(res.GrantingPolicies))
+
+	// A grant shared by several policies is this request's own slice.
+	merged := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.UpdateOperation, Path: "secret/x"}, nil, false)
+	again := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.UpdateOperation, Path: "secret/x"}, nil, false)
+	assert.NotSame(t, &merged.GrantingPolicies[0], &again.GrantingPolicies[0])
+}
+
+// TestCBP_GrantingPoliciesShared pins the sharing CBPResults.GrantingPolicies
+// documents: a sole granter's answer is its cached policy's slice, and root's is
+// the package-level one, so a consumer must never write into it.
+func TestCBP_GrantingPoliciesShared(t *testing.T) {
+	ctx := testContext()
+	a := finalizedPolicy(t, "a", PolicyTypeCBP, `path "secret/x" { capabilities = ["read"] }`)
+	cbp, err := NewCBP(ctx, []*Policy{a})
+	require.NoError(t, err)
+	res := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "secret/x"}, nil, false)
+	require.True(t, res.Allowed)
+	require.Len(t, res.GrantingPolicies, 1)
+	assert.Same(t, &a.info[0], &res.GrantingPolicies[0])
+	assert.Equal(t, []sdklogical.PolicyInfo{{Name: "a", NamespaceId: namespace.RootNamespaceID, NamespacePath: "", Type: "cbp"}}, res.GrantingPolicies)
+
+	root := finalizedPolicy(t, "root", PolicyTypeCBP, "")
+	rootCBP, err := NewCBP(ctx, []*Policy{root})
+	require.NoError(t, err)
+	res = rootCBP.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "anything"}, nil, false)
+	require.Len(t, res.GrantingPolicies, 1)
+	assert.Same(t, &rootGrantingPolicies[0], &res.GrantingPolicies[0])
+
+	// A policy never finalized is still named, from a slice of its own.
+	hand := testParsePolicy(t, `path "secret/y" { capabilities = ["read"] }`)
+	hand.Name = "hand"
+	handCBP, err := NewCBP(ctx, []*Policy{hand})
+	require.NoError(t, err)
+	res = handCBP.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "secret/y"}, nil, false)
+	assert.Equal(t, []string{"hand"}, grantingNames(res.GrantingPolicies))
+	assert.Nil(t, hand.info, "a compile does not finalize a shared policy")
+}
+
+// TestCBP_MCPSourcePolicy pins the attribution of MCP rule-sets, whichever way
+// the policy reached the compile: loaded from the store, finalized, or built by
+// hand and never finalized. A hand-built policy's own rule-sets stay unstamped.
+func TestCBP_MCPSourcePolicy(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	rules := func(tool string) string {
+		return `
+path "mcp/x" {
+  methods {
+    allowed = ["tools/call"]
+  }
+  tools {
+    allowed = ["` + tool + `"]
+  }
+}`
+	}
+
+	stored := testParseMCPPolicy(t, rules("a"))
+	stored.Name, stored.Type = "stored", PolicyTypeMCP
+	require.NoError(t, ps.SetPolicy(ctx, stored, nil))
+	ps.tokenPoliciesLRU.Purge()
+	loaded, err := ps.GetPolicy(ctx, "stored", PolicyTypeMCP)
+	require.NoError(t, err)
+
+	prefetched := finalizedPolicy(t, "prefetched", PolicyTypeMCP, rules("b"))
+	hand := testParseMCPPolicy(t, rules("c"))
+	hand.Name, hand.Type = "hand", PolicyTypeMCP
+
+	for _, tc := range []struct {
+		policy *Policy
+		want   string
+	}{{loaded, "stored"}, {prefetched, "prefetched"}, {hand, "hand"}} {
+		cbp, err := NewCBP(ctx, []*Policy{tc.policy})
+		require.NoError(t, err)
+		sets := cbp.mcpRulesForPath("mcp/x")
+		require.Len(t, sets, 1)
+		assert.Equal(t, tc.want, sets[0].SourcePolicy)
+	}
+	assert.Equal(t, "", hand.Paths[0].Permissions.MCP[0].SourcePolicy)
+
+	cbp, err := NewCBP(ctx, []*Policy{loaded, hand, prefetched})
+	require.NoError(t, err)
+	sets := cbp.mcpRulesForPath("mcp/x")
+	require.Len(t, sets, 3)
+	assert.Equal(t, []string{"stored", "hand", "prefetched"}, []string{sets[0].SourcePolicy, sets[1].SourcePolicy, sets[2].SourcePolicy})
+	assert.Equal(t, "", hand.Paths[0].Permissions.MCP[0].SourcePolicy)
+}
+
+// TestCBP_MCPEditIsEnforced pins that an edited MCP policy governs the next
+// compile, now that the index holds the cached policy's rule-sets instead of a
+// copy of them.
+func TestCBP_MCPEditIsEnforced(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	names := map[string][]string{namespace.RootNamespaceID: {"contract"}}
+	write := func(tool string) {
+		p := testParseMCPPolicy(t, `
+path "mcp/x" {
+  methods {
+    allowed = ["tools/call"]
+  }
+  tools {
+    allowed = ["`+tool+`"]
+  }
+}`)
+		p.Name, p.Type = "contract", PolicyTypeMCP
+		require.NoError(t, ps.SetPolicy(ctx, p, nil))
+	}
+
+	write("old")
+	first, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	require.True(t, mcpListItemAllowed(first.mcpRulesForPath("mcp/x"), "tools/call", "old"))
+
+	write("new")
+	second, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	sets := second.mcpRulesForPath("mcp/x")
+	assert.True(t, mcpListItemAllowed(sets, "tools/call", "new"))
+	assert.False(t, mcpListItemAllowed(sets, "tools/call", "old"))
+
+	require.NoError(t, ps.DeletePolicy(ctx, "contract", PolicyTypeMCP))
+	third, err := ps.CBP(ctx, names)
+	require.NoError(t, err)
+	assert.Empty(t, third.mcpRulesForPath("mcp/x"))
+}
+
+// TestCBP_ConcurrentCompileWhileWriting compiles and evaluates from many
+// goroutines while another rewrites and deletes the policies they compile from,
+// under the race detector. The policies meet at every key kind, so each compile
+// runs every merge: capabilities with conditions at an exact key, a deny
+// collapse at a prefix, a segment wildcard, and three MCP rule-sets at one key,
+// two of them stanzas of one policy.
+func TestCBP_ConcurrentCompileWhileWriting(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	rules := map[string]struct {
+		typ  PolicyType
+		body string
+	}{
+		"cbp-a": {PolicyTypeCBP, `
+path "secret/a" {
+  capabilities = ["read", "list"]
+  condition = "request.client_ip != ''"
+}
+path "pre/*" { capabilities = ["read"] }
+path "seg/+/x" { capabilities = ["read"] }
+`},
+		"cbp-b": {PolicyTypeCBP, `
+path "secret/a" {
+  capabilities = ["update"]
+  condition = "request.client_ip == '1.1.1.1'"
+}
+path "pre/*" { capabilities = ["deny"] }
+path "seg/+/x" { capabilities = ["update"] }
+`},
+		"mcp-a": {PolicyTypeMCP, `
+path "mcp/x" {
+  methods {
+    allowed = ["tools/list", "tools/call"]
+  }
+  tools {
+    allowed = ["get_*"]
+  }
+}
+path "mcp/x" {
+  methods {
+    allowed = ["tools/list", "tools/call"]
+  }
+  tools {
+    allowed = ["list_*"]
+  }
+}`},
+		"mcp-b": {PolicyTypeMCP, `
+path "mcp/x" {
+  methods {
+    allowed = ["tools/list", "tools/call"]
+  }
+  tools {
+    allowed = ["search_*"]
+  }
+}`},
+	}
+	// write reports instead of failing: it also runs on the writer goroutine.
+	write := func(name string) {
+		r := rules[name]
+		var p *Policy
+		var err error
+		if r.typ == PolicyTypeMCP {
+			p, err = ParseMCPPolicy(namespace.RootNamespace, r.body)
+		} else {
+			p, err = ParseCBPPolicy(namespace.RootNamespace, r.body)
+		}
+		if err == nil {
+			p.Name, p.Type = name, r.typ
+			err = ps.SetPolicy(ctx, p, nil)
+		}
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	for name := range rules {
+		write(name)
+	}
+	names := map[string][]string{namespace.RootNamespaceID: {"cbp-a", "cbp-b", "mcp-a", "mcp-b", "cbp-a"}}
+
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = ps.DeletePolicy(ctx, "cbp-b", PolicyTypeCBP)
+			_ = ps.DeletePolicy(ctx, "mcp-a", PolicyTypeMCP)
+			write("cbp-b")
+			write("mcp-a")
+			write("mcp-b")
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				cbp, err := ps.CBP(ctx, names)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				for _, req := range []*logical.Request{
+					{Operation: logical.ReadOperation, Path: "secret/a", ClientIP: "1.1.1.1"},
+					{Operation: logical.UpdateOperation, Path: "secret/a", ClientIP: "1.1.1.1"},
+					{Operation: logical.ReadOperation, Path: "pre/zz"},
+					{Operation: logical.UpdateOperation, Path: "seg/q/x"},
+				} {
+					cbp.AllowOperation(ctx, req, nil, false)
+				}
+				mcpListItemAllowed(cbp.mcpRulesForPath("mcp/x"), "tools/list", "search_issues")
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	<-writerDone
+}
+
+// TestCBP_StoredNameAttributed pins that a policy loaded from the store is
+// attributed by the name it is stored under, never by a name written in its
+// body. The granting-policies slice is built once, when the policy is cached,
+// so it must be built after the store's name has replaced the parsed one.
+func TestCBP_StoredNameAttributed(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	setStoredPolicy(t, ps, ctx, "good", `
+name = "evil"
+path "secret/x" { capabilities = ["read"] }
+`)
+	contract := testParseMCPPolicy(t, `
+name = "evil"
+path "mcp/x" {
+  methods {
+    allowed = ["tools/call"]
+  }
+  tools {
+    allowed = ["get_*"]
+  }
+}`)
+	contract.Name, contract.Type = "good-mcp", PolicyTypeMCP
+	require.NoError(t, ps.SetPolicy(ctx, contract, nil))
+
+	// Purged, so both are loaded and parsed from storage, not served as written.
+	ps.tokenPoliciesLRU.Purge()
+	cbp, err := ps.CBP(ctx, map[string][]string{namespace.RootNamespaceID: {"good", "good-mcp"}})
+	require.NoError(t, err)
+
+	res := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "secret/x"}, nil, false)
+	require.True(t, res.Allowed)
+	assert.Equal(t, []string{"good"}, grantingNames(res.GrantingPolicies))
+	sets := cbp.mcpRulesForPath("mcp/x")
+	require.Len(t, sets, 1)
+	assert.Equal(t, "good-mcp", sets[0].SourcePolicy)
+
+	// A prefetched policy without parsed paths is parsed from its body, which
+	// names itself "evil"; the caller's name still wins.
+	prefetched := &Policy{
+		Name:      "good-prefetched",
+		Type:      PolicyTypeCBP,
+		Raw:       "name = \"evil\"\npath \"secret/y\" { capabilities = [\"read\"] }",
+		namespace: namespace.RootNamespace,
+	}
+	cbp, err = ps.CBP(ctx, map[string][]string{}, prefetched)
+	require.NoError(t, err)
+	res = cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "secret/y"}, nil, false)
+	require.True(t, res.Allowed)
+	assert.Equal(t, []string{"good-prefetched"}, grantingNames(res.GrantingPolicies))
 }
