@@ -678,6 +678,33 @@ func (ps *PolicyStore) CBP(ctx context.Context, policyNames map[string][]string,
 		return strings.Compare(a.Name, b.Name)
 	})
 
+	return ps.compile(ctx, allPolicies, additionalPolicies)
+}
+
+// cbpForNamespace is the request path's entry: every name is resolved in the
+// namespace ctx carries, which is also the namespace the CBP is compiled in.
+// It takes no map and looks the namespace up no second time, and the policies
+// are gathered in a fixed buffer that reaches the heap only past eight.
+func (ps *PolicyStore) cbpForNamespace(ctx context.Context, names []string, additional []*Policy) (*CBP, error) {
+	var buf [8]*Policy
+	all := buf[:0]
+	for _, name := range names {
+		p, err := ps.getPolicyAnyType(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get policy: %w", err)
+		}
+		if p != nil {
+			all = append(all, p)
+		}
+	}
+	// One namespace, so CBP()'s order reduces to the name order.
+	slices.SortFunc(all, func(a, b *Policy) int { return strings.Compare(a.Name, b.Name) })
+	return ps.compile(ctx, all, additional)
+}
+
+// compile compiles the named policies, already ordered, followed by the
+// pre-fetched ones, parsing any that arrives without parsed paths.
+func (ps *PolicyStore) compile(ctx context.Context, allPolicies []*Policy, additionalPolicies []*Policy) (*CBP, error) {
 	// Pre-fetched policies keep their caller-given order, appended after the
 	// named ones. The caller chose that sequence; sorting it would be discarding
 	// information rather than adding determinism.

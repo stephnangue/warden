@@ -1965,6 +1965,41 @@ path "mcp/x" {
 	<-writerDone
 }
 
+// TestCBP_ForNamespaceMatchesCBP pins that the request path's entry compiles
+// what CBP() compiles for one namespace: the same grants, the same granting
+// policies in the same order, and the same first-wins filter path, whatever
+// order the names arrive in.
+func TestCBP_ForNamespaceMatchesCBP(t *testing.T) {
+	core := createTestCore(t)
+	ps := core.policyStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	for _, which := range []string{"b", "a"} {
+		setStoredPolicy(t, ps, ctx, "filter-"+which, `
+path "secret/shared" {
+  capabilities = ["list"]
+  list_scan_response_keys_filter_path = "secret/from-`+which+`/{{ .key }}"
+}`)
+	}
+	extra := finalizedPolicy(t, "extra", PolicyTypeCBP, `path "secret/shared" { capabilities = ["list"] }`)
+	list := &logical.Request{Operation: logical.ListOperation, Path: "secret/shared"}
+
+	want, err := ps.CBP(ctx, map[string][]string{namespace.RootNamespaceID: {"filter-b", "filter-a"}}, extra)
+	require.NoError(t, err)
+	wantRes := want.AllowOperation(ctx, list, nil, false)
+	require.True(t, wantRes.Allowed)
+
+	for _, names := range [][]string{{"filter-b", "filter-a"}, {"filter-a", "filter-b"}} {
+		got, err := ps.cbpForNamespace(ctx, names, []*Policy{extra})
+		require.NoError(t, err)
+		res := got.AllowOperation(ctx, list, nil, false)
+		require.True(t, res.Allowed)
+		assert.Equal(t, wantRes.ResponseKeysFilterPath, res.ResponseKeysFilterPath)
+		assert.Equal(t, grantingNames(wantRes.GrantingPolicies), grantingNames(res.GrantingPolicies))
+	}
+	assert.Equal(t, []string{"filter-a", "filter-b", "extra"}, grantingNames(wantRes.GrantingPolicies))
+}
+
 // TestCBP_StoredNameAttributed pins that a policy loaded from the store is
 // attributed by the name it is stored under, never by a name written in its
 // body. The granting-policies slice is built once, when the policy is cached,
