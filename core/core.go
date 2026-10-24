@@ -433,6 +433,13 @@ type Core struct {
 	// same one. Built by newTransparentAuthFlight.
 	transparentAuthFlight *flight.Group[*TokenEntry]
 
+	// anonymousListens holds one slot per anonymous subscriptions/listen
+	// stream open on this node's discovery server, in every namespace,
+	// bounding them at maxAnonymousListens. Made on first use
+	// (anonymousListenSlots).
+	anonymousListensOnce sync.Once
+	anonymousListens     chan struct{}
+
 	// clusterConfig holds tunable HA cluster parameters (timeouts, intervals).
 	clusterConfig ClusterConfig
 }

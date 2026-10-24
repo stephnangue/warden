@@ -73,7 +73,7 @@ const sysMCPTimeout = time.Minute
 const maxSysMCPBatch = 50
 
 // maxAnonymousListens caps the subscriptions/listen streams callers presenting
-// no identity may hold open at once on one system backend. A stream holds a
+// no identity may hold open at once on one node, across its namespaces. A stream holds a
 // goroutine and a connection until sysMCPTimeout, and needs no credential, so
 // without a cap anyone who can reach Warden could park them by the thousand.
 const maxAnonymousListens = 64
@@ -220,8 +220,8 @@ func (b *SystemBackend) handleMCPStream(ctx context.Context, req *logical.Reques
 
 	if req.Discovery != nil && req.Discovery.Anonymous && callsMethod(req, "subscriptions/listen") {
 		select {
-		case b.anonymousListens <- struct{}{}:
-			defer func() { <-b.anonymousListens }()
+		case b.core.anonymousListenSlots() <- struct{}{}:
+			defer func() { <-b.core.anonymousListenSlots() }()
 		default:
 			return logical.ErrorResponse(logical.ErrServiceUnavailable("too many anonymous notification streams; retry later")), nil
 		}
@@ -239,6 +239,14 @@ func (b *SystemBackend) handleMCPStream(ctx context.Context, req *logical.Reques
 
 	b.discoveryMCP().ServeHTTP(req.ResponseWriter, req.HTTPRequest.WithContext(ctx))
 	return &logical.Response{Streamed: true}, nil
+}
+
+// anonymousListenSlots returns the node's anonymous listen semaphore: one
+// per node, shared by every namespace's discovery server, so the bound is the
+// node's and not a namespace's.
+func (c *Core) anonymousListenSlots() chan struct{} {
+	c.anonymousListensOnce.Do(func() { c.anonymousListens = make(chan struct{}, maxAnonymousListens) })
+	return c.anonymousListens
 }
 
 // discoveryMCP returns the backend's MCP server, built on first use.

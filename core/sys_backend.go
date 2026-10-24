@@ -21,18 +21,13 @@ type SystemBackend struct {
 	// use, by discoveryMCP.
 	mcpOnce    sync.Once
 	mcpHandler http.Handler
-
-	// anonymousListens holds one slot per open anonymous subscriptions/listen
-	// stream, bounding them at maxAnonymousListens.
-	anonymousListens chan struct{}
 }
 
 // NewSystemBackend creates a new system backend using framework.Backend
 func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 	b := &SystemBackend{
-		core:             core,
-		logger:           log,
-		anonymousListens: make(chan struct{}, maxAnonymousListens),
+		core:   core,
+		logger: log,
 	}
 
 	b.Backend = &framework.Backend{

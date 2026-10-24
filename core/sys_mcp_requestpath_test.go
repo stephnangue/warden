@@ -240,36 +240,49 @@ func TestSysMCP_GatedByBuiltins(t *testing.T) {
 	})
 }
 
-// The discovery endpoint answers in a child namespace by path as by header.
+// The discovery endpoint answers in a child namespace by path as by header,
+// for identity calls and anonymous ones alike: the role-less leg sees the
+// path relative to the namespace.
 func TestSysMCP_NamespaceByPath(t *testing.T) {
 	e := newDiscEnv(t, "team/", "auth/jwt/")
-	e.mountAuth("jwt/")
+	m := e.mountAuth("jwt/")
 	srv := startMCPTestServer(t, e.c, nil)
 
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/team/sys/mcp", strings.NewReader(
+	post := func(bearer, body string) int {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/team/sys/mcp", strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	assert.Equal(t, http.StatusOK, post("eyJ.any.token",
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`))
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
-	req.Header.Set("Authorization", "Bearer eyJ.any.token")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	admits := m.admits.Load()
+	assert.Equal(t, http.StatusOK, post("", toolsListCall), "anonymous in a child namespace too")
+	assert.Equal(t, admits, m.admits.Load(), "and admitting nothing")
+	assert.Equal(t, http.StatusUnauthorized, post("",
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`))
 }
 
-// Anonymous notification streams are capped: once every slot is held, the
-// next is refused rather than parked.
+// Anonymous notification streams are capped per node: once every slot is
+// held, in whatever namespace, the next is refused rather than parked.
 func TestSysMCP_AnonymousListensCapped(t *testing.T) {
 	e, _, _ := discoveryEnv(t)
-	sys := e.c.systemBackend
+	slots := e.c.anonymousListenSlots()
 	for range maxAnonymousListens {
-		sys.anonymousListens <- struct{}{}
+		slots <- struct{}{}
 	}
 	t.Cleanup(func() {
 		for range maxAnonymousListens {
-			<-sys.anonymousListens
+			<-slots
 		}
 	})
 
