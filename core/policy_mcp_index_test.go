@@ -138,8 +138,38 @@ path "mcp/gateway/*" {
 	assert.Nil(t, cbp.CheckAllowedFromNonExactPaths("mcp/gateway/call", false),
 		"an MCP policy must contribute nothing to the capability index")
 
-	_, exact := cbp.exactRules.Get("mcp/gateway/call")
+	_, exact := cbp.exactRules["mcp/gateway/call"]
 	assert.False(t, exact)
+	assert.Nil(t, cbp.exactRules, "no capability index is even allocated")
+	assert.Nil(t, cbp.prefixRules)
+}
+
+// Indexes start nil and are allocated on first use, so a CBP with nothing in
+// one of them — no policy at all, or MCP policies only — answers every read
+// path without panicking: a nil *radix.Tree cannot be searched.
+func TestCBP_EmptyIndexesAnswer(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	empty, err := NewCBP(ctx, nil)
+	require.NoError(t, err)
+	mcpOnly := mustMCPIndex(t, `
+path "mcp/gateway/*" {
+  tools {
+    allowed = ["x"]
+  }
+}
+`)
+	for name, cbp := range map[string]*CBP{"no policy": empty, "MCP only": mcpOnly} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, []string{DenyCapability}, cbp.Capabilities(ctx, "secret/x"))
+			assert.Nil(t, cbp.CheckAllowedFromNonExactPaths("secret/x", true))
+			for _, op := range []logical.Operation{logical.ReadOperation, logical.ListOperation, logical.ScanOperation} {
+				res := cbp.AllowOperation(ctx, &logical.Request{Path: "secret/x/", Operation: op}, nil, false)
+				assert.False(t, res.Allowed, "%s", op)
+			}
+		})
+	}
+	assert.Nil(t, empty.mcpRulesForPath("mcp/gateway/call"))
+	assert.NotEmpty(t, mcpOnly.mcpRulesForPath("mcp/gateway/call"))
 }
 
 // TestMCPIndex_MixedPoliciesIndexSeparately compiles a CBP grant and an MCP

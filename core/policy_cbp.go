@@ -21,10 +21,15 @@ import (
 // CBP is used to wrap a set of policies to provide
 // an efficient interface for access control.
 type CBP struct {
-	// exactRules contains the path policies that are exact
-	exactRules *radix.Tree
+	// exactRules contains the path policies that are exact. An exact key is
+	// only ever looked up exactly — no walk over the exact paths exists — so a
+	// map serves it: one allocation however many stanzas, a hash lookup per
+	// request. An endpoint that needs to walk them in order would scan or sort
+	// the keys; a radix tree here would make every request pay for it.
+	exactRules map[string]*CBPPermissions
 
-	// prefixRules contains the path policies that are a prefix
+	// prefixRules contains the path policies that are a prefix, found by
+	// longest-prefix match.
 	prefixRules *radix.Tree
 
 	segmentWildcardPaths map[string]interface{}
@@ -35,12 +40,86 @@ type CBP struct {
 	// capability grant and its tool contract can come from different documents
 	// whose stanzas need not be spelled the same way. Values are
 	// *CBPPermissions carrying only .MCP.
-	mcpExactRules           *radix.Tree
+	mcpExactRules           map[string]*CBPPermissions
 	mcpPrefixRules          *radix.Tree
 	mcpSegmentWildcardPaths map[string]interface{}
 
+	// Every index above starts nil and is allocated by the first stanza that
+	// needs it (store, storeMCP): a compile pays only for the indexes its
+	// policies use. Readers tolerate nil: a nil map reads as empty, and the
+	// trees are guarded (lookupEntry, checkAllowedFromNonExactPaths).
+
 	// root is enabled if the "root" named policy is present.
 	root bool
+}
+
+// lookupEntry returns the entry already indexed under pc's key in the given
+// index, if any.
+func lookupEntry(exact map[string]*CBPPermissions, prefix *radix.Tree, wild map[string]interface{}, pc *PathRules) (*CBPPermissions, bool) {
+	switch {
+	case pc.HasSegmentWildcards:
+		raw, ok := wild[pc.Path]
+		if !ok {
+			return nil, false
+		}
+		return raw.(*CBPPermissions), true
+	case pc.IsPrefix:
+		if prefix == nil {
+			return nil, false
+		}
+		raw, ok := prefix.Get(pc.Path)
+		if !ok {
+			return nil, false
+		}
+		return raw.(*CBPPermissions), true
+	default:
+		e, ok := exact[pc.Path]
+		return e, ok
+	}
+}
+
+// store indexes e under pc's key in the capability index, allocating the
+// index on first use. hint sizes the exact-path map: the compile's stanzas.
+func (a *CBP) store(pc *PathRules, e *CBPPermissions, hint int) {
+	switch {
+	case pc.HasSegmentWildcards:
+		if a.segmentWildcardPaths == nil {
+			a.segmentWildcardPaths = make(map[string]interface{}, 1)
+		}
+		a.segmentWildcardPaths[pc.Path] = e
+	case pc.IsPrefix:
+		if a.prefixRules == nil {
+			a.prefixRules = radix.New()
+		}
+		a.prefixRules.Insert(pc.Path, e)
+	default:
+		if a.exactRules == nil {
+			a.exactRules = make(map[string]*CBPPermissions, hint)
+		}
+		a.exactRules[pc.Path] = e
+	}
+}
+
+// storeMCP indexes e under pc's key in the MCP index, allocating the index on
+// first use.
+func (a *CBP) storeMCP(pc *PathRules, e *CBPPermissions) {
+	switch {
+	case pc.HasSegmentWildcards:
+		if a.mcpSegmentWildcardPaths == nil {
+			a.mcpSegmentWildcardPaths = make(map[string]interface{}, 1)
+		}
+		a.mcpSegmentWildcardPaths[pc.Path] = e
+	case pc.IsPrefix:
+		if a.mcpPrefixRules == nil {
+			a.mcpPrefixRules = radix.New()
+		}
+		a.mcpPrefixRules.Insert(pc.Path, e)
+	default:
+		if a.mcpExactRules == nil {
+			a.mcpExactRules = make(map[string]*CBPPermissions, 1)
+		}
+		a.mcpExactRules[pc.Path] = e
+	}
 }
 
 type PolicyCheckOpts struct {
@@ -87,16 +166,9 @@ const limitParameterName = "limit"
 
 // NewACL is used to construct a policy based CBP from a set of policies.
 func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
-	// Initialize
-	a := &CBP{
-		exactRules:              radix.New(),
-		prefixRules:             radix.New(),
-		segmentWildcardPaths:    make(map[string]interface{}, len(policies)),
-		mcpExactRules:           radix.New(),
-		mcpPrefixRules:          radix.New(),
-		mcpSegmentWildcardPaths: make(map[string]interface{}, len(policies)),
-		root:                    false,
-	}
+	// Initialize. Every index starts nil; the first stanza needing one
+	// allocates it.
+	a := &CBP{}
 
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
@@ -113,9 +185,11 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 	// attachment into a compile failure, which surfaces as a 500 on every
 	// request the token makes.
 	grantingPolicyCount := 0
+	stanzas := 0
 	for _, policy := range policies {
 		if policy != nil && policy.Type == PolicyTypeCBP {
 			grantingPolicyCount++
+			stanzas += len(policy.Paths)
 		}
 	}
 
@@ -153,29 +227,12 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 		}
 
 		for _, pc := range policy.Paths {
-			var raw interface{}
-			var ok bool
-			var tree *radix.Tree
-
 			if !pc.Expiration.IsZero() && time.Now().After(pc.Expiration) {
 				// Skip adding expired paths.
 				continue
 			}
 
-			switch {
-			case pc.HasSegmentWildcards:
-				raw, ok = a.segmentWildcardPaths[pc.Path]
-			default:
-				// Check which tree to use
-				tree = a.exactRules
-				if pc.IsPrefix {
-					tree = a.prefixRules
-				}
-
-				// Check for an existing policy
-				raw, ok = tree.Get(pc.Path)
-			}
-
+			existingPerms, ok := lookupEntry(a.exactRules, a.prefixRules, a.segmentWildcardPaths, pc)
 			if !ok {
 				clonedPerms, err := pc.Permissions.Clone()
 				if err != nil {
@@ -185,18 +242,12 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				// Store this policy name as the policy that permits these
 				// capabilities
 				clonedPerms.GrantingPoliciesMap = addGrantingPoliciesToMap(nil, policy, clonedPerms.CapabilitiesBitmap)
-				switch {
-				case pc.HasSegmentWildcards:
-					a.segmentWildcardPaths[pc.Path] = clonedPerms
-				default:
-					tree.Insert(pc.Path, clonedPerms)
-				}
+				a.store(pc, clonedPerms, stanzas)
 				continue
 			}
 
-			// these are the ones already in the tree
-			existingPerms := raw.(*CBPPermissions)
-
+			// existingPerms is the indexed entry itself: every merge below
+			// writes it in place.
 			switch {
 			case existingPerms.CapabilitiesBitmap&DenyCapabilityInt > 0:
 				// If we are explicitly denied in the existing capability set,
@@ -206,7 +257,7 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			case pc.Permissions.CapabilitiesBitmap&DenyCapabilityInt > 0:
 				// If this new policy explicitly denies, only save the deny value
 				existingPerms.CapabilitiesBitmap = DenyCapabilityInt
-				goto INSERT
+				continue
 
 			default:
 				// Insert the capabilities in this new policy into the existing
@@ -242,14 +293,6 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			default:
 				existingPerms.Conditions = append(existingPerms.Conditions, pc.Permissions.Conditions...)
 			}
-
-		INSERT:
-			switch {
-			case pc.HasSegmentWildcards:
-				a.segmentWildcardPaths[pc.Path] = existingPerms
-			default:
-				tree.Insert(pc.Path, existingPerms)
-			}
 		}
 	}
 	return a, nil
@@ -271,21 +314,7 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 			continue
 		}
 
-		var raw interface{}
-		var ok bool
-		var tree *radix.Tree
-
-		switch {
-		case pc.HasSegmentWildcards:
-			raw, ok = a.mcpSegmentWildcardPaths[pc.Path]
-		default:
-			tree = a.mcpExactRules
-			if pc.IsPrefix {
-				tree = a.mcpPrefixRules
-			}
-			raw, ok = tree.Get(pc.Path)
-		}
-
+		existingPerms, ok := lookupEntry(a.mcpExactRules, a.mcpPrefixRules, a.mcpSegmentWildcardPaths, pc)
 		if !ok {
 			// Clone before inserting: CBP() compiles from *Policy values held in
 			// the LRU and shared across requests, so the index must never hold
@@ -299,19 +328,10 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 			for _, m := range clonedPerms.MCP {
 				m.SourcePolicy = policy.Name
 			}
-			switch {
-			case pc.HasSegmentWildcards:
-				a.mcpSegmentWildcardPaths[pc.Path] = clonedPerms
-			default:
-				tree.Insert(pc.Path, clonedPerms)
-			}
+			a.storeMCP(pc, clonedPerms)
 			continue
 		}
 
-		existingPerms, castOK := raw.(*CBPPermissions)
-		if !castOK {
-			return errors.New("error type casting MCP permissions")
-		}
 		for _, m := range pc.Permissions.MCP {
 			clone := m.Clone()
 			clone.SourcePolicy = policy.Name
@@ -335,8 +355,8 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 // evaluated against it. Callers must treat it as read-only: sorting or
 // appending would corrupt the CBP for every other caller holding it.
 func (a *CBP) mcpRulesForPath(path string) []*CBPMCPRules {
-	if raw, ok := a.mcpExactRules.Get(path); ok {
-		return raw.(*CBPPermissions).MCP
+	if e, ok := a.mcpExactRules[path]; ok {
+		return e.MCP
 	}
 
 	if perms := checkAllowedFromNonExactPaths(
@@ -448,16 +468,14 @@ func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logi
 
 	// Find an exact matching rule, look for prefix if no match
 	var capabilities uint32
-	raw, ok := a.exactRules.Get(path)
-	if ok {
-		permissions = raw.(*CBPPermissions)
+	if e, ok := a.exactRules[path]; ok {
+		permissions = e
 		capabilities = permissions.CapabilitiesBitmap
 		goto CHECK
 	}
 	if op == logical.ListOperation || op == logical.ScanOperation {
-		raw, ok = a.exactRules.Get(strings.TrimSuffix(path, "/"))
-		if ok {
-			permissions = raw.(*CBPPermissions)
+		if e, ok := a.exactRules[strings.TrimSuffix(path, "/")]; ok {
+			permissions = e
 			capabilities = permissions.CapabilitiesBitmap
 			goto CHECK
 		}
@@ -734,8 +752,9 @@ func checkAllowedFromNonExactPaths(
 		return false
 	}
 
-	// Find a prefix rule if any.
-	{
+	// Find a prefix rule if any. The tree is nil until a prefix stanza is
+	// indexed, and a nil *radix.Tree cannot be searched.
+	if prefixRules != nil {
 		prefix, raw, ok := prefixRules.LongestPrefix(path)
 		if ok {
 			if len(segmentWildcardPaths) == 0 {
