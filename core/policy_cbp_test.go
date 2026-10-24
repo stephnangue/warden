@@ -2000,6 +2000,49 @@ path "secret/shared" {
 	assert.Equal(t, []string{"filter-a", "filter-b", "extra"}, grantingNames(wantRes.GrantingPolicies))
 }
 
+// TestCBP_NonExactResolution pins which stanza the non-exact resolver returns,
+// with and without segment wildcards beside the prefixes and in both modes: a
+// compile without wildcards answers from the prefix tree alone, before any
+// ranking.
+func TestCBP_NonExactResolution(t *testing.T) {
+	ctx := testContext()
+	prefixOnly := finalizedPolicy(t, "prefix", PolicyTypeCBP, `
+path "secret/*" { capabilities = ["read"] }
+path "secret/team/*" { capabilities = ["update"] }
+path "closed/*" { capabilities = ["deny"] }
+`)
+	mixed := finalizedPolicy(t, "mixed", PolicyTypeCBP, `
+path "secret/*" { capabilities = ["read"] }
+path "secret/+/data" { capabilities = ["delete"] }
+`)
+
+	only, err := NewCBP(ctx, []*Policy{prefixOnly})
+	require.NoError(t, err)
+	require.Nil(t, only.segmentWildcardPaths)
+	both, err := NewCBP(ctx, []*Policy{mixed})
+	require.NoError(t, err)
+	require.NotEmpty(t, both.segmentWildcardPaths)
+
+	caps := func(p *CBPPermissions) uint32 {
+		if p == nil {
+			return 0
+		}
+		return p.CapabilitiesBitmap
+	}
+	for _, bareMount := range []bool{false, true} {
+		// Longest prefix wins, a deny included, and no match is nil.
+		assert.Equal(t, UpdateCapabilityInt, caps(only.CheckAllowedFromNonExactPaths("secret/team/x", bareMount)))
+		assert.Equal(t, ReadCapabilityInt, caps(only.CheckAllowedFromNonExactPaths("secret/other", bareMount)))
+		assert.Equal(t, DenyCapabilityInt, caps(only.CheckAllowedFromNonExactPaths("closed/x", bareMount)))
+		assert.Nil(t, only.CheckAllowedFromNonExactPaths("public/x", bareMount))
+	}
+	// With wildcards the ranking still decides: a later wildcard beats an
+	// earlier glob.
+	assert.Equal(t, DeleteCapabilityInt, caps(both.CheckAllowedFromNonExactPaths("secret/a/data", false)))
+	assert.Equal(t, ReadCapabilityInt, caps(both.CheckAllowedFromNonExactPaths("secret/a/other", false)))
+	assert.Nil(t, both.CheckAllowedFromNonExactPaths("public/x", false))
+}
+
 // TestCBP_StoredNameAttributed pins that a policy loaded from the store is
 // attributed by the name it is stored under, never by a name written in its
 // body. The granting-policies slice is built once, when the policy is cached,

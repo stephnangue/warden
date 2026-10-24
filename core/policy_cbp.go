@@ -745,6 +745,22 @@ func checkAllowedFromNonExactPaths(
 	path string,
 	bareMount bool,
 ) *CBPPermissions {
+	// Without segment wildcards there is nothing to rank: the longest prefix
+	// wins, or nothing does, whatever bareMount says. Answered before the
+	// ranking slice is made, so the common lookup allocates nothing. The tree
+	// is nil until a prefix stanza is indexed, and a nil *radix.Tree cannot be
+	// searched.
+	if len(segmentWildcardPaths) == 0 {
+		if prefixRules == nil {
+			return nil
+		}
+		_, raw, ok := prefixRules.LongestPrefix(path)
+		if !ok {
+			return nil
+		}
+		return raw.(*CBPPermissions)
+	}
+
 	wcPathDescrs := make([]wcPathDescr, 0, len(segmentWildcardPaths)+1)
 
 	less := func(i, j int) bool {
@@ -803,14 +819,10 @@ func checkAllowedFromNonExactPaths(
 		return false
 	}
 
-	// Find a prefix rule if any. The tree is nil until a prefix stanza is
-	// indexed, and a nil *radix.Tree cannot be searched.
+	// Find a prefix rule if any, to rank against the segment wildcards.
 	if prefixRules != nil {
 		prefix, raw, ok := prefixRules.LongestPrefix(path)
 		if ok {
-			if len(segmentWildcardPaths) == 0 {
-				return raw.(*CBPPermissions)
-			}
 			wcPathDescrs = append(wcPathDescrs, wcPathDescr{
 				firstWCOrGlob: len(prefix),
 				wcPath:        prefix,
@@ -818,10 +830,6 @@ func checkAllowedFromNonExactPaths(
 				perms:         raw.(*CBPPermissions),
 			})
 		}
-	}
-
-	if len(segmentWildcardPaths) == 0 {
-		return nil
 	}
 
 	pathParts := strings.Split(path, "/")
