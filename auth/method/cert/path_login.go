@@ -93,6 +93,10 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	// Certificate fingerprint for token caching in transparent mode
 	fingerprint := certFingerprint(cert)
 
+	// The leaf's fields, and the anchors of the chains it verified along.
+	admission := newAdmission(cert, verifiedChains, b.mountFacts)
+	admission.PrincipalID = principalID
+
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
@@ -101,9 +105,7 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 			TokenTTL:    calculateTTL(config, cert, time.Now()),
 			ClientIP:    req.ClientIP,
 			ClientToken: fingerprint, // Cert fingerprint for token type caching
-			// The leaf's fields, and the anchors of the chains it verified
-			// along.
-			Admission: newAdmission(cert, verifiedChains, b.mountFacts),
+			Admission:   admission,
 		},
 		Data: map[string]any{
 			"principal_id": principalID,

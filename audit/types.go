@@ -131,6 +131,28 @@ type Auth struct {
 	// was resolved for the request; nil otherwise. Identity only — the raw user
 	// credential is never logged.
 	User *UserAttribution `json:"user,omitempty"`
+
+	// Discovery is how a request on a discovery endpoint was admitted without
+	// a service token; nil on every other request.
+	Discovery *DiscoveryAuth `json:"discovery,omitempty"`
+}
+
+// DiscoveryAuth records how a discovery request was admitted: the auth
+// mounts that admitted the presented credential and the roles granted there,
+// or that it ran anonymously.
+type DiscoveryAuth struct {
+	AdmittedBy   []AdmittedMount `json:"admitted_by,omitempty"`
+	RolesGranted int             `json:"roles_granted"`
+	Anonymous    bool            `json:"anonymous,omitempty"`
+	// CredentialUnverified: an anonymous request presented a credential that
+	// was neither checked nor used.
+	CredentialUnverified bool `json:"credential_unverified,omitempty"`
+}
+
+// AdmittedMount is one auth mount that admitted a discovery credential.
+type AdmittedMount struct {
+	Mount       string `json:"mount"`
+	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 // UserAttribution records the secondary (user) principal in an audit entry so a
@@ -377,6 +399,14 @@ func (e *LogEntry) Clone() *LogEntry {
 		if e.Auth.Groups != nil {
 			clone.Auth.Groups = make([]string, len(e.Auth.Groups))
 			copy(clone.Auth.Groups, e.Auth.Groups)
+		}
+		if d := e.Auth.Discovery; d != nil {
+			dc := *d
+			if d.AdmittedBy != nil {
+				dc.AdmittedBy = make([]AdmittedMount, len(d.AdmittedBy))
+				copy(dc.AdmittedBy, d.AdmittedBy)
+			}
+			clone.Auth.Discovery = &dc
 		}
 		if e.Auth.PolicyResults != nil {
 			clone.Auth.PolicyResults = &PolicyResults{

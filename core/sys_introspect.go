@@ -69,8 +69,22 @@ func (b *SystemBackend) pathIntrospectRoles() []*framework.Path {
 // handleIntrospectRoles is the sys/introspect/roles handler: {roles, warnings},
 // each role {name, description, skill, provider_path}, sorted by name. No
 // credential is a 401.
+//
+// Through the request path, the discovery is the one the role-less leg
+// already made for this request (requestDiscovery), so the credential is
+// admitted once per target mount, not twice.
 func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
-	d, err := b.core.discoverFromAdmissions(ctx, req)
+	var d *admissionDiscovery
+	var err error
+	if discoveryRequestFromContext(ctx) != nil {
+		if !hasDiscoveryCredential(req) {
+			err = errDiscoveryNoCredential
+		} else {
+			d, err = b.core.requestDiscovery(ctx)
+		}
+	} else {
+		d, err = b.core.discoverFromAdmissions(ctx, req)
+	}
 	if errors.Is(err, errDiscoveryNoCredential) {
 		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: err}, nil
 	}

@@ -50,6 +50,13 @@ type Admission struct {
 	// renamed: names reach them only through the mount's Mapping.
 	Facts selector.Facts
 
+	// PrincipalID is the principal a login with this credential would be
+	// issued for, derived as that auth method's login derives it (the JWT's
+	// user_claim, the certificate's principal field, the service account's
+	// username, the SPIFFE ID). Set by the auth method that builds the
+	// admission.
+	PrincipalID string
+
 	// Mount is the admitting mount's live naming, shared with every other
 	// admission of that mount, so a mapping edit reaches cached admissions.
 	Mount *MountFacts

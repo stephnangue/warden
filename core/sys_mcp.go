@@ -43,16 +43,6 @@ import (
 // is negotiated by the SDK independently of this string.
 const mcpServerVersion = "1.0.0"
 
-// mcpRequestKey is the private context key under which the middleware stashes
-// the inbound *http.Request so handlers — tools, the skill:// resource and the
-// skills/* methods — can recover the caller's credentials (Authorization
-// header and forwarded client certificate). The SDK does not hand the raw
-// request to handlers — it surfaces only
-// headers via req.Extra.Header and, notably, not the TLS client certificate —
-// so discovery, which presents the caller's credential to the auth mounts,
-// needs the request threaded through the context.
-type mcpRequestKey struct{}
-
 // maxSysMCPBody caps a discovery request body. Every request this endpoint
 // serves carries at most a skill URI or a cursor, so anything near this is
 // already pathological; the cap exists so buffering the body cannot be
@@ -94,7 +84,7 @@ const jsonRPCCodeInvalidRequest = -32600
 func sysMCPContext(r *http.Request, ns *namespace.Namespace) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(r.Context(), sysMCPTimeout)
 	ctx = namespace.ContextWithNamespace(ctx, ns)
-	ctx = withMCPRequest(ctx, r)
+	ctx = withDiscoveryRequest(ctx, r)
 	return ctx, cancel
 }
 
@@ -162,21 +152,6 @@ func writeBatchTooLarge(w http.ResponseWriter) {
 			"message": fmt.Sprintf("JSON-RPC batch exceeds %d messages", maxSysMCPBatch),
 		},
 	})
-}
-
-// withMCPRequest stashes r in ctx, with an empty discovery memo: every handler
-// serving r shares one discovery (requestDiscovery).
-func withMCPRequest(ctx context.Context, r *http.Request) context.Context {
-	ctx = context.WithValue(ctx, mcpRequestKey{}, r)
-	return context.WithValue(ctx, discoveryMemoKey{}, &discoveryMemo{})
-}
-
-// mcpRequestFromContext recovers the inbound *http.Request stashed by the
-// middleware. Returns nil if absent (should not happen for a request routed
-// through mcpServerHandler).
-func mcpRequestFromContext(ctx context.Context) *http.Request {
-	r, _ := ctx.Value(mcpRequestKey{}).(*http.Request)
-	return r
 }
 
 // mcpServerHandler builds the always-on MCP discovery endpoint served at

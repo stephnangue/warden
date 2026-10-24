@@ -32,6 +32,10 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 			Unauthenticated: []string{
 				"init",
 				"health",
+			},
+			// Discovery: authorized on the presented credential, with no role,
+			// under the built-in policies (logical.Paths.Identity).
+			Identity: []string{
 				"introspect/roles",
 			},
 			Root: []string{

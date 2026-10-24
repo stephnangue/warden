@@ -87,10 +87,11 @@ func newAdmission(id spiffeid.ID, svid string, audiences []string, issuedAt time
 		helper.TableValues(factAudiences, audiences),
 	)
 	return &logical.Admission{
-		Facts:    facts,
-		Mount:    mount,
-		IssuedAt: issuedAt,
-		Bytes:    facts.Bytes(),
+		Facts:       facts,
+		PrincipalID: id.String(),
+		Mount:       mount,
+		IssuedAt:    issuedAt,
+		Bytes:       facts.Bytes(),
 	}
 }
 

@@ -94,6 +94,7 @@ func (b *jwtAuthBackend) handleLogin(ctx context.Context, req *logical.Request, 
 	// read of claims above and nothing reads them after this line.
 	admission := newAdmission(claims, jwtToken, b.mountFacts)
 	admission.AudienceBound = len(config.BoundAudiences) > 0
+	admission.PrincipalID = principalID
 
 	// ClientToken carries the raw JWT so that LoginCreateToken can pass it to
 	// the identity token type, which hashes it with the mount accessor into

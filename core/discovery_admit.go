@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,6 +57,22 @@ type admissionDiscovery struct {
 	granted   []*logical.Role
 	providers map[string]discoveryProvider // the roles' providers, by mount path
 	warnings  []string                     // one per target mount that failed; never nil
+
+	// admitted are the target mounts whose live naming is not human that
+	// admitted the credential, sorted by mount, each with its admission and
+	// the membership computed for it. The role-less leg names the caller from
+	// the first.
+	admitted []discoveryAdmitted
+	// targets counts the distinct target mounts, failed those that could not
+	// decide: every one failing is an outage, not a refusal.
+	targets, failed int
+}
+
+// discoveryAdmitted is one target mount that admitted the credential.
+type discoveryAdmitted struct {
+	mount      string // relative to the namespace, without "auth/"
+	adm        *logical.Admission
+	membership *logical.Membership
 }
 
 // errDiscoveryNoCredential refuses discovery for a caller that presented no
@@ -157,6 +175,13 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 			targets = append(targets, t)
 		}
 	}
+	// With no role to reach, the namespace's own auth mount still names the
+	// caller, so a namespace without roles admits a valid credential (and
+	// grants it nothing) rather than refusing it. Only then: with targets,
+	// the extra admission would cost a verifier round trip for nothing.
+	if len(targets) == 0 && nsTarget != "" {
+		targets = append(targets, nsTarget)
+	}
 
 	// Admit once per target.
 	type admitResult struct {
@@ -179,12 +204,15 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	now := time.Now()
 	warnings := []string{}
 	grants := make(map[string]map[string]logical.GroupGrant, len(targets))
+	var admitted []discoveryAdmitted
+	failed := 0
 	for i, mount := range targets {
 		r := results[i]
 		if r.err != nil {
 			// The log keeps the error verbatim; the caller gets its class.
 			c.logger.Warn("introspect: mount failed", lgr.String("mount", mount), lgr.Err(r.err))
 			warnings = append(warnings, fmt.Sprintf("mount %q: %s", mount, admitFailurePhrase(r.err)))
+			failed++
 			continue
 		}
 		if r.adm == nil || r.adm.MountPath == "" {
@@ -196,8 +224,11 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 			// without a naming answers no fact.
 			continue
 		}
-		grants[mount] = compute(r.adm, n, gs, now).Roles
+		m := compute(r.adm, n, gs, now)
+		grants[mount] = m.Roles
+		admitted = append(admitted, discoveryAdmitted{mount: mount, adm: r.adm, membership: m})
 	}
+	slices.SortFunc(admitted, func(a, b discoveryAdmitted) int { return strings.Compare(a.mount, b.mount) })
 
 	var granted []*logical.Role
 	for i, r := range roles {
@@ -207,7 +238,10 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 			}
 		}
 	}
-	return &admissionDiscovery{ns: ns, granted: granted, providers: providers, warnings: warnings}, nil
+	return &admissionDiscovery{
+		ns: ns, granted: granted, providers: providers, warnings: warnings,
+		admitted: admitted, targets: len(targets), failed: failed,
+	}, nil
 }
 
 // namespaceAuthTarget returns the auth mount the namespace's auto_auth_path
@@ -305,11 +339,37 @@ func (m *discoveryMemo) get(log *lgr.GatedLogger, discover func() (*admissionDis
 // discoveryMemoKey is the context key of a request's discoveryMemo.
 type discoveryMemoKey struct{}
 
-// requestDiscovery returns the discovery of the discovery-server request in
-// ctx: the memoised one when ctx carries a memo (withMCPRequest puts one
-// there), else a fresh one. It never returns (nil, nil).
+// discoveryRequestKey is the context key under which the inbound
+// *http.Request of a discovery request is stashed, so its handlers — the
+// discovery server's tools, the skill:// resource and the skills/* methods,
+// and the role-less leg of the request path — can recover the caller's
+// credentials (Authorization header and forwarded client certificate). The
+// MCP SDK does not hand the raw request to handlers — it surfaces only
+// headers via req.Extra.Header and, notably, not the TLS client certificate —
+// so discovery, which presents the caller's credential to the auth mounts,
+// needs the request threaded through the context.
+type discoveryRequestKey struct{}
+
+// withDiscoveryRequest stashes r in ctx, with an empty discovery memo: every
+// handler serving r, and the role-less leg that admits it, share one
+// discovery (requestDiscovery).
+func withDiscoveryRequest(ctx context.Context, r *http.Request) context.Context {
+	ctx = context.WithValue(ctx, discoveryRequestKey{}, r)
+	return context.WithValue(ctx, discoveryMemoKey{}, &discoveryMemo{})
+}
+
+// discoveryRequestFromContext recovers the inbound *http.Request stashed by
+// withDiscoveryRequest, or nil.
+func discoveryRequestFromContext(ctx context.Context) *http.Request {
+	r, _ := ctx.Value(discoveryRequestKey{}).(*http.Request)
+	return r
+}
+
+// requestDiscovery returns the discovery of the discovery request in ctx: the
+// memoised one when ctx carries a memo (withDiscoveryRequest puts one there),
+// else a fresh one. It never returns (nil, nil).
 func (c *Core) requestDiscovery(ctx context.Context) (*admissionDiscovery, error) {
-	httpReq := mcpRequestFromContext(ctx)
+	httpReq := discoveryRequestFromContext(ctx)
 	if httpReq == nil {
 		return nil, fmt.Errorf("internal: request context missing")
 	}

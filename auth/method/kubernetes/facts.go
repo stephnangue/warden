@@ -69,10 +69,11 @@ func newAdmission(status *tokenReviewStatus, namespace, name string, claims map[
 		helper.TableValues(factAudiences, status.Audiences),
 	)
 	return &logical.Admission{
-		Facts:    facts,
-		Mount:    mount,
-		IssuedAt: helper.IssuedAt(claims),
-		Bytes:    facts.Bytes(),
+		Facts:       facts,
+		PrincipalID: status.User.Username,
+		Mount:       mount,
+		IssuedAt:    helper.IssuedAt(claims),
+		Bytes:       facts.Bytes(),
 	}
 }
 

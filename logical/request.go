@@ -109,6 +109,12 @@ type Request struct {
 	roleGrant    RoleGrant
 	hasRoleGrant bool
 
+	// Discovery records how a request on an identity path was admitted
+	// without a service token: the mounts that admitted the credential, how
+	// many roles their groups grant it, or that it ran anonymously. For the
+	// audit only; never disclosed to the caller. Nil on every other request.
+	Discovery *DiscoveryAdmission `json:"-"`
+
 	// RequestedRole is the role a transparent request asks for (X-Warden-Role,
 	// the role/<name>/ segment, ?role=, the provider's default_role), set by
 	// implicit auth alongside Transparent and never from client input

@@ -101,9 +101,11 @@ func TestKubernetes_MaxAgeRefusesTokenWithoutIat(t *testing.T) {
 // TestKubernetes_GenericJWTAtKubernetesTarget: discovery with a JWT that is
 // not a service account token, in a namespace whose only target is a
 // kubernetes mount reviewing tokens with the caller's own (self-review). The
-// API server refuses the review call itself, and discovery reports exactly one
-// warning for the mount, in its fixed phrase: nothing of what the API server
-// answered, nor where it lives, reaches the caller. The call costs one review.
+// API server refuses the review call itself, so the one mount the caller could
+// be admitted through cannot decide: sys/introspect/roles, which admits the
+// caller before answering, answers 503, naming the mount in its fixed phrase:
+// nothing of what the API server answered, nor where it lives, reaches the
+// caller. The call costs one review.
 func TestKubernetes_GenericJWTAtKubernetesTarget(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	const (
@@ -123,24 +125,18 @@ func TestKubernetes_GenericJWTAtKubernetesTarget(t *testing.T) {
 		"Authorization":      "Bearer " + h.GetDefaultJWT(t),
 		"X-Warden-Namespace": ns,
 	}, "")
-	if status != 200 {
-		t.Fatalf("discovery: status %d: %s", status, body)
+	if status != 503 {
+		t.Fatalf("discovery: status %d, want 503: %s", status, body)
 	}
 	var out struct {
-		Data struct {
-			Roles    []map[string]any `json:"roles"`
-			Warnings []string         `json:"warnings"`
-		} `json:"data"`
+		Errors []string `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("decode %s: %v", body, err)
 	}
-	if len(out.Data.Roles) != 0 {
-		t.Errorf("a JWT the target cannot review is granted roles: %v", out.Data.Roles)
-	}
-	want := []string{`mount "k8s/": could not verify the credential`}
-	if len(out.Data.Warnings) != 1 || out.Data.Warnings[0] != want[0] {
-		t.Errorf("warnings = %q, want exactly %q", out.Data.Warnings, want)
+	want := `no auth mount could decide on the presented credential (mount "k8s/": could not verify the credential)`
+	if len(out.Errors) != 1 || out.Errors[0] != want {
+		t.Errorf("errors = %q, want exactly %q", out.Errors, want)
 	}
 	stub, _ := url.Parse(reviewer.URL)
 	if h.LeaksStubDetail(body) || strings.Contains(string(body), stub.Host) {

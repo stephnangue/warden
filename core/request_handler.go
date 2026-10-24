@@ -22,7 +22,6 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/openbao/openbao/sdk/v2/helper/pathmanager"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
-	spiffelib "github.com/stephnangue/warden/auth/spiffe"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
@@ -953,6 +952,15 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		req.MountPoint = entry.Path
 	}
 
+	// An identity path authorizes on the presented credential, with no role:
+	// implicit auth and minting are skipped below, and without a service
+	// token the role-less leg admits it before CheckToken. The request and
+	// one discovery memo ride ctx, so the handler reuses those admissions.
+	identityPath := req.HTTPRequest != nil && c.router.IdentityPath(ctx, req.Path)
+	if identityPath {
+		ctx = withDiscoveryRequest(ctx, req.HTTPRequest)
+	}
+
 	// Parse request body before CheckToken since req.Data may be used during policy evaluation.
 	// Help requests are never streaming - they should return help text, not proxy upstream.
 	isStreaming := c.isStreamingRequest(ctx, req.Path) && req.Operation != logical.HelpOperation
@@ -992,7 +1000,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// ?role= selects nothing, so it leaves the header in force. There is
 		// no provider here, so no default_role: a request selecting neither is
 		// refused before its credential is admitted.
-		if !providerAuth && req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
+		if !providerAuth && !identityPath && req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
 			var authPath string
 			if ns, _ := namespace.FromContext(ctx); ns != nil {
 				authPath = ns.CustomMetadata["auto_auth_path"]
@@ -1150,8 +1158,9 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		}
 
 		// Perform implicit auth if needed
-		// Skip if already marked as unauthenticated (handled above)
-		if !req.StreamUnauthenticated {
+		// Skip if already marked as unauthenticated (handled above), and on an
+		// identity path, which takes no role (the role-less leg admits it).
+		if !req.StreamUnauthenticated && !identityPath {
 			if isTransparent, role := c.isTransparentRequest(req, matchingBackend); isTransparent {
 				if failure := c.authenticateImplicitly(ctx, req, matchingBackend, role, noRoleSelectedGateway); failure != nil {
 					return failure, nil, nil
@@ -1203,6 +1212,16 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			logger.String("path", req.Path))
 		return logical.ErrorResponse(logical.ErrForbidden(
 			"MCP requests cannot use unauthenticated streaming paths")), nil, nil
+	}
+
+	// The role-less leg: an identity path without a service token is admitted
+	// on the credential it presents and runs under the built-in policies.
+	// Both branches above reach here, and the request's token entry is in
+	// place before CheckToken looks for one.
+	if identityPath && req.HTTPRequest.Header.Get(logical.HeaderWardenToken) == "" {
+		if refusal := c.admitRoleless(ctx, req); refusal != nil {
+			return refusal, nil, nil
+		}
 	}
 
 	// Validate the token (non-login requests require authentication)
@@ -1316,8 +1335,10 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		}
 	}
 
-	// For streaming requests, mint credentials (unless StreamUnauthenticated)
-	if req.Streamed && !req.StreamUnauthenticated {
+	// For streaming requests, mint credentials (unless StreamUnauthenticated).
+	// An identity path never mints: it takes no role, so there is nothing to
+	// mint for.
+	if req.Streamed && !req.StreamUnauthenticated && !identityPath {
 		if err := c.mintCredentialForRequest(ctx, req, te); err != nil {
 			c.logger.Error("failed to mint credential for streaming request",
 				logger.Err(err),
@@ -2927,10 +2948,6 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 		ctx = context.WithValue(ctx, logical.ClientIPKey, req.ClientIP)
 	}
 
-	// A non-empty credential is the secondary (user) path: the mount must be a
-	// bearer format, and the credential is used verbatim as the bearer token.
-	explicitCred := credential != ""
-
 	// Resolve the auth mount and its backend in one lookup. The backend names
 	// the credential format it admits; the entry supplies the stable mount
 	// accessor folded into the cache key.
@@ -2949,103 +2966,28 @@ func (c *Core) resolveTransparentIdentity(ctx context.Context, req *logical.Requ
 	}
 	credentialFormat := formatProvider.CredentialFormat()
 
-	var singleflightKey string
+	tc, err := transparentCredentialOf(req, credential, credentialFormat, authMountEntry.Type, autoAuthPath)
+	if err != nil {
+		return nil, false, err
+	}
+	credKey := tc.key // fingerprint or JWT — used for the post-login lookup
+	// A credential authenticated by certificate, not by any bearer: signal the
+	// primary caller to drop a stray Authorization bearer (ExtractToken falls
+	// back to Authorization, so a cert request that also carries a bearer —
+	// e.g. a secondary user token on Authorization — would otherwise leave that
+	// bearer, not the cert-minted token ID, in ClientToken). This function
+	// performs no request mutation.
+	clearClientToken = tc.cert
+	sfHash := sha256.Sum256([]byte(tc.kind + ":" + mountAccessor + ":" + credKey))
+	singleflightKey := hex.EncodeToString(sfHash[:])
+	loginData := map[string]any{}
+	if !tc.cert {
+		loginData["jwt"] = credKey
+	}
 	// lookupFunc takes its ctx rather than closing over the request's: inside the
 	// singleflight it runs on the login's detached context.
-	var lookupFunc func(ctx context.Context) (*TokenEntry, error)
-	var loginData map[string]any
-	var credKey string // fingerprint or JWT — used for the post-login lookup
-
-	// Dispatch by the credential's wire-extraction shape. Cases group by what
-	// the credential looks like on the wire (cert vs JWT bearer): a generic JWT
-	// and a Kubernetes service account JWT both arrive as JWTs in the
-	// Authorization header and share the same parse path. The cache key is per
-	// mount, so formats sharing an extraction case never share an entry.
-	switch credentialFormat {
-	case logical.CredentialFormatCert:
-		if explicitCred {
-			return nil, false, fmt.Errorf("auth method %q at %q requires a bearer credential, not a TLS client certificate", authMountEntry.Type, autoAuthPath)
-		}
-		clientCert := extractTransparentClientCert(req)
-		if clientCert == nil {
-			return nil, false, fmt.Errorf("auth method %q at %q requires a TLS client certificate", authMountEntry.Type, autoAuthPath)
-		}
-		hash := sha256.Sum256(clientCert.Raw)
-		fingerprint := hex.EncodeToString(hash[:])
-		sfHash := sha256.Sum256([]byte("cert:" + mountAccessor + ":" + fingerprint))
-		singleflightKey = hex.EncodeToString(sfHash[:])
-		loginData = map[string]any{}
-		credKey = fingerprint
-		// Authenticate via the client certificate, not any bearer. Signal the
-		// primary caller to drop a stray Authorization bearer (ExtractToken falls
-		// back to Authorization, so a cert request that also carries a bearer —
-		// e.g. a secondary user token on Authorization — would otherwise leave that
-		// bearer, not the cert-minted token ID, in ClientToken).
-		clearClientToken = true
-		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-			return c.LookupTransparentToken(ctx, fingerprint, mountAccessor)
-		}
-
-	case logical.CredentialFormatJWT, logical.CredentialFormatKubernetesJWT:
-		clientToken := credential
-		if clientToken == "" {
-			clientToken = req.ClientToken
-		}
-		if !strings.HasPrefix(clientToken, "eyJ") {
-			return nil, false, fmt.Errorf("auth method %q at %q requires a JWT bearer token", authMountEntry.Type, autoAuthPath)
-		}
-		sfHash := sha256.Sum256([]byte("jwt:" + mountAccessor + ":" + clientToken))
-		singleflightKey = hex.EncodeToString(sfHash[:])
-		loginData = map[string]any{"jwt": clientToken}
-		credKey = clientToken
-		lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-			return c.LookupTransparentToken(ctx, clientToken, mountAccessor)
-		}
-
-	case logical.CredentialFormatSPIFFE:
-		// Unified SPIFFE mount: accept either a JWT-SVID (bearer) or an
-		// X.509-SVID (TLS/forwarded cert). Prefer an explicitly-presented
-		// JWT-SVID over an ambient mesh-forwarded cert — a sidecar makes a
-		// forwarded cert present on most requests, so cert-first would shadow
-		// the JWT path and mis-attribute a JWT-SVID workload to the cert
-		// identity. A JWT-SVID is a bearer JWT whose (unverified) sub is a
-		// spiffe:// ID; the mount re-verifies it against the trust-domain bundle.
-		clientToken := credential
-		if clientToken == "" {
-			clientToken = req.ClientToken
-		}
-		if spiffelib.IsJWTSVID(clientToken) {
-			sfHash := sha256.Sum256([]byte("spiffe-jwt:" + mountAccessor + ":" + clientToken))
-			singleflightKey = hex.EncodeToString(sfHash[:])
-			loginData = map[string]any{"jwt": clientToken}
-			credKey = clientToken
-			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-				return c.LookupTransparentToken(ctx, clientToken, mountAccessor)
-			}
-		} else if explicitCred {
-			// The secondary (user) path is bearer-only; an X.509-SVID can't ride a
-			// header, so a non-SVID credential here is a misconfigured user mount.
-			return nil, false, fmt.Errorf("auth method %q at %q requires a JWT-SVID bearer credential", authMountEntry.Type, autoAuthPath)
-		} else if clientCert := extractTransparentClientCert(req); clientCert != nil {
-			hash := sha256.Sum256(clientCert.Raw)
-			fingerprint := hex.EncodeToString(hash[:])
-			sfHash := sha256.Sum256([]byte("spiffe-cert:" + mountAccessor + ":" + fingerprint))
-			singleflightKey = hex.EncodeToString(sfHash[:])
-			loginData = map[string]any{}
-			credKey = fingerprint
-			// Authenticate via the X.509-SVID, not any bearer. Signal the primary
-			// caller to clear a stray non-SVID bearer so the cert-minted token ID
-			// becomes ClientToken (this function performs no request mutation).
-			clearClientToken = true
-			lookupFunc = func(ctx context.Context) (*TokenEntry, error) {
-				return c.LookupTransparentToken(ctx, fingerprint, mountAccessor)
-			}
-		} else {
-			return nil, false, fmt.Errorf("auth method %q at %q requires an X.509-SVID (TLS/forwarded cert) or a JWT-SVID bearer token", authMountEntry.Type, autoAuthPath)
-		}
-
-	default:
-		return nil, false, fmt.Errorf("auth method %q has unsupported credential format %q for implicit auth", authMountEntry.Type, credentialFormat)
+	lookupFunc := func(ctx context.Context) (*TokenEntry, error) {
+		return c.LookupTransparentToken(ctx, credKey, mountAccessor)
 	}
 
 	// Step 1: Try cached lookup
