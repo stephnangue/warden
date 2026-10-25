@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +22,13 @@ import (
 // token and the extra headers, on an HTTP request bound to reqCtx.
 func stepDownRequest(t *testing.T, c *Core, reqCtx context.Context, token string, headers map[string]string) (*logical.Response, error) {
 	t.Helper()
-	httpReq := httptest.NewRequest(http.MethodPut, "/v1/sys/step-down", nil).WithContext(reqCtx)
+	return stepDownRequestAt(t, c, reqCtx, "/v1/sys/step-down", token, headers)
+}
+
+// stepDownRequestAt is stepDownRequest at urlPath, which may name a namespace.
+func stepDownRequestAt(t *testing.T, c *Core, reqCtx context.Context, urlPath, token string, headers map[string]string) (*logical.Response, error) {
+	t.Helper()
+	httpReq := httptest.NewRequest(http.MethodPut, urlPath, nil).WithContext(reqCtx)
 	if token != "" {
 		httpReq.Header.Set("X-Warden-Token", token)
 	}
@@ -29,7 +36,7 @@ func stepDownRequest(t *testing.T, c *Core, reqCtx context.Context, token string
 		httpReq.Header.Set(k, v)
 	}
 	return c.HandleRequest(rootCtx(), &logical.Request{
-		Path:        "sys/step-down",
+		Path:        strings.TrimPrefix(urlPath, "/v1/"),
 		Operation:   logical.UpdateOperation,
 		HTTPRequest: httpReq,
 	})
@@ -99,11 +106,22 @@ func TestStepDown_RefusedInNamespace(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, c.namespaceStore.SetNamespace(rootCtx(), &namespace.Namespace{Path: "ns1/"}))
 
-	resp, _ := stepDownRequest(t, c, context.Background(), root, map[string]string{"X-Warden-Namespace": "ns1"})
-	require.NotNil(t, resp)
-	require.Error(t, resp.Err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "operation unavailable in namespaces")
+	for name, send := range map[string]func() (*logical.Response, error){
+		"header": func() (*logical.Response, error) {
+			return stepDownRequest(t, c, context.Background(), root, map[string]string{"X-Warden-Namespace": "ns1"})
+		},
+		"path": func() (*logical.Response, error) {
+			return stepDownRequestAt(t, c, context.Background(), "/v1/ns1/sys/step-down", root, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, _ := send()
+			require.NotNil(t, resp)
+			require.Error(t, resp.Err)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			assert.Contains(t, resp.Err.Error(), "operation unavailable in namespaces")
+		})
+	}
 }
 
 // The step-down starts only once the HTTP request is done, so the request and
