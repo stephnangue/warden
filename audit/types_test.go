@@ -141,8 +141,6 @@ func TestCloneFull(t *testing.T) {
 			MountClass:      "provider",
 			Method:          "GET",
 			ClientIP:        "1.2.3.4",
-			Headers:         map[string][]string{"X-Token": {"val1", "val2"}},
-			Data:            map[string]any{"key": "value", "nested": map[string]any{"a": "b"}},
 			NamespaceID:     "ns1",
 			NamespacePath:   "root/",
 			Unauthenticated: true,
@@ -155,8 +153,6 @@ func TestCloneFull(t *testing.T) {
 			MountClass:    "provider",
 			Streamed:      true,
 			UpstreamURL:   "http://upstream",
-			Headers:       map[string][]string{"Content-Type": {"application/json"}},
-			Data:          map[string]any{"result": "ok"},
 			Warnings:      []string{"warn1"},
 			Credential: &Credential{
 				CredentialID: "cred-1",
@@ -211,14 +207,9 @@ func TestCloneFull(t *testing.T) {
 	clone := entry.Clone()
 
 	// Verify independence - modify original and check clone is unaffected
-	entry.Request.Headers["X-Token"][0] = "modified"
-	if clone.Request.Headers["X-Token"][0] == "modified" {
-		t.Error("clone headers should be independent")
-	}
-
-	entry.Request.Data["key"] = "modified"
-	if clone.Request.Data["key"] == "modified" {
-		t.Error("clone data should be independent")
+	entry.Request.ClientIP = "modified"
+	if clone.Request.ClientIP == "modified" {
+		t.Error("clone request should be independent")
 	}
 
 	entry.Response.Credential.Data["access_key"] = "modified"
@@ -260,80 +251,5 @@ func TestCloneFull(t *testing.T) {
 	}
 	if clone.Auth.Actors[1].Subject != "broker-beta" {
 		t.Errorf("clone auth actors[1] mismatch: %+v", clone.Auth.Actors[1])
-	}
-}
-
-func TestCloneValue(t *testing.T) {
-	// Test various types through cloneValue
-	if cloneValue(nil) != nil {
-		t.Error("nil should clone to nil")
-	}
-
-	// map[string]any
-	m := map[string]any{"a": "b"}
-	cm := cloneValue(m).(map[string]any)
-	m["a"] = "modified"
-	if cm["a"] == "modified" {
-		t.Error("cloned map should be independent")
-	}
-
-	// map[string]string
-	ms := map[string]string{"x": "y"}
-	cms := cloneValue(ms).(map[string]string)
-	ms["x"] = "modified"
-	if cms["x"] == "modified" {
-		t.Error("cloned string map should be independent")
-	}
-
-	// []any
-	sa := []any{"a", "b"}
-	csa := cloneValue(sa).([]any)
-	sa[0] = "modified"
-	if csa[0] == "modified" {
-		t.Error("cloned slice should be independent")
-	}
-
-	// []string
-	ss := []string{"a", "b"}
-	css := cloneValue(ss).([]string)
-	ss[0] = "modified"
-	if css[0] == "modified" {
-		t.Error("cloned string slice should be independent")
-	}
-
-	// primitive
-	if cloneValue(42) != 42 {
-		t.Error("primitive should clone to same value")
-	}
-	if cloneValue("hello") != "hello" {
-		t.Error("string should clone to same value")
-	}
-	if cloneValue(true) != true {
-		t.Error("bool should clone to same value")
-	}
-}
-
-func TestCloneHeaders(t *testing.T) {
-	if cloneHeaders(nil) != nil {
-		t.Error("nil headers should clone to nil")
-	}
-
-	h := map[string][]string{
-		"X-Token": {"val1"},
-		"Empty":   nil,
-	}
-	ch := cloneHeaders(h)
-	h["X-Token"][0] = "modified"
-	if ch["X-Token"][0] == "modified" {
-		t.Error("cloned headers should be independent")
-	}
-	if ch["Empty"] != nil {
-		t.Error("nil header values should stay nil")
-	}
-}
-
-func TestCloneMapAnyNil(t *testing.T) {
-	if cloneMapAny(nil) != nil {
-		t.Error("nil map should clone to nil")
 	}
 }

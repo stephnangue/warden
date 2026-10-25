@@ -61,12 +61,8 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		SaltFields: []string{
 			"response.credential.data", // HMAC salt all credential values (access_key, secret_key, password, etc.)
 		},
-		OmitFields: []string{
-			"request.data",
-			"request.headers",
-			"response.data",
-			"response.headers",
-		},
+		// Nothing is omitted by default: request and response headers and
+		// bodies, which this list used to drop, are never recorded at all.
 		SkipTest: false,
 	}
 

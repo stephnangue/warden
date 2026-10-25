@@ -872,7 +872,6 @@ func TestBuildAuditRequest_BasicFields(t *testing.T) {
 		MountPoint: "secret/",
 		MountType:  "kv",
 		ClientIP:   "192.168.1.1",
-		Data:       map[string]any{"key": "value"},
 	}
 
 	result := buildAuditRequest(req, nil)
@@ -883,7 +882,37 @@ func TestBuildAuditRequest_BasicFields(t *testing.T) {
 	assert.Equal(t, "secret/", result.MountPoint)
 	assert.Equal(t, "kv", result.MountType)
 	assert.Equal(t, "192.168.1.1", result.ClientIP)
-	assert.Equal(t, "value", result.Data["key"])
+}
+
+// auditJSON is the entry part as a device would write it, before any salt or
+// omit rule: whatever a builder put in it.
+func auditJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return string(b)
+}
+
+// The request's headers and body never enter its audit record: they carry the
+// caller's credentials, and, once a provider has prepared the upstream call,
+// the minted ones, which it sets on the same header map.
+func TestBuildAuditRequest_RecordsNoHeadersOrBody(t *testing.T) {
+	httpReq, _ := http.NewRequest("POST", "/v1/vault/gateway/v1/secret", nil)
+	httpReq.Header.Set("Authorization", "Bearer eyJ.CALLER-JWT")
+	httpReq.Header.Set("X-Warden-Token", "wst_CALLER-TOKEN")
+	httpReq.Header.Set("X-Vault-Token", "hvs.MINTED-TOKEN")
+
+	req := &logical.Request{
+		Path:        "vault/gateway/v1/secret",
+		HTTPRequest: httpReq,
+		Data:        map[string]any{"jwt": "eyJ.LOGIN-JWT", "password": "LOGIN-PASSWORD"},
+	}
+	got := auditJSON(t, buildAuditRequest(req, nil))
+
+	assert.Contains(t, got, `"method":"POST"`)
+	for _, secret := range []string{"CALLER-JWT", "CALLER-TOKEN", "MINTED-TOKEN", "LOGIN-JWT", "LOGIN-PASSWORD", "Authorization", `"headers"`, `"data"`} {
+		assert.NotContains(t, got, secret)
+	}
 }
 
 func TestBuildAuditRequest_WithAuditPath(t *testing.T) {
@@ -912,7 +941,6 @@ func TestBuildAuditRequest_WithNamespace(t *testing.T) {
 
 func TestBuildAuditRequest_WithHTTPRequest(t *testing.T) {
 	httpReq, _ := http.NewRequest("GET", "/v1/secret/data/foo", nil)
-	httpReq.Header.Set("X-Request-Id", "ext-123")
 
 	req := &logical.Request{
 		Path:        "secret/data/foo",
@@ -920,8 +948,6 @@ func TestBuildAuditRequest_WithHTTPRequest(t *testing.T) {
 	}
 	result := buildAuditRequest(req, nil)
 	assert.Equal(t, "GET", result.Method)
-	assert.NotNil(t, result.Headers)
-	assert.Contains(t, result.Headers["X-Request-Id"], "ext-123")
 }
 
 // =============================================================================
@@ -936,13 +962,11 @@ func TestBuildAuditResponse_NilResponse(t *testing.T) {
 func TestBuildAuditResponse_Basic(t *testing.T) {
 	resp := &logical.Response{
 		StatusCode: http.StatusOK,
-		Data:       map[string]any{"key": "value"},
 		Warnings:   []string{"warn1"},
 	}
 	result := buildAuditResponse(resp, nil, nil)
 	require.NotNil(t, result)
 	assert.Equal(t, http.StatusOK, result.StatusCode)
-	assert.Equal(t, "value", result.Data["key"])
 	assert.Contains(t, result.Warnings, "warn1")
 }
 
@@ -993,15 +1017,27 @@ func TestBuildAuditResponse_WithUpstreamURL(t *testing.T) {
 	assert.True(t, result.Streamed)
 }
 
-func TestBuildAuditResponse_WithHeaders(t *testing.T) {
+// The response's headers and body never enter its audit record: a login's body
+// holds the token it issued. The issued credential is recorded on its own, for
+// the format to salt.
+func TestBuildAuditResponse_RecordsNoHeadersOrBody(t *testing.T) {
 	headers := http.Header{}
-	headers.Set("Content-Type", "application/json")
+	headers.Set("Set-Cookie", "session=COOKIE-SECRET")
 	resp := &logical.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: http.StatusCreated,
 		Headers:    headers,
+		Data:       map[string]any{"token_id": "wst_ISSUED-TOKEN", "data": map[string]any{"token": "ISSUED-SECRET"}},
 	}
-	result := buildAuditResponse(resp, nil, nil)
-	assert.Contains(t, result.Headers["Content-Type"], "application/json")
+	cred := &credential.Credential{CredentialID: "cred-1", Data: map[string]string{"secret_key": "CRED-SECRET"}}
+	result := buildAuditResponse(resp, nil, cred)
+	got := auditJSON(t, result)
+
+	assert.Contains(t, got, `"status_code":201`)
+	for _, secret := range []string{"COOKIE-SECRET", "ISSUED-TOKEN", "ISSUED-SECRET", `"headers"`, `"data":{"token`} {
+		assert.NotContains(t, got, secret)
+	}
+	require.NotNil(t, result.Credential)
+	assert.Equal(t, "CRED-SECRET", result.Credential.Data["secret_key"], "the credential is recorded, for the format's salt floor")
 }
 
 // =============================================================================
@@ -1169,53 +1205,6 @@ func TestBuildAuditCredential_NilData(t *testing.T) {
 	result := buildAuditCredential(cred)
 	require.NotNil(t, result)
 	assert.Nil(t, result.Data)
-}
-
-// =============================================================================
-// copyMapAny Tests
-// =============================================================================
-
-func TestCopyMapAny_Nil(t *testing.T) {
-	assert.Nil(t, copyMapAny(nil))
-}
-
-func TestCopyMapAny_NonNil(t *testing.T) {
-	original := map[string]any{"a": 1, "b": "two"}
-	copied := copyMapAny(original)
-	assert.Equal(t, original, copied)
-
-	copied["c"] = 3
-	assert.NotContains(t, original, "c")
-}
-
-// =============================================================================
-// copyHeaders Tests
-// =============================================================================
-
-func TestCopyHeaders_Nil(t *testing.T) {
-	assert.Nil(t, copyHeaders(nil))
-}
-
-func TestCopyHeaders_Basic(t *testing.T) {
-	headers := http.Header{
-		"Content-Type": []string{"application/json"},
-		"X-Custom":     []string{"val1", "val2"},
-	}
-	copied := copyHeaders(headers)
-	assert.Equal(t, []string{"application/json"}, copied["Content-Type"])
-	assert.Equal(t, []string{"val1", "val2"}, copied["X-Custom"])
-
-	copied["New-Header"] = []string{"new"}
-	_, exists := headers["New-Header"]
-	assert.False(t, exists)
-}
-
-func TestCopyHeaders_NilValues(t *testing.T) {
-	headers := http.Header{
-		"X-Empty": nil,
-	}
-	copied := copyHeaders(headers)
-	assert.Nil(t, copied["X-Empty"])
 }
 
 // =============================================================================

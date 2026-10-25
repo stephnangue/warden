@@ -138,7 +138,7 @@ func (f *JSONFormat) saltEntry(ctx context.Context, entry *LogEntry) error {
 }
 
 // saltFieldByPath salts a field identified by a dot-separated path
-// Examples: "auth.token_id", "request.data.password", "response.credential.data"
+// Examples: "auth.token_id", "request.client_ip", "response.credential.data"
 func (f *JSONFormat) saltFieldByPath(ctx context.Context, entry *LogEntry, fieldPath string) error {
 	parts := strings.Split(fieldPath, ".")
 	if len(parts) == 0 {
@@ -276,34 +276,6 @@ func (f *JSONFormat) saltRequestField(ctx context.Context, request *Request, par
 	}
 
 	switch parts[0] {
-	case "data":
-		if request.Data == nil {
-			return nil
-		}
-		// If parts length is 1, salt all string values in the data map
-		if len(parts) == 1 {
-			for key, value := range request.Data {
-				if strValue, ok := value.(string); ok && strValue != "" {
-					salted, err := f.saltFn(ctx, strValue)
-					if err != nil {
-						return err
-					}
-					request.Data[key] = salted
-				}
-			}
-		} else if len(parts) >= 2 {
-			// Salt specific key
-			key := parts[1]
-			if value, ok := request.Data[key]; ok {
-				if strValue, ok := value.(string); ok && strValue != "" {
-					salted, err := f.saltFn(ctx, strValue)
-					if err != nil {
-						return err
-					}
-					request.Data[key] = salted
-				}
-			}
-		}
 	case "client_ip":
 		if request.ClientIP != "" {
 			salted, err := f.saltFn(ctx, request.ClientIP)
@@ -311,38 +283,6 @@ func (f *JSONFormat) saltRequestField(ctx context.Context, request *Request, par
 				return err
 			}
 			request.ClientIP = salted
-		}
-	case "headers":
-		if request.Headers == nil {
-			return nil
-		}
-		// If parts length is 1, salt all header values
-		if len(parts) == 1 {
-			for key, values := range request.Headers {
-				for i, value := range values {
-					if value != "" {
-						salted, err := f.saltFn(ctx, value)
-						if err != nil {
-							return err
-						}
-						request.Headers[key][i] = salted
-					}
-				}
-			}
-		} else if len(parts) >= 2 {
-			// Salt specific header
-			key := parts[1]
-			if values, ok := request.Headers[key]; ok {
-				for i, value := range values {
-					if value != "" {
-						salted, err := f.saltFn(ctx, value)
-						if err != nil {
-							return err
-						}
-						request.Headers[key][i] = salted
-					}
-				}
-			}
 		}
 	}
 
@@ -360,66 +300,6 @@ func (f *JSONFormat) saltResponseField(ctx context.Context, response *Response, 
 		return f.saltCredentialField(ctx, response.Credential, parts[1:])
 	case "auth_result":
 		return f.saltAuthResultField(ctx, response.AuthResult, parts[1:])
-	case "data":
-		if response.Data == nil {
-			return nil
-		}
-		// If parts length is 1, salt all string values in the data map
-		if len(parts) == 1 {
-			for key, value := range response.Data {
-				if strValue, ok := value.(string); ok && strValue != "" {
-					salted, err := f.saltFn(ctx, strValue)
-					if err != nil {
-						return err
-					}
-					response.Data[key] = salted
-				}
-			}
-		} else if len(parts) >= 2 {
-			// Salt specific key
-			key := parts[1]
-			if value, ok := response.Data[key]; ok {
-				if strValue, ok := value.(string); ok && strValue != "" {
-					salted, err := f.saltFn(ctx, strValue)
-					if err != nil {
-						return err
-					}
-					response.Data[key] = salted
-				}
-			}
-		}
-	case "headers":
-		if response.Headers == nil {
-			return nil
-		}
-		// If parts length is 1, salt all header values
-		if len(parts) == 1 {
-			for key, values := range response.Headers {
-				for i, value := range values {
-					if value != "" {
-						salted, err := f.saltFn(ctx, value)
-						if err != nil {
-							return err
-						}
-						response.Headers[key][i] = salted
-					}
-				}
-			}
-		} else if len(parts) >= 2 {
-			// Salt specific header
-			key := parts[1]
-			if values, ok := response.Headers[key]; ok {
-				for i, value := range values {
-					if value != "" {
-						salted, err := f.saltFn(ctx, value)
-						if err != nil {
-							return err
-						}
-						response.Headers[key][i] = salted
-					}
-				}
-			}
-		}
 	}
 
 	return nil
@@ -541,7 +421,7 @@ func (f *JSONFormat) omitFieldsFromEntry(entry *LogEntry) {
 }
 
 // omitFieldByPath omits a field identified by a dot-separated path
-// Examples: "auth", "request.data", "response.credential"
+// Examples: "auth", "request.client_ip", "response.credential"
 func (f *JSONFormat) omitFieldByPath(entry *LogEntry, fieldPath string) {
 	parts := strings.Split(fieldPath, ".")
 	if len(parts) == 0 {
@@ -658,18 +538,6 @@ func (f *JSONFormat) omitRequestField(request *Request, parts []string) {
 		request.Method = ""
 	case "client_ip":
 		request.ClientIP = ""
-	case "headers":
-		if len(parts) == 1 {
-			request.Headers = nil
-		} else if len(parts) >= 2 && request.Headers != nil {
-			delete(request.Headers, parts[1])
-		}
-	case "data":
-		if len(parts) == 1 {
-			request.Data = nil
-		} else if len(parts) >= 2 && request.Data != nil {
-			delete(request.Data, parts[1])
-		}
 	case "namespace_id":
 		request.NamespaceID = ""
 	case "namespace_path":
@@ -692,18 +560,6 @@ func (f *JSONFormat) omitResponseField(response *Response, parts []string) {
 	switch parts[0] {
 	case "status_code":
 		response.StatusCode = 0
-	case "headers":
-		if len(parts) == 1 {
-			response.Headers = nil
-		} else if len(parts) >= 2 && response.Headers != nil {
-			delete(response.Headers, parts[1])
-		}
-	case "data":
-		if len(parts) == 1 {
-			response.Data = nil
-		} else if len(parts) >= 2 && response.Data != nil {
-			delete(response.Data, parts[1])
-		}
 	case "mount_class":
 		response.MountClass = ""
 	case "streamed":

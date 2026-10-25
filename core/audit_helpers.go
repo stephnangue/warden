@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -13,8 +12,9 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// buildAuditRequest converts logical.Request to audit.Request
-// NOTE: Raw data passed through - format layer handles salting/omission via config
+// buildAuditRequest converts logical.Request to audit.Request. The request's
+// headers and body are never copied: they carry the caller's credentials and,
+// once a provider has prepared the upstream call, the minted ones.
 func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Request {
 	if req == nil {
 		return nil
@@ -41,7 +41,6 @@ func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Req
 		MountType:       req.MountType,
 		MountClass:      req.MountClass,
 		ClientIP:        req.ClientIP,
-		Data:            copyMapAny(req.Data), // Raw - format layer handles
 		Unauthenticated: req.Unauthenticated,
 		Streamed:        req.Streamed,
 		Transparent:     req.Transparent,
@@ -49,7 +48,6 @@ func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Req
 
 	if req.HTTPRequest != nil {
 		auditReq.Method = req.HTTPRequest.Method
-		auditReq.Headers = copyHeaders(req.HTTPRequest.Header) // Raw - format layer handles
 	}
 
 	if ns != nil {
@@ -60,8 +58,9 @@ func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Req
 	return auditReq
 }
 
-// buildAuditResponse converts logical.Response to audit.Response
-// NOTE: Raw data passed through - format layer handles salting/omission via config
+// buildAuditResponse converts logical.Response to audit.Response. Its headers
+// and body are never copied, as for the request: a login's body holds the token
+// it issued. The issued credential is recorded on its own, salted by the format.
 func buildAuditResponse(resp *logical.Response, req *logical.Request, cred *credential.Credential) *audit.Response {
 	if resp == nil {
 		return nil
@@ -72,14 +71,9 @@ func buildAuditResponse(resp *logical.Response, req *logical.Request, cred *cred
 	// For non-streaming responses, backends set StatusCode explicitly.
 	auditResp := &audit.Response{
 		StatusCode: resp.StatusCode,
-		Data:       copyMapAny(resp.Data), // Raw - format layer handles
 		MountClass: resp.MountClass,
 		Streamed:   resp.Streamed,
 		Warnings:   resp.Warnings,
-	}
-
-	if resp.Headers != nil {
-		auditResp.Headers = copyHeaders(resp.Headers) // Raw - format layer handles
 	}
 
 	if cred != nil {
@@ -246,34 +240,6 @@ func buildAuditCredential(cred *credential.Credential) *audit.Credential {
 	}
 
 	return auditCred
-}
-
-// copyMapAny creates a shallow copy of a map[string]any
-func copyMapAny(data map[string]any) map[string]any {
-	if data == nil {
-		return nil
-	}
-	result := make(map[string]any, len(data))
-	for k, v := range data {
-		result[k] = v
-	}
-	return result
-}
-
-// copyHeaders creates a copy of HTTP headers
-func copyHeaders(headers http.Header) map[string][]string {
-	if headers == nil {
-		return nil
-	}
-	result := make(map[string][]string, len(headers))
-	for k, v := range headers {
-		if v != nil {
-			copied := make([]string, len(v))
-			copy(copied, v)
-			result[k] = copied
-		}
-	}
-	return result
 }
 
 // buildRequestAuditEntry creates an audit.LogEntry for a request
