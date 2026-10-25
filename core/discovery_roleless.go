@@ -58,6 +58,26 @@ func (c *Core) admitRoleless(ctx context.Context, req *logical.Request) *logical
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrInternal("namespace missing"))
 	}
+
+	// A call whose answer is the same for every caller runs anonymously: no
+	// credential is checked, so it costs no admission, and a presented one is
+	// neither used nor kept. The entry carries only what the policy check
+	// needs and claims no token: no type, no ID, no principal.
+	if !rolelessNeedsIdentity(req) {
+		req.Discovery = &logical.DiscoveryAdmission{
+			Anonymous:            true,
+			CredentialUnverified: hasDiscoveryCredential(req),
+		}
+		req.SetTokenEntry(&logical.TokenEntry{
+			NamespaceID:   ns.ID,
+			NamespacePath: ns.Path,
+			CreatedByIP:   req.ClientIP,
+			Policies:      builtinPolicyNames,
+		})
+		req.ClientToken = ""
+		return nil
+	}
+
 	if !hasDiscoveryCredential(req) {
 		return rolelessUnauthorized(errDiscoveryNoCredential)
 	}
@@ -128,6 +148,58 @@ func (c *Core) identityTokenIDAt(ctx context.Context, req *logical.Request, moun
 		return "", err
 	}
 	return identityTokenType.ComputeID(identityTokenType.LookupValue(tc.key, entry.Accessor)), nil
+}
+
+// discoveryAnonymousMethods are the MCP methods of the discovery server whose
+// answer is the same for every caller, besides the lifecycle methods
+// (isLifecycleMethod): the tool list (the same two tools for everyone, as the
+// built-in policies filter it), the fixed resource template, the server's own
+// log level, and the notification stream, which never carries anything since
+// neither list ever changes. Every other method answers from the caller's
+// identity and needs it; a method missing from here needs it too, so a new
+// one is closed until it is classified.
+var discoveryAnonymousMethods = map[string]struct{}{
+	"tools/list":               {},
+	"resources/templates/list": {},
+	"logging/setlevel":         {},
+	"subscriptions/listen":     {},
+}
+
+// discoveryMethodIsAnonymous reports whether an MCP method of the discovery
+// server answers the same to every caller.
+func discoveryMethodIsAnonymous(method string) bool {
+	m := strings.ToLower(method)
+	if isLifecycleMethod(m) {
+		return true
+	}
+	_, ok := discoveryAnonymousMethods[m]
+	return ok
+}
+
+// rolelessNeedsIdentity reports whether req, a request on an identity path,
+// needs the caller's identity: whether its answer depends on who asks.
+// sys/introspect/roles always does. On the discovery server it is decided per
+// call, from the body the extractor parsed before this runs: identity is
+// needed when any call needs it. A body with no call (a GET or DELETE, which
+// the server answers 405) or one that failed to parse needs none: it costs no
+// admission, and the MCP gate refuses a bad body.
+func rolelessNeedsIdentity(req *logical.Request) bool {
+	if req.Path != sysMCPRequestPath {
+		return true
+	}
+	desc := req.MCPDescriptor
+	if desc == nil {
+		return true
+	}
+	if desc.ParseErr != nil || len(desc.Calls) == 0 {
+		return false
+	}
+	for i := range desc.Calls {
+		if !discoveryMethodIsAnonymous(desc.Calls[i].Method) {
+			return true
+		}
+	}
+	return false
 }
 
 // rolelessUnauthorized is the 401 of a refused role-less request.

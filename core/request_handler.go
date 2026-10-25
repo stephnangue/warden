@@ -229,8 +229,9 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 // on it, so none is resolved, and its audit entry records none
 // (withholdRoleGrant).
 func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request, unauth bool) (*CBP, *logical.TokenEntry, error) {
-	// Ensure there is a client token
-	if req.ClientToken == "" {
+	// Ensure there is a client token, or an entry already set without one: the
+	// role-less leg's anonymous entry, the one request that runs with no token.
+	if req.ClientToken == "" && req.TokenEntry() == nil {
 		return nil, nil, sdklogical.ErrPermissionDenied
 	}
 

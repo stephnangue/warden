@@ -59,6 +59,7 @@ const (
 	mcpRuleTypeBatchEmpty       = "batch_empty"
 	mcpRuleTypeMalformedParams  = "malformed_params"
 	mcpRuleTypeBatchUnsupported = "batch_unsupported"
+	mcpRuleTypeBatchTooLarge    = logical.MCPParseKindBatchTooLarge
 
 	// mcpRuleTypeBatchListUnfilterable denies an otherwise-allowed batch
 	// that contains a list method. A batched JSON-RPC list response can't
@@ -295,6 +296,32 @@ func mcpListItemAllowed(sets []*CBPMCPRules, callMethod, name string) bool {
 func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCPDecision {
 	desc := req.MCPDescriptor
 	if desc == nil || len(desc.Calls) == 0 {
+		return nil
+	}
+
+	// An in-process server sees each call's answer before the client does,
+	// so every list call is filtered, inside a batch as well, through one
+	// filter per list method.
+	if desc.InProcess {
+		for i := range desc.Calls {
+			method := strings.ToLower(desc.Calls[i].Method)
+			callMethod, ok := mcpListMethodToCall[method]
+			if !ok || mcpKeepsEveryItem(sets, callMethod) {
+				continue
+			}
+			if _, done := req.MCPListFilters[method]; done {
+				continue
+			}
+			if req.MCPListFilters == nil {
+				req.MCPListFilters = make(map[string]*logical.MCPListFilter, 1)
+			}
+			req.MCPListFilters[method] = &logical.MCPListFilter{
+				ListMethod: method,
+				Keep: func(name string) bool {
+					return mcpListItemAllowed(sets, callMethod, name)
+				},
+			}
+		}
 		return nil
 	}
 
@@ -853,6 +880,7 @@ func mcpDenyRank(ruleType string) int {
 		mcpRuleTypeMalformedParams,
 		mcpRuleTypeBatchListUnfilterable,
 		mcpRuleTypeBatchUnsupported,
+		mcpRuleTypeBatchTooLarge,
 		mcpRuleTypeHeaderMismatch,
 		// Never actually competes — it is produced outside evaluateMCPCall,
 		// where there are no rule-sets to rank against. Listed so the ranking
@@ -941,6 +969,8 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 		return "Batched list requests are not supported."
 	case mcpRuleTypeBatchUnsupported:
 		return "Batched requests are not supported at the requested protocol version."
+	case mcpRuleTypeBatchTooLarge:
+		return "Request batch has too many messages."
 	case mcpRuleTypeMissingMethod:
 		return "Request method required."
 	case mcpRuleTypeHeaderMismatch:

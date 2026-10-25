@@ -41,15 +41,78 @@ func (rt mcpHeaderRoundTripper) RoundTrip(r *http.Request) (*http.Response, erro
 	return rt.base.RoundTrip(r)
 }
 
-// startMCPTestServer serves the MCP discovery handler over HTTP. When cert is
-// non-nil, each request is wrapped with a forwarded client certificate in its
-// context, simulating the listener's certForwardingMiddleware so the X.509
-// credential path can be exercised end-to-end (the SDK does not surface the
-// client cert to tool handlers, so the handler must recover it from the
-// threaded request context).
+// requestPathHandler serves HTTP through the request path, as the http
+// package's handleLogical does — the request built the same way, handed to
+// HandleRequest, and the answer written back — which core cannot import. Only
+// the shapes the discovery endpoint answers with are rendered: a streamed
+// response (written by the backend), a body, an error, data.
+func requestPathHandler(c *Core) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		op := logical.ReadOperation
+		switch r.Method {
+		case http.MethodPost:
+			op = logical.CreateOperation
+		case http.MethodPut:
+			op = logical.UpdateOperation
+		case http.MethodDelete:
+			op = logical.DeleteOperation
+		}
+		req := &logical.Request{
+			Operation:      op,
+			Path:           strings.TrimPrefix(r.URL.Path, "/v1/"),
+			HTTPRequest:    r,
+			ResponseWriter: logical.NewStatusRecordingWriter(w),
+		}
+		resp, err := c.HandleRequest(r.Context(), req)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(logical.GetErrorCode(err))
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": logical.ErrorMessages(err)})
+			return
+		}
+		switch {
+		case resp == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case resp.Streamed:
+		default:
+			for k, vs := range resp.Headers {
+				for _, v := range vs {
+					w.Header().Add(k, v)
+				}
+			}
+			status := resp.StatusCode
+			if status == 0 {
+				status = http.StatusOK
+				if resp.Err != nil {
+					status = logical.GetErrorCode(resp.Err)
+				}
+			}
+			var body []byte
+			switch {
+			case len(resp.Body) > 0:
+				body = resp.Body
+			case resp.Err != nil:
+				w.Header().Set("Content-Type", "application/json")
+				body, _ = json.Marshal(map[string]any{"errors": logical.ErrorMessages(resp.Err)})
+			case resp.Data != nil:
+				w.Header().Set("Content-Type", "application/json")
+				body, _ = json.Marshal(map[string]any{"data": resp.Data})
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write(body)
+		}
+	})
+}
+
+// startMCPTestServer serves the request path over HTTP, the discovery
+// endpoint at /v1/sys/mcp among it. When cert is non-nil, each request is
+// wrapped with a forwarded client certificate in its context, simulating the
+// listener's certForwardingMiddleware so the X.509 credential path can be
+// exercised end-to-end (the SDK does not surface the client cert to tool
+// handlers, so the handler must recover it from the threaded request context).
 func startMCPTestServer(t *testing.T, c *Core, cert *x509.Certificate) *httptest.Server {
 	t.Helper()
-	handler := c.MCPServerHandler()
+	handler := requestPathHandler(c)
 	if cert != nil {
 		inner := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +219,7 @@ func TestMCPServer_ListRoles_JWT(t *testing.T) {
 // surface to tool handlers) through to the auth mount that admits it.
 func TestMCPServer_ListRoles_CertPath(t *testing.T) {
 	e := newDiscEnv(t, "", "")
+	e.stub.nextFormat = logical.CredentialFormatCert
 	e.mountAuth("cert-mount/").needCert = true
 	e.provider("git", "git/", "auth/cert-mount/")
 	e.grant("cloners", []string{"auth/cert-mount/"},
@@ -175,21 +239,21 @@ func TestMCPServer_ListRoles_CertPath(t *testing.T) {
 }
 
 // TestMCPServer_ListRoles_NoCredential asserts that a call with neither a
-// bearer token nor a client cert returns an MCP tool error (mirroring the
-// endpoint's 401) rather than a protocol-level failure, so the model can see
-// the error and self-correct.
+// bearer token nor a client cert is refused by the request path with a 401,
+// before the tool runs, while the anonymous handshake and tools/list still
+// succeed, so a client connects and learns what it may call.
 func TestMCPServer_ListRoles_NoCredential(t *testing.T) {
 	_, _, c := setupTestSystemBackend(t)
 	srv := startMCPTestServer(t, c, nil)
 	session := connectMCP(t, srv, "")
 
-	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
-	require.NoError(t, err)
-	require.True(t, res.IsError, "no-credential call must be a tool error")
-	require.NotEmpty(t, res.Content)
-	txt, ok := res.Content[0].(*mcp.TextContent)
-	require.True(t, ok)
-	assert.Contains(t, txt.Text, "JWT bearer token or TLS client certificate")
+	tools, err := session.ListTools(context.Background(), nil)
+	require.NoError(t, err, "tools/list needs no credential")
+	assert.Len(t, tools.Tools, 2)
+
+	_, err = session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Unauthorized")
 }
 
 // TestMCPServer_SealedNode_Returns503 pins that the discovery route rejects
@@ -355,12 +419,12 @@ func TestMCPServerHandler_ShedsConnectionDeadlines(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/json, text/event-stream")
 
-	c.MCPServerHandler().ServeHTTP(w, r)
+	requestPathHandler(c).ServeHTTP(w, r)
 
-	require.Len(t, w.read, 1, "an armed read deadline tears down an idle listen stream")
-	require.Len(t, w.write, 1, "an armed write deadline severs the stream on its first notification")
-	assert.True(t, w.read[0].IsZero())
-	assert.True(t, w.write[0].IsZero())
+	require.NotEmpty(t, w.read, "an armed read deadline tears down an idle listen stream")
+	require.NotEmpty(t, w.write, "an armed write deadline severs the stream on its first notification")
+	assert.True(t, w.read[len(w.read)-1].IsZero(), "the body read window is closed once the body is in hand")
+	assert.True(t, w.write[len(w.write)-1].IsZero())
 }
 
 // Buffering the body must leave it readable by the SDK, or every discovery
@@ -374,12 +438,14 @@ func TestMCPServerHandler_BufferedBodyStillReaches(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/json, text/event-stream")
 
-	c.MCPServerHandler().ServeHTTP(rec, r)
+	requestPathHandler(c).ServeHTTP(rec, r)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "list_roles", "the buffered body must reach the SDK unchanged")
 }
 
+// An oversized body is refused by the MCP gate before the server runs, as the
+// transport refuses input it cannot accept: a 413.
 func TestMCPServerHandler_RejectsOversizedBody(t *testing.T) {
 	c := createTestCore(t)
 	rec := httptest.NewRecorder()
@@ -387,20 +453,19 @@ func TestMCPServerHandler_RejectsOversizedBody(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(strings.Repeat("a", maxSysMCPBody+1)))
 	r.Header.Set("Content-Type", "application/json")
 
-	c.MCPServerHandler().ServeHTTP(rec, r)
+	requestPathHandler(c).ServeHTTP(rec, r)
 
-	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "body: %s", rec.Body.String())
 }
 
 // Shedding the listener's deadlines leaves this endpoint with no ceiling of
-// its own, and it accepts a subscriptions/listen stream before any credential
-// is checked — so it must impose one, the way a gateway mount imposes
-// listen_timeout. Without it an unauthenticated caller could park goroutines
-// and connections here indefinitely.
-func TestSysMCPContext_ImposesItsOwnCeiling(t *testing.T) {
+// its own, so it imposes one, the way a gateway mount imposes listen_timeout:
+// nothing else ends a stalled request. The request path bounds its handler
+// by it; the dev playground's self-check runs under the same ceiling.
+func TestDiscoveryRequestContext_ImposesItsOwnCeiling(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader("{}"))
 
-	ctx, cancel := sysMCPContext(r, namespace.RootNamespace)
+	ctx, cancel := discoveryRequestContext(r, namespace.RootNamespace)
 	defer cancel()
 
 	deadline, ok := ctx.Deadline()
@@ -416,19 +481,22 @@ func TestSysMCPContext_ImposesItsOwnCeiling(t *testing.T) {
 	assert.Same(t, r, discoveryRequestFromContext(ctx))
 }
 
-// postSysMCPBatch posts a JSON-RPC batch of n list_roles calls to the
-// discovery handler, as a client on a revision that still batches would.
+// postSysMCPBatch posts a JSON-RPC batch of n tools/list calls to the
+// discovery endpoint through the request path, as a client on a revision that
+// still batches would. tools/list needs no credential, so the batch is served
+// anonymously.
 func postSysMCPBatch(t *testing.T, c *Core, n int) *httptest.ResponseRecorder {
 	t.Helper()
 	calls := make([]string, n)
 	for i := range calls {
-		calls[i] = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`, i+1)
+		calls[i] = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list"}`, i+1)
 	}
 	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(" ["+strings.Join(calls, ",")+"]"))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/json, text/event-stream")
+	r.Header.Set("MCP-Protocol-Version", "2025-03-26")
 	rec := httptest.NewRecorder()
-	c.MCPServerHandler().ServeHTTP(rec, r)
+	requestPathHandler(c).ServeHTTP(rec, r)
 	return rec
 }
 
@@ -473,36 +541,15 @@ func TestMCPServerHandler_SingleRequestUnaffectedByBatchCap(t *testing.T) {
 	c := createTestCore(t)
 	rec := httptest.NewRecorder()
 
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
 	r := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/json, text/event-stream")
 
-	c.MCPServerHandler().ServeHTTP(rec, r)
+	requestPathHandler(c).ServeHTTP(rec, r)
 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	var response map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response), "a single request is answered with a single response")
 	assert.EqualValues(t, 1, response["id"])
-}
-
-func TestBatchExceedsCap(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-		want bool
-	}{
-		{"single object", `{"jsonrpc":"2.0","id":1,"method":"ping"}`, false},
-		{"at the cap", "[" + strings.TrimSuffix(strings.Repeat("{},", 3), ",") + "]", false},
-		{"over the cap", "\n\t[" + strings.TrimSuffix(strings.Repeat("{},", 4), ",") + "]", true},
-		{"non-object elements still count", "[1,2,3,4]", true},
-		{"empty batch", "[]", false},
-		{"malformed before the cap", "[{},{", false},
-		{"malformed after the cap", "[{},{},{},{},{", true},
-		{"empty body", "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, batchExceedsCap([]byte(tc.body), 3))
-		})
-	}
 }

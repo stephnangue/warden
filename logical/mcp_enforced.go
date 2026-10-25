@@ -43,3 +43,17 @@ type MCPPolicyEnforced interface {
 	// return enforce=false.
 	ShouldEnforceMCPPolicy(req *Request) (enforce bool, cap int64)
 }
+
+// MCPInProcessServer is implemented by an MCPPolicyEnforced backend that
+// serves MCP itself, answering every call of a body on its own, rather than
+// proxying the body to an upstream. Two things follow, both from the policy
+// layer seeing each call's answer before the client does:
+//
+//   - a list call is filtered per call, inside a batch too, through
+//     Request.MCPListFilters, where an upstream's batched answer could only
+//     be refused whole;
+//   - a batch of more than MaxMCPBatch messages is refused before any call
+//     runs (MCPParseKindBatchTooLarge), since each is answered in full.
+type MCPInProcessServer interface {
+	MaxMCPBatch() int
+}

@@ -268,12 +268,12 @@ func TestSkills_NoCredential(t *testing.T) {
 	_, err := mcp.CallCustomMethod[*skillsListParams, *skillsListResult](
 		context.Background(), session, "skills/list", &skillsListParams{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "JWT bearer token or TLS client certificate")
+	assert.Contains(t, err.Error(), "Unauthorized")
 
+	session = connectSkillsClient(t, startMCPTestServer(t, c, nil), "")
 	_, err = readSkillResource(session, "skill://troubleshooting/SKILL.md")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "JWT bearer token or TLS client certificate",
-		"even a foundation skill needs an identity to scope it")
+	assert.Contains(t, err.Error(), "Unauthorized", "even a foundation skill needs an identity to scope it")
 }
 
 // The render cache serves the same rendering while a skill is unchanged, then

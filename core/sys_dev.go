@@ -282,7 +282,7 @@ func (c *Core) CheckDevPlaygroundDiscovery(ctx context.Context, wantRoles []stri
 	}
 	httpReq := httptest.NewRequest(http.MethodPost, "/v1/sys/mcp", nil).WithContext(ctx)
 	httpReq.Header.Set("Authorization", "Bearer "+token)
-	ctx, cancel := sysMCPContext(httpReq, namespace.RootNamespace)
+	ctx, cancel := discoveryRequestContext(httpReq, namespace.RootNamespace)
 	defer cancel()
 
 	roles, warnings, err := c.resolveDiscovery(ctx)

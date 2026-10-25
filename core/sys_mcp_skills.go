@@ -272,11 +272,18 @@ func (c *Core) handleSkillsGet(ctx context.Context, _ *mcp.ServerSession, p *ski
 }
 
 // discoveryServerCapabilities are the capabilities the discovery server
-// declares: the SDK defaults (logging), resources, and the Skills extension.
-// Tools are added by the SDK from the registered tools.
+// declares: the SDK defaults (logging), tools, resources, and the Skills
+// extension.
+//
+// Neither list ever changes — the tools are fixed, the resource is a fixed
+// template — so neither is announced as changing (ListChanged false). Declared
+// here, the tools capability is kept as is rather than defaulted by the SDK to
+// a changing list, and a client opens no subscriptions/listen stream to wait
+// for a change that never comes.
 func discoveryServerCapabilities() *mcp.ServerCapabilities {
 	caps := &mcp.ServerCapabilities{
 		Logging:   &mcp.LoggingCapabilities{},
+		Tools:     &mcp.ToolCapabilities{ListChanged: false},
 		Resources: &mcp.ResourceCapabilities{},
 	}
 	caps.AddExtension(skillsExtension, nil)

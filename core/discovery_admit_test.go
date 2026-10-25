@@ -292,6 +292,17 @@ func (e *discEnv) listRoles(bearer string) ([]mcpRole, []string, error) {
 	return out.Roles, out.Warnings, nil
 }
 
+// listRolesRefused calls list_roles with bearer and returns the transport
+// error the request path refused it with (an HTTP status the SDK client
+// surfaces as its error), failing if the call was answered instead.
+func (e *discEnv) listRolesRefused(bearer string) error {
+	e.t.Helper()
+	session := connectMCPWithHeaders(e.t, e.server(), e.headers(bearer))
+	_, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
+	require.Error(e.t, err, "list_roles must be refused before the tool runs")
+	return err
+}
+
 // listRolesJSON is the encoded structured output of list_roles.
 func (e *discEnv) listRolesJSON() string {
 	e.t.Helper()
@@ -416,15 +427,14 @@ func TestDiscoveryAdmit_NoDisclosure(t *testing.T) {
 		})
 	}
 
-	// A credential no target admits is unauthenticated, not ungranted:
-	// sys/introspect/roles, which admits it before answering, refuses it,
-	// naming no mount.
+	// A credential no target admits is unauthenticated, not ungranted: both
+	// endpoints admit it before answering and refuse it, naming no mount.
 	t.Run("target does not admit", func(t *testing.T) {
 		e, m := setup(t)
 		e.group("deployers", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
 		m.claims = nil
 		e.assertIntrospectUnauthorized(errRolelessNotAdmitted)
-		assert.Equal(t, want, e.listRolesJSON())
+		assert.ErrorContains(t, e.listRolesRefused("eyJ.any.token"), "Unauthorized")
 	})
 
 	// Control: the same setup with a matching group lists the role.
@@ -434,8 +444,8 @@ func TestDiscoveryAdmit_NoDisclosure(t *testing.T) {
 }
 
 // A target whose live naming is human grants nothing, and admits no caller on
-// sys/introspect/roles, as the agent leg never admits through a human mount;
-// flipping it to agent grants on the next call.
+// either discovery endpoint, as the agent leg never admits through a human
+// mount; flipping it to agent grants on the next call.
 func TestDiscoveryAdmit_HumanTargetSkipped(t *testing.T) {
 	e := newDiscEnv(t, "", "")
 	m := e.mountAuth("jwt/")
@@ -445,7 +455,7 @@ func TestDiscoveryAdmit_HumanTargetSkipped(t *testing.T) {
 	e.group("deployers", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
 
 	e.assertIntrospectUnauthorized(errRolelessNotAdmitted)
-	assert.Equal(t, `{"roles":[],"warnings":[]}`, e.listRolesJSON())
+	assert.ErrorContains(t, e.listRolesRefused("eyJ.any.token"), "Unauthorized")
 	assert.Equal(t, int64(2), m.calls.Load())
 
 	m.mf.Publish(testNaming(t, logical.EntityKindAgent, map[string]string{"repository": "repo"}))
@@ -626,23 +636,30 @@ func TestDiscoveryAdmit_MountFailurePhrases(t *testing.T) {
 			e.role("deploy", "vault/", "")
 			e.group("all", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}))
 
-			want := []string{`mount "jwt/": ` + tc.want}
-			_, warnings, err := e.listRoles("eyJ.any.token")
-			require.NoError(t, err)
-			assert.Equal(t, want, warnings)
+			want := `mount "jwt/": ` + tc.want
 
-			// sys/introspect/roles admits the caller first: with its only
-			// mount unable to decide, that is an outage (503), and the
-			// refusal names the mount by the same fixed phrase.
+			// Both endpoints admit the caller first: with its only mount
+			// unable to decide, that is an outage (503), and the refusal
+			// names the mount by its fixed phrase.
 			resp, err := e.introspectAs(bearerRequest("eyJ.any.token"))
 			require.NoError(t, err)
 			require.NotNil(t, resp)
 			require.Error(t, resp.Err)
 			assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-			assert.Contains(t, resp.Err.Error(), want[0])
+			assert.Contains(t, resp.Err.Error(), want)
 
-			body := resp.Err.Error() + e.listRolesJSON()
-			for _, leak := range []string{host, detail, "503", "TokenReview", "SPIFFE", "certificates configured"} {
+			status, raw := e.postDiscoveryRaw("eyJ.any.token", "2025-11-25",
+				`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`)
+			assert.Equal(t, http.StatusServiceUnavailable, status)
+			var refusal struct {
+				Errors []string `json:"errors"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &refusal), "body: %s", raw)
+			require.Len(t, refusal.Errors, 1)
+			assert.Contains(t, refusal.Errors[0], want)
+
+			body := resp.Err.Error() + string(raw)
+			for _, leak := range []string{host, detail, "TokenReview", "SPIFFE", "certificates configured"} {
 				assert.NotContains(t, body, leak)
 			}
 		})
@@ -711,8 +728,8 @@ func TestDiscoveryMemo_PanicBecomesError(t *testing.T) {
 	assert.ErrorIs(t, err, errDiscoveryFailed)
 }
 
-// No credential is a 401 on sys/introspect/roles and a tool error on
-// list_roles, and no mount is asked.
+// No credential is a 401 on sys/introspect/roles and on list_roles, both
+// refused by the request path before the handler runs, and no mount is asked.
 func TestDiscoveryAdmit_NoCredential(t *testing.T) {
 	e := newDiscEnv(t, "", "")
 	m := e.mountAuth("jwt/")
@@ -741,8 +758,10 @@ func TestDiscoveryAdmit_NoCredential(t *testing.T) {
 		})
 	}
 
-	_, _, err := e.listRoles("")
-	assert.EqualError(t, err, msg)
+	status, raw := e.postDiscoveryRaw("", "2025-11-25",
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_roles","arguments":{}}}`)
+	assert.Equal(t, http.StatusUnauthorized, status)
+	assert.Contains(t, string(raw), msg)
 	assert.Zero(t, m.calls.Load())
 }
 
@@ -791,6 +810,23 @@ func TestDiscoveryAdmit_PerMountIntrospectGone(t *testing.T) {
 // JSON-RPC responses (one per call of a batch).
 func (e *discEnv) postDiscovery(bearer, version, body string) []map[string]any {
 	e.t.Helper()
+	status, raw := e.postDiscoveryRaw(bearer, version, body)
+	require.Equal(e.t, http.StatusOK, status, "body: %s", raw)
+	var out []map[string]any
+	if strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {
+		require.NoError(e.t, json.Unmarshal(raw, &out), "body: %s", raw)
+	} else {
+		var one map[string]any
+		require.NoError(e.t, json.Unmarshal(raw, &one), "body: %s", raw)
+		out = []map[string]any{one}
+	}
+	return out
+}
+
+// postDiscoveryRaw POSTs body like postDiscovery and returns the status and
+// the raw answer, whatever they are.
+func (e *discEnv) postDiscoveryRaw(bearer, version, body string) (int, []byte) {
+	e.t.Helper()
 	req, err := http.NewRequest(http.MethodPost, e.server().URL+"/v1/sys/mcp", strings.NewReader(body))
 	require.NoError(e.t, err)
 	req.Header.Set("Content-Type", "application/json")
@@ -806,16 +842,7 @@ func (e *discEnv) postDiscovery(bearer, version, body string) []map[string]any {
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(e.t, err)
-	require.Equal(e.t, http.StatusOK, resp.StatusCode, "body: %s", raw)
-	var out []map[string]any
-	if strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {
-		require.NoError(e.t, json.Unmarshal(raw, &out), "body: %s", raw)
-	} else {
-		var one map[string]any
-		require.NoError(e.t, json.Unmarshal(raw, &one), "body: %s", raw)
-		out = []map[string]any{one}
-	}
-	return out
+	return resp.StatusCode, raw
 }
 
 // One discovery-server request costs at most one admission per distinct
@@ -867,8 +894,8 @@ func TestDiscoveryAdmit_OneAdmissionPerTargetPerRequest(t *testing.T) {
 		jwt.claims, jwtB.claims = nil, nil
 		defer func() { jwt.claims, jwtB.claims = discClaims(), discClaims() }()
 		a0, b0 := admits()
-		out := e.postDiscovery("not-a-credential", "2025-03-26", batch)
-		require.Len(t, out, 6)
+		status, raw := e.postDiscoveryRaw("not-a-credential", "2025-03-26", batch)
+		assert.Equal(t, http.StatusUnauthorized, status, "the batch is refused whole: %s", raw)
 		a1, b1 := admits()
 		assert.Equal(t, int64(1), a1-a0, "an unadmitted caller costs no more than one admission per target")
 		assert.Equal(t, int64(1), b1-b0)

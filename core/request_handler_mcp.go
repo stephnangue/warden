@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -77,6 +78,9 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 	}
 
 	desc := &logical.MCPRequestDescriptor{}
+	if _, ok := backend.(logical.MCPInProcessServer); ok {
+		desc.InProcess = true
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			// Drop any partial Calls so the matcher's invariant
@@ -152,6 +156,17 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 		desc.ParseErr = &logical.MCPParseError{
 			Kind: logical.MCPParseKindBatchUnsupported,
 			Msg:  "batch request from a client announcing a revision that dropped batching",
+		}
+		return
+	}
+
+	// An in-process server answers each call of a batch in full, so it caps
+	// how many one body may carry. Refused here, as a body that cannot be
+	// served, before policy, admission or any call runs.
+	if inproc, ok := backend.(logical.MCPInProcessServer); ok && isBatch && len(reqs) > inproc.MaxMCPBatch() {
+		desc.ParseErr = &logical.MCPParseError{
+			Kind: logical.MCPParseKindBatchTooLarge,
+			Msg:  fmt.Sprintf("JSON-RPC batch exceeds %d messages", inproc.MaxMCPBatch()),
 		}
 		return
 	}
