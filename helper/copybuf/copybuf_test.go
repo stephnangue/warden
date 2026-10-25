@@ -51,6 +51,61 @@ func TestCopy_RoundTrip(t *testing.T) {
 	}
 }
 
+// A reused buffer still holds the bytes of the response it copied before;
+// none of them reaches the next copy's output.
+func TestCopy_NoStaleBytes(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		var first bytes.Buffer
+		if _, err := Copy(&first, bytes.NewReader(bytes.Repeat([]byte("S"), 3*Size))); err != nil {
+			t.Fatal(err)
+		}
+		var second bytes.Buffer
+		if _, err := Copy(&second, bytes.NewReader([]byte("short"))); err != nil {
+			t.Fatal(err)
+		}
+		if second.String() != "short" {
+			t.Fatalf("second copy wrote %q", second.String())
+		}
+	}
+}
+
+// errAfter returns its data, then err rather than io.EOF.
+type errAfter struct {
+	data []byte
+	err  error
+}
+
+func (r *errAfter) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// A read error other than io.EOF ends the copy with that error, after what was
+// read before it.
+func TestCopy_ReadError(t *testing.T) {
+	boom := errors.New("upstream reset")
+	var out bytes.Buffer
+	written, err := Copy(&out, &errAfter{data: []byte("partial"), err: boom})
+	if !errors.Is(err, boom) || written != 7 || out.String() != "partial" {
+		t.Errorf("written %d, err %v, out %q", written, err, out.String())
+	}
+}
+
+// shortWriter accepts one byte less than it is given.
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func TestCopy_ShortWrite(t *testing.T) {
+	if _, err := Copy(shortWriter{}, bytes.NewReader([]byte("abc"))); !errors.Is(err, io.ErrShortWrite) {
+		t.Errorf("err = %v, want io.ErrShortWrite", err)
+	}
+}
+
 // readerFromWriter fails the test if Copy hands the copy to it: a ReaderFrom
 // allocates a buffer of its own.
 type readerFromWriter struct {

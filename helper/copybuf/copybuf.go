@@ -8,6 +8,12 @@
 // buf[:n] (Copy, CopyResponse and httputil.ReverseProxy alike), and a writer
 // may not keep the slice it is handed (io.Writer's contract), so no buffer is
 // shared by two copies.
+//
+// The HTTP/2 server keeps that contract too, although it writes frames on a
+// goroutine of its own: it copies a handler's data into the frame before that
+// goroutine starts (go.dev/issue/58446), and drops the frames still queued for
+// a stream that closes, so a Write that returns early leaves no reference to
+// the buffer behind.
 package copybuf
 
 import (
