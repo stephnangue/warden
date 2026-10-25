@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/middleware"
 	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stephnangue/warden/core"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -257,6 +258,9 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 	}
 
 	f.proxy = &httputil.ReverseProxy{
+		// Every forwarded response is copied through a buffer; pooled, it is
+		// not allocated per response.
+		BufferPool: copybuf.ProxyPool,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host

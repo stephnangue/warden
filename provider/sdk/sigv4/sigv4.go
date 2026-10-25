@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/logger"
 )
 
@@ -569,21 +570,7 @@ func ForwardDirectOpts(log *logger.GatedLogger, w http.ResponseWriter, r *http.R
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	if flusher, ok := w.(http.Flusher); ok {
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
-				flusher.Flush()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	} else {
-		io.Copy(w, resp.Body)
-	}
+	_, _ = copybuf.CopyResponse(w, resp.Body)
 }
 
 // writeFilteredResponse buffers resp's body (capped at opts.MaxBody), runs it

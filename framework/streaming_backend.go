@@ -21,6 +21,7 @@ import (
 
 	"github.com/armon/go-radix"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -796,6 +797,9 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 	b.Proxy = &httputil.ReverseProxy{
 		Director:  func(req *http.Request) {},
 		Transport: swap,
+		// Every proxied response is copied through a buffer; pooled, it is
+		// not allocated per response.
+		BufferPool: copybuf.ProxyPool,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			// The request's own deadline — a mount's timeout — passed before
 			// the upstream answered. The client is still waiting: written

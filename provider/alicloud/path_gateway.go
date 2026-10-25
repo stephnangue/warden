@@ -12,6 +12,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
@@ -237,21 +238,7 @@ func (b *alicloudBackend) forward(req *logical.Request, body []byte) {
 	}
 	req.ResponseWriter.WriteHeader(resp.StatusCode)
 
-	if flusher, ok := req.ResponseWriter.(http.Flusher); ok {
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				req.ResponseWriter.Write(buf[:n])
-				flusher.Flush()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	} else {
-		io.Copy(req.ResponseWriter, resp.Body)
-	}
+	_, _ = copybuf.CopyResponse(req.ResponseWriter, resp.Body)
 }
 
 // handleOSSRequest handles AWS SigV4-signed OSS (S3-compatible) requests.
