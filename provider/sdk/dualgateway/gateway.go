@@ -12,6 +12,7 @@ import (
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
@@ -264,21 +265,7 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 	}
 	req.ResponseWriter.WriteHeader(resp.StatusCode)
 
-	if flusher, ok := req.ResponseWriter.(http.Flusher); ok {
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				req.ResponseWriter.Write(buf[:n])
-				flusher.Flush()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	} else {
-		io.Copy(req.ResponseWriter, resp.Body)
-	}
+	_, _ = copybuf.CopyResponse(req.ResponseWriter, resp.Body)
 }
 
 // handleS3Request proxies S3-compatible requests with SigV4 verification and re-signing.
