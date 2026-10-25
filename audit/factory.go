@@ -81,28 +81,7 @@ func (f *FileDeviceFactory) Create(
 		accessor = fmt.Sprintf("%s_%s", f.Type(), randID)
 	}
 
-	// Create format with optional salting and omission if configured
-	var jsonFormat *JSONFormat
-	var formatOpts []JSONFormatOption
-
-	// Always add prefix if configured
-	if conf.Prefix != "" {
-		formatOpts = append(formatOpts, WithPrefix(conf.Prefix))
-	}
-
-	// Add salting if configured
-	if conf.HMACKey != "" && len(conf.SaltFields) > 0 {
-		hmacer := NewHMACer(conf.HMACKey)
-		formatOpts = append(formatOpts, WithSaltFunc(hmacer.SaltFunc()))
-		formatOpts = append(formatOpts, WithSaltFields(conf.SaltFields))
-	}
-
-	// Add omit fields if configured
-	if len(conf.OmitFields) > 0 {
-		formatOpts = append(formatOpts, WithOmitFields(conf.OmitFields))
-	}
-
-	jsonFormat = NewJSONFormat(formatOpts...)
+	jsonFormat, warnings := jsonFormatFor(conf)
 
 	device := NewDevice(mountPath, jsonFormat, bufferedSink, &DeviceConfig{
 		Name:        mountPath,
@@ -114,7 +93,40 @@ func (f *FileDeviceFactory) Create(
 		Accessor:    accessor,
 		BufferSize:  conf.BufferSize,
 		FlushPeriod: conf.FlushPeriod,
+		Warnings:    warnings,
 	})
 
 	return device, nil
+}
+
+// jsonFormatFor builds the device's format from its configuration, with the
+// warnings to report for what it had to change.
+//
+// A salt path needs the device's HMAC key. Without one, every salt path is
+// omitted instead: the value is dropped rather than written in clear. Core
+// generates a key for every device it enables, so this is a device whose
+// stored configuration lost it.
+func jsonFormatFor(conf *FileDeviceConfig) (*JSONFormat, []string) {
+	var opts []JSONFormatOption
+	var warnings []string
+
+	if conf.Prefix != "" {
+		opts = append(opts, WithPrefix(conf.Prefix))
+	}
+
+	omit := conf.OmitFields
+	switch {
+	case len(conf.SaltFields) == 0:
+	case conf.HMACKey != "":
+		opts = append(opts, WithSaltFunc(NewHMACer(conf.HMACKey).SaltFunc()), WithSaltFields(conf.SaltFields))
+	default:
+		omit = fieldPaths(omit, conf.SaltFields, false)
+		warnings = append(warnings, fmt.Sprintf("no hmac_key: these fields are omitted instead of salted: %v", conf.SaltFields))
+	}
+
+	if len(omit) > 0 {
+		opts = append(opts, WithOmitFields(omit))
+	}
+
+	return NewJSONFormat(opts...), warnings
 }

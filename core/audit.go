@@ -119,6 +119,11 @@ func (c *Core) loadAudits(ctx context.Context) error {
 				return fmt.Errorf("audit %q: HCL type changed (%q → %q); rename the path to migrate", path, existing.Type, decl.Type)
 			}
 			newConfig := mergeAuditConfig(decl.Config, existing.Config)
+			// A device stored without a key (an empty HCL hmac_key before it
+			// counted as absent) gets one now.
+			if err := ensureAuditHMACKey(newConfig); err != nil {
+				return fmt.Errorf("audit %q: %w", path, err)
+			}
 			if existing.Description != decl.Description || !auditConfigEqual(existing.Config, newConfig) {
 				existing.Description = decl.Description
 				existing.Config = newConfig
@@ -201,12 +206,8 @@ func (c *Core) buildConfigAuditEntry(decl *MountEntry, normalizedPath string) (*
 	for k, v := range decl.Config {
 		cfg[k] = v
 	}
-	if _, ok := cfg["hmac_key"]; !ok {
-		salt, err := generateAuditHMACSalt()
-		if err != nil {
-			return nil, fmt.Errorf("generate HMAC salt: %w", err)
-		}
-		cfg["hmac_key"] = salt
+	if err := ensureAuditHMACKey(cfg); err != nil {
+		return nil, err
 	}
 	accessor, err := c.generateMountAccessor("audit_" + decl.Type)
 	if err != nil {
@@ -229,17 +230,43 @@ func (c *Core) buildConfigAuditEntry(decl *MountEntry, normalizedPath string) (*
 // stored config, returning a fresh map that preserves the generated
 // hmac_key from the stored config (so audit-log HMACs stay stable across
 // restarts) but otherwise reflects the HCL values.
+//
+// An empty hmac_key counts as absent, on both sides: a template that renders
+// empty (an unset environment variable) must not overwrite the stored salt,
+// which would turn salting off for the device from then on.
 func mergeAuditConfig(declared, stored map[string]any) map[string]any {
 	out := make(map[string]any, len(declared)+1)
 	for k, v := range declared {
 		out[k] = v
 	}
-	if _, ok := out["hmac_key"]; !ok {
-		if salt, hadSalt := stored["hmac_key"]; hadSalt {
-			out["hmac_key"] = salt
+	if !hasAuditHMACKey(out) {
+		delete(out, "hmac_key")
+		if hasAuditHMACKey(stored) {
+			out["hmac_key"] = stored["hmac_key"]
 		}
 	}
 	return out
+}
+
+// hasAuditHMACKey reports whether cfg holds a non-empty hmac_key.
+func hasAuditHMACKey(cfg map[string]any) bool {
+	key, _ := cfg["hmac_key"].(string)
+	return key != ""
+}
+
+// ensureAuditHMACKey gives cfg a generated hmac_key unless it holds a
+// non-empty one. Without a key a device cannot salt, and drops every salted
+// field instead.
+func ensureAuditHMACKey(cfg map[string]any) error {
+	if hasAuditHMACKey(cfg) {
+		return nil
+	}
+	salt, err := generateAuditHMACSalt()
+	if err != nil {
+		return fmt.Errorf("generate HMAC salt: %w", err)
+	}
+	cfg["hmac_key"] = salt
+	return nil
 }
 
 // auditConfigEqual compares two audit Config maps for equality. Used by
@@ -417,6 +444,14 @@ func (c *Core) newAuditBackend(ctx context.Context, entry *MountEntry) (audit.De
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create audit device: %w", err)
+		}
+		if wr, ok := backend.(audit.WarningReporter); ok {
+			for _, w := range wr.Warnings() {
+				c.logger.Warn("audit device configuration changed to keep it safe",
+					logger.String("path", entry.Path),
+					logger.String("warning", w),
+				)
+			}
 		}
 	}
 	return backend, nil

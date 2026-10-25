@@ -3,6 +3,8 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -46,8 +48,14 @@ const (
 	MaxMaxBackups  = 1000
 )
 
+// defaultSaltFields are salted on every device, whatever its salt_fields
+// says: an operator's list adds to them and can never remove one. They cover
+// every secret Warden issues (access keys, tokens, passwords).
+var defaultSaltFields = []string{"response.credential.data"}
+
 func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
-	// Set defaults first
+	// Set defaults first. The salt and omit lists are not pre-filled: an
+	// operator's list would replace them.
 	config := FileDeviceConfig{
 		Path:        "warden_audit.log",
 		RotateSize:  104857600, // 100MB (more reasonable default)
@@ -58,12 +66,7 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		BufferSize:  100,
 		FlushPeriod: 5 * time.Second,
 		Mode:        "0600",
-		SaltFields: []string{
-			"response.credential.data", // HMAC salt all credential values (access_key, secret_key, password, etc.)
-		},
-		// Nothing is omitted by default: request and response headers and
-		// bodies, which this list used to drop, are never recorded at all.
-		SkipTest: false,
+		SkipTest:    false,
 	}
 
 	jsonData, err := json.Marshal(data)
@@ -76,12 +79,46 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal to FileDeviceConfig: %w", err)
 	}
 
+	// Nothing is omitted by default: request and response headers and bodies
+	// are never recorded at all.
+	config.SaltFields = fieldPaths(defaultSaltFields, config.SaltFields, true)
+	config.OmitFields = fieldPaths(nil, config.OmitFields, false)
+
 	// Validate configuration
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &config, nil
+}
+
+// fieldPaths returns a new list holding floor, then the operator's paths in
+// their order, each once and empty ones dropped. It never appends to floor,
+// which is shared by every device being created.
+//
+// With collapseCovered, a path below another listed path is dropped too: for
+// salt paths, response.credential.data.secret_key under the floor's
+// response.credential.data would otherwise be hashed twice, and its hash
+// would no longer match the value's.
+func fieldPaths(floor, operator []string, collapseCovered bool) []string {
+	out := make([]string, 0, len(floor)+len(operator))
+	for _, list := range [2][]string{floor, operator} {
+		for _, p := range list {
+			if p != "" && !slices.Contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	}
+	if !collapseCovered {
+		return out
+	}
+	kept := make([]string, 0, len(out))
+	for _, p := range out {
+		if !slices.ContainsFunc(out, func(q string) bool { return strings.HasPrefix(p, q+".") }) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // Validate checks the configuration for invalid values

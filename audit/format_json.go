@@ -512,6 +512,19 @@ func (f *JSONFormat) omitPolicyResultsField(pr *PolicyResults, parts []string) {
 	switch parts[0] {
 	case "granting_policies":
 		pr.GrantingPolicies = nil
+	case "condition":
+		// Mirrors the salt paths, whose "inputs" keys are themselves dotted
+		// (agent.metadata.env): every salt path must also be omittable, for a
+		// device with no HMAC key to drop what it cannot hash.
+		switch {
+		case len(parts) == 1:
+			pr.Condition = nil
+		case parts[1] != "inputs" || pr.Condition == nil:
+		case len(parts) == 2:
+			pr.Condition.Inputs = nil
+		default:
+			delete(pr.Condition.Inputs, strings.Join(parts[2:], "."))
+		}
 	}
 }
 

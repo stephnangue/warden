@@ -512,6 +512,17 @@ type DeviceConfig struct {
 	// Performance options
 	BufferSize  int           `json:"buffer_size,omitempty"`
 	FlushPeriod time.Duration `json:"flush_period,omitempty"`
+
+	// Warnings name what the factory changed in the operator's configuration
+	// to keep the device safe. Reported through WarningReporter.
+	Warnings []string `json:"-"`
+}
+
+// WarningReporter is implemented by a device whose factory changed its
+// configuration. Core logs the warnings with the device's mount path, at
+// enable and at every unseal: factories have no logger of their own.
+type WarningReporter interface {
+	Warnings() []string
 }
 
 // AuditManager manages audit devices

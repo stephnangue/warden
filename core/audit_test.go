@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -839,6 +840,89 @@ func TestMergeAuditConfig(t *testing.T) {
 		out := mergeAuditConfig(declared, stored)
 		_, has := out["hmac_key"]
 		assert.False(t, has, "no salt anywhere → none in output (buildConfigAuditEntry generates on first-register)")
+	})
+
+	// A template rendering empty (an unset environment variable) must not
+	// overwrite the stored salt: the device would stop salting for good.
+	t.Run("an empty HCL hmac_key keeps the stored one", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x", "hmac_key": ""}
+		stored := map[string]any{"file_path": "/x", "hmac_key": "stable-salt-abc"}
+		out := mergeAuditConfig(declared, stored)
+		assert.Equal(t, "stable-salt-abc", out["hmac_key"])
+	})
+
+	t.Run("an empty key on both sides leaves hmac_key absent", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x", "hmac_key": ""}
+		stored := map[string]any{"file_path": "/x", "hmac_key": ""}
+		out := mergeAuditConfig(declared, stored)
+		_, has := out["hmac_key"]
+		assert.False(t, has)
+	})
+}
+
+// What a factory changed to keep a device safe is logged by core with the
+// device's mount path: the factory has no logger of its own.
+func TestNewAuditBackend_LogsFactoryWarnings(t *testing.T) {
+	core := newCoreForLoadAuditsTest(t)
+	var buf bytes.Buffer
+	cfg := logger.DefaultConfig()
+	cfg.Outputs = nil
+	core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+
+	backend, err := core.newAuditBackend(context.Background(), &MountEntry{
+		Class: mountClassAudit,
+		Type:  "file",
+		Path:  "siem/",
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"salt_fields": []any{"auth.token_id"},
+		},
+	})
+	require.NoError(t, err)
+	defer backend.Close()
+
+	logged := buf.String()
+	assert.Contains(t, logged, "siem/")
+	assert.Contains(t, logged, "no hmac_key")
+	assert.Contains(t, logged, "auth.token_id")
+}
+
+// An empty HCL hmac_key counts as absent: a new device gets a generated key,
+// and one stored without a key gets one at the next refresh. Without a key,
+// a device would drop every salted field.
+func TestLoadAudits_EmptyHMACKeyIsGenerated(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	declare := func(core *Core, auditPath string) {
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:        "file",
+			Path:        "siem",
+			Config:      map[string]any{"file_path": auditPath, "hmac_key": ""},
+			Declarative: true,
+		}}
+	}
+
+	t.Run("new device", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		declare(core, filepath.Join(t.TempDir(), "audit.log"))
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
+	})
+
+	t.Run("refresh of a device stored without a key", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		auditPath := filepath.Join(t.TempDir(), "audit.log")
+		declare(core, auditPath)
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+
+		// What the old merge stored: the empty HCL key in place of the salt.
+		core.audit.Entries[0].Config["hmac_key"] = ""
+		require.NoError(t, core.persistAudits(ctx))
+		core.audit = NewMountTable()
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
 	})
 }
 
