@@ -63,10 +63,6 @@ type HandlerProperties struct {
 
 // Handler creates and returns the main HTTP handler for Warden.
 func Handler(props *HandlerProperties) http.Handler {
-	mux := http.NewServeMux()
-	core := props.Core
-	log := props.Logger
-
 	// Create a shared forwarder for standby-to-active request forwarding.
 	// Used both by the generic handler (pre-check) and the logical handler
 	// (mid-request standby transition race).
@@ -74,46 +70,87 @@ func Handler(props *HandlerProperties) http.Handler {
 	if fwdTimeout == 0 {
 		fwdTimeout = defaultForwardingTimeout
 	}
-	forwarder := newStandbyForwarder(log, props.ClusterTLSConfigFunc, fwdTimeout)
-	forwarder.core = core
-
-	// HA endpoints — must work on standby and sealed nodes.
-	// Register before the /v1/sys/ catch-all.
-	mux.Handle("/v1/sys/health", handleSysHealth(core, log, props.Version))
-	mux.Handle("/v1/sys/ready", handleSysReady(core, log))
-	mux.Handle("/v1/sys/leader", handleSysLeader(core, log))
-	mux.Handle("/v1/sys/seal-status", handleSysSealStatus(core, log))
-
-	// System init endpoint - handles initialization before system is ready
-	mux.Handle("/v1/sys/init", handleSysInit(core, log))
-
-	// OIDC issuer discovery + JWKS (Workload Identity Federation). Served at the
-	// origin root — not under /v1/ — so an upstream STS fetches them at the
-	// standard well-known path. Unauthenticated; wrapGenericHandler exempts these
-	// from the /v1/ prefix check. Deliberately NOT in standbyAllowedPaths: only
-	// the active node holds the signing key/config, so standbys forward.
-	mux.Handle(oidcDiscoveryPath, handleOIDCDiscovery(core, log))
-	mux.Handle(oidcJWKSPath, handleOIDCJWKS(core, log))
-
-	// RFC 9728 protected resource metadata. Also origin-root and
-	// unauthenticated — a client fetches it precisely because it has no user
-	// credential yet. Registered twice: the bare path, and the subtree, because
-	// the resource's own path is appended to the well-known prefix.
-	mux.Handle(prmPath, handlePRM(core, log))
-	mux.Handle(prmPath+"/", handlePRM(core, log))
-
-	// System backend endpoints - catch-all for /v1/sys/
-	// Handles providers, auth, namespaces, credentials, etc.
-	mux.Handle("/v1/sys/", handleLogical(core, log, forwarder))
-
-	// Logical backend endpoints - catch-all for /v1/
-	// Handles provider-specific operations (e.g., /v1/aws/, /v1/provider/)
-	mux.Handle("/v1/", handleLogical(core, log, forwarder))
+	forwarder := newStandbyForwarder(props.Logger, props.ClusterTLSConfigFunc, fwdTimeout)
+	forwarder.core = props.Core
 
 	// Wrap with generic handler middleware
-	handler := wrapGenericHandler(core, mux, log, forwarder)
+	return wrapGenericHandler(props.Core, newMux(props, forwarder), props.Logger, forwarder)
+}
 
-	return handler
+// routeKind says how a route reaches the core.
+type routeKind int
+
+const (
+	// routeLogical routes through handleLogical into Core.HandleRequest: the
+	// request path, which authenticates, authorizes and audits every request.
+	routeLogical routeKind = iota
+
+	// routeInfra is served before the request path, unauthenticated and
+	// unaudited by design: cluster health and seal state, initialization, and
+	// the origin-root discovery documents a client fetches before it holds a
+	// credential. Nothing else may be one (TestRoutes_NoBypass).
+	routeInfra
+)
+
+// route is one registration on Warden's mux.
+type route struct {
+	pattern string
+	kind    routeKind
+	handler http.Handler
+}
+
+// newMux registers routes on a new mux.
+func newMux(props *HandlerProperties, forwarder *standbyForwarder) *http.ServeMux {
+	mux := http.NewServeMux()
+	for _, r := range routes(props, forwarder) {
+		mux.Handle(r.pattern, r.handler)
+	}
+	return mux
+}
+
+// routes is every registration on Warden's mux, each marked with how it
+// reaches the core. Everything under /v1/ is the request path except the
+// infrastructure endpoints, which must answer on standby and sealed nodes.
+func routes(props *HandlerProperties, forwarder *standbyForwarder) []route {
+	core := props.Core
+	log := props.Logger
+	logical := handleLogical(core, log, forwarder)
+	return []route{
+		// HA endpoints — must work on standby and sealed nodes.
+		// Registered before the /v1/sys/ catch-all.
+		{"/v1/sys/health", routeInfra, handleSysHealth(core, log, props.Version)},
+		{"/v1/sys/ready", routeInfra, handleSysReady(core, log)},
+		{"/v1/sys/leader", routeInfra, handleSysLeader(core, log)},
+		{"/v1/sys/seal-status", routeInfra, handleSysSealStatus(core, log)},
+
+		// System init endpoint - handles initialization before system is ready
+		{"/v1/sys/init", routeInfra, handleSysInit(core, log)},
+
+		// OIDC issuer discovery + JWKS (Workload Identity Federation). Served
+		// at the origin root — not under /v1/ — so an upstream STS fetches
+		// them at the standard well-known path. Unauthenticated;
+		// wrapGenericHandler exempts these from the /v1/ prefix check.
+		// Deliberately NOT in standbyAllowedPaths: only the active node holds
+		// the signing key/config, so standbys forward.
+		{oidcDiscoveryPath, routeInfra, handleOIDCDiscovery(core, log)},
+		{oidcJWKSPath, routeInfra, handleOIDCJWKS(core, log)},
+
+		// RFC 9728 protected resource metadata. Also origin-root and
+		// unauthenticated — a client fetches it precisely because it has no
+		// user credential yet. Registered twice: the bare path, and the
+		// subtree, because the resource's own path is appended to the
+		// well-known prefix.
+		{prmPath, routeInfra, handlePRM(core, log)},
+		{prmPath + "/", routeInfra, handlePRM(core, log)},
+
+		// System backend endpoints - catch-all for /v1/sys/
+		// Handles providers, auth, namespaces, credentials, etc.
+		{"/v1/sys/", routeLogical, logical},
+
+		// Logical backend endpoints - catch-all for /v1/
+		// Handles provider-specific operations (e.g., /v1/aws/, /v1/provider/)
+		{"/v1/", routeLogical, logical},
+	}
 }
 
 // standbyAllowedPaths are paths that can be served directly by standby nodes
