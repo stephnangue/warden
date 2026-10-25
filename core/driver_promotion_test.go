@@ -59,7 +59,7 @@ func TestHA_DriverRebuiltAfterRepromotion(t *testing.T) {
 	first := active
 
 	// It steps down; the other node, now active, moves the source to version 2.
-	require.NoError(t, first.StepDown(nil))
+	require.NoError(t, first.StepDown())
 	second := waitForActiveNode(t, []*Core{standby}, 10*time.Second)
 	require.NotNil(t, second)
 	src, err := second.credConfigStore.GetSource(ctx, "src")
@@ -69,7 +69,7 @@ func TestHA_DriverRebuiltAfterRepromotion(t *testing.T) {
 	require.NoError(t, second.credConfigStore.UpdateSource(ctx, &updated))
 
 	// It steps down in turn, and the first node takes over again.
-	require.NoError(t, second.StepDown(nil))
+	require.NoError(t, second.StepDown())
 	require.NotNil(t, waitForActiveNode(t, []*Core{first}, 10*time.Second))
 
 	driver, err = first.credentialManager.GetOrCreateDriver(ctx, "src")

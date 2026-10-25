@@ -73,7 +73,6 @@ func Handler(props *HandlerProperties) http.Handler {
 	mux.Handle("/v1/sys/health", handleSysHealth(core, log, props.Version))
 	mux.Handle("/v1/sys/ready", handleSysReady(core, log))
 	mux.Handle("/v1/sys/leader", handleSysLeader(core, log))
-	mux.Handle("/v1/sys/step-down", handleSysStepDown(core, log))
 	mux.Handle("/v1/sys/seal-status", handleSysSealStatus(core, log))
 
 	// System init endpoint - handles initialization before system is ready
