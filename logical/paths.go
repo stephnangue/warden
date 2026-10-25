@@ -23,4 +23,13 @@ type Paths struct {
 	// The path syntax is the same as Root and Unauthenticated:
 	// exact match, or prefix match if ends with '*'.
 	Stream []string
+
+	// Identity are the paths that authorize on the credential the caller
+	// presents, before any role is chosen. A request to one carries no role:
+	// a role selection is ignored and nothing is minted. Without a service
+	// token it runs under the namespace's built-in policies alone; with one,
+	// under that token's policies and the built-ins. Only the system backend
+	// may declare them, and none may also be Root or Unauthenticated. The
+	// syntax is that of Root.
+	Identity []string
 }

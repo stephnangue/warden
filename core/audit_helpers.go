@@ -293,6 +293,7 @@ func (c *Core) buildRequestAuditEntry(
 		Auth:      buildAuditAuth(auth, te),
 	}
 	stampRoleGrant(entry, req)
+	stampDiscovery(entry, req)
 	stampUserAttribution(entry, req)
 	stampMCPClient(entry, req)
 
@@ -324,6 +325,33 @@ func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
 	if len(rg.Groups) > 0 {
 		entry.Auth.Groups = slices.Clone(rg.Groups)
 	}
+}
+
+// stampDiscovery records how a request on an identity path was admitted
+// without a service token: the mounts that admitted its credential, with the
+// principal each admitted, and how many roles were granted there; or that it
+// ran anonymously. A no-op for every other request. The caller is never told
+// any of it.
+func stampDiscovery(entry *audit.LogEntry, req *logical.Request) {
+	d := req.Discovery
+	if entry == nil || d == nil {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	da := &audit.DiscoveryAuth{
+		RolesGranted:         d.RolesGranted,
+		Anonymous:            d.Anonymous,
+		CredentialUnverified: d.CredentialUnverified,
+	}
+	if len(d.AdmittedBy) > 0 {
+		da.AdmittedBy = make([]audit.AdmittedMount, len(d.AdmittedBy))
+		for i, m := range d.AdmittedBy {
+			da.AdmittedBy[i] = audit.AdmittedMount{Mount: m.Mount, PrincipalID: m.PrincipalID}
+		}
+	}
+	entry.Auth.Discovery = da
 }
 
 // stampUserAttribution records the secondary (user) principal onto an audit
@@ -405,6 +433,7 @@ func (c *Core) buildResponseAuditEntry(
 		Response:  buildAuditResponse(resp, req, cred),
 	}
 	stampRoleGrant(entry, req)
+	stampDiscovery(entry, req)
 	stampUserAttribution(entry, req)
 	stampMCPClient(entry, req)
 

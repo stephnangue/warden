@@ -82,5 +82,8 @@ func (b *certAuthBackend) admit(_ context.Context, req *logical.Request, _ time.
 		b.logger.Debug("introspect/admit: certificate not admitted", lgr.Err(err))
 		return nil, nil
 	}
-	return newAdmission(cert, chains, b.mountFacts), nil
+	adm := newAdmission(cert, chains, b.mountFacts)
+	// admitCert checked that the principal is there.
+	adm.PrincipalID = extractPrincipal(cert, principalClaimOf(config))
+	return adm, nil
 }

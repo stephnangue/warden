@@ -130,8 +130,11 @@ func (b *jwtAuthBackend) admit(ctx context.Context, req *logical.Request, now ti
 		b.logger.Debug("introspect/admit: JWT not admitted", lgr.Err(err))
 		return nil, nil
 	}
+	// admitToken checked that the principal is there.
+	principalID := extractClaim(claims, config.UserClaim)
 	adm := newAdmission(claims, token, b.mountFacts)
 	adm.AudienceBound = len(config.BoundAudiences) > 0
+	adm.PrincipalID = principalID
 	return adm, nil
 }
 

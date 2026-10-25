@@ -40,6 +40,9 @@ import (
 type admitStub struct {
 	mu     sync.Mutex
 	mounts map[string]*admitStubMount
+	// nextFormat is the credential format the next mount created reports,
+	// as a real transparent auth method does; zero means JWT.
+	nextFormat logical.CredentialFormat
 }
 
 type admitStubMount struct {
@@ -82,12 +85,22 @@ func discClaims() map[string]any {
 
 type admitStubBackend struct {
 	*framework.Backend
-	stub *admitStub
+	stub   *admitStub
+	format logical.CredentialFormat
 }
+
+// CredentialFormat implements logical.CredentialFormatProvider.
+func (b *admitStubBackend) CredentialFormat() logical.CredentialFormat { return b.format }
 
 func (s *admitStub) factory() logical.Factory {
 	return func(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
-		b := &admitStubBackend{stub: s}
+		s.mu.Lock()
+		format := s.nextFormat
+		s.mu.Unlock()
+		if format == "" {
+			format = logical.CredentialFormatJWT
+		}
+		b := &admitStubBackend{stub: s, format: format}
 		b.Backend = &framework.Backend{
 			BackendType:  "jwt",
 			BackendClass: logical.ClassAuth,
@@ -123,6 +136,7 @@ func (b *admitStubBackend) admit(_ context.Context, req *logical.Request, _ time
 		return nil, nil
 	}
 	adm := &logical.Admission{Facts: selector.NewClaims(maps.Clone(m.claims)), Mount: m.mf}
+	adm.PrincipalID, _ = m.claims["sub"].(string)
 	m.mu.Lock()
 	m.made = append(m.made, adm)
 	m.mu.Unlock()
@@ -389,10 +403,6 @@ func TestDiscoveryAdmit_NoDisclosure(t *testing.T) {
 		"group grants a missing role": func(t *testing.T, e *discEnv, _ *admitStubMount) {
 			e.group("deployers", []string{"ghost"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
 		},
-		"target does not admit": func(t *testing.T, e *discEnv, m *admitStubMount) {
-			e.group("deployers", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
-			m.claims = nil
-		},
 	}
 
 	const want = `{"roles":[],"warnings":[]}`
@@ -406,14 +416,26 @@ func TestDiscoveryAdmit_NoDisclosure(t *testing.T) {
 		})
 	}
 
+	// A credential no target admits is unauthenticated, not ungranted:
+	// sys/introspect/roles, which admits it before answering, refuses it,
+	// naming no mount.
+	t.Run("target does not admit", func(t *testing.T) {
+		e, m := setup(t)
+		e.group("deployers", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
+		m.claims = nil
+		e.assertIntrospectUnauthorized(errRolelessNotAdmitted)
+		assert.Equal(t, want, e.listRolesJSON())
+	})
+
 	// Control: the same setup with a matching group lists the role.
 	e, _ := setup(t)
 	e.group("deployers", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
 	assert.Equal(t, []string{"deploy"}, roleNames(e.introspectRoles()))
 }
 
-// A target whose live naming is human grants nothing; flipping it to agent
-// grants on the next call.
+// A target whose live naming is human grants nothing, and admits no caller on
+// sys/introspect/roles, as the agent leg never admits through a human mount;
+// flipping it to agent grants on the next call.
 func TestDiscoveryAdmit_HumanTargetSkipped(t *testing.T) {
 	e := newDiscEnv(t, "", "")
 	m := e.mountAuth("jwt/")
@@ -422,7 +444,7 @@ func TestDiscoveryAdmit_HumanTargetSkipped(t *testing.T) {
 	e.role("deploy", "vault/", "")
 	e.group("deployers", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
 
-	assert.Equal(t, `{"roles":[],"warnings":[]}`, e.introspectJSON())
+	e.assertIntrospectUnauthorized(errRolelessNotAdmitted)
 	assert.Equal(t, `{"roles":[],"warnings":[]}`, e.listRolesJSON())
 	assert.Equal(t, int64(2), m.calls.Load())
 
@@ -430,7 +452,20 @@ func TestDiscoveryAdmit_HumanTargetSkipped(t *testing.T) {
 	assert.Equal(t, []string{"deploy"}, roleNames(e.introspectRoles()))
 
 	m.mf.Publish(nil)
-	assert.Empty(t, e.introspectRoles(), "a mount without a naming answers no fact")
+	e.assertIntrospectUnauthorized(errRolelessNotAdmitted)
+}
+
+// assertIntrospectUnauthorized reads sys/introspect/roles with a bearer and
+// asserts the role-less leg refused it with want: a 401 with the challenge.
+func (e *discEnv) assertIntrospectUnauthorized(want error) {
+	e.t.Helper()
+	resp, err := e.introspectAs(bearerRequest("eyJ.any.token"))
+	require.NoError(e.t, err)
+	require.NotNil(e.t, resp)
+	require.Error(e.t, resp.Err)
+	assert.Equal(e.t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(e.t, resp.Err.Error(), want.Error())
+	assert.Equal(e.t, rolelessChallenge, resp.Headers.Get("WWW-Authenticate"))
 }
 
 // A role without a usable provider is evaluated at the namespace's
@@ -592,12 +627,21 @@ func TestDiscoveryAdmit_MountFailurePhrases(t *testing.T) {
 			e.group("all", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}))
 
 			want := []string{`mount "jwt/": ` + tc.want}
-			assert.Equal(t, want, e.introspect().Data["warnings"])
 			_, warnings, err := e.listRoles("eyJ.any.token")
 			require.NoError(t, err)
 			assert.Equal(t, want, warnings)
 
-			body := e.introspectJSON() + e.listRolesJSON()
+			// sys/introspect/roles admits the caller first: with its only
+			// mount unable to decide, that is an outage (503), and the
+			// refusal names the mount by the same fixed phrase.
+			resp, err := e.introspectAs(bearerRequest("eyJ.any.token"))
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			require.Error(t, resp.Err)
+			assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+			assert.Contains(t, resp.Err.Error(), want[0])
+
+			body := resp.Err.Error() + e.listRolesJSON()
 			for _, leak := range []string{host, detail, "503", "TokenReview", "SPIFFE", "certificates configured"} {
 				assert.NotContains(t, body, leak)
 			}

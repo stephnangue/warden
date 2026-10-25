@@ -413,7 +413,7 @@ func TestSysMCPContext_ImposesItsOwnCeiling(t *testing.T) {
 	ns, err := namespace.FromContext(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, namespace.RootNamespaceID, ns.ID)
-	assert.Same(t, r, mcpRequestFromContext(ctx))
+	assert.Same(t, r, discoveryRequestFromContext(ctx))
 }
 
 // postSysMCPBatch posts a JSON-RPC batch of n list_roles calls to the
