@@ -2,9 +2,11 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/logger"
@@ -39,6 +41,12 @@ func (f *FileDeviceFactory) Create(
 	conf, err := mapToFileDeviceConfig(config)
 	if err != nil {
 		return nil, err
+	}
+	// Enabling refuses these (ValidateConfig); a stored configuration that
+	// holds one still loads, so that an unseal never fails, without it.
+	var warnings []string
+	for _, d := range conf.dropUnknownFieldPaths() {
+		warnings = append(warnings, "ignored "+d)
 	}
 
 	// we only support json format for now
@@ -81,7 +89,8 @@ func (f *FileDeviceFactory) Create(
 		accessor = fmt.Sprintf("%s_%s", f.Type(), randID)
 	}
 
-	jsonFormat, warnings := jsonFormatFor(conf)
+	jsonFormat, formatWarnings := jsonFormatFor(conf)
+	warnings = append(warnings, formatWarnings...)
 
 	device := NewDevice(mountPath, jsonFormat, bufferedSink, &DeviceConfig{
 		Name:        mountPath,
@@ -98,6 +107,22 @@ func (f *FileDeviceFactory) Create(
 
 	return device, nil
 }
+
+// ValidateConfig implements ConfigValidator: it refuses a configuration that
+// Create would not accept, or would accept only by ignoring a salt or omit
+// path that names no field.
+func (f *FileDeviceFactory) ValidateConfig(config map[string]any) error {
+	conf, err := mapToFileDeviceConfig(config)
+	if err != nil {
+		return err
+	}
+	if dropped := conf.dropUnknownFieldPaths(); len(dropped) > 0 {
+		return errors.New(strings.Join(dropped, "; "))
+	}
+	return nil
+}
+
+var _ ConfigValidator = (*FileDeviceFactory)(nil)
 
 // jsonFormatFor builds the device's format from its configuration, with the
 // warnings to report for what it had to change.

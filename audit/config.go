@@ -121,6 +121,28 @@ func fieldPaths(floor, operator []string, collapseCovered bool) []string {
 	return kept
 }
 
+// dropUnknownFieldPaths removes the salt and omit paths that name no field an
+// entry records, and describes each one removed. A path that matched nothing
+// used to be ignored without a word, leaving a value its operator believed
+// hashed or dropped in clear.
+func (c *FileDeviceConfig) dropUnknownFieldPaths() []string {
+	var dropped []string
+	keep := func(paths []string, salt bool, option string) []string {
+		kept := make([]string, 0, len(paths))
+		for _, p := range paths {
+			if err := checkFieldPath(salt, p); err != nil {
+				dropped = append(dropped, fmt.Sprintf("%s %q: %v", option, p, err))
+				continue
+			}
+			kept = append(kept, p)
+		}
+		return kept
+	}
+	c.SaltFields = keep(c.SaltFields, true, "salt_fields")
+	c.OmitFields = keep(c.OmitFields, false, "omit_fields")
+	return dropped
+}
+
 // Validate checks the configuration for invalid values
 func (c *FileDeviceConfig) Validate() error {
 	// Validate file path is provided

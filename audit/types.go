@@ -574,3 +574,10 @@ type Factory interface {
 		config map[string]any) (Device, error)
 	Initialize(logger *logger.GatedLogger) error
 }
+
+// ConfigValidator is implemented by a factory that can check a device
+// configuration before the device is enabled. Core refuses a new device whose
+// configuration it rejects; a stored one is still loaded, through Create.
+type ConfigValidator interface {
+	ValidateConfig(config map[string]any) error
+}

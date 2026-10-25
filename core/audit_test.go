@@ -887,6 +887,64 @@ func TestNewAuditBackend_LogsFactoryWarnings(t *testing.T) {
 	assert.Contains(t, logged, "auth.token_id")
 }
 
+// Enabling a device refuses a salt or omit path that names no field, and
+// registers and persists nothing. Such a path used to be ignored without a
+// word, leaving in clear a value its operator believed hashed.
+func TestEnableAudit_RefusesUnknownFieldPath(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := newCoreForLoadAuditsTest(t)
+
+	err := core.EnableAudit(ctx, &MountEntry{
+		Class: mountClassAudit,
+		Type:  "file",
+		Path:  "siem/",
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"hmac_key":    "k",
+			"salt_fields": []any{"agent.metadata.env"},
+		},
+	}, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `salt_fields "agent.metadata.env": matches no audit field`)
+	assert.Empty(t, core.audit.Entries)
+	stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "nothing is persisted")
+}
+
+// A stored device holding such a path still loads at unseal, without the path,
+// and the drop is logged: an upgrade must never fail to start.
+func TestLoadAudits_StoredUnknownFieldPathLoads(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := newCoreForLoadAuditsTest(t)
+	var buf bytes.Buffer
+	cfg := logger.DefaultConfig()
+	cfg.Outputs = nil
+	core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+
+	core.audit.Entries = append(core.audit.Entries, &MountEntry{
+		Class:       mountClassAudit,
+		Type:        "file",
+		Path:        "siem/",
+		Accessor:    "audit_file_test",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"hmac_key":    "k",
+			"salt_fields": []any{"auth.token_id", "agent.metadata.env"},
+		},
+	})
+	require.NoError(t, core.persistAudits(ctx))
+	core.audit = NewMountTable()
+
+	require.NoError(t, core.loadAudits(ctx))
+	require.Len(t, core.audit.Entries, 1)
+	logged := buf.String()
+	assert.Contains(t, logged, "siem/")
+	assert.Contains(t, logged, `ignored salt_fields \"agent.metadata.env\"`)
+}
+
 // An empty HCL hmac_key counts as absent: a new device gets a generated key,
 // and one stored without a key gets one at the next refresh. Without a key,
 // a device would drop every salted field.

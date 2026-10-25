@@ -3,22 +3,25 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+
+	"github.com/stephnangue/warden/logical"
 )
 
 // JSONFormat implements the Format interface for JSON output
 type JSONFormat struct {
-	prefix     string
-	saltFn     SaltFunc
-	omitFields []string
-	saltFields []string
+	prefix string
+	saltFn SaltFunc
+
+	// The configured field paths, split once at construction.
+	omitPaths [][]string
+	saltPaths [][]string
 }
 
 // NewJSONFormat creates a new JSON format
 func NewJSONFormat(opts ...JSONFormatOption) *JSONFormat {
-	f := &JSONFormat{
-		omitFields: []string{},
-	}
+	f := &JSONFormat{}
 
 	for _, opt := range opts {
 		opt(f)
@@ -47,15 +50,25 @@ func WithSaltFunc(fn SaltFunc) JSONFormatOption {
 // WithOmitFields sets fields to omit from output
 func WithOmitFields(fields []string) JSONFormatOption {
 	return func(f *JSONFormat) {
-		f.omitFields = fields
+		f.omitPaths = splitFieldPaths(fields)
 	}
 }
 
 // WithSaltFields sets fields to salt in the output
 func WithSaltFields(fields []string) JSONFormatOption {
 	return func(f *JSONFormat) {
-		f.saltFields = fields
+		f.saltPaths = splitFieldPaths(fields)
 	}
+}
+
+// splitFieldPaths splits each dot-separated path once, so formatting an entry
+// splits nothing.
+func splitFieldPaths(fields []string) [][]string {
+	out := make([][]string, 0, len(fields))
+	for _, p := range fields {
+		out = append(out, strings.Split(p, "."))
+	}
+	return out
 }
 
 // FormatRequest formats a request entry as JSON
@@ -63,27 +76,7 @@ func (f *JSONFormat) FormatRequest(ctx context.Context, entry *LogEntry) ([]byte
 	// Clone the entry to avoid data races when logging to multiple devices in parallel
 	entry = entry.Clone()
 	entry.Type = string(EntryTypeRequest)
-
-	// Salt sensitive data if function is provided
-	if f.saltFn != nil {
-		if err := f.saltEntry(ctx, entry); err != nil {
-			return nil, err
-		}
-	}
-
-	// Remove omitted fields
-	f.omitFieldsFromEntry(entry)
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return nil, err
-	}
-
-	if f.prefix != "" {
-		return append([]byte(f.prefix), data...), nil
-	}
-
-	return data, nil
+	return f.format(ctx, entry)
 }
 
 // FormatResponse formats a response entry as JSON
@@ -91,16 +84,22 @@ func (f *JSONFormat) FormatResponse(ctx context.Context, entry *LogEntry) ([]byt
 	// Clone the entry to avoid data races when logging to multiple devices in parallel
 	entry = entry.Clone()
 	entry.Type = string(EntryTypeResponse)
+	return f.format(ctx, entry)
+}
 
-	// Salt sensitive data if function is provided
+// format salts, then omits, the configured fields of entry, this device's own
+// clone, and encodes it.
+func (f *JSONFormat) format(ctx context.Context, entry *LogEntry) ([]byte, error) {
 	if f.saltFn != nil {
-		if err := f.saltEntry(ctx, entry); err != nil {
-			return nil, err
+		// A path that fails is skipped so the others are still salted. Paths
+		// are checked when the device is created.
+		for _, parts := range f.saltPaths {
+			_ = f.saltField(ctx, entry, parts)
 		}
 	}
-
-	// Remove omitted fields
-	f.omitFieldsFromEntry(entry)
+	for _, parts := range f.omitPaths {
+		_ = omitField(entry, parts)
+	}
 
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -119,537 +118,538 @@ func (f *JSONFormat) Name() string {
 	return "json"
 }
 
-// saltEntry salts sensitive fields in the entry
-func (f *JSONFormat) saltEntry(ctx context.Context, entry *LogEntry) error {
-	// If no salt fields are configured, do nothing
-	if len(f.saltFields) == 0 {
-		return nil
-	}
+var (
+	// errUnknownFieldPath: the path names no field of an audit entry.
+	errUnknownFieldPath = errors.New("matches no audit field")
+	// errNotSaltable: the path names a group of fields, which only omission
+	// takes whole.
+	errNotSaltable = errors.New("names a group of fields: salt the fields inside it")
+	// errNeverLogged: the path names a request or response header or body,
+	// which no entry records.
+	errNeverLogged = errors.New("request and response headers and bodies are never logged")
+)
 
-	// Salt each configured field path
-	for _, fieldPath := range f.saltFields {
-		if err := f.saltFieldByPath(ctx, entry, fieldPath); err != nil {
-			// Continue on error to salt as many fields as possible
-			continue
-		}
+// checkFieldPath reports whether path names a field that a salt path (salt)
+// or an omit path can act on. It runs the walkers formatting uses, so the
+// paths they accept and the paths accepted here cannot drift apart.
+func checkFieldPath(salt bool, path string) error {
+	probe := &LogEntry{
+		Auth: &Auth{PolicyResults: &PolicyResults{
+			Condition: &logical.ConditionResult{Inputs: map[string]string{}},
+		}},
+		Request: &Request{},
+		Response: &Response{
+			Credential: &Credential{Data: map[string]string{}, Metadata: map[string]string{}},
+			AuthResult: &AuthResult{},
+		},
 	}
+	parts := strings.Split(path, ".")
+	if salt {
+		f := &JSONFormat{saltFn: func(_ context.Context, s string) (string, error) { return s, nil }}
+		return f.saltField(context.Background(), probe, parts)
+	}
+	return omitField(probe, parts)
+}
 
+// leaf refuses segments after a field that has none below it.
+func leaf(rest []string) error {
+	if len(rest) > 0 {
+		return errUnknownFieldPath
+	}
 	return nil
 }
 
-// saltFieldByPath salts a field identified by a dot-separated path
-// Examples: "auth.token_id", "request.client_ip", "response.credential.data"
-func (f *JSONFormat) saltFieldByPath(ctx context.Context, entry *LogEntry, fieldPath string) error {
-	parts := strings.Split(fieldPath, ".")
-	if len(parts) == 0 {
+// mapKey reads the segments after a map field: none names the whole map, one
+// names a key.
+func mapKey(rest []string) (key string, whole bool, err error) {
+	switch len(rest) {
+	case 0:
+		return "", true, nil
+	case 1:
+		return rest[0], false, nil
+	}
+	return "", false, errUnknownFieldPath
+}
+
+// neverLogged reports whether name is a request or response field that used
+// to record headers or a body. Omitting one is accepted and does nothing, so
+// configurations written for earlier releases stay valid.
+func neverLogged(name string) bool {
+	return name == "headers" || name == "data"
+}
+
+// salt replaces a non-empty value with its salted form.
+func (f *JSONFormat) salt(ctx context.Context, v *string) error {
+	if *v == "" {
 		return nil
 	}
-
-	switch parts[0] {
-	case "auth":
-		return f.saltAuthField(ctx, entry.Auth, parts[1:])
-	case "request":
-		return f.saltRequestField(ctx, entry.Request, parts[1:])
-	case "response":
-		return f.saltResponseField(ctx, entry.Response, parts[1:])
+	salted, err := f.saltFn(ctx, *v)
+	if err != nil {
+		return err
 	}
-
+	*v = salted
 	return nil
+}
+
+// saltMap salts one key of m, or every key when rest names the whole map.
+func (f *JSONFormat) saltMap(ctx context.Context, m map[string]string, rest []string) error {
+	key, whole, err := mapKey(rest)
+	if err != nil {
+		return err
+	}
+	if whole {
+		for k, v := range m {
+			if err := f.salt(ctx, &v); err != nil {
+				return err
+			}
+			m[k] = v
+		}
+		return nil
+	}
+	if v, ok := m[key]; ok {
+		if err := f.salt(ctx, &v); err != nil {
+			return err
+		}
+		m[key] = v
+	}
+	return nil
+}
+
+// saltField salts the field parts names.
+// Examples: "auth.token_id", "request.client_ip", "response.credential.data"
+func (f *JSONFormat) saltField(ctx context.Context, entry *LogEntry, parts []string) error {
+	name, rest := parts[0], parts[1:]
+	switch name {
+	case "auth", "request", "response":
+		if len(rest) == 0 {
+			return errNotSaltable
+		}
+	default:
+		return errUnknownFieldPath
+	}
+	switch name {
+	case "auth":
+		return f.saltAuthField(ctx, entry.Auth, rest)
+	case "request":
+		return f.saltRequestField(ctx, entry.Request, rest)
+	default:
+		return f.saltResponseField(ctx, entry.Response, rest)
+	}
 }
 
 // saltAuthField salts a field within the Auth structure
 func (f *JSONFormat) saltAuthField(ctx context.Context, auth *Auth, parts []string) error {
-	if auth == nil || len(parts) == 0 {
+	name, rest := parts[0], parts[1:]
+	switch name {
+	case "token_id", "token_accessor", "principal_id", "created_by_ip":
+		if err := leaf(rest); err != nil {
+			return err
+		}
+	case "policy_results":
+		if len(rest) == 0 {
+			return errNotSaltable
+		}
+		var pr *PolicyResults
+		if auth != nil {
+			pr = auth.PolicyResults
+		}
+		return f.saltPolicyResultsField(ctx, pr, rest)
+	default:
+		return errUnknownFieldPath
+	}
+	if auth == nil {
 		return nil
 	}
 
-	switch parts[0] {
+	switch name {
 	case "token_id":
-		if auth.TokenID != "" {
-			salted, err := f.saltFn(ctx, auth.TokenID)
-			if err != nil {
-				return err
-			}
-			auth.TokenID = salted
-		}
+		return f.salt(ctx, &auth.TokenID)
 	case "token_accessor":
-		if auth.TokenAccessor != "" {
-			salted, err := f.saltFn(ctx, auth.TokenAccessor)
-			if err != nil {
-				return err
-			}
-			auth.TokenAccessor = salted
-		}
-	case "principal_id":
-		if auth.PrincipalID != "" {
-			salted, err := f.saltFn(ctx, auth.PrincipalID)
-			if err != nil {
-				return err
-			}
-			auth.PrincipalID = salted
-		}
-		// The principals a discovery request was admitted as are the same
-		// identity: left in clear beside the salted one, they would undo it.
-		if d := auth.Discovery; d != nil {
-			for i := range d.AdmittedBy {
-				if d.AdmittedBy[i].PrincipalID == "" {
-					continue
-				}
-				salted, err := f.saltFn(ctx, d.AdmittedBy[i].PrincipalID)
-				if err != nil {
-					return err
-				}
-				d.AdmittedBy[i].PrincipalID = salted
-			}
-		}
+		return f.salt(ctx, &auth.TokenAccessor)
 	case "created_by_ip":
-		if auth.CreatedByIP != "" {
-			salted, err := f.saltFn(ctx, auth.CreatedByIP)
-			if err != nil {
+		return f.salt(ctx, &auth.CreatedByIP)
+	}
+	// principal_id. The principals a discovery request was admitted as are the
+	// same identity: left in clear beside the salted one, they would undo it.
+	if err := f.salt(ctx, &auth.PrincipalID); err != nil {
+		return err
+	}
+	if d := auth.Discovery; d != nil {
+		for i := range d.AdmittedBy {
+			if err := f.salt(ctx, &d.AdmittedBy[i].PrincipalID); err != nil {
 				return err
 			}
-			auth.CreatedByIP = salted
-		}
-	case "policy_results":
-		if auth.PolicyResults != nil && len(parts) > 1 {
-			return f.saltPolicyResultsField(ctx, auth.PolicyResults, parts[1:])
 		}
 	}
-
 	return nil
 }
 
 // saltPolicyResultsField salts a field within the PolicyResults structure
 func (f *JSONFormat) saltPolicyResultsField(ctx context.Context, pr *PolicyResults, parts []string) error {
-	if pr == nil || len(parts) == 0 {
-		return nil
-	}
-
-	switch parts[0] {
+	name, rest := parts[0], parts[1:]
+	switch name {
 	case "granting_policies":
-		// Salt all policy names
-		for i, policy := range pr.GrantingPolicies {
-			if policy != "" {
-				salted, err := f.saltFn(ctx, policy)
-				if err != nil {
-					return err
-				}
-				pr.GrantingPolicies[i] = salted
+		if err := leaf(rest); err != nil {
+			return err
+		}
+		if pr == nil {
+			return nil
+		}
+		for i := range pr.GrantingPolicies {
+			if err := f.salt(ctx, &pr.GrantingPolicies[i]); err != nil {
+				return err
 			}
 		}
+		return nil
 	case "condition":
 		// "...condition.inputs" salts every referenced-input value;
 		// "...condition.inputs.<dotted-key>" salts one (the input map keys are
 		// themselves dotted, e.g. agent.metadata.env, so rejoin the tail).
-		if pr.Condition == nil || len(parts) < 2 || parts[1] != "inputs" {
+		if len(rest) == 0 {
+			return errNotSaltable
+		}
+		if rest[0] != "inputs" {
+			return errUnknownFieldPath
+		}
+		if pr == nil || pr.Condition == nil {
 			return nil
 		}
-		if len(parts) == 2 {
-			for k, v := range pr.Condition.Inputs {
-				if v == "" {
-					continue
-				}
-				salted, err := f.saltFn(ctx, v)
-				if err != nil {
-					return err
-				}
-				pr.Condition.Inputs[k] = salted
-			}
-		} else if key := strings.Join(parts[2:], "."); pr.Condition.Inputs != nil {
-			if v, ok := pr.Condition.Inputs[key]; ok && v != "" {
-				salted, err := f.saltFn(ctx, v)
-				if err != nil {
-					return err
-				}
-				pr.Condition.Inputs[key] = salted
-			}
+		if len(rest) == 1 {
+			return f.saltMap(ctx, pr.Condition.Inputs, nil)
 		}
+		return f.saltMap(ctx, pr.Condition.Inputs, []string{strings.Join(rest[1:], ".")})
 	}
-
-	return nil
+	return errUnknownFieldPath
 }
 
 // saltRequestField salts a field within the Request structure
 func (f *JSONFormat) saltRequestField(ctx context.Context, request *Request, parts []string) error {
-	if request == nil || len(parts) == 0 {
+	name, rest := parts[0], parts[1:]
+	switch {
+	case neverLogged(name):
+		return errNeverLogged
+	case name != "client_ip":
+		return errUnknownFieldPath
+	}
+	if err := leaf(rest); err != nil {
+		return err
+	}
+	if request == nil {
 		return nil
 	}
-
-	switch parts[0] {
-	case "client_ip":
-		if request.ClientIP != "" {
-			salted, err := f.saltFn(ctx, request.ClientIP)
-			if err != nil {
-				return err
-			}
-			request.ClientIP = salted
-		}
-	}
-
-	return nil
+	return f.salt(ctx, &request.ClientIP)
 }
 
 // saltResponseField salts a field within the Response structure
 func (f *JSONFormat) saltResponseField(ctx context.Context, response *Response, parts []string) error {
-	if response == nil || len(parts) == 0 {
-		return nil
+	name, rest := parts[0], parts[1:]
+	switch {
+	case neverLogged(name):
+		return errNeverLogged
+	case name != "credential" && name != "auth_result":
+		return errUnknownFieldPath
+	case len(rest) == 0:
+		return errNotSaltable
 	}
-
-	switch parts[0] {
-	case "credential":
-		return f.saltCredentialField(ctx, response.Credential, parts[1:])
-	case "auth_result":
-		return f.saltAuthResultField(ctx, response.AuthResult, parts[1:])
+	if name == "credential" {
+		var cred *Credential
+		if response != nil {
+			cred = response.Credential
+		}
+		return f.saltCredentialField(ctx, cred, rest)
 	}
-
-	return nil
+	var authResult *AuthResult
+	if response != nil {
+		authResult = response.AuthResult
+	}
+	return f.saltAuthResultField(ctx, authResult, rest)
 }
 
 // saltCredentialField salts a field within the Credential structure
 func (f *JSONFormat) saltCredentialField(ctx context.Context, cred *Credential, parts []string) error {
-	if cred == nil || len(parts) == 0 {
+	name, rest := parts[0], parts[1:]
+	switch name {
+	case "data", "metadata":
+		// Data holds the issued secret values; metadata logs in clear unless
+		// salted (response.credential.metadata salts every key, .subject one).
+		if _, _, err := mapKey(rest); err != nil {
+			return err
+		}
+		if cred == nil {
+			return nil
+		}
+		if name == "data" {
+			return f.saltMap(ctx, cred.Data, rest)
+		}
+		return f.saltMap(ctx, cred.Metadata, rest)
+	case "credential_id", "lease_id", "token_id":
+		if err := leaf(rest); err != nil {
+			return err
+		}
+	default:
+		return errUnknownFieldPath
+	}
+	if cred == nil {
 		return nil
 	}
-
-	switch parts[0] {
+	switch name {
 	case "credential_id":
-		if cred.CredentialID != "" {
-			salted, err := f.saltFn(ctx, cred.CredentialID)
-			if err != nil {
-				return err
-			}
-			cred.CredentialID = salted
-		}
+		return f.salt(ctx, &cred.CredentialID)
 	case "lease_id":
-		if cred.LeaseID != "" {
-			salted, err := f.saltFn(ctx, cred.LeaseID)
-			if err != nil {
-				return err
-			}
-			cred.LeaseID = salted
-		}
-	case "token_id":
-		if cred.TokenID != "" {
-			salted, err := f.saltFn(ctx, cred.TokenID)
-			if err != nil {
-				return err
-			}
-			cred.TokenID = salted
-		}
-	case "data":
-		if cred.Data == nil {
-			return nil
-		}
-		// If parts length is 1, salt all values in the data map (contains sensitive credential values)
-		if len(parts) == 1 {
-			for key, value := range cred.Data {
-				if value != "" {
-					salted, err := f.saltFn(ctx, value)
-					if err != nil {
-						return err
-					}
-					cred.Data[key] = salted
-				}
-			}
-		} else if len(parts) >= 2 {
-			// Salt specific key
-			key := parts[1]
-			if value, ok := cred.Data[key]; ok && value != "" {
-				salted, err := f.saltFn(ctx, value)
-				if err != nil {
-					return err
-				}
-				cred.Data[key] = salted
-			}
-		}
-	case "metadata":
-		// Metadata logs in clear by default; salting is opt-in via salt_fields
-		// (response.credential.metadata salts every key, .subject one key).
-		if cred.Metadata == nil {
-			return nil
-		}
-		if len(parts) == 1 {
-			for key, value := range cred.Metadata {
-				if value != "" {
-					salted, err := f.saltFn(ctx, value)
-					if err != nil {
-						return err
-					}
-					cred.Metadata[key] = salted
-				}
-			}
-		} else if len(parts) >= 2 {
-			key := parts[1]
-			if value, ok := cred.Metadata[key]; ok && value != "" {
-				salted, err := f.saltFn(ctx, value)
-				if err != nil {
-					return err
-				}
-				cred.Metadata[key] = salted
-			}
-		}
+		return f.salt(ctx, &cred.LeaseID)
+	default:
+		return f.salt(ctx, &cred.TokenID)
 	}
-
-	return nil
 }
 
 // saltAuthResultField salts a field within the AuthResult structure
 func (f *JSONFormat) saltAuthResultField(ctx context.Context, authResult *AuthResult, parts []string) error {
-	if authResult == nil || len(parts) == 0 {
+	if parts[0] != "principal_id" {
+		return errUnknownFieldPath
+	}
+	if err := leaf(parts[1:]); err != nil {
+		return err
+	}
+	if authResult == nil {
 		return nil
 	}
+	return f.salt(ctx, &authResult.PrincipalID)
+}
 
-	switch parts[0] {
-	case "principal_id":
-		if authResult.PrincipalID != "" {
-			salted, err := f.saltFn(ctx, authResult.PrincipalID)
-			if err != nil {
-				return err
-			}
-			authResult.PrincipalID = salted
+// The omit leaves of each structure: the field's JSON name, and how to clear
+// it. A field with fields of its own below it that can be omitted one by one
+// is handled beside its table instead.
+var (
+	omitAuthLeaves = map[string]func(*Auth){
+		"token_id":           func(a *Auth) { a.TokenID = "" },
+		"token_accessor":     func(a *Auth) { a.TokenAccessor = "" },
+		"token_type":         func(a *Auth) { a.TokenType = "" },
+		"principal_id":       omitPrincipalID,
+		"role_name":          func(a *Auth) { a.RoleName = "" },
+		"role_granted_by":    func(a *Auth) { a.RoleGrantedBy = "" },
+		"role_denied_reason": func(a *Auth) { a.RoleDeniedReason = "" },
+		"groups":             func(a *Auth) { a.Groups = nil },
+		"policies":           func(a *Auth) { a.Policies = nil },
+		"token_ttl":          func(a *Auth) { a.TokenTTL = 0 },
+		"expires_at":         func(a *Auth) { a.ExpiresAt = 0 },
+		"namespace_id":       func(a *Auth) { a.NamespaceID = "" },
+		"namespace_path":     func(a *Auth) { a.NamespacePath = "" },
+		"created_by_ip":      func(a *Auth) { a.CreatedByIP = "" },
+		"actors":             func(a *Auth) { a.Actors = nil },
+		"user":               func(a *Auth) { a.User = nil },
+		"discovery":          func(a *Auth) { a.Discovery = nil },
+	}
+	omitPolicyResultsLeaves = map[string]func(*PolicyResults){
+		"allowed":           func(p *PolicyResults) { p.Allowed = false },
+		"granting_policies": func(p *PolicyResults) { p.GrantingPolicies = nil },
+		"mcp_decision":      func(p *PolicyResults) { p.MCPDecision = nil },
+		"mcp_client":        func(p *PolicyResults) { p.MCPClient = nil },
+	}
+	omitRequestLeaves = map[string]func(*Request){
+		"id":              func(r *Request) { r.ID = "" },
+		"operation":       func(r *Request) { r.Operation = "" },
+		"path":            func(r *Request) { r.Path = "" },
+		"mount_point":     func(r *Request) { r.MountPoint = "" },
+		"mount_type":      func(r *Request) { r.MountType = "" },
+		"mount_class":     func(r *Request) { r.MountClass = "" },
+		"method":          func(r *Request) { r.Method = "" },
+		"client_ip":       func(r *Request) { r.ClientIP = "" },
+		"namespace_id":    func(r *Request) { r.NamespaceID = "" },
+		"namespace_path":  func(r *Request) { r.NamespacePath = "" },
+		"unauthenticated": func(r *Request) { r.Unauthenticated = false },
+		"streamed":        func(r *Request) { r.Streamed = false },
+		"transparent":     func(r *Request) { r.Transparent = false },
+	}
+	omitResponseLeaves = map[string]func(*Response){
+		"status_code":    func(r *Response) { r.StatusCode = 0 },
+		"status_message": func(r *Response) { r.StatusMessage = "" },
+		"mount_class":    func(r *Response) { r.MountClass = "" },
+		"streamed":       func(r *Response) { r.Streamed = false },
+		"warnings":       func(r *Response) { r.Warnings = nil },
+		"upstream_url":   func(r *Response) { r.UpstreamURL = "" },
+	}
+	omitCredentialLeaves = map[string]func(*Credential){
+		"credential_id": func(c *Credential) { c.CredentialID = "" },
+		"type":          func(c *Credential) { c.Type = "" },
+		"category":      func(c *Credential) { c.Category = "" },
+		"lease_ttl":     func(c *Credential) { c.LeaseTTL = 0 },
+		"lease_id":      func(c *Credential) { c.LeaseID = "" },
+		"token_id":      func(c *Credential) { c.TokenID = "" },
+		"source_name":   func(c *Credential) { c.SourceName = "" },
+		"source_type":   func(c *Credential) { c.SourceType = "" },
+		"spec_name":     func(c *Credential) { c.SpecName = "" },
+		"revocable":     func(c *Credential) { c.Revocable = false },
+	}
+	omitAuthResultLeaves = map[string]func(*AuthResult){
+		"token_type":   func(a *AuthResult) { a.TokenType = "" },
+		"principal_id": func(a *AuthResult) { a.PrincipalID = "" },
+		"policies":     func(a *AuthResult) { a.Policies = nil },
+		"token_ttl":    func(a *AuthResult) { a.TokenTTL = 0 },
+	}
+)
+
+// omitPrincipalID clears the principal and the principals a discovery request
+// was admitted as, the same identity.
+func omitPrincipalID(a *Auth) {
+	a.PrincipalID = ""
+	if d := a.Discovery; d != nil {
+		for i := range d.AdmittedBy {
+			d.AdmittedBy[i].PrincipalID = ""
 		}
 	}
+}
 
+// omitLeaf clears the leaf name of target, looked up in leaves.
+func omitLeaf[T any](leaves map[string]func(*T), target *T, name string, rest []string) error {
+	omit, ok := leaves[name]
+	if !ok {
+		return errUnknownFieldPath
+	}
+	if err := leaf(rest); err != nil {
+		return err
+	}
+	if target != nil {
+		omit(target)
+	}
 	return nil
 }
 
-// omitFieldsFromEntry removes fields from entry based on configuration
-func (f *JSONFormat) omitFieldsFromEntry(entry *LogEntry) {
-	for _, fieldPath := range f.omitFields {
-		f.omitFieldByPath(entry, fieldPath)
-	}
-}
-
-// omitFieldByPath omits a field identified by a dot-separated path
+// omitField omits the field parts names.
 // Examples: "auth", "request.client_ip", "response.credential"
-func (f *JSONFormat) omitFieldByPath(entry *LogEntry, fieldPath string) {
-	parts := strings.Split(fieldPath, ".")
-	if len(parts) == 0 {
-		return
-	}
-
-	switch parts[0] {
+func omitField(entry *LogEntry, parts []string) error {
+	name, rest := parts[0], parts[1:]
+	switch name {
 	case "auth":
-		if len(parts) == 1 {
+		if len(rest) == 0 {
 			entry.Auth = nil
-		} else {
-			f.omitAuthField(entry.Auth, parts[1:])
+			return nil
 		}
+		return omitAuthField(entry.Auth, rest)
 	case "request":
-		if len(parts) == 1 {
+		if len(rest) == 0 {
 			entry.Request = nil
-		} else if entry.Request != nil {
-			f.omitRequestField(entry.Request, parts[1:])
+			return nil
 		}
+		if neverLogged(rest[0]) {
+			return nil
+		}
+		return omitLeaf(omitRequestLeaves, entry.Request, rest[0], rest[1:])
 	case "response":
-		if len(parts) == 1 {
+		if len(rest) == 0 {
 			entry.Response = nil
-		} else if entry.Response != nil {
-			f.omitResponseField(entry.Response, parts[1:])
+			return nil
 		}
+		return omitResponseField(entry.Response, rest)
 	case "error":
+		if err := leaf(rest); err != nil {
+			return err
+		}
 		entry.Error = ""
+		return nil
 	}
+	return errUnknownFieldPath
 }
 
 // omitAuthField omits a field within the Auth structure
-func (f *JSONFormat) omitAuthField(auth *Auth, parts []string) {
-	if auth == nil || len(parts) == 0 {
-		return
+func omitAuthField(auth *Auth, parts []string) error {
+	name, rest := parts[0], parts[1:]
+	if name != "policy_results" {
+		return omitLeaf(omitAuthLeaves, auth, name, rest)
 	}
-
-	switch parts[0] {
-	case "token_id":
-		auth.TokenID = ""
-	case "token_accessor":
-		auth.TokenAccessor = ""
-	case "token_type":
-		auth.TokenType = ""
-	case "principal_id":
-		auth.PrincipalID = ""
-		if d := auth.Discovery; d != nil {
-			for i := range d.AdmittedBy {
-				d.AdmittedBy[i].PrincipalID = ""
-			}
-		}
-	case "role_name":
-		auth.RoleName = ""
-	case "role_granted_by":
-		auth.RoleGrantedBy = ""
-	case "role_denied_reason":
-		auth.RoleDeniedReason = ""
-	case "groups":
-		auth.Groups = nil
-	case "discovery":
-		auth.Discovery = nil
-	case "policies":
-		auth.Policies = nil
-	case "policy_results":
-		if len(parts) == 1 {
+	if len(rest) == 0 {
+		if auth != nil {
 			auth.PolicyResults = nil
-		} else if auth.PolicyResults != nil {
-			f.omitPolicyResultsField(auth.PolicyResults, parts[1:])
 		}
-	case "token_ttl":
-		auth.TokenTTL = 0
-	case "expires_at":
-		auth.ExpiresAt = 0
-	case "namespace_id":
-		auth.NamespaceID = ""
-	case "namespace_path":
-		auth.NamespacePath = ""
-	case "created_by_ip":
-		auth.CreatedByIP = ""
+		return nil
 	}
+	var pr *PolicyResults
+	if auth != nil {
+		pr = auth.PolicyResults
+	}
+	return omitPolicyResultsField(pr, rest)
 }
 
 // omitPolicyResultsField omits a field within the PolicyResults structure
-func (f *JSONFormat) omitPolicyResultsField(pr *PolicyResults, parts []string) {
-	if pr == nil || len(parts) == 0 {
-		return
+func omitPolicyResultsField(pr *PolicyResults, parts []string) error {
+	name, rest := parts[0], parts[1:]
+	if name != "condition" {
+		return omitLeaf(omitPolicyResultsLeaves, pr, name, rest)
 	}
-
-	switch parts[0] {
-	case "granting_policies":
-		pr.GrantingPolicies = nil
-	case "condition":
-		// Mirrors the salt paths, whose "inputs" keys are themselves dotted
-		// (agent.metadata.env): every salt path must also be omittable, for a
-		// device with no HMAC key to drop what it cannot hash.
-		switch {
-		case len(parts) == 1:
+	// Mirrors the salt paths, whose "inputs" keys are themselves dotted
+	// (agent.metadata.env): every salt path must also be omittable, for a
+	// device with no HMAC key to drop what it cannot hash.
+	switch {
+	case len(rest) == 0:
+		if pr != nil {
 			pr.Condition = nil
-		case parts[1] != "inputs" || pr.Condition == nil:
-		case len(parts) == 2:
-			pr.Condition.Inputs = nil
-		default:
-			delete(pr.Condition.Inputs, strings.Join(parts[2:], "."))
 		}
+	case rest[0] != "inputs":
+		return errUnknownFieldPath
+	case pr == nil || pr.Condition == nil:
+	case len(rest) == 1:
+		pr.Condition.Inputs = nil
+	default:
+		delete(pr.Condition.Inputs, strings.Join(rest[1:], "."))
 	}
-}
-
-// omitRequestField omits a field within the Request structure
-func (f *JSONFormat) omitRequestField(request *Request, parts []string) {
-	if request == nil || len(parts) == 0 {
-		return
-	}
-
-	switch parts[0] {
-	case "id":
-		request.ID = ""
-	case "operation":
-		request.Operation = ""
-	case "path":
-		request.Path = ""
-	case "mount_point":
-		request.MountPoint = ""
-	case "mount_type":
-		request.MountType = ""
-	case "mount_class":
-		request.MountClass = ""
-	case "method":
-		request.Method = ""
-	case "client_ip":
-		request.ClientIP = ""
-	case "namespace_id":
-		request.NamespaceID = ""
-	case "namespace_path":
-		request.NamespacePath = ""
-	case "unauthenticated":
-		request.Unauthenticated = false
-	case "streamed":
-		request.Streamed = false
-	case "transparent":
-		request.Transparent = false
-	}
+	return nil
 }
 
 // omitResponseField omits a field within the Response structure
-func (f *JSONFormat) omitResponseField(response *Response, parts []string) {
-	if response == nil || len(parts) == 0 {
-		return
-	}
-
-	switch parts[0] {
-	case "status_code":
-		response.StatusCode = 0
-	case "mount_class":
-		response.MountClass = ""
-	case "streamed":
-		response.Streamed = false
-	case "warnings":
-		response.Warnings = nil
-	case "credential":
-		if len(parts) == 1 {
-			response.Credential = nil
-		} else {
-			f.omitCredentialField(response.Credential, parts[1:])
+func omitResponseField(response *Response, parts []string) error {
+	name, rest := parts[0], parts[1:]
+	switch {
+	case neverLogged(name):
+		return nil
+	case name == "credential":
+		var cred *Credential
+		if response != nil {
+			cred = response.Credential
 		}
-	case "auth_result":
-		if len(parts) == 1 {
-			response.AuthResult = nil
-		} else {
-			f.omitAuthResultField(response.AuthResult, parts[1:])
+		if len(rest) == 0 {
+			if response != nil {
+				response.Credential = nil
+			}
+			return nil
 		}
+		return omitCredentialField(cred, rest)
+	case name == "auth_result":
+		var authResult *AuthResult
+		if response != nil {
+			authResult = response.AuthResult
+		}
+		if len(rest) == 0 {
+			if response != nil {
+				response.AuthResult = nil
+			}
+			return nil
+		}
+		return omitLeaf(omitAuthResultLeaves, authResult, rest[0], rest[1:])
 	}
+	return omitLeaf(omitResponseLeaves, response, name, rest)
 }
 
 // omitCredentialField omits a field within the Credential structure
-func (f *JSONFormat) omitCredentialField(cred *Credential, parts []string) {
-	if cred == nil || len(parts) == 0 {
-		return
+func omitCredentialField(cred *Credential, parts []string) error {
+	name, rest := parts[0], parts[1:]
+	if name != "data" && name != "metadata" {
+		return omitLeaf(omitCredentialLeaves, cred, name, rest)
 	}
-
-	switch parts[0] {
-	case "credential_id":
-		cred.CredentialID = ""
-	case "type":
-		cred.Type = ""
-	case "category":
-		cred.Category = ""
-	case "lease_ttl":
-		cred.LeaseTTL = 0
-	case "lease_id":
-		cred.LeaseID = ""
-	case "token_id":
-		cred.TokenID = ""
-	case "source_name":
-		cred.SourceName = ""
-	case "source_type":
-		cred.SourceType = ""
-	case "spec_name":
-		cred.SpecName = ""
-	case "revocable":
-		cred.Revocable = false
-	case "data":
-		if len(parts) == 1 {
-			cred.Data = nil
-		} else if len(parts) >= 2 && cred.Data != nil {
-			delete(cred.Data, parts[1])
-		}
-	case "metadata":
-		if len(parts) == 1 {
-			cred.Metadata = nil
-		} else if len(parts) >= 2 && cred.Metadata != nil {
-			delete(cred.Metadata, parts[1])
-		}
+	key, whole, err := mapKey(rest)
+	if err != nil {
+		return err
 	}
-}
-
-// omitAuthResultField omits a field within the AuthResult structure
-func (f *JSONFormat) omitAuthResultField(authResult *AuthResult, parts []string) {
-	if authResult == nil || len(parts) == 0 {
-		return
+	if cred == nil {
+		return nil
 	}
-
-	switch parts[0] {
-	case "token_type":
-		authResult.TokenType = ""
-	case "principal_id":
-		authResult.PrincipalID = ""
-	case "policies":
-		authResult.Policies = nil
-	case "token_ttl":
-		authResult.TokenTTL = 0
+	switch {
+	case name == "data" && whole:
+		cred.Data = nil
+	case name == "data":
+		delete(cred.Data, key)
+	case whole:
+		cred.Metadata = nil
+	default:
+		delete(cred.Metadata, key)
 	}
+	return nil
 }

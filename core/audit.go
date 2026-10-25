@@ -378,6 +378,15 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 		entry.Accessor = accessor
 	}
 
+	// A new device is refused a configuration its factory would only accept
+	// by ignoring part of it, such as a salt path that names no field. Stored
+	// devices load through Create, which drops such a path and warns.
+	if v, ok := c.auditDevices[entry.Type].(audit.ConfigValidator); ok {
+		if err := v.ValidateConfig(entry.Config); err != nil {
+			return logical.ErrBadRequest(fmt.Sprintf("invalid audit device configuration: %v", err))
+		}
+	}
+
 	var backend audit.Device
 	var err error
 	backend, err = c.newAuditBackend(ctx, entry)
