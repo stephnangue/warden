@@ -314,7 +314,9 @@ func (c *Core) lookupTokenEntry(ctx context.Context, req *logical.Request) (*log
 // shared slice. Root is recognised by its canonical name, as the policy store
 // resolves it.
 func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltins bool) (*CBP, error) {
-	names := make([]string, 0, len(te.Policies))
+	// A fixed buffer: the names reach the heap only past eight.
+	var nbuf [8]string
+	names := nbuf[:0]
 	isRoot := false
 	for _, name := range te.Policies {
 		canonical, ok := logical.CanonicalPolicyName(name)
@@ -326,7 +328,6 @@ func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltin
 		}
 		names = append(names, name)
 	}
-	policyNames := map[string][]string{te.NamespaceID: names}
 
 	tokenNS, err := c.NamespaceByID(ctx, te.NamespaceID)
 	if err != nil {
@@ -360,7 +361,7 @@ func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltin
 			return nil, ErrInternalError
 		}
 	}
-	cbp, err := c.policyStore.CBP(tokenCtx, policyNames, builtins...)
+	cbp, err := c.policyStore.cbpForNamespace(tokenCtx, names, builtins)
 	if err != nil {
 		c.logger.Error("failed to construct CBP", logger.Err(err))
 		return nil, ErrInternalError

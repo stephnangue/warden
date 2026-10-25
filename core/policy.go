@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/hashicorp/hcl"
 	"github.com/hashicorp/hcl/hcl/ast"
-	"github.com/mitchellh/copystructure"
 	"github.com/openbao/openbao/sdk/v2/helper/hclutil"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/internal/namespace"
@@ -90,6 +89,54 @@ type Policy struct {
 	Expiration  time.Time
 	Modified    time.Time
 	namespace   *namespace.Namespace
+
+	// info is the one-element granting-policies answer of every request this
+	// policy alone grants. Built by finalize, before the policy is published
+	// to the cache, so the request path never allocates it. Shared and read
+	// only once published; nil on a policy that was never finalized.
+	info []sdklogical.PolicyInfo
+}
+
+// grantRef is one policy merged into a compiled path entry after the first,
+// with the capabilities its stanza brought.
+type grantRef struct {
+	policy *Policy
+	caps   uint32
+}
+
+// policyInfo is the granting-policies record naming p.
+func policyInfo(p *Policy) sdklogical.PolicyInfo {
+	info := sdklogical.PolicyInfo{Name: p.Name, Type: "cbp"}
+	if p.namespace != nil {
+		info.NamespaceId, info.NamespacePath = p.namespace.ID, p.namespace.Path
+	}
+	return info
+}
+
+// grantInfo returns the slice naming p as sole granter: the shared one built
+// by finalize, or, for a policy never finalized, a fresh one.
+func (p *Policy) grantInfo() []sdklogical.PolicyInfo {
+	if p.info != nil {
+		return p.info
+	}
+	return []sdklogical.PolicyInfo{policyInfo(p)}
+}
+
+// finalize prepares a freshly built policy for sharing, once, before it is
+// published to the policy cache: it builds the granting-policies slice and
+// stamps each MCP rule-set with the policy's name. NewCBP then indexes the
+// parsed objects as they are, without copying them; nothing writes them
+// afterwards.
+func (p *Policy) finalize() {
+	p.info = []sdklogical.PolicyInfo{policyInfo(p)}
+	for _, pc := range p.Paths {
+		if pc == nil || pc.Permissions == nil {
+			continue
+		}
+		for _, m := range pc.Permissions.MCP {
+			m.SourcePolicy = p.Name
+		}
+	}
 }
 
 // ShallowClone returns a shallow clone of the policy. This should not be used
@@ -163,8 +210,14 @@ type MCPRulesHCL struct {
 type CBPPermissions struct {
 	CapabilitiesBitmap     uint32
 	PaginationLimit        int
-	GrantingPoliciesMap    map[uint32][]sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
+	// owner is the policy whose stanza created this compiled entry, ownerCaps
+	// the capabilities that stanza brought, and extra the policies merged in
+	// after it. Together they answer grantingFor. Set by NewCBP on its own
+	// copy; nil on a parsed stanza.
+	owner     *Policy
+	ownerCaps uint32
+	extra     []grantRef
 	// Conditions holds compiled path-level CEL conditions from all merged
 	// policies for this path. nil means no condition (unconditional at this
 	// layer). Non-nil: the gate passes if at least one program evaluates true
@@ -206,106 +259,39 @@ type CBPMCPRules struct {
 	SourcePolicy string
 }
 
-// Clone returns a deep copy of the CBPMCPRules. Safe to call on a nil
-// receiver (returns nil). All slices and maps are independently
-// allocated so mutating the clone never affects the original.
-func (m *CBPMCPRules) Clone() *CBPMCPRules {
-	if m == nil {
+// grantingFor names the policies whose stanzas brought capability cap to this
+// compiled entry, owner first, then merged policies in insertion order. When
+// the owner alone grants it, the answer is the owner's shared slice and costs
+// no allocation; only a grant shared by several policies builds a new one.
+func (p *CBPPermissions) grantingFor(cap uint32) []sdklogical.PolicyInfo {
+	if p.owner == nil {
 		return nil
 	}
-	clone := &CBPMCPRules{SourcePolicy: m.SourcePolicy}
-	if m.AllowedMethods != nil {
-		clone.AllowedMethods = append([]string(nil), m.AllowedMethods...)
+	n := 0
+	if p.ownerCaps&cap != 0 {
+		n++
 	}
-	if m.DeniedMethods != nil {
-		clone.DeniedMethods = append([]string(nil), m.DeniedMethods...)
-	}
-	if m.AllowedTools != nil {
-		clone.AllowedTools = append([]string(nil), m.AllowedTools...)
-	}
-	if m.DeniedTools != nil {
-		clone.DeniedTools = append([]string(nil), m.DeniedTools...)
-	}
-	if m.AllowedResources != nil {
-		clone.AllowedResources = append([]string(nil), m.AllowedResources...)
-	}
-	if m.DeniedResources != nil {
-		clone.DeniedResources = append([]string(nil), m.DeniedResources...)
-	}
-	if m.AllowedPrompts != nil {
-		clone.AllowedPrompts = append([]string(nil), m.AllowedPrompts...)
-	}
-	if m.DeniedPrompts != nil {
-		clone.DeniedPrompts = append([]string(nil), m.DeniedPrompts...)
-	}
-	// Program is immutable; share the pointer.
-	clone.Condition = m.Condition
-	return clone
-}
-
-func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
-	ret := &CBPPermissions{
-		CapabilitiesBitmap:     p.CapabilitiesBitmap,
-		PaginationLimit:        p.PaginationLimit,
-		ResponseKeysFilterPath: p.ResponseKeysFilterPath,
-	}
-
-	switch {
-	case p.GrantingPoliciesMap == nil:
-	case len(p.GrantingPoliciesMap) == 0:
-		ret.GrantingPoliciesMap = make(map[uint32][]sdklogical.PolicyInfo)
-	default:
-		clonedGrantingPoliciesMap, err := copystructure.Copy(p.GrantingPoliciesMap)
-		if err != nil {
-			return nil, err
-		}
-		ret.GrantingPoliciesMap = clonedGrantingPoliciesMap.(map[uint32][]sdklogical.PolicyInfo)
-	}
-
-	switch {
-	case p.Conditions == nil:
-	case len(p.Conditions) == 0:
-		ret.Conditions = make([]*compiledCondition, 0)
-	default:
-		// Programs are immutable; copy the slice of pointers, not the programs.
-		ret.Conditions = append([]*compiledCondition(nil), p.Conditions...)
-	}
-
-	switch {
-	case p.MCP == nil:
-	case len(p.MCP) == 0:
-		ret.MCP = make([]*CBPMCPRules, 0)
-	default:
-		ret.MCP = make([]*CBPMCPRules, len(p.MCP))
-		for i, m := range p.MCP {
-			ret.MCP[i] = m.Clone()
+	for _, g := range p.extra {
+		if g.caps&cap != 0 {
+			n++
 		}
 	}
-
-	return ret, nil
-}
-
-func addGrantingPoliciesToMap(m map[uint32][]sdklogical.PolicyInfo, policy *Policy, capabilitiesBitmap uint32) map[uint32][]sdklogical.PolicyInfo {
-	if m == nil {
-		m = make(map[uint32][]sdklogical.PolicyInfo)
+	switch {
+	case n == 0:
+		return nil
+	case n == 1 && p.ownerCaps&cap != 0:
+		return p.owner.grantInfo()
 	}
-
-	// For all possible policies, check if the provided capabilities include
-	// them
-	for _, capability := range cap2Int {
-		if capabilitiesBitmap&capability == 0 {
-			continue
+	out := make([]sdklogical.PolicyInfo, 0, n)
+	if p.ownerCaps&cap != 0 {
+		out = append(out, policyInfo(p.owner))
+	}
+	for _, g := range p.extra {
+		if g.caps&cap != 0 {
+			out = append(out, policyInfo(g.policy))
 		}
-
-		m[capability] = append(m[capability], sdklogical.PolicyInfo{
-			Name:          policy.Name,
-			NamespaceId:   policy.namespace.ID,
-			NamespacePath: policy.namespace.Path,
-			Type:          "cbp",
-		})
 	}
-
-	return m
+	return out
 }
 
 // ParseCBPPolicy is used to parse the specified CBP rules into an
@@ -351,6 +337,12 @@ func parseCBPPolicy(ns *namespace.Namespace, rules string) (*Policy, error) {
 		if err := parsePaths(&p, o); err != nil {
 			return nil, fmt.Errorf("failed to parse policy: %w", err)
 		}
+	}
+	// A parsed policy always carries Paths, empty for a body with no stanza:
+	// nil reads as "never parsed" to PolicyStore.CBP, which would parse the
+	// body again on every request that names this policy.
+	if p.Paths == nil {
+		p.Paths = []*PathRules{}
 	}
 
 	return &p, nil

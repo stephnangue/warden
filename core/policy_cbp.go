@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 	"errors"
-	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,10 +21,15 @@ import (
 // CBP is used to wrap a set of policies to provide
 // an efficient interface for access control.
 type CBP struct {
-	// exactRules contains the path policies that are exact
-	exactRules *radix.Tree
+	// exactRules contains the path policies that are exact. An exact key is
+	// only ever looked up exactly — no walk over the exact paths exists — so a
+	// map serves it: one allocation however many stanzas, a hash lookup per
+	// request. An endpoint that needs to walk them in order would scan or sort
+	// the keys; a radix tree here would make every request pay for it.
+	exactRules map[string]*CBPPermissions
 
-	// prefixRules contains the path policies that are a prefix
+	// prefixRules contains the path policies that are a prefix, found by
+	// longest-prefix match.
 	prefixRules *radix.Tree
 
 	segmentWildcardPaths map[string]interface{}
@@ -35,12 +40,106 @@ type CBP struct {
 	// capability grant and its tool contract can come from different documents
 	// whose stanzas need not be spelled the same way. Values are
 	// *CBPPermissions carrying only .MCP.
-	mcpExactRules           *radix.Tree
+	mcpExactRules           map[string]*CBPPermissions
 	mcpPrefixRules          *radix.Tree
 	mcpSegmentWildcardPaths map[string]interface{}
 
+	// Every index above starts nil and is allocated by the first stanza that
+	// needs it (store, storeMCP): a compile pays only for the indexes its
+	// policies use. Readers tolerate nil: a nil map reads as empty, and the
+	// trees are guarded (lookupEntry, checkAllowedFromNonExactPaths).
+
 	// root is enabled if the "root" named policy is present.
 	root bool
+
+	// slab backs every capability entry of this compile: one copy per stanza,
+	// allocated together. Entries are addressed by pointer, so the slab is
+	// sized up front and never grows.
+	slab []CBPPermissions
+
+	// ownedMCP lists the MCP index entries this compile allocated, because two
+	// stanzas met at one key or a rule-set was not stamped with its policy.
+	// Every other MCP entry is a parsed policy's own CBPPermissions, shared
+	// with the policy cache and never written.
+	ownedMCP []*CBPPermissions
+}
+
+// rootGrantingPolicies is the granting-policies answer of every root request.
+// Shared: read only.
+var rootGrantingPolicies = []sdklogical.PolicyInfo{{
+	Name:          "root",
+	NamespaceId:   "root",
+	NamespacePath: "",
+	Type:          "cbp",
+}}
+
+// lookupEntry returns the entry already indexed under pc's key in the given
+// index, if any.
+func lookupEntry(exact map[string]*CBPPermissions, prefix *radix.Tree, wild map[string]interface{}, pc *PathRules) (*CBPPermissions, bool) {
+	switch {
+	case pc.HasSegmentWildcards:
+		raw, ok := wild[pc.Path]
+		if !ok {
+			return nil, false
+		}
+		return raw.(*CBPPermissions), true
+	case pc.IsPrefix:
+		if prefix == nil {
+			return nil, false
+		}
+		raw, ok := prefix.Get(pc.Path)
+		if !ok {
+			return nil, false
+		}
+		return raw.(*CBPPermissions), true
+	default:
+		e, ok := exact[pc.Path]
+		return e, ok
+	}
+}
+
+// store indexes e under pc's key in the capability index, allocating the
+// index on first use. hint sizes the exact-path map: the compile's stanzas.
+func (a *CBP) store(pc *PathRules, e *CBPPermissions, hint int) {
+	switch {
+	case pc.HasSegmentWildcards:
+		if a.segmentWildcardPaths == nil {
+			a.segmentWildcardPaths = make(map[string]interface{}, 1)
+		}
+		a.segmentWildcardPaths[pc.Path] = e
+	case pc.IsPrefix:
+		if a.prefixRules == nil {
+			a.prefixRules = radix.New()
+		}
+		a.prefixRules.Insert(pc.Path, e)
+	default:
+		if a.exactRules == nil {
+			a.exactRules = make(map[string]*CBPPermissions, hint)
+		}
+		a.exactRules[pc.Path] = e
+	}
+}
+
+// storeMCP indexes e under pc's key in the MCP index, allocating the index on
+// first use.
+func (a *CBP) storeMCP(pc *PathRules, e *CBPPermissions) {
+	switch {
+	case pc.HasSegmentWildcards:
+		if a.mcpSegmentWildcardPaths == nil {
+			a.mcpSegmentWildcardPaths = make(map[string]interface{}, 1)
+		}
+		a.mcpSegmentWildcardPaths[pc.Path] = e
+	case pc.IsPrefix:
+		if a.mcpPrefixRules == nil {
+			a.mcpPrefixRules = radix.New()
+		}
+		a.mcpPrefixRules.Insert(pc.Path, e)
+	default:
+		if a.mcpExactRules == nil {
+			a.mcpExactRules = make(map[string]*CBPPermissions, 1)
+		}
+		a.mcpExactRules[pc.Path] = e
+	}
 }
 
 type PolicyCheckOpts struct {
@@ -57,10 +156,15 @@ type AuthzResults struct {
 }
 
 type CBPResults struct {
-	Allowed                bool
-	RootPrivs              bool
-	IsRoot                 bool
-	CapabilitiesBitmap     uint32
+	Allowed            bool
+	RootPrivs          bool
+	IsRoot             bool
+	CapabilitiesBitmap uint32
+
+	// GrantingPolicies names the policies that granted the operation. It is
+	// shared, not built per request: a single granter's slice lives on its
+	// cached policy, root's is a package-level value. Read only — write a
+	// copy.
 	GrantingPolicies       []sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
 
@@ -87,16 +191,9 @@ const limitParameterName = "limit"
 
 // NewACL is used to construct a policy based CBP from a set of policies.
 func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
-	// Initialize
-	a := &CBP{
-		exactRules:              radix.New(),
-		prefixRules:             radix.New(),
-		segmentWildcardPaths:    make(map[string]interface{}, len(policies)),
-		mcpExactRules:           radix.New(),
-		mcpPrefixRules:          radix.New(),
-		mcpSegmentWildcardPaths: make(map[string]interface{}, len(policies)),
-		root:                    false,
-	}
+	// Initialize. Every index starts nil; the first stanza needing one
+	// allocates it.
+	a := &CBP{}
 
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
@@ -113,10 +210,15 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 	// attachment into a compile failure, which surfaces as a 500 on every
 	// request the token makes.
 	grantingPolicyCount := 0
+	stanzas := 0
 	for _, policy := range policies {
 		if policy != nil && policy.Type == PolicyTypeCBP {
 			grantingPolicyCount++
+			stanzas += len(policy.Paths)
 		}
+	}
+	if stanzas > 0 {
+		a.slab = make([]CBPPermissions, 0, stanzas)
 	}
 
 	// Inject each policy
@@ -153,50 +255,28 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 		}
 
 		for _, pc := range policy.Paths {
-			var raw interface{}
-			var ok bool
-			var tree *radix.Tree
-
 			if !pc.Expiration.IsZero() && time.Now().After(pc.Expiration) {
 				// Skip adding expired paths.
 				continue
 			}
 
-			switch {
-			case pc.HasSegmentWildcards:
-				raw, ok = a.segmentWildcardPaths[pc.Path]
-			default:
-				// Check which tree to use
-				tree = a.exactRules
-				if pc.IsPrefix {
-					tree = a.prefixRules
-				}
-
-				// Check for an existing policy
-				raw, ok = tree.Get(pc.Path)
-			}
-
+			existingPerms, ok := lookupEntry(a.exactRules, a.prefixRules, a.segmentWildcardPaths, pc)
 			if !ok {
-				clonedPerms, err := pc.Permissions.Clone()
-				if err != nil {
-					return nil, fmt.Errorf("error cloning ACL permissions: %w", err)
-				}
-
-				// Store this policy name as the policy that permits these
-				// capabilities
-				clonedPerms.GrantingPoliciesMap = addGrantingPoliciesToMap(nil, policy, clonedPerms.CapabilitiesBitmap)
-				switch {
-				case pc.HasSegmentWildcards:
-					a.segmentWildcardPaths[pc.Path] = clonedPerms
-				default:
-					tree.Insert(pc.Path, clonedPerms)
-				}
+				// The compiled entry is a copy of the stanza's permissions in
+				// this compile's slab, recording the policy that brought them.
+				// The copy shares the parsed Conditions backing array; the merge
+				// below never appends into it in place (see the full slice
+				// expression there).
+				a.slab = append(a.slab, *pc.Permissions)
+				e := &a.slab[len(a.slab)-1]
+				e.owner = policy
+				e.ownerCaps = pc.Permissions.CapabilitiesBitmap
+				a.store(pc, e, stanzas)
 				continue
 			}
 
-			// these are the ones already in the tree
-			existingPerms := raw.(*CBPPermissions)
-
+			// existingPerms is this compile's slab copy: every merge below
+			// writes it in place, never the parsed policy.
 			switch {
 			case existingPerms.CapabilitiesBitmap&DenyCapabilityInt > 0:
 				// If we are explicitly denied in the existing capability set,
@@ -206,13 +286,13 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			case pc.Permissions.CapabilitiesBitmap&DenyCapabilityInt > 0:
 				// If this new policy explicitly denies, only save the deny value
 				existingPerms.CapabilitiesBitmap = DenyCapabilityInt
-				goto INSERT
+				continue
 
 			default:
 				// Insert the capabilities in this new policy into the existing
 				// value
 				existingPerms.CapabilitiesBitmap = existingPerms.CapabilitiesBitmap | pc.Permissions.CapabilitiesBitmap
-				existingPerms.GrantingPoliciesMap = addGrantingPoliciesToMap(existingPerms.GrantingPoliciesMap, policy, pc.Permissions.CapabilitiesBitmap)
+				existingPerms.extra = append(existingPerms.extra, grantRef{policy: policy, caps: pc.Permissions.CapabilitiesBitmap})
 			}
 
 			// Lowest set pagination limit wins.
@@ -240,15 +320,10 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			case pc.Permissions.Conditions == nil:
 				existingPerms.Conditions = nil
 			default:
-				existingPerms.Conditions = append(existingPerms.Conditions, pc.Permissions.Conditions...)
-			}
-
-		INSERT:
-			switch {
-			case pc.HasSegmentWildcards:
-				a.segmentWildcardPaths[pc.Path] = existingPerms
-			default:
-				tree.Insert(pc.Path, existingPerms)
+				// Full slice expression: the first policy's Conditions backing
+				// array belongs to the parsed policy, so the append must copy.
+				c := existingPerms.Conditions
+				existingPerms.Conditions = append(c[:len(c):len(c)], pc.Permissions.Conditions...)
 			}
 		}
 	}
@@ -271,55 +346,65 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 			continue
 		}
 
-		var raw interface{}
-		var ok bool
-		var tree *radix.Tree
-
-		switch {
-		case pc.HasSegmentWildcards:
-			raw, ok = a.mcpSegmentWildcardPaths[pc.Path]
-		default:
-			tree = a.mcpExactRules
-			if pc.IsPrefix {
-				tree = a.mcpPrefixRules
-			}
-			raw, ok = tree.Get(pc.Path)
-		}
-
+		existingPerms, ok := lookupEntry(a.mcpExactRules, a.mcpPrefixRules, a.mcpSegmentWildcardPaths, pc)
 		if !ok {
-			// Clone before inserting: CBP() compiles from *Policy values held in
-			// the LRU and shared across requests, so the index must never hold
-			// a CBPPermissions the cached policy still owns — the same-key
-			// append below would otherwise grow the cached rule-sets on every
-			// compile.
-			clonedPerms, err := pc.Permissions.Clone()
-			if err != nil {
-				return fmt.Errorf("error cloning MCP permissions: %w", err)
+			// First stanza at this key: index the parsed CBPPermissions itself.
+			// CBP() compiles from *Policy values held in the policy cache and
+			// shared across requests, so this entry is never written here: a
+			// later stanza at the same key replaces it with an owned copy
+			// below. Rule-sets are stamped with their policy's name when the
+			// policy is built (finalize); a set that is not gets copied.
+			e := pc.Permissions
+			if !mcpStamped(e.MCP, policy.Name) {
+				e = &CBPPermissions{MCP: stampedMCP(e.MCP, policy.Name)}
+				a.ownedMCP = append(a.ownedMCP, e)
 			}
-			for _, m := range clonedPerms.MCP {
-				m.SourcePolicy = policy.Name
-			}
-			switch {
-			case pc.HasSegmentWildcards:
-				a.mcpSegmentWildcardPaths[pc.Path] = clonedPerms
-			default:
-				tree.Insert(pc.Path, clonedPerms)
-			}
+			a.storeMCP(pc, e)
 			continue
 		}
 
-		existingPerms, castOK := raw.(*CBPPermissions)
-		if !castOK {
-			return errors.New("error type casting MCP permissions")
+		if !slices.Contains(a.ownedMCP, existingPerms) {
+			// A second stanza at one key, from another policy or the same one:
+			// the entry becomes this compile's own, holding the rule-sets
+			// already indexed and then the new ones.
+			merged := &CBPPermissions{MCP: make([]*CBPMCPRules, len(existingPerms.MCP), len(existingPerms.MCP)+len(pc.Permissions.MCP))}
+			copy(merged.MCP, existingPerms.MCP)
+			a.ownedMCP = append(a.ownedMCP, merged)
+			a.storeMCP(pc, merged)
+			existingPerms = merged
 		}
 		for _, m := range pc.Permissions.MCP {
-			clone := m.Clone()
-			clone.SourcePolicy = policy.Name
-			existingPerms.MCP = append(existingPerms.MCP, clone)
+			if m.SourcePolicy != policy.Name {
+				c := *m
+				c.SourcePolicy = policy.Name
+				m = &c
+			}
+			existingPerms.MCP = append(existingPerms.MCP, m)
 		}
 	}
 
 	return nil
+}
+
+// mcpStamped reports whether every rule-set already names policy name.
+func mcpStamped(sets []*CBPMCPRules, name string) bool {
+	for _, m := range sets {
+		if m.SourcePolicy != name {
+			return false
+		}
+	}
+	return true
+}
+
+// stampedMCP returns copies of sets naming policy name; sets are not written.
+func stampedMCP(sets []*CBPMCPRules, name string) []*CBPMCPRules {
+	out := make([]*CBPMCPRules, len(sets))
+	for i, m := range sets {
+		c := *m
+		c.SourcePolicy = name
+		out[i] = &c
+	}
+	return out
 }
 
 // mcpRulesForPath returns the rule-sets of the single MCP stanza that wins for
@@ -335,8 +420,8 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 // evaluated against it. Callers must treat it as read-only: sorting or
 // appending would corrupt the CBP for every other caller holding it.
 func (a *CBP) mcpRulesForPath(path string) []*CBPMCPRules {
-	if raw, ok := a.mcpExactRules.Get(path); ok {
-		return raw.(*CBPPermissions).MCP
+	if e, ok := a.mcpExactRules[path]; ok {
+		return e.MCP
 	}
 
 	if perms := checkAllowedFromNonExactPaths(
@@ -412,12 +497,7 @@ func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logi
 		ret.Allowed = true
 		ret.RootPrivs = true
 		ret.IsRoot = true
-		ret.GrantingPolicies = []sdklogical.PolicyInfo{{
-			Name:          "root",
-			NamespaceId:   "root",
-			NamespacePath: "",
-			Type:          "cbp",
-		}}
+		ret.GrantingPolicies = rootGrantingPolicies
 		return ret
 	}
 	op := req.Operation
@@ -448,16 +528,14 @@ func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logi
 
 	// Find an exact matching rule, look for prefix if no match
 	var capabilities uint32
-	raw, ok := a.exactRules.Get(path)
-	if ok {
-		permissions = raw.(*CBPPermissions)
+	if e, ok := a.exactRules[path]; ok {
+		permissions = e
 		capabilities = permissions.CapabilitiesBitmap
 		goto CHECK
 	}
 	if op == logical.ListOperation || op == logical.ScanOperation {
-		raw, ok = a.exactRules.Get(strings.TrimSuffix(path, "/"))
-		if ok {
-			permissions = raw.(*CBPPermissions)
+		if e, ok := a.exactRules[strings.TrimSuffix(path, "/")]; ok {
+			permissions = e
 			capabilities = permissions.CapabilitiesBitmap
 			goto CHECK
 		}
@@ -496,41 +574,32 @@ CHECK:
 		return ret
 	}
 
-	var grantingPolicies []sdklogical.PolicyInfo
-	operationAllowed := false
+	var grantCap uint32
 	switch op {
 	case logical.ReadOperation:
-		operationAllowed = capabilities&ReadCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[ReadCapabilityInt]
+		grantCap = ReadCapabilityInt
 	case logical.ListOperation:
-		operationAllowed = capabilities&ListCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[ListCapabilityInt]
+		grantCap = ListCapabilityInt
 	case logical.UpdateOperation:
-		operationAllowed = capabilities&UpdateCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[UpdateCapabilityInt]
+		grantCap = UpdateCapabilityInt
 	case logical.DeleteOperation:
-		operationAllowed = capabilities&DeleteCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[DeleteCapabilityInt]
+		grantCap = DeleteCapabilityInt
 	case logical.CreateOperation:
-		operationAllowed = capabilities&CreateCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[CreateCapabilityInt]
+		grantCap = CreateCapabilityInt
 	case logical.PatchOperation:
-		operationAllowed = capabilities&PatchCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[PatchCapabilityInt]
+		grantCap = PatchCapabilityInt
 	case logical.ScanOperation:
-		operationAllowed = capabilities&ScanCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[ScanCapabilityInt]
+		grantCap = ScanCapabilityInt
 	// These three re-use UpdateCapabilityInt since that's the most appropriate
 	// capability/operation mapping
 	case logical.RevokeOperation, logical.RenewOperation, logical.RollbackOperation:
-		operationAllowed = capabilities&UpdateCapabilityInt > 0
-		grantingPolicies = permissions.GrantingPoliciesMap[UpdateCapabilityInt]
+		grantCap = UpdateCapabilityInt
 
 	default:
 		return ret
 	}
 
-	if !operationAllowed {
+	if capabilities&grantCap == 0 {
 		return ret
 	}
 
@@ -599,7 +668,7 @@ CHECK:
 		return ret
 	}
 
-	ret.GrantingPolicies = grantingPolicies
+	ret.GrantingPolicies = permissions.grantingFor(grantCap)
 
 	// Pagination clamping and list-response key filtering for list/scan.
 	// (Request-body parameter constraints have been removed; express value
@@ -676,6 +745,22 @@ func checkAllowedFromNonExactPaths(
 	path string,
 	bareMount bool,
 ) *CBPPermissions {
+	// Without segment wildcards there is nothing to rank: the longest prefix
+	// wins, or nothing does, whatever bareMount says. Answered before the
+	// ranking slice is made, so the common lookup allocates nothing. The tree
+	// is nil until a prefix stanza is indexed, and a nil *radix.Tree cannot be
+	// searched.
+	if len(segmentWildcardPaths) == 0 {
+		if prefixRules == nil {
+			return nil
+		}
+		_, raw, ok := prefixRules.LongestPrefix(path)
+		if !ok {
+			return nil
+		}
+		return raw.(*CBPPermissions)
+	}
+
 	wcPathDescrs := make([]wcPathDescr, 0, len(segmentWildcardPaths)+1)
 
 	less := func(i, j int) bool {
@@ -734,13 +819,10 @@ func checkAllowedFromNonExactPaths(
 		return false
 	}
 
-	// Find a prefix rule if any.
-	{
+	// Find a prefix rule if any, to rank against the segment wildcards.
+	if prefixRules != nil {
 		prefix, raw, ok := prefixRules.LongestPrefix(path)
 		if ok {
-			if len(segmentWildcardPaths) == 0 {
-				return raw.(*CBPPermissions)
-			}
 			wcPathDescrs = append(wcPathDescrs, wcPathDescr{
 				firstWCOrGlob: len(prefix),
 				wcPath:        prefix,
@@ -748,10 +830,6 @@ func checkAllowedFromNonExactPaths(
 				perms:         raw.(*CBPPermissions),
 			})
 		}
-	}
-
-	if len(segmentWildcardPaths) == 0 {
-		return nil
 	}
 
 	pathParts := strings.Split(path, "/")

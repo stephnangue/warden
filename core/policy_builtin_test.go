@@ -5,6 +5,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -316,6 +317,131 @@ func BenchmarkBuildCBP_Builtins(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// storeTestPolicy parses raw as a policy of the given type and stores it under
+// name in the root namespace.
+func storeTestPolicy(tb testing.TB, c *Core, name string, typ PolicyType, raw string) {
+	tb.Helper()
+	var p *Policy
+	var err error
+	if typ == PolicyTypeMCP {
+		p, err = ParseMCPPolicy(namespace.RootNamespace, raw)
+	} else {
+		p, err = ParseCBPPolicy(namespace.RootNamespace, raw)
+	}
+	require.NoError(tb, err)
+	p.Name, p.Type = name, typ
+	require.NoError(tb, c.policyStore.SetPolicy(rootCtx(), p, nil))
+}
+
+// BenchmarkBuildCBP measures a request's compile for the token shapes that
+// matter: an agent with a capability policy and an MCP contract, an operator
+// with a 40-stanza policy, root, a token with no policy of its own, and a
+// namespace whose default-cbp is emptied to turn discovery off. The built-ins
+// join every case but root.
+func BenchmarkBuildCBP(b *testing.B) {
+	c := createTestCore(b)
+	ctx := rootCtx()
+
+	storeTestPolicy(b, c, "agent-cbp", PolicyTypeCBP, `
+path "mcp/github/*" { capabilities = ["create", "read"] }
+path "mcp/jira" { capabilities = ["create"] }
+path "prov/role/+/gateway*" { capabilities = ["read"] }
+path "secret/team/data" {
+  capabilities = ["read"]
+  condition = "request.client_ip != ''"
+}
+`)
+	storeTestPolicy(b, c, "agent-mcp", PolicyTypeMCP, `
+path "mcp/github/*" {
+  methods {
+    allowed = ["tools/list", "tools/call"]
+  }
+  tools {
+    allowed = ["get_repository", "list_issues"]
+    denied  = ["delete_*"]
+  }
+}
+path "mcp/jira" {
+  methods {
+    allowed = ["tools/call"]
+  }
+  tools {
+    allowed = ["*"]
+  }
+}
+`)
+	var sb strings.Builder
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&sb, "path \"svc%d/config\" { capabilities = [\"read\", \"list\"] }\n", i)
+	}
+	for i := 0; i < 15; i++ {
+		fmt.Fprintf(&sb, "path \"svc%d/data/*\" { capabilities = [\"read\", \"create\", \"update\"] }\n", i)
+	}
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&sb, "path \"svc%d/+/items\" { capabilities = [\"read\"] }\n", i)
+	}
+	storeTestPolicy(b, c, "ops-large", PolicyTypeCBP, sb.String())
+
+	run := func(name string, policies []string) {
+		b.Run(name, func(b *testing.B) {
+			te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: policies}
+			if _, err := c.buildCBP(ctx, te, true); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := c.buildCBP(ctx, te, true); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+	run("agent-2-policies", []string{"agent-cbp", "agent-mcp"})
+	run("ops-40-stanzas", []string{"ops-large"})
+	run("root", []string{"root"})
+	run("no-policies", nil)
+
+	// Last: it rewrites a built-in the cases above compile with.
+	storeTestPolicy(b, c, builtinCBPPolicy, PolicyTypeCBP, "# discovery off\n")
+	run("default-cbp-emptied", nil)
+}
+
+// TestCBP_AllocationBudget holds the request path to its measured allocations,
+// so a regression fails a test instead of drifting a benchmark: one for a
+// capability check on an exact or a prefix path (the result itself), and
+// eleven for a compile with the built-ins of BenchmarkBuildCBP_Builtins's
+// token. Raise a budget only with the benchmark that justifies it.
+func TestCBP_AllocationBudget(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	storeTestPolicy(t, c, "reader", PolicyTypeCBP, `path "prov/role/+/gateway*" { capabilities = ["read", "create"] }`)
+	te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{"reader"}}
+
+	build := func() {
+		if _, err := c.buildCBP(ctx, te, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	build()
+	assert.Equal(t, 11.0, testing.AllocsPerRun(200, build), "buildCBP with the built-ins")
+
+	prefixOnly, err := ParseCBPPolicy(namespace.RootNamespace, `
+path "secret/x" { capabilities = ["read"] }
+path "pre/*" { capabilities = ["read"] }
+`)
+	require.NoError(t, err)
+	prefixOnly.Name, prefixOnly.Type = "prefix-only", PolicyTypeCBP
+	prefixOnly.finalize()
+	cbp, err := NewCBP(ctx, []*Policy{prefixOnly})
+	require.NoError(t, err)
+	for _, path := range []string{"secret/x", "pre/zz"} {
+		req := &logical.Request{Operation: logical.ReadOperation, Path: path}
+		require.True(t, cbp.AllowOperation(ctx, req, nil, false).Allowed, path)
+		assert.Equal(t, 1.0, testing.AllocsPerRun(200, func() { cbp.AllowOperation(ctx, req, nil, false) }), "AllowOperation on %s", path)
 	}
 }
 
