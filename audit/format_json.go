@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/stephnangue/warden/logical"
@@ -126,7 +127,7 @@ var (
 	errNotSaltable = errors.New("names a group of fields: salt the fields inside it")
 	// errNeverLogged: the path names a request or response header or body,
 	// which no entry records.
-	errNeverLogged = errors.New("request and response headers and bodies are never logged")
+	errNeverLogged = errors.New("request and response headers and bodies are not fields of an audit entry")
 )
 
 // checkFieldPath reports whether path names a field that a salt path (salt)
@@ -161,11 +162,13 @@ func leaf(rest []string) error {
 
 // mapKey reads the segments after a map field: none names the whole map, one
 // names a key.
+// An empty key (a trailing dot) names nothing: it would match no value and
+// leave the operator believing one salted.
 func mapKey(rest []string) (key string, whole bool, err error) {
-	switch len(rest) {
-	case 0:
+	switch {
+	case len(rest) == 0:
 		return "", true, nil
-	case 1:
+	case len(rest) == 1 && rest[0] != "":
 		return rest[0], false, nil
 	}
 	return "", false, errUnknownFieldPath
@@ -308,7 +311,7 @@ func (f *JSONFormat) saltPolicyResultsField(ctx context.Context, pr *PolicyResul
 		if len(rest) == 0 {
 			return errNotSaltable
 		}
-		if rest[0] != "inputs" {
+		if rest[0] != "inputs" || slices.Contains(rest[1:], "") {
 			return errUnknownFieldPath
 		}
 		if pr == nil || pr.Condition == nil {
@@ -583,7 +586,7 @@ func omitPolicyResultsField(pr *PolicyResults, parts []string) error {
 		if pr != nil {
 			pr.Condition = nil
 		}
-	case rest[0] != "inputs":
+	case rest[0] != "inputs" || slices.Contains(rest[1:], ""):
 		return errUnknownFieldPath
 	case pr == nil || pr.Condition == nil:
 	case len(rest) == 1:

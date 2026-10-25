@@ -542,14 +542,15 @@ func auditURL(u *url.URL) string {
 }
 
 // redactQueryValues keeps each key of a raw query and replaces its value. A
-// segment with no "=" is a value with no key, and is replaced whole.
+// segment with no "=", or one whose "=" is followed by another (a base64
+// token's padding, dGVzdA==), is a value with no key, and is replaced whole.
 func redactQueryValues(raw string) string {
 	var b strings.Builder
 	b.Grow(len(raw))
 	for rest := raw; ; {
 		segment, next, more := strings.Cut(rest, "&")
 		if segment != "" {
-			if key, _, ok := strings.Cut(segment, "="); ok {
+			if key, value, ok := strings.Cut(segment, "="); ok && !strings.HasPrefix(value, "=") {
 				b.WriteString(key)
 				b.WriteByte('=')
 			}
@@ -802,7 +803,7 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 			if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 				b.Logger.Error("proxy timed out",
 					logger.Err(err),
-					logger.String("target_url", r.URL.String()),
+					logger.String("target_url", auditURL(r.URL)),
 				)
 				b.writeProxyError(w, r, http.StatusGatewayTimeout)
 				return
@@ -815,13 +816,13 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 			if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
 				b.Logger.Debug("proxy aborted: client closed connection",
 					logger.Err(err),
-					logger.String("target_url", r.URL.String()),
+					logger.String("target_url", auditURL(r.URL)),
 				)
 				return
 			}
 			b.Logger.Error("proxy error",
 				logger.Err(err),
-				logger.String("target_url", r.URL.String()),
+				logger.String("target_url", auditURL(r.URL)),
 			)
 			b.writeProxyError(w, r, http.StatusBadGateway)
 		},

@@ -34,6 +34,10 @@ type FileDeviceConfig struct {
 	OmitFields []string `json:"omit_fields,omitempty"`
 
 	SkipTest bool `json:"skip_test" default:"false"`
+
+	// unknownFieldPaths describes the operator's salt and omit paths that name
+	// no field, left out of SaltFields and OmitFields.
+	unknownFieldPaths []string
 }
 
 // Configuration validation limits
@@ -79,10 +83,15 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal to FileDeviceConfig: %w", err)
 	}
 
-	// Nothing is omitted by default: request and response headers and bodies
-	// are never recorded at all.
-	config.SaltFields = fieldPaths(defaultSaltFields, config.SaltFields, true)
-	config.OmitFields = fieldPaths(nil, config.OmitFields, false)
+	// The operator's paths are checked before the floor is merged in, so a
+	// path it would absorb (a misspelt key under response.credential.data) is
+	// still reported. Nothing is omitted by default: request and response
+	// headers and bodies are not fields of an entry.
+	salt, unknownSalt := knownFieldPaths(config.SaltFields, true, "salt_fields")
+	omit, unknownOmit := knownFieldPaths(config.OmitFields, false, "omit_fields")
+	config.unknownFieldPaths = append(unknownSalt, unknownOmit...)
+	config.SaltFields = fieldPaths(defaultSaltFields, salt, true)
+	config.OmitFields = fieldPaths(nil, omit, false)
 
 	// Validate configuration
 	if err := config.Validate(); err != nil {
@@ -121,26 +130,20 @@ func fieldPaths(floor, operator []string, collapseCovered bool) []string {
 	return kept
 }
 
-// dropUnknownFieldPaths removes the salt and omit paths that name no field an
-// entry records, and describes each one removed. A path that matched nothing
-// used to be ignored without a word, leaving a value its operator believed
-// hashed or dropped in clear.
-func (c *FileDeviceConfig) dropUnknownFieldPaths() []string {
-	var dropped []string
-	keep := func(paths []string, salt bool, option string) []string {
-		kept := make([]string, 0, len(paths))
-		for _, p := range paths {
-			if err := checkFieldPath(salt, p); err != nil {
-				dropped = append(dropped, fmt.Sprintf("%s %q: %v", option, p, err))
-				continue
-			}
-			kept = append(kept, p)
+// knownFieldPaths keeps the paths that name a field an entry records, and
+// describes each one left out. A path that matched nothing used to be ignored
+// without a word, leaving a value its operator believed hashed or dropped in
+// clear.
+func knownFieldPaths(paths []string, salt bool, option string) (known, unknown []string) {
+	known = make([]string, 0, len(paths))
+	for _, p := range paths {
+		if err := checkFieldPath(salt, p); err != nil {
+			unknown = append(unknown, fmt.Sprintf("%s %q: %v", option, p, err))
+			continue
 		}
-		return kept
+		known = append(known, p)
 	}
-	c.SaltFields = keep(c.SaltFields, true, "salt_fields")
-	c.OmitFields = keep(c.OmitFields, false, "omit_fields")
-	return dropped
+	return known, unknown
 }
 
 // Validate checks the configuration for invalid values

@@ -3,6 +3,7 @@
 package audit
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -241,8 +242,16 @@ func TestAuditCustomListsKeepTheFloor(t *testing.T) {
 		}
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.Contains(line, `"headers"`) || strings.Contains(line, `"request":{`) && strings.Contains(line, `"data":{`) && !strings.Contains(line, `"credential"`) {
-			t.Errorf("an entry records headers or a request body: %s", line)
+		var entry map[string]map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		for _, part := range []string{"request", "response"} {
+			for _, field := range []string{"headers", "data"} {
+				if _, ok := entry[part][field]; ok {
+					t.Errorf("an entry records %s.%s: %s", part, field, line)
+				}
+			}
 		}
 	}
 	redactedURLs := 0

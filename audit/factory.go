@@ -45,7 +45,7 @@ func (f *FileDeviceFactory) Create(
 	// Enabling refuses these (ValidateConfig); a stored configuration that
 	// holds one still loads, so that an unseal never fails, without it.
 	var warnings []string
-	for _, d := range conf.dropUnknownFieldPaths() {
+	for _, d := range conf.unknownFieldPaths {
 		warnings = append(warnings, "ignored "+d)
 	}
 
@@ -116,7 +116,7 @@ func (f *FileDeviceFactory) ValidateConfig(config map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if dropped := conf.dropUnknownFieldPaths(); len(dropped) > 0 {
+	if dropped := conf.unknownFieldPaths; len(dropped) > 0 {
 		return errors.New(strings.Join(dropped, "; "))
 	}
 	return nil

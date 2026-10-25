@@ -38,9 +38,10 @@ type Request struct {
 	MountType  string `json:"mount_type,omitempty"`  // Backend type (vault, aws, jwt)
 	MountClass string `json:"mount_class,omitempty"` // provider, auth, system, audit
 
-	// HTTP details. Headers and bodies are never recorded: they carry the
-	// caller's credentials, and after routing the credentials minted for the
-	// upstream.
+	// HTTP details. Headers and the body are not fields of the entry: they
+	// carry the caller's credentials, and after routing the credentials minted
+	// for the upstream. A policy condition still records the values it read
+	// from the body, under auth.policy_results.condition.inputs.
 	Method   string `json:"method"` // GET, POST, PUT, DELETE
 	ClientIP string `json:"client_ip"`
 
@@ -56,8 +57,8 @@ type Request struct {
 
 // Response contains audit information about the response
 type Response struct {
-	// HTTP response. Headers and bodies are never recorded, as for the
-	// request: a login's body holds the token it issued.
+	// HTTP response. Headers and the body are not fields of the entry, as for
+	// the request: a login's body holds the token it issued.
 	StatusCode    int    `json:"status_code"`
 	StatusMessage string `json:"status_message,omitempty"`
 

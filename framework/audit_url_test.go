@@ -26,6 +26,7 @@ func TestAuditURL(t *testing.T) {
 		{"https://api.example.com/v1?SECRET-ONLY", "https://api.example.com/v1?%5Bredacted%5D"},
 		{"https://api.example.com/v1?a=1&&b=&c", "https://api.example.com/v1?a=%5Bredacted%5D&&b=%5Bredacted%5D&%5Bredacted%5D"},
 		{"https://api.example.com/v1?token=a%26b%3Dc", "https://api.example.com/v1?token=%5Bredacted%5D"},
+		{"https://api.example.com/v1?dGVzdA==&k=v", "https://api.example.com/v1?%5Bredacted%5D&k=%5Bredacted%5D"},
 	} {
 		u, err := url.Parse(tc.in)
 		require.NoError(t, err)

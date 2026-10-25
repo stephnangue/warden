@@ -15,19 +15,33 @@ import (
 // Every path the format tests, the default salt field and the documentation
 // use is accepted; so is omitting a field that used to record headers or a
 // body, which earlier releases' defaults named.
-func TestCheckFieldPath_Accepted(t *testing.T) {
-	salt := []string{
-		"response.credential.data", "response.credential.data.secret_key",
-		"response.credential.metadata", "response.credential.metadata.email",
-		"response.credential.credential_id", "response.credential.lease_id", "response.credential.token_id",
-		"response.auth_result.principal_id",
-		"auth.token_id", "auth.token_accessor", "auth.principal_id", "auth.created_by_ip",
-		"auth.policy_results.granting_policies",
-		"auth.policy_results.condition.inputs",
-		"auth.policy_results.condition.inputs.agent.metadata.env",
-		"auth.policy_results.condition.inputs.request.data.model",
-		"request.client_ip",
+// acceptedSaltPaths are the salt paths of every shape the format accepts.
+var acceptedSaltPaths = []string{
+	"response.credential.data", "response.credential.data.secret_key",
+	"response.credential.metadata", "response.credential.metadata.email",
+	"response.credential.credential_id", "response.credential.lease_id", "response.credential.token_id",
+	"response.auth_result.principal_id",
+	"auth.token_id", "auth.token_accessor", "auth.principal_id", "auth.created_by_ip",
+	"auth.policy_results.granting_policies",
+	"auth.policy_results.condition.inputs",
+	"auth.policy_results.condition.inputs.agent.metadata.env",
+	"auth.policy_results.condition.inputs.request.data.model",
+	"request.client_ip",
+}
+
+// Every salt path can also be omitted: a device without an HMAC key omits
+// its salt paths instead, and one without an omit counterpart would be written
+// in clear.
+func TestCheckFieldPath_EverySaltPathCanBeOmitted(t *testing.T) {
+	for _, p := range acceptedSaltPaths {
+		if err := checkFieldPath(false, p); err != nil {
+			t.Errorf("salt path %q cannot be omitted: %v", p, err)
+		}
 	}
+}
+
+func TestCheckFieldPath_Accepted(t *testing.T) {
+	salt := acceptedSaltPaths
 	omit := []string{
 		"auth", "request", "response", "error",
 		"auth.groups", "auth.discovery", "auth.actors", "auth.user", "auth.principal_id",
@@ -87,6 +101,12 @@ func TestCheckFieldPath_Refused(t *testing.T) {
 		{false, "error.x", errUnknownFieldPath},
 		{false, "type", errUnknownFieldPath},
 		{false, "", errUnknownFieldPath},
+		// A trailing dot names an empty key, which matches nothing.
+		{true, "response.credential.data.", errUnknownFieldPath},
+		{true, "auth.policy_results.condition.inputs.", errUnknownFieldPath},
+		{true, "auth.policy_results.condition.inputs.agent.", errUnknownFieldPath},
+		{false, "response.credential.metadata.", errUnknownFieldPath},
+		{false, "auth.policy_results.condition.inputs.", errUnknownFieldPath},
 		// An unknown name inside each structure.
 		{false, "auth.bogus", errUnknownFieldPath},
 		{false, "auth.policy_results.bogus", errUnknownFieldPath},
@@ -208,5 +228,12 @@ func TestFileDeviceFactory_UnknownFieldPaths(t *testing.T) {
 
 	if err := f.ValidateConfig(map[string]any{"file_path": "/tmp/x.log", "salt_fields": []any{"auth.token_id"}}); err != nil {
 		t.Errorf("a valid configuration was refused: %v", err)
+	}
+
+	// A bad path below the default salt field is reported too: it is checked
+	// before the default, which would have absorbed it, is merged in.
+	err = f.ValidateConfig(map[string]any{"file_path": "/tmp/x.log", "salt_fields": []any{"response.credential.data.k.x"}})
+	if err == nil || !strings.Contains(err.Error(), "response.credential.data.k.x") {
+		t.Errorf("want the path under the floor refused, got %v", err)
 	}
 }

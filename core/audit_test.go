@@ -967,6 +967,26 @@ func TestLoadAudits_EmptyHMACKeyIsGenerated(t *testing.T) {
 		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
 	})
 
+	// With the generated key stored, the next boot's empty HCL key changes
+	// nothing: the table is not rewritten on every boot.
+	t.Run("a stored key is kept without a refresh", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		declare(core, filepath.Join(t.TempDir(), "audit.log"))
+		require.NoError(t, core.loadAudits(ctx))
+		stored := core.audit.Entries[0].Config["hmac_key"]
+
+		var buf bytes.Buffer
+		cfg := logger.DefaultConfig()
+		cfg.Outputs = nil
+		core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+		core.audit = NewMountTable()
+		require.NoError(t, core.loadAudits(ctx))
+
+		require.Len(t, core.audit.Entries, 1)
+		assert.Equal(t, stored, core.audit.Entries[0].Config["hmac_key"])
+		assert.NotContains(t, buf.String(), "refreshing HCL-declared audit device")
+	})
+
 	t.Run("refresh of a device stored without a key", func(t *testing.T) {
 		core := newCoreForLoadAuditsTest(t)
 		auditPath := filepath.Join(t.TempDir(), "audit.log")
