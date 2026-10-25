@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -513,10 +514,53 @@ func (b *StreamingBackend) handleStreaming(ctx context.Context, req *logical.Req
 	// All providers rewrite req.HTTPRequest.URL to the upstream target before proxying,
 	// so we can reliably derive it here as a safety net.
 	if req.UpstreamURL == "" && req.HTTPRequest != nil && req.HTTPRequest.URL != nil {
-		req.UpstreamURL = req.HTTPRequest.URL.String()
+		req.UpstreamURL = auditURL(req.HTTPRequest.URL)
 	}
 
 	return err
+}
+
+// redactedQueryValue replaces each query value in an audited URL, already in
+// query encoding.
+const redactedQueryValue = "%5Bredacted%5D"
+
+// auditURL is u as the audit records it: no user-info, and every query value
+// replaced, keys kept. A query carries credentials as often as a header does
+// (?api_key=, a presigned URL's X-Amz-Signature and X-Amz-Security-Token),
+// and user-info is a username and password. A URL with neither is recorded
+// as it is.
+func auditURL(u *url.URL) string {
+	if u.RawQuery == "" && u.User == nil {
+		return u.String()
+	}
+	redacted := *u
+	redacted.User = nil
+	if u.RawQuery != "" {
+		redacted.RawQuery = redactQueryValues(u.RawQuery)
+	}
+	return redacted.String()
+}
+
+// redactQueryValues keeps each key of a raw query and replaces its value. A
+// segment with no "=" is a value with no key, and is replaced whole.
+func redactQueryValues(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for rest := raw; ; {
+		segment, next, more := strings.Cut(rest, "&")
+		if segment != "" {
+			if key, _, ok := strings.Cut(segment, "="); ok {
+				b.WriteString(key)
+				b.WriteByte('=')
+			}
+			b.WriteString(redactedQueryValue)
+		}
+		if !more {
+			return b.String()
+		}
+		b.WriteByte('&')
+		rest = next
+	}
 }
 
 // HandleExistenceCheck delegates to the embedded Backend
