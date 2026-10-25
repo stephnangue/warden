@@ -110,7 +110,9 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 // response.credential.data would otherwise be hashed twice, and its hash
 // would no longer match the value's.
 func fieldPaths(floor, operator []string, collapseCovered bool) []string {
-	out := make([]string, 0, len(floor)+len(operator))
+	// Sized from the operator's list alone: no arithmetic on a length that
+	// comes from configuration; the floor is a path or two.
+	out := make([]string, 0, len(operator))
 	for _, list := range [2][]string{floor, operator} {
 		for _, p := range list {
 			if p != "" && !slices.Contains(out, p) {
