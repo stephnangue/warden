@@ -610,7 +610,15 @@ func GrepNodeLog(t *testing.T, nodeNum int, pattern string) bool {
 // partial lines are skipped, so it is safe to poll while the node is writing.
 func ReadAuditEntries(t *testing.T, nodeNum int, substr string) []audit.LogEntry {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(E2EDir(), ".logs", fmt.Sprintf("node%d-audit.log", nodeNum)))
+	return ReadAuditFile(t, filepath.Join(E2EDir(), ".logs", fmt.Sprintf("node%d-audit.log", nodeNum)), substr)
+}
+
+// ReadAuditFile parses the audit entries in the file at path whose line
+// contains substr (every entry when substr is empty), or none if the file
+// cannot be read.
+func ReadAuditFile(t *testing.T, path, substr string) []audit.LogEntry {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}

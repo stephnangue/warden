@@ -2,9 +2,11 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/stephnangue/warden/helper"
 	"github.com/stephnangue/warden/logger"
@@ -39,6 +41,12 @@ func (f *FileDeviceFactory) Create(
 	conf, err := mapToFileDeviceConfig(config)
 	if err != nil {
 		return nil, err
+	}
+	// Enabling refuses these (ValidateConfig); a stored configuration that
+	// holds one still loads, so that an unseal never fails, without it.
+	var warnings []string
+	for _, d := range conf.unknownFieldPaths {
+		warnings = append(warnings, "ignored "+d)
 	}
 
 	// we only support json format for now
@@ -81,28 +89,8 @@ func (f *FileDeviceFactory) Create(
 		accessor = fmt.Sprintf("%s_%s", f.Type(), randID)
 	}
 
-	// Create format with optional salting and omission if configured
-	var jsonFormat *JSONFormat
-	var formatOpts []JSONFormatOption
-
-	// Always add prefix if configured
-	if conf.Prefix != "" {
-		formatOpts = append(formatOpts, WithPrefix(conf.Prefix))
-	}
-
-	// Add salting if configured
-	if conf.HMACKey != "" && len(conf.SaltFields) > 0 {
-		hmacer := NewHMACer(conf.HMACKey)
-		formatOpts = append(formatOpts, WithSaltFunc(hmacer.SaltFunc()))
-		formatOpts = append(formatOpts, WithSaltFields(conf.SaltFields))
-	}
-
-	// Add omit fields if configured
-	if len(conf.OmitFields) > 0 {
-		formatOpts = append(formatOpts, WithOmitFields(conf.OmitFields))
-	}
-
-	jsonFormat = NewJSONFormat(formatOpts...)
+	jsonFormat, formatWarnings := jsonFormatFor(conf)
+	warnings = append(warnings, formatWarnings...)
 
 	device := NewDevice(mountPath, jsonFormat, bufferedSink, &DeviceConfig{
 		Name:        mountPath,
@@ -114,7 +102,56 @@ func (f *FileDeviceFactory) Create(
 		Accessor:    accessor,
 		BufferSize:  conf.BufferSize,
 		FlushPeriod: conf.FlushPeriod,
+		Warnings:    warnings,
 	})
 
 	return device, nil
+}
+
+// ValidateConfig implements ConfigValidator: it refuses a configuration that
+// Create would not accept, or would accept only by ignoring a salt or omit
+// path that names no field.
+func (f *FileDeviceFactory) ValidateConfig(config map[string]any) error {
+	conf, err := mapToFileDeviceConfig(config)
+	if err != nil {
+		return err
+	}
+	if dropped := conf.unknownFieldPaths; len(dropped) > 0 {
+		return errors.New(strings.Join(dropped, "; "))
+	}
+	return nil
+}
+
+var _ ConfigValidator = (*FileDeviceFactory)(nil)
+
+// jsonFormatFor builds the device's format from its configuration, with the
+// warnings to report for what it had to change.
+//
+// A salt path needs the device's HMAC key. Without one, every salt path is
+// omitted instead: the value is dropped rather than written in clear. Core
+// generates a key for every device it enables, so this is a device whose
+// stored configuration lost it.
+func jsonFormatFor(conf *FileDeviceConfig) (*JSONFormat, []string) {
+	var opts []JSONFormatOption
+	var warnings []string
+
+	if conf.Prefix != "" {
+		opts = append(opts, WithPrefix(conf.Prefix))
+	}
+
+	omit := conf.OmitFields
+	switch {
+	case len(conf.SaltFields) == 0:
+	case conf.HMACKey != "":
+		opts = append(opts, WithSaltFunc(NewHMACer(conf.HMACKey).SaltFunc()), WithSaltFields(conf.SaltFields))
+	default:
+		omit = fieldPaths(omit, conf.SaltFields, false)
+		warnings = append(warnings, fmt.Sprintf("no hmac_key: these fields are omitted instead of salted: %v", conf.SaltFields))
+	}
+
+	if len(omit) > 0 {
+		opts = append(opts, WithOmitFields(omit))
+	}
+
+	return NewJSONFormat(opts...), warnings
 }

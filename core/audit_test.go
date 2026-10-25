@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -840,6 +841,167 @@ func TestMergeAuditConfig(t *testing.T) {
 		_, has := out["hmac_key"]
 		assert.False(t, has, "no salt anywhere → none in output (buildConfigAuditEntry generates on first-register)")
 	})
+
+	// A template rendering empty (an unset environment variable) must not
+	// overwrite the stored salt: the device would stop salting for good.
+	t.Run("an empty HCL hmac_key keeps the stored one", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x", "hmac_key": ""}
+		stored := map[string]any{"file_path": "/x", "hmac_key": "stable-salt-abc"}
+		out := mergeAuditConfig(declared, stored)
+		assert.Equal(t, "stable-salt-abc", out["hmac_key"])
+	})
+
+	t.Run("an empty key on both sides leaves hmac_key absent", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x", "hmac_key": ""}
+		stored := map[string]any{"file_path": "/x", "hmac_key": ""}
+		out := mergeAuditConfig(declared, stored)
+		_, has := out["hmac_key"]
+		assert.False(t, has)
+	})
+}
+
+// What a factory changed to keep a device safe is logged by core with the
+// device's mount path: the factory has no logger of its own.
+func TestNewAuditBackend_LogsFactoryWarnings(t *testing.T) {
+	core := newCoreForLoadAuditsTest(t)
+	var buf bytes.Buffer
+	cfg := logger.DefaultConfig()
+	cfg.Outputs = nil
+	core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+
+	backend, err := core.newAuditBackend(context.Background(), &MountEntry{
+		Class: mountClassAudit,
+		Type:  "file",
+		Path:  "siem/",
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"salt_fields": []any{"auth.token_id"},
+		},
+	})
+	require.NoError(t, err)
+	defer backend.Close()
+
+	logged := buf.String()
+	assert.Contains(t, logged, "siem/")
+	assert.Contains(t, logged, "no hmac_key")
+	assert.Contains(t, logged, "auth.token_id")
+}
+
+// Enabling a device refuses a salt or omit path that names no field, and
+// registers and persists nothing. Such a path used to be ignored without a
+// word, leaving in clear a value its operator believed hashed.
+func TestEnableAudit_RefusesUnknownFieldPath(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := newCoreForLoadAuditsTest(t)
+
+	err := core.EnableAudit(ctx, &MountEntry{
+		Class: mountClassAudit,
+		Type:  "file",
+		Path:  "siem/",
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"hmac_key":    "k",
+			"salt_fields": []any{"agent.metadata.env"},
+		},
+	}, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `salt_fields "agent.metadata.env": matches no audit field`)
+	assert.Empty(t, core.audit.Entries)
+	stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "nothing is persisted")
+}
+
+// A stored device holding such a path still loads at unseal, without the path,
+// and the drop is logged: an upgrade must never fail to start.
+func TestLoadAudits_StoredUnknownFieldPathLoads(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := newCoreForLoadAuditsTest(t)
+	var buf bytes.Buffer
+	cfg := logger.DefaultConfig()
+	cfg.Outputs = nil
+	core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+
+	core.audit.Entries = append(core.audit.Entries, &MountEntry{
+		Class:       mountClassAudit,
+		Type:        "file",
+		Path:        "siem/",
+		Accessor:    "audit_file_test",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"hmac_key":    "k",
+			"salt_fields": []any{"auth.token_id", "agent.metadata.env"},
+		},
+	})
+	require.NoError(t, core.persistAudits(ctx))
+	core.audit = NewMountTable()
+
+	require.NoError(t, core.loadAudits(ctx))
+	require.Len(t, core.audit.Entries, 1)
+	logged := buf.String()
+	assert.Contains(t, logged, "siem/")
+	assert.Contains(t, logged, `ignored salt_fields \"agent.metadata.env\"`)
+}
+
+// An empty HCL hmac_key counts as absent: a new device gets a generated key,
+// and one stored without a key gets one at the next refresh. Without a key,
+// a device would drop every salted field.
+func TestLoadAudits_EmptyHMACKeyIsGenerated(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	declare := func(core *Core, auditPath string) {
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:        "file",
+			Path:        "siem",
+			Config:      map[string]any{"file_path": auditPath, "hmac_key": ""},
+			Declarative: true,
+		}}
+	}
+
+	t.Run("new device", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		declare(core, filepath.Join(t.TempDir(), "audit.log"))
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
+	})
+
+	// With the generated key stored, the next boot's empty HCL key changes
+	// nothing: the table is not rewritten on every boot.
+	t.Run("a stored key is kept without a refresh", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		declare(core, filepath.Join(t.TempDir(), "audit.log"))
+		require.NoError(t, core.loadAudits(ctx))
+		stored := core.audit.Entries[0].Config["hmac_key"]
+
+		var buf bytes.Buffer
+		cfg := logger.DefaultConfig()
+		cfg.Outputs = nil
+		core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+		core.audit = NewMountTable()
+		require.NoError(t, core.loadAudits(ctx))
+
+		require.Len(t, core.audit.Entries, 1)
+		assert.Equal(t, stored, core.audit.Entries[0].Config["hmac_key"])
+		assert.NotContains(t, buf.String(), "refreshing HCL-declared audit device")
+	})
+
+	t.Run("refresh of a device stored without a key", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		auditPath := filepath.Join(t.TempDir(), "audit.log")
+		declare(core, auditPath)
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+
+		// What the old merge stored: the empty HCL key in place of the salt.
+		core.audit.Entries[0].Config["hmac_key"] = ""
+		require.NoError(t, core.persistAudits(ctx))
+		core.audit = NewMountTable()
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
+	})
 }
 
 // newCoreForLoadAuditsTest builds a real-barrier Core wired with the real
@@ -872,7 +1034,6 @@ func TestBuildAuditRequest_BasicFields(t *testing.T) {
 		MountPoint: "secret/",
 		MountType:  "kv",
 		ClientIP:   "192.168.1.1",
-		Data:       map[string]any{"key": "value"},
 	}
 
 	result := buildAuditRequest(req, nil)
@@ -883,7 +1044,37 @@ func TestBuildAuditRequest_BasicFields(t *testing.T) {
 	assert.Equal(t, "secret/", result.MountPoint)
 	assert.Equal(t, "kv", result.MountType)
 	assert.Equal(t, "192.168.1.1", result.ClientIP)
-	assert.Equal(t, "value", result.Data["key"])
+}
+
+// auditJSON is the entry part as a device would write it, before any salt or
+// omit rule: whatever a builder put in it.
+func auditJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return string(b)
+}
+
+// The request's headers and body never enter its audit record: they carry the
+// caller's credentials, and, once a provider has prepared the upstream call,
+// the minted ones, which it sets on the same header map.
+func TestBuildAuditRequest_RecordsNoHeadersOrBody(t *testing.T) {
+	httpReq, _ := http.NewRequest("POST", "/v1/vault/gateway/v1/secret", nil)
+	httpReq.Header.Set("Authorization", "Bearer eyJ.CALLER-JWT")
+	httpReq.Header.Set("X-Warden-Token", "wst_CALLER-TOKEN")
+	httpReq.Header.Set("X-Vault-Token", "hvs.MINTED-TOKEN")
+
+	req := &logical.Request{
+		Path:        "vault/gateway/v1/secret",
+		HTTPRequest: httpReq,
+		Data:        map[string]any{"jwt": "eyJ.LOGIN-JWT", "password": "LOGIN-PASSWORD"},
+	}
+	got := auditJSON(t, buildAuditRequest(req, nil))
+
+	assert.Contains(t, got, `"method":"POST"`)
+	for _, secret := range []string{"CALLER-JWT", "CALLER-TOKEN", "MINTED-TOKEN", "LOGIN-JWT", "LOGIN-PASSWORD", "Authorization", `"headers"`, `"data"`} {
+		assert.NotContains(t, got, secret)
+	}
 }
 
 func TestBuildAuditRequest_WithAuditPath(t *testing.T) {
@@ -912,7 +1103,6 @@ func TestBuildAuditRequest_WithNamespace(t *testing.T) {
 
 func TestBuildAuditRequest_WithHTTPRequest(t *testing.T) {
 	httpReq, _ := http.NewRequest("GET", "/v1/secret/data/foo", nil)
-	httpReq.Header.Set("X-Request-Id", "ext-123")
 
 	req := &logical.Request{
 		Path:        "secret/data/foo",
@@ -920,8 +1110,6 @@ func TestBuildAuditRequest_WithHTTPRequest(t *testing.T) {
 	}
 	result := buildAuditRequest(req, nil)
 	assert.Equal(t, "GET", result.Method)
-	assert.NotNil(t, result.Headers)
-	assert.Contains(t, result.Headers["X-Request-Id"], "ext-123")
 }
 
 // =============================================================================
@@ -936,13 +1124,11 @@ func TestBuildAuditResponse_NilResponse(t *testing.T) {
 func TestBuildAuditResponse_Basic(t *testing.T) {
 	resp := &logical.Response{
 		StatusCode: http.StatusOK,
-		Data:       map[string]any{"key": "value"},
 		Warnings:   []string{"warn1"},
 	}
 	result := buildAuditResponse(resp, nil, nil)
 	require.NotNil(t, result)
 	assert.Equal(t, http.StatusOK, result.StatusCode)
-	assert.Equal(t, "value", result.Data["key"])
 	assert.Contains(t, result.Warnings, "warn1")
 }
 
@@ -993,15 +1179,27 @@ func TestBuildAuditResponse_WithUpstreamURL(t *testing.T) {
 	assert.True(t, result.Streamed)
 }
 
-func TestBuildAuditResponse_WithHeaders(t *testing.T) {
+// The response's headers and body never enter its audit record: a login's body
+// holds the token it issued. The issued credential is recorded on its own, for
+// the format to salt.
+func TestBuildAuditResponse_RecordsNoHeadersOrBody(t *testing.T) {
 	headers := http.Header{}
-	headers.Set("Content-Type", "application/json")
+	headers.Set("Set-Cookie", "session=COOKIE-SECRET")
 	resp := &logical.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: http.StatusCreated,
 		Headers:    headers,
+		Data:       map[string]any{"token_id": "wst_ISSUED-TOKEN", "data": map[string]any{"token": "ISSUED-SECRET"}},
 	}
-	result := buildAuditResponse(resp, nil, nil)
-	assert.Contains(t, result.Headers["Content-Type"], "application/json")
+	cred := &credential.Credential{CredentialID: "cred-1", Data: map[string]string{"secret_key": "CRED-SECRET"}}
+	result := buildAuditResponse(resp, nil, cred)
+	got := auditJSON(t, result)
+
+	assert.Contains(t, got, `"status_code":201`)
+	for _, secret := range []string{"COOKIE-SECRET", "ISSUED-TOKEN", "ISSUED-SECRET", `"headers"`, `"data":{"token`} {
+		assert.NotContains(t, got, secret)
+	}
+	require.NotNil(t, result.Credential)
+	assert.Equal(t, "CRED-SECRET", result.Credential.Data["secret_key"], "the credential is recorded, for the format's salt floor")
 }
 
 // =============================================================================
@@ -1169,53 +1367,6 @@ func TestBuildAuditCredential_NilData(t *testing.T) {
 	result := buildAuditCredential(cred)
 	require.NotNil(t, result)
 	assert.Nil(t, result.Data)
-}
-
-// =============================================================================
-// copyMapAny Tests
-// =============================================================================
-
-func TestCopyMapAny_Nil(t *testing.T) {
-	assert.Nil(t, copyMapAny(nil))
-}
-
-func TestCopyMapAny_NonNil(t *testing.T) {
-	original := map[string]any{"a": 1, "b": "two"}
-	copied := copyMapAny(original)
-	assert.Equal(t, original, copied)
-
-	copied["c"] = 3
-	assert.NotContains(t, original, "c")
-}
-
-// =============================================================================
-// copyHeaders Tests
-// =============================================================================
-
-func TestCopyHeaders_Nil(t *testing.T) {
-	assert.Nil(t, copyHeaders(nil))
-}
-
-func TestCopyHeaders_Basic(t *testing.T) {
-	headers := http.Header{
-		"Content-Type": []string{"application/json"},
-		"X-Custom":     []string{"val1", "val2"},
-	}
-	copied := copyHeaders(headers)
-	assert.Equal(t, []string{"application/json"}, copied["Content-Type"])
-	assert.Equal(t, []string{"val1", "val2"}, copied["X-Custom"])
-
-	copied["New-Header"] = []string{"new"}
-	_, exists := headers["New-Header"]
-	assert.False(t, exists)
-}
-
-func TestCopyHeaders_NilValues(t *testing.T) {
-	headers := http.Header{
-		"X-Empty": nil,
-	}
-	copied := copyHeaders(headers)
-	assert.Nil(t, copied["X-Empty"])
 }
 
 // =============================================================================

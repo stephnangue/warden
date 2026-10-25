@@ -67,44 +67,8 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 			},
 		},
 		{
-			name:       "salt request data password",
-			saltFields: []string{"request.data.password"},
-			entry: &LogEntry{
-				Timestamp: time.Now(),
-				Request: &Request{
-					ID:   "req-123",
-					Path: "/v1/auth/login",
-					Data: map[string]interface{}{
-						"username": "user1",
-						"password": "secret-password",
-					},
-				},
-			},
-			checkFunc: func(t *testing.T, entry *LogEntry) {
-				if entry.Request == nil || entry.Request.Data == nil {
-					t.Fatal("Request or Data is nil")
-				}
-				password, ok := entry.Request.Data["password"].(string)
-				if !ok {
-					t.Fatal("Password is not a string")
-				}
-				if password == "secret-password" {
-					t.Error("Password was not salted")
-				}
-				if !containsBytes([]byte(password), "hmac-sha256:") {
-					t.Error("Password doesn't have HMAC prefix")
-				}
-				// Username should not be salted
-				if username, ok := entry.Request.Data["username"].(string); ok {
-					if username != "user1" {
-						t.Error("Username was modified when it shouldn't be")
-					}
-				}
-			},
-		},
-		{
 			name:       "salt multiple fields",
-			saltFields: []string{"auth.token_id", "request.data.password", "request.data.secret"},
+			saltFields: []string{"auth.token_id", "request.client_ip"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Auth: &Auth{
@@ -112,46 +76,24 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 					TokenType: "service_token",
 				},
 				Request: &Request{
-					ID:   "req-456",
-					Path: "/v1/secret/update",
-					Data: map[string]interface{}{
-						"password": "pass123",
-						"secret":   "secret456",
-						"public":   "public-info",
-					},
+					ID:       "req-456",
+					Path:     "/v1/secret/update",
+					ClientIP: "10.0.0.7",
 				},
 			},
 			checkFunc: func(t *testing.T, entry *LogEntry) {
-				// Check token is salted
-				if entry.Auth == nil {
-					t.Fatal("Auth is nil")
+				if entry.Auth == nil || entry.Request == nil {
+					t.Fatal("Auth or Request is nil")
 				}
 				if entry.Auth.TokenID == "token-abc" {
 					t.Error("Token was not salted")
 				}
-
-				// Check password is salted
-				if entry.Request == nil || entry.Request.Data == nil {
-					t.Fatal("Request or Data is nil")
+				if entry.Request.ClientIP == "10.0.0.7" {
+					t.Error("Client IP was not salted")
 				}
-				if password, ok := entry.Request.Data["password"].(string); ok {
-					if password == "pass123" {
-						t.Error("Password was not salted")
-					}
-				}
-
-				// Check secret is salted
-				if secret, ok := entry.Request.Data["secret"].(string); ok {
-					if secret == "secret456" {
-						t.Error("Secret was not salted")
-					}
-				}
-
-				// Check public is not salted
-				if public, ok := entry.Request.Data["public"].(string); ok {
-					if public != "public-info" {
-						t.Error("Public field was modified")
-					}
+				// Fields not listed are left as they are
+				if entry.Auth.TokenType != "service_token" || entry.Request.Path != "/v1/secret/update" {
+					t.Error("An unlisted field was modified")
 				}
 			},
 		},
@@ -293,78 +235,6 @@ func TestJSONFormatWithConfigurableSalting(t *testing.T) {
 	}
 }
 
-func TestJSONFormatSaltAllDataFields(t *testing.T) {
-	// Test that specifying just "request.data" salts all fields in the data map
-	mockSaltFunc := func(ctx context.Context, data string) (string, error) {
-		return "hmac-sha256:" + data + "-salted", nil
-	}
-
-	format := NewJSONFormat(
-		WithSaltFunc(mockSaltFunc),
-		WithSaltFields([]string{"request.data"}),
-	)
-
-	entry := &LogEntry{
-		Timestamp: time.Now(),
-		Request: &Request{
-			ID:   "req-123",
-			Path: "/v1/auth/login",
-			Data: map[string]interface{}{
-				"username": "user1",
-				"password": "secret-password",
-				"token":    "secret-token",
-				"number":   123, // non-string should be ignored
-			},
-		},
-	}
-
-	jsonData, err := format.FormatRequest(context.Background(), entry)
-	if err != nil {
-		t.Fatalf("Failed to format request: %v", err)
-	}
-
-	// Parse the JSON to get the formatted entry
-	var formattedEntry LogEntry
-	if err := json.Unmarshal(jsonData, &formattedEntry); err != nil {
-		t.Fatalf("Failed to unmarshal JSON: %v", err)
-	}
-
-	// Check that all string fields were salted in the formatted output
-	if username, ok := formattedEntry.Request.Data["username"].(string); ok {
-		if username == "user1" {
-			t.Error("Username was not salted")
-		}
-		if !containsBytes([]byte(username), "hmac-sha256:") {
-			t.Error("Username doesn't have HMAC prefix")
-		}
-	}
-
-	if password, ok := formattedEntry.Request.Data["password"].(string); ok {
-		if password == "secret-password" {
-			t.Error("Password was not salted")
-		}
-		if !containsBytes([]byte(password), "hmac-sha256:") {
-			t.Error("Password doesn't have HMAC prefix")
-		}
-	}
-
-	if token, ok := formattedEntry.Request.Data["token"].(string); ok {
-		if token == "secret-token" {
-			t.Error("Token was not salted")
-		}
-		if !containsBytes([]byte(token), "hmac-sha256:") {
-			t.Error("Token doesn't have HMAC prefix")
-		}
-	}
-
-	// Number should remain unchanged
-	if number, ok := formattedEntry.Request.Data["number"].(float64); ok { // JSON unmarshals numbers as float64
-		if number != 123 {
-			t.Error("Number field was modified")
-		}
-	}
-}
-
 func TestJSONFormatOmitFields(t *testing.T) {
 	testCases := []struct {
 		name       string
@@ -398,56 +268,23 @@ func TestJSONFormatOmitFields(t *testing.T) {
 			},
 		},
 		{
-			name:       "omit request.data",
-			omitFields: []string{"request.data"},
+			name:       "omit request.client_ip",
+			omitFields: []string{"request.client_ip"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Request: &Request{
-					ID:   "req-123",
-					Path: "/v1/test",
-					Data: map[string]interface{}{
-						"username": "user1",
-						"password": "secret",
-					},
+					ID:       "req-123",
+					Path:     "/v1/test",
+					ClientIP: "10.0.0.7",
 				},
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
 				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if !containsBytes(data, "request") {
-					t.Error("Request should still be present")
-				}
 				if !containsBytes(data, "/v1/test") {
 					t.Error("Request.Path should still be present")
 				}
-				if containsBytes(data, "username") || containsBytes(data, "password") {
-					t.Error("Request.Data should not be in JSON output")
-				}
-			},
-		},
-		{
-			name:       "omit specific request.data field",
-			omitFields: []string{"request.data.password"},
-			entry: &LogEntry{
-				Timestamp: time.Now(),
-				Request: &Request{
-					ID:   "req-123",
-					Path: "/v1/test",
-					Data: map[string]interface{}{
-						"username": "user1",
-						"password": "secret",
-					},
-				},
-			},
-			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
-				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if !containsBytes(data, "username") {
-					t.Error("username field should still be present in JSON")
-				}
-				if !containsBytes(data, "user1") {
-					t.Error("username value should still be present in JSON")
-				}
-				if containsBytes(data, "password") || containsBytes(data, "secret") {
-					t.Error("password field should not be in JSON output")
+				if containsBytes(data, "10.0.0.7") {
+					t.Error("Request.ClientIP should not be in JSON output")
 				}
 			},
 		},
@@ -462,9 +299,6 @@ func TestJSONFormatOmitFields(t *testing.T) {
 						TokenID:      "token-456",
 						CredentialID: "cred-id-123",
 						Type:         "aws_access_keys",
-					},
-					Data: map[string]interface{}{
-						"result": "success",
 					},
 				},
 			},
@@ -483,12 +317,12 @@ func TestJSONFormatOmitFields(t *testing.T) {
 		},
 		{
 			name:       "omit multiple fields",
-			omitFields: []string{"request.data", "response.credential"},
+			omitFields: []string{"request.client_ip", "response.credential"},
 			entry: &LogEntry{
 				Timestamp: time.Now(),
 				Request: &Request{
-					ID:   "req-789",
-					Data: map[string]interface{}{"key": "value"},
+					ID:       "req-789",
+					ClientIP: "10.0.0.8",
 				},
 				Response: &Response{
 					StatusCode: 200,
@@ -497,8 +331,8 @@ func TestJSONFormatOmitFields(t *testing.T) {
 			},
 			checkFunc: func(t *testing.T, data []byte, entry *LogEntry) {
 				// Check JSON output, not the original entry (which is not modified due to cloning)
-				if containsBytes(data, "\"key\"") || containsBytes(data, "\"value\"") {
-					t.Error("Request.Data should not be in JSON output")
+				if containsBytes(data, "10.0.0.8") {
+					t.Error("Request.ClientIP should not be in JSON output")
 				}
 				if containsBytes(data, "token-123") || containsBytes(data, "\"credential\"") {
 					t.Error("Response.Credential should not be in JSON output")
@@ -541,39 +375,23 @@ func TestJSONFormatNoSaltingWhenFieldsNotConfigured(t *testing.T) {
 			TokenType: "service_token",
 		},
 		Request: &Request{
-			ID:   "req-123",
-			Path: "/v1/auth/login",
-			Data: map[string]interface{}{
-				"password": "secret-password",
-				"token":    "secret-token",
-				"other":    "not-salted",
-			},
+			ID:       "req-123",
+			Path:     "/v1/auth/login",
+			ClientIP: "10.0.0.9",
 		},
 	}
 
-	_, err := format.FormatRequest(context.Background(), entry)
+	data, err := format.FormatRequest(context.Background(), entry)
 	if err != nil {
 		t.Fatalf("Failed to format request: %v", err)
 	}
 
 	// Check that nothing was salted when no salt fields are configured
-	if entry.Auth.TokenID != "token-123" {
-		t.Error("Token was modified when it should not be")
+	if containsBytes(data, "hmac-sha256:") {
+		t.Errorf("A field was salted with no salt fields configured: %s", data)
 	}
-	if password, ok := entry.Request.Data["password"].(string); ok {
-		if password != "secret-password" {
-			t.Error("Password was modified when it should not be")
-		}
-	}
-	if token, ok := entry.Request.Data["token"].(string); ok {
-		if token != "secret-token" {
-			t.Error("Token was modified when it should not be")
-		}
-	}
-	if other, ok := entry.Request.Data["other"].(string); ok {
-		if other != "not-salted" {
-			t.Error("Other field was modified when it should not be")
-		}
+	if !containsBytes(data, "token-123") || !containsBytes(data, "10.0.0.9") {
+		t.Errorf("A field was modified when it should not be: %s", data)
 	}
 }
 
@@ -632,7 +450,6 @@ func TestFormatResponse(t *testing.T) {
 		Request:   &Request{ID: "req-1", Path: "/test"},
 		Response: &Response{
 			StatusCode: 200,
-			Data:       map[string]any{"key": "value"},
 		},
 	}
 
@@ -753,101 +570,6 @@ func TestFormatResponseWithSalting(t *testing.T) {
 		return "hmac-sha256:" + data + "-salted", nil
 	}
 
-	t.Run("salt response data", func(t *testing.T) {
-		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.data"}))
-		entry := &LogEntry{
-			Timestamp: time.Now(),
-			Response: &Response{
-				StatusCode: 200,
-				Data:       map[string]any{"secret": "value123"},
-			},
-		}
-
-		data, err := f.FormatResponse(context.Background(), entry)
-		if err != nil {
-			t.Fatalf("FormatResponse failed: %v", err)
-		}
-
-		var result LogEntry
-		json.Unmarshal(data, &result)
-		if v, ok := result.Response.Data["secret"].(string); ok {
-			if v == "value123" {
-				t.Error("response data was not salted")
-			}
-		}
-	})
-
-	t.Run("salt response data specific key", func(t *testing.T) {
-		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.data.secret"}))
-		entry := &LogEntry{
-			Timestamp: time.Now(),
-			Response: &Response{
-				StatusCode: 200,
-				Data:       map[string]any{"secret": "value123", "public": "safe"},
-			},
-		}
-
-		data, err := f.FormatResponse(context.Background(), entry)
-		if err != nil {
-			t.Fatalf("FormatResponse failed: %v", err)
-		}
-
-		var result LogEntry
-		json.Unmarshal(data, &result)
-		if v, ok := result.Response.Data["public"].(string); ok {
-			if v != "safe" {
-				t.Error("public field should not be salted")
-			}
-		}
-	})
-
-	t.Run("salt response headers all", func(t *testing.T) {
-		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.headers"}))
-		entry := &LogEntry{
-			Timestamp: time.Now(),
-			Response: &Response{
-				StatusCode: 200,
-				Headers:    map[string][]string{"Authorization": {"Bearer token123"}},
-			},
-		}
-
-		data, err := f.FormatResponse(context.Background(), entry)
-		if err != nil {
-			t.Fatalf("FormatResponse failed: %v", err)
-		}
-
-		var result LogEntry
-		json.Unmarshal(data, &result)
-		if result.Response.Headers["Authorization"][0] == "Bearer token123" {
-			t.Error("response header was not salted")
-		}
-	})
-
-	t.Run("salt response headers specific", func(t *testing.T) {
-		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.headers.Authorization"}))
-		entry := &LogEntry{
-			Timestamp: time.Now(),
-			Response: &Response{
-				StatusCode: 200,
-				Headers: map[string][]string{
-					"Authorization": {"Bearer token123"},
-					"Content-Type":  {"application/json"},
-				},
-			},
-		}
-
-		data, err := f.FormatResponse(context.Background(), entry)
-		if err != nil {
-			t.Fatalf("FormatResponse failed: %v", err)
-		}
-
-		var result LogEntry
-		json.Unmarshal(data, &result)
-		if result.Response.Headers["Content-Type"][0] != "application/json" {
-			t.Error("Content-Type should not be salted")
-		}
-	})
-
 	t.Run("salt auth result", func(t *testing.T) {
 		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{
 			"response.auth_result.principal_id",
@@ -940,53 +662,6 @@ func TestFormatResponseWithSalting(t *testing.T) {
 		}
 	})
 
-	t.Run("salt request headers all", func(t *testing.T) {
-		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"request.headers"}))
-		entry := &LogEntry{
-			Timestamp: time.Now(),
-			Request: &Request{
-				ID:      "req-1",
-				Headers: map[string][]string{"X-Token": {"secret"}},
-			},
-		}
-
-		data, err := f.FormatRequest(context.Background(), entry)
-		if err != nil {
-			t.Fatalf("FormatRequest failed: %v", err)
-		}
-
-		var result LogEntry
-		json.Unmarshal(data, &result)
-		if result.Request.Headers["X-Token"][0] == "secret" {
-			t.Error("request header should be salted")
-		}
-	})
-
-	t.Run("salt request headers specific", func(t *testing.T) {
-		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"request.headers.X-Token"}))
-		entry := &LogEntry{
-			Timestamp: time.Now(),
-			Request: &Request{
-				ID: "req-1",
-				Headers: map[string][]string{
-					"X-Token":      {"secret"},
-					"Content-Type": {"text/plain"},
-				},
-			},
-		}
-
-		data, err := f.FormatRequest(context.Background(), entry)
-		if err != nil {
-			t.Fatalf("FormatRequest failed: %v", err)
-		}
-
-		var result LogEntry
-		json.Unmarshal(data, &result)
-		if result.Request.Headers["Content-Type"][0] != "text/plain" {
-			t.Error("Content-Type should not be salted")
-		}
-	})
-
 	t.Run("salt credential id", func(t *testing.T) {
 		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.credential.credential_id"}))
 		entry := &LogEntry{
@@ -1039,7 +714,7 @@ func TestFormatResponseWithSalting(t *testing.T) {
 	})
 
 	t.Run("salt nil response", func(t *testing.T) {
-		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.data"}))
+		f := NewJSONFormat(WithSaltFunc(mockSalt), WithSaltFields([]string{"response.credential.data"}))
 		entry := &LogEntry{Timestamp: time.Now()}
 
 		_, err := f.FormatRequest(context.Background(), entry)
@@ -1158,41 +833,6 @@ func TestOmitResponseFields(t *testing.T) {
 			},
 			check: func(t *testing.T, data []byte) {
 				// just ensure no error
-			},
-		},
-		{
-			name:       "omit response headers specific",
-			omitFields: []string{"response.headers.X-Secret"},
-			entry: &LogEntry{
-				Timestamp: fixedTS,
-				Response: &Response{
-					StatusCode: 200,
-					Headers:    map[string][]string{"X-Secret": {"val"}, "X-Public": {"pub"}},
-				},
-			},
-			check: func(t *testing.T, data []byte) {
-				if containsBytes(data, "X-Secret") {
-					t.Error("X-Secret header should be omitted")
-				}
-				if !containsBytes(data, "X-Public") {
-					t.Error("X-Public should remain")
-				}
-			},
-		},
-		{
-			name:       "omit response data specific key",
-			omitFields: []string{"response.data.secret"},
-			entry: &LogEntry{
-				Timestamp: fixedTS,
-				Response: &Response{
-					StatusCode: 200,
-					Data:       map[string]any{"secret": "val", "public": "pub"},
-				},
-			},
-			check: func(t *testing.T, data []byte) {
-				if containsBytes(data, "\"secret\"") {
-					t.Error("secret key should be omitted")
-				}
 			},
 		},
 		{
@@ -1316,22 +956,6 @@ func TestOmitResponseFields(t *testing.T) {
 			},
 			check: func(t *testing.T, data []byte) {
 				// Just ensure no error
-			},
-		},
-		{
-			name:       "omit request headers specific",
-			omitFields: []string{"request.headers.Authorization"},
-			entry: &LogEntry{
-				Timestamp: fixedTS,
-				Request: &Request{
-					ID:      "r1",
-					Headers: map[string][]string{"Authorization": {"Bearer x"}, "Accept": {"*/*"}},
-				},
-			},
-			check: func(t *testing.T, data []byte) {
-				if containsBytes(data, "Authorization") {
-					t.Error("Authorization header should be omitted")
-				}
 			},
 		},
 		{

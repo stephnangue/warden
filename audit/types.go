@@ -38,11 +38,12 @@ type Request struct {
 	MountType  string `json:"mount_type,omitempty"`  // Backend type (vault, aws, jwt)
 	MountClass string `json:"mount_class,omitempty"` // provider, auth, system, audit
 
-	// HTTP details
-	Method   string              `json:"method"` // GET, POST, PUT, DELETE
-	ClientIP string              `json:"client_ip"`
-	Headers  map[string][]string `json:"headers,omitempty"`
-	Data     map[string]any      `json:"data,omitempty"`
+	// HTTP details. Headers and the body are not fields of the entry: they
+	// carry the caller's credentials, and after routing the credentials minted
+	// for the upstream. A policy condition still records the values it read
+	// from the body, under auth.policy_results.condition.inputs.
+	Method   string `json:"method"` // GET, POST, PUT, DELETE
+	ClientIP string `json:"client_ip"`
 
 	// Namespace context
 	NamespaceID   string `json:"namespace_id,omitempty"`
@@ -56,11 +57,10 @@ type Request struct {
 
 // Response contains audit information about the response
 type Response struct {
-	// HTTP response
-	StatusCode    int                 `json:"status_code"`
-	StatusMessage string              `json:"status_message,omitempty"`
-	Headers       map[string][]string `json:"headers,omitempty"`
-	Data          map[string]any      `json:"data,omitempty"`
+	// HTTP response. Headers and the body are not fields of the entry, as for
+	// the request: a login's body holds the token it issued.
+	StatusCode    int    `json:"status_code"`
+	StatusMessage string `json:"status_message,omitempty"`
 
 	// Mount context (from response)
 	MountClass string `json:"mount_class,omitempty"`
@@ -310,12 +310,6 @@ func (e *LogEntry) Clone() *LogEntry {
 			Streamed:        e.Request.Streamed,
 			Transparent:     e.Request.Transparent,
 		}
-		if e.Request.Headers != nil {
-			clone.Request.Headers = cloneHeaders(e.Request.Headers)
-		}
-		if e.Request.Data != nil {
-			clone.Request.Data = cloneMapAny(e.Request.Data)
-		}
 	}
 
 	// Clone Response
@@ -326,12 +320,6 @@ func (e *LogEntry) Clone() *LogEntry {
 			MountClass:    e.Response.MountClass,
 			Streamed:      e.Response.Streamed,
 			UpstreamURL:   e.Response.UpstreamURL,
-		}
-		if e.Response.Headers != nil {
-			clone.Response.Headers = cloneHeaders(e.Response.Headers)
-		}
-		if e.Response.Data != nil {
-			clone.Response.Data = cloneMapAny(e.Response.Data)
 		}
 		if e.Response.Warnings != nil {
 			clone.Response.Warnings = make([]string, len(e.Response.Warnings))
@@ -446,64 +434,6 @@ func (e *LogEntry) Clone() *LogEntry {
 	return clone
 }
 
-// cloneMapAny creates a deep copy of a map[string]any, recursively cloning
-// nested maps and slices to prevent data races when logging to multiple devices.
-func cloneMapAny(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	clone := make(map[string]any, len(m))
-	for k, v := range m {
-		clone[k] = cloneValue(v)
-	}
-	return clone
-}
-
-// cloneValue recursively clones a value, handling maps, slices, and primitives.
-func cloneValue(v any) any {
-	if v == nil {
-		return nil
-	}
-	switch val := v.(type) {
-	case map[string]any:
-		return cloneMapAny(val)
-	case map[string]string:
-		clone := make(map[string]string, len(val))
-		for k, v := range val {
-			clone[k] = v
-		}
-		return clone
-	case []any:
-		clone := make([]any, len(val))
-		for i, item := range val {
-			clone[i] = cloneValue(item)
-		}
-		return clone
-	case []string:
-		clone := make([]string, len(val))
-		copy(clone, val)
-		return clone
-	default:
-		// Primitives (string, int, bool, etc.) are safe to share
-		return v
-	}
-}
-
-// cloneHeaders creates a copy of HTTP headers
-func cloneHeaders(h map[string][]string) map[string][]string {
-	if h == nil {
-		return nil
-	}
-	clone := make(map[string][]string, len(h))
-	for k, v := range h {
-		if v != nil {
-			clone[k] = make([]string, len(v))
-			copy(clone[k], v)
-		}
-	}
-	return clone
-}
-
 // Format defines the serialization format for audit logs
 type Format interface {
 	// FormatRequest formats a request entry
@@ -583,6 +513,17 @@ type DeviceConfig struct {
 	// Performance options
 	BufferSize  int           `json:"buffer_size,omitempty"`
 	FlushPeriod time.Duration `json:"flush_period,omitempty"`
+
+	// Warnings name what the factory changed in the operator's configuration
+	// to keep the device safe. Reported through WarningReporter.
+	Warnings []string `json:"-"`
+}
+
+// WarningReporter is implemented by a device whose factory changed its
+// configuration. Core logs the warnings with the device's mount path, at
+// enable and at every unseal: factories have no logger of their own.
+type WarningReporter interface {
+	Warnings() []string
 }
 
 // AuditManager manages audit devices
@@ -633,4 +574,11 @@ type Factory interface {
 		accessor string,
 		config map[string]any) (Device, error)
 	Initialize(logger *logger.GatedLogger) error
+}
+
+// ConfigValidator is implemented by a factory that can check a device
+// configuration before the device is enabled. Core refuses a new device whose
+// configuration it rejects; a stored one is still loaded, through Create.
+type ConfigValidator interface {
+	ValidateConfig(config map[string]any) error
 }

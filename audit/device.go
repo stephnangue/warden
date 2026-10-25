@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -201,6 +202,13 @@ func (d *device) Close() error {
 func (d *device) Name() string {
 	return d.name
 }
+
+// Warnings implements WarningReporter.
+func (d *device) Warnings() []string {
+	return slices.Clone(d.config.Warnings)
+}
+
+var _ WarningReporter = (*device)(nil)
 
 func (d *device) Setup(ctx context.Context, conf *logical.BackendConfig) error {
 	return nil
