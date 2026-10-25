@@ -175,10 +175,12 @@ func (b *SystemBackend) handlePolicyCreate(policyType PolicyType) framework.Oper
 			return logical.ErrorResponse(err), nil
 		}
 
-		return b.respondCreated(map[string]any{
+		data := map[string]any{
 			"name":    name,
 			"message": fmt.Sprintf("Successfully created policy %s", name),
-		}), nil
+		}
+		appendWarnings(data, builtinPolicyWarnings(policy)...)
+		return b.respondCreated(data), nil
 	}
 }
 
@@ -251,10 +253,12 @@ func (b *SystemBackend) handlePolicyUpdate(policyType PolicyType) framework.Oper
 			return logical.ErrorResponse(err), nil
 		}
 
-		return b.respondSuccess(map[string]any{
+		data := map[string]any{
 			"name":    name,
 			"message": fmt.Sprintf("Successfully updated policy %s", name),
-		}), nil
+		}
+		appendWarnings(data, builtinPolicyWarnings(policy)...)
+		return b.respondSuccess(data), nil
 	}
 }
 

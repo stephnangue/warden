@@ -2136,6 +2136,14 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 		return err
 	}
 
+	// The built-in policies, in every namespace, once the system mount's
+	// storage is in place; on the active node only, which alone writes.
+	if !standby {
+		if err := c.seedNamespacePolicies(ctx); err != nil {
+			return err
+		}
+	}
+
 	// Auth methods are loaded after the provider/system mounts so the router
 	// and system backend are live before any auth backend's Initialize()
 	// runs. Mirrors OpenBao's postUnseal ordering.

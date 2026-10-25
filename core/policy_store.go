@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -61,6 +62,14 @@ type PolicyStore struct {
 
 	modifyLock *sync.RWMutex
 
+	// missingBuiltins remembers, per (namespace, type, name) cache key, a
+	// built-in policy found missing, tagged with builtinGen at the time it was
+	// looked for (see appendDefaultPolicies). builtinGen moves on every write or
+	// delete of a built-in name, so an entry recorded before such a change no
+	// longer counts.
+	missingBuiltins sync.Map
+	builtinGen      atomic.Uint64
+
 	logger *logger.GatedLogger
 }
 
@@ -101,11 +110,23 @@ func (c *Core) setupPolicyStore(ctx context.Context) error {
 		return err
 	}
 
-	// Ensure that the default policies exists, and if not, create them
-	if err := c.policyStore.loadDefaultPolicies(ctx); err != nil {
+	return nil
+}
+
+// seedNamespacePolicies seeds the built-in policies into every namespace, on
+// the active node only, once the mounts are set up: the root namespace's
+// policies live in the system mount's storage. A namespace created later is
+// seeded when it is created.
+func (c *Core) seedNamespacePolicies(ctx context.Context) error {
+	namespaces, err := c.namespaceStore.ListAllNamespaces(ctx, true)
+	if err != nil {
 		return err
 	}
-
+	for _, ns := range namespaces {
+		if err := c.policyStore.seedDefaultPolicies(namespace.ContextWithNamespace(ctx, ns)); err != nil {
+			return fmt.Errorf("namespace %q: %w", ns.Path, err)
+		}
+	}
 	return nil
 }
 
@@ -132,6 +153,9 @@ func (ps *PolicyStore) SetPolicy(ctx context.Context, p *Policy, casVersion *int
 	if slices.Contains(immutablePolicies, p.Name) {
 		return fmt.Errorf("cannot update %q policy", p.Name)
 	}
+	if isReservedPolicyName(p.Name) && !isBuiltinPolicy(p.Name, p.Type) {
+		return errReservedPolicyName
+	}
 
 	return ps.setPolicyInternal(ctx, p, casVersion)
 }
@@ -139,7 +163,11 @@ func (ps *PolicyStore) SetPolicy(ctx context.Context, p *Policy, casVersion *int
 func (ps *PolicyStore) setPolicyInternal(ctx context.Context, p *Policy, casVersion *int) error {
 	ps.modifyLock.Lock()
 	defer ps.modifyLock.Unlock()
+	return ps.setPolicyLocked(ctx, p, casVersion)
+}
 
+// setPolicyLocked stores p. The caller holds modifyLock exclusively.
+func (ps *PolicyStore) setPolicyLocked(ctx context.Context, p *Policy, casVersion *int) error {
 	// Get the appropriate view based on policy type and namespace
 	view := ps.getBarrierView(p.namespace, p.Type)
 	if view == nil {
@@ -226,6 +254,9 @@ func (ps *PolicyStore) setPolicyInternal(ctx context.Context, p *Policy, casVers
 		if ps.tokenPoliciesLRU != nil {
 			ps.tokenPoliciesLRU.Add(index, p)
 		}
+		if isBuiltinPolicy(p.Name, p.Type) {
+			ps.builtinGen.Add(1)
+		}
 	default:
 		return errors.New("unknown policy type, cannot set")
 	}
@@ -284,12 +315,10 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 	index := ps.cacheKey(ns, name, policyType)
 
 	var cache *lru.TwoQueueCache[policyCacheKey, *Policy]
-	var view BarrierView
 
 	switch policyType {
 	case PolicyTypeCBP, PolicyTypeMCP:
 		cache = ps.tokenPoliciesLRU
-		view = ps.getBarrierView(ns, policyType)
 	default:
 		return nil, fmt.Errorf("unknown policy type %d", policyType)
 	}
@@ -324,6 +353,10 @@ func (ps *PolicyStore) switchedGetPolicy(ctx context.Context, name string, polic
 		}
 		return p, nil
 	}
+
+	// The storage view is built only past the cache: building one allocates,
+	// and a cache hit, the common case on the request path, never reads it.
+	view := ps.getBarrierView(ns, policyType)
 
 	if grabLock {
 		ps.modifyLock.Lock()
@@ -505,9 +538,11 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 			if slices.Contains(immutablePolicies, name) {
 				return fmt.Errorf("cannot delete %q policy", name)
 			}
-			// "default" is a CBP-only singleton; an MCP policy may use the name.
-			if policyType == PolicyTypeCBP && name == "default" {
-				return errors.New("cannot delete default policy")
+			// A built-in is edited, never deleted: emptying it is how its
+			// grants are withdrawn. A policy left under another reserved name
+			// can be deleted, to clean it up.
+			if isBuiltinPolicy(name, policyType) {
+				return logical.ErrBadRequestf("cannot delete built-in policy %q; edit it instead", name)
 			}
 		}
 
@@ -521,6 +556,9 @@ func (ps *PolicyStore) switchedDeletePolicy(ctx context.Context, name string, po
 		if ps.tokenPoliciesLRU != nil {
 			// Clear the cache
 			ps.tokenPoliciesLRU.Remove(index)
+		}
+		if isBuiltinPolicy(name, policyType) {
+			ps.builtinGen.Add(1)
 		}
 	default:
 		// Previously an unrouted type fell out of this switch reporting success
@@ -690,11 +728,4 @@ type policyCacheKey struct {
 // cacheKey builds the LRU key for a policy. name must already be canonical.
 func (ps *PolicyStore) cacheKey(ns *namespace.Namespace, name string, policyType PolicyType) policyCacheKey {
 	return policyCacheKey{nsUUID: ns.UUID, policyType: policyType, name: name}
-}
-
-// loadDefaultPolicies loads default policies for the namespace in the provided context
-func (ps *PolicyStore) loadDefaultPolicies(ctx context.Context) error {
-	// There is no default policy for now
-
-	return nil
 }

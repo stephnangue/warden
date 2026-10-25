@@ -90,8 +90,8 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 // The grant is computed from the namespace's published groups and roles, read
 // once each, and the admission's cached membership under them at now. On a
 // grant it sets the grant's GrantedBy; on a refusal, DeniedReason, and te
-// keeps no policies and no spec, so the request is refused by the CBP even if
-// nothing else refused it. A role edit, a group edit or a mapping edit is seen
+// keeps no policies and no spec, and buildCBP attaches no built-in policy to
+// it, so the request is refused by the CBP even if nothing else refused it. A role edit, a group edit or a mapping edit is seen
 // by the next request of a cached admission: nothing here is cached on the
 // token.
 //

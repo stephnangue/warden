@@ -590,6 +590,11 @@ func createTestCore(t testing.TB) *Core {
 	// Setup the mounts (this will create and mount the system backend)
 	_ = core.setupMounts(ctx)
 
+	// Seed the built-in policies, as the active node does at unseal.
+	if err := core.seedNamespacePolicies(ctx); err != nil {
+		t.Fatalf("seed built-in policies: %v", err)
+	}
+
 	// Initialize and load the role store, as the active node does at unseal.
 	core.roleStore = NewRoleStore(core)
 	_ = core.setupRoleStore(ctx, false)

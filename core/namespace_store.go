@@ -575,9 +575,9 @@ func (ns *NamespaceStore) initializeNamespace(ctx context.Context, storage logic
 	return nil
 }
 
-// initializeNamespacePolicies loads the default policies for the namespace store.
+// initializeNamespacePolicies seeds the built-in policies of a new namespace.
 func (ns *NamespaceStore) initializeNamespacePolicies(ctx context.Context) error {
-	if err := ns.core.policyStore.loadDefaultPolicies(ctx); err != nil {
+	if err := ns.core.policyStore.seedDefaultPolicies(ctx); err != nil {
 		return fmt.Errorf("error creating default policies: %w", err)
 	}
 	return nil

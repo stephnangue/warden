@@ -431,7 +431,24 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 	if err := logical.ValidateAssignablePolicies(policies); err != nil {
 		return nil, logical.ErrBadRequest(err.Error())
 	}
-	role.Policies = policies
+
+	// A reserved name grants nothing through a role: a built-in is attached
+	// to every request already, and any other reserved name is no policy.
+	// Dropped rather than refused, so a role written for an earlier release
+	// keeps working.
+	var warnings []string
+	policies = slices.DeleteFunc(policies, func(p string) bool {
+		if !isReservedPolicyName(p) {
+			return false
+		}
+		if p == builtinCBPPolicy || p == builtinMCPPolicy {
+			warnings = append(warnings, fmt.Sprintf("policy %q is attached to every request already; dropped from the role", p))
+		} else {
+			warnings = append(warnings, fmt.Sprintf("policy name %q is reserved for built-in policies and names no policy; dropped from the role", p))
+		}
+		return true
+	})
+	role.Policies = slices.Clip(policies)
 
 	providerPath, err := authhelper.ValidateDiscoveryFields(role.Skill, role.ProviderPath)
 	if err != nil {
@@ -449,7 +466,6 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 		role.Metadata = nil
 	}
 
-	var warnings []string
 	if s.core.policyStore != nil {
 		for _, p := range role.Policies {
 			if pol, err := s.core.policyStore.getPolicyAnyType(ctx, p); err == nil && pol == nil {
