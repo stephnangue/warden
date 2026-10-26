@@ -344,7 +344,7 @@ func TestGroupUpdate_DryRun(t *testing.T) {
 func TestGroupUpdate_TypeChangeSurfaces(t *testing.T) {
 	setupFake(t, http.StatusBadRequest, `{"errors":["type cannot change; create a new group"]}`)
 	cmd := freshUpdateCmd()
-	updateJSON = `{"type": "internal"}`
+	updateJSON = `{"type": "static"}`
 	err := runGroupUpdate(cmd, []string{"g"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "type cannot change; create a new group")

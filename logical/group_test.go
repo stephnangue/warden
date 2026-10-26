@@ -25,7 +25,7 @@ func testGroup() *Group {
 }
 
 func TestParseGroupType(t *testing.T) {
-	for _, s := range []string{"virtual", "internal", "directory"} {
+	for _, s := range []string{"virtual", "static", "directory"} {
 		gt, err := ParseGroupType(s)
 		require.NoError(t, err)
 		assert.Equal(t, GroupType(s), gt)
@@ -68,7 +68,7 @@ func TestGroup_Hash(t *testing.T) {
 
 	for name, mutate := range map[string]func(*Group){
 		"name":        func(g *Group) { g.Name = "x" },
-		"type":        func(g *Group) { g.Type = GroupTypeInternal },
+		"type":        func(g *Group) { g.Type = GroupTypeStatic },
 		"description": func(g *Group) { g.Description = "x" },
 		"roles":       func(g *Group) { g.Roles = []string{"deploy"} },
 		"selector":    func(g *Group) { g.Rules[0]["repo"] = []string{"acme/x"} },
