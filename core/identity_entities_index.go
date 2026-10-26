@@ -113,12 +113,33 @@ type entityChange struct {
 }
 
 // entityConflictError is a write refused because a name or a native identity
-// is held by another entity.
+// is held by another entity. It names the mount by accessor; a caller that can
+// resolve mounts renders it by path (message).
 type entityConflictError struct {
-	msg string
+	// name is the entity name taken, for a name conflict; empty for a native
+	// identity, which accessor and alias name and entity holds.
+	name            string
+	accessor, alias string
+	entity          string
+	// move says the write could take it with move.
+	move bool
 }
 
-func (e *entityConflictError) Error() string { return e.msg }
+func (e *entityConflictError) Error() string {
+	return e.message(func(accessor string) string { return accessor })
+}
+
+// message renders e, naming the mount through mount.
+func (e *entityConflictError) message(mount func(accessor string) string) string {
+	if e.name != "" {
+		return fmt.Sprintf("entity %q already exists", e.name)
+	}
+	msg := fmt.Sprintf("native identity %q on mount %s is already claimed by entity %q", e.alias, mount(e.accessor), e.entity)
+	if e.move {
+		msg += "; pass move to take it"
+	}
+	return msg
+}
 
 // entityTxn is one write to an nsEntities: one transaction per tree.
 type entityTxn struct {
@@ -154,13 +175,12 @@ func (t *entityTxn) conflict(en *entityEntry) error {
 		return fmt.Errorf("entity id %q is held twice", en.ID)
 	}
 	if prev, taken := t.names.Get([]byte(en.Name)); taken && prev.ID != en.ID {
-		return &entityConflictError{fmt.Sprintf("entity %q already exists", en.Name)}
+		return &entityConflictError{name: en.Name}
 	}
 	var key [maxAliasKeyBytes]byte
 	for _, a := range en.Aliases {
 		if prev, taken := t.aliases.Get(appendAliasKey(key[:0], a.MountAccessor, a.Name)); taken && prev.ID != en.ID {
-			return &entityConflictError{fmt.Sprintf(
-				"native identity %q on mount %s is already claimed by entity %q", a.Name, a.MountAccessor, prev.Name)}
+			return &entityConflictError{accessor: a.MountAccessor, alias: a.Name, entity: prev.Name}
 		}
 	}
 	return nil

@@ -85,7 +85,12 @@ func RenderError(err error) ExitCode {
 	case FormatJSON, FormatNDJSON:
 		emitJSONError(code, err, format == FormatJSON)
 	default:
-		fmt.Fprintln(errWriter, err.Error())
+		msg := err.Error()
+		var he *hintedError
+		if errors.As(err, &he) {
+			msg += " (" + he.hint + ")"
+		}
+		fmt.Fprintln(errWriter, msg)
 	}
 	return exit
 }
@@ -196,11 +201,31 @@ func isCobraUsageError(err error) bool {
 	return false
 }
 
+// WithHint returns err with a recovery hint for this command: it replaces the
+// category's default hint in the JSON envelope and follows the message in
+// text output. err keeps its message and its classification.
+func WithHint(err error, hint string) error {
+	return &hintedError{err: err, hint: hint}
+}
+
+type hintedError struct {
+	err  error
+	hint string
+}
+
+func (e *hintedError) Error() string { return e.err.Error() }
+func (e *hintedError) Unwrap() error { return e.err }
+
 func emitJSONError(code ErrorCode, err error, pretty bool) {
+	hint := DefaultHint(code)
+	var he *hintedError
+	if errors.As(err, &he) {
+		hint = he.hint
+	}
 	we := WardenError{
 		Code:    code,
 		Message: humanMessage(err),
-		Hint:    DefaultHint(code),
+		Hint:    hint,
 	}
 	envelope := map[string]any{"error": we}
 	var b []byte

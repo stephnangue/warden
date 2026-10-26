@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -127,17 +128,21 @@ func TestSys_ReadIdentityUsage(t *testing.T) {
 		"groups":{
 			"total":42,
 			"virtual":{"count":42,"max":8000,"selectors":310,"max_selectors":16000}
-		}
+		},
+		"identities":{"entities":7,"max_entities":50000,"aliases":12}
 	}}`)
 
 	u, err := client.Sys().ReadIdentityUsage()
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, rec.method)
 	assert.Equal(t, "/v1/sys/identity/usage", rec.path)
-	assert.Equal(t, &IdentityUsage{Groups: GroupsUsage{
-		Total:   42,
-		Virtual: VirtualGroupsUsage{Count: 42, Max: 8000, Selectors: 310, MaxSelectors: 16000},
-	}}, u)
+	assert.Equal(t, &IdentityUsage{
+		Groups: GroupsUsage{
+			Total:   42,
+			Virtual: VirtualGroupsUsage{Count: 42, Max: 8000, Selectors: 310, MaxSelectors: 16000},
+		},
+		Identities: IdentitiesUsage{Entities: 7, MaxEntities: 50000, Aliases: 12},
+	}, u)
 }
 
 func TestSys_ReadIdentityUsage_Forbidden(t *testing.T) {
@@ -146,4 +151,179 @@ func TestSys_ReadIdentityUsage_Forbidden(t *testing.T) {
 	var respErr *ResponseError
 	require.ErrorAs(t, err, &respErr)
 	assert.Equal(t, http.StatusForbidden, respErr.StatusCode)
+}
+
+// billingAgentJSON is an entity as sys/identity/entity/<name> returns it.
+const billingAgentJSON = `{"data":{
+	"id":"6f1c",
+	"name":"billing-agent",
+	"kind":"agent",
+	"description":"Reconciles supplier invoices",
+	"sponsors":["alice@corp.example"],
+	"state":"active",
+	"governed_by":"warden",
+	"ungoverned_reason":"",
+	"profile":{"runtime":"langgraph"},
+	"metadata":{"team":"billing"},
+	"aliases":[
+		{"mount":"auth/kubernetes/","mount_accessor":"auth_kubernetes_1","name":"system:serviceaccount:billing:agent","created_at":"2026-10-26T10:00:00Z"}
+	],
+	"hash":"e1",
+	"created_at":"2026-10-26T10:00:00Z",
+	"updated_at":"2026-10-26T11:00:00Z"
+}}`
+
+func TestSys_CreateEntity(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusCreated, billingAgentJSON)
+
+	e, err := client.Sys().CreateEntity("billing-agent", &EntityInput{
+		Description: strPtr("Reconciles supplier invoices"),
+		Sponsors:    []string{"alice@corp.example"},
+		Profile:     map[string]string{"runtime": "langgraph"},
+		Aliases:     []AliasRef{{Mount: "auth/kubernetes/", Name: "system:serviceaccount:billing:agent"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, http.MethodPost, rec.method)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent", rec.path)
+	assert.Equal(t, map[string]any{
+		"description": "Reconciles supplier invoices",
+		"sponsors":    []any{"alice@corp.example"},
+		"profile":     map[string]any{"runtime": "langgraph"},
+		"aliases":     []any{map[string]any{"mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent"}},
+	}, rec.body, "only the fields the input sets are sent")
+
+	assert.Equal(t, "6f1c", e.ID)
+	assert.Equal(t, "warden", e.GovernedBy)
+	assert.Equal(t, map[string]string{"runtime": "langgraph"}, e.Profile)
+	require.Len(t, e.Aliases, 1)
+	assert.Equal(t, EntityAlias{
+		Mount:         "auth/kubernetes/",
+		MountAccessor: "auth_kubernetes_1",
+		Name:          "system:serviceaccount:billing:agent",
+		CreatedAt:     time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC),
+	}, e.Aliases[0])
+	assert.Equal(t, time.Date(2026, 10, 26, 11, 0, 0, 0, time.UTC), e.UpdatedAt)
+	assert.Equal(t, "e1", e.Hash)
+}
+
+func TestSys_ReadUpdateEntity(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, billingAgentJSON)
+
+	_, err := client.Sys().ReadEntity("billing-agent")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.method)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent", rec.path)
+
+	e, err := client.Sys().ReadEntityByID("6f1c")
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/sys/identity/entity/id/6f1c", rec.path)
+	assert.Equal(t, "billing-agent", e.Name)
+
+	_, err = client.Sys().UpdateEntity("billing-agent", &EntityInput{
+		Sponsors: []string{}, State: "suspended", NewName: "invoice-agent", ExpectedHash: "e1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPut, rec.method)
+	assert.Equal(t, map[string]any{
+		"sponsors": []any{}, "state": "suspended", "new_name": "invoice-agent", "expected_hash": "e1",
+	}, rec.body, "an empty list clears; unset fields are not sent")
+}
+
+func TestSys_DeleteEntity(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"billing-agent"}}`)
+	require.NoError(t, client.Sys().DeleteEntity("billing-agent", "", false))
+	assert.Equal(t, http.MethodDelete, rec.method)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent", rec.path)
+	assert.Empty(t, rec.query, "no expected_hash and no force unless asked")
+
+	require.NoError(t, client.Sys().DeleteEntity("billing-agent", "e1", true))
+	assert.Equal(t, "e1", rec.query.Get("expected_hash"))
+	assert.Equal(t, "true", rec.query.Get("force"))
+}
+
+func TestSys_ListEntities(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{
+		"keys":["billing-agent","ci-runner"],
+		"entities":[
+			{"name":"billing-agent","state":"active","governed_by":"warden","aliases":[]},
+			{"name":"ci-runner","state":"suspended","governed_by":"","ungoverned_reason":"no sponsor and no description"}
+		]
+	}}`)
+
+	entities, err := client.Sys().ListEntities(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/sys/identity/entity", rec.path)
+	assert.Equal(t, "true", rec.query.Get("warden-list"))
+	assert.Len(t, rec.query, 1, "no filter")
+	require.Len(t, entities, 2)
+	assert.Equal(t, "no sponsor and no description", entities[1].UngovernedReason)
+
+	_, err = client.Sys().ListEntities(&EntityFilter{
+		Kind: "agent", State: "active", Sponsor: "alice@corp.example", GovernedBy: "warden", Ungoverned: true, Orphaned: true,
+	})
+	require.NoError(t, err)
+	for k, v := range map[string]string{
+		"kind": "agent", "state": "active", "sponsor": "alice@corp.example", "governed_by": "warden",
+		"ungoverned": "true", "orphaned": "true",
+	} {
+		assert.Equal(t, v, rec.query.Get(k), k)
+	}
+}
+
+func TestSys_ListEntities_Empty(t *testing.T) {
+	client, _ := newRoleServer(t, http.StatusOK, `{"data":{"keys":[],"entities":[]}}`)
+	entities, err := client.Sys().ListEntities(&EntityFilter{Orphaned: true})
+	require.NoError(t, err)
+	assert.Empty(t, entities)
+	assert.NotNil(t, entities)
+}
+
+func TestSys_ClaimAlias(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{
+		"entity":"invoice-agent","mount":"auth/jwt/","mount_accessor":"auth_jwt_1","name":"repo:corp/x","moved_from":"billing-agent"
+	}}`)
+
+	ref := AliasRef{Mount: "auth/jwt/", Name: "repo:corp/x"}
+	_, err := client.Sys().ClaimAlias("invoice-agent", ref, false)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.method)
+	assert.Equal(t, "/v1/sys/identity/entity/invoice-agent/alias", rec.path)
+	assert.Equal(t, map[string]any{"mount": "auth/jwt/", "name": "repo:corp/x"}, rec.body, "no move unless asked")
+
+	claim, err := client.Sys().ClaimAlias("invoice-agent", ref, true)
+	require.NoError(t, err)
+	assert.Equal(t, true, rec.body["move"])
+	assert.Equal(t, &AliasClaim{
+		Entity: "invoice-agent", Mount: "auth/jwt/", MountAccessor: "auth_jwt_1", Name: "repo:corp/x", MovedFrom: "billing-agent",
+	}, claim)
+}
+
+func TestSys_RemoveAlias(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"entity":"billing-agent"}}`)
+	require.NoError(t, client.Sys().RemoveAlias("billing-agent", AliasRef{MountAccessor: "auth_jwt_gone", Name: "repo:corp/x"}))
+	assert.Equal(t, http.MethodPost, rec.method)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent/alias/remove", rec.path)
+	assert.Equal(t, map[string]any{"mount_accessor": "auth_jwt_gone", "name": "repo:corp/x"}, rec.body,
+		"the mount by accessor, which still names a mount disabled since")
+}
+
+func TestSys_LookupAlias(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{
+		"entity":"billing-agent","entity_id":"6f1c","kind":"agent","state":"active","governed_by":"warden"
+	}}`)
+	l, err := client.Sys().LookupAlias(AliasRef{Mount: "auth/kubernetes/", Name: "system:serviceaccount:billing:agent"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.method)
+	assert.Equal(t, "/v1/sys/identity/lookup", rec.path)
+	assert.Equal(t, map[string]any{"mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent"}, rec.body)
+	assert.Equal(t, &AliasLookup{Entity: "billing-agent", EntityID: "6f1c", Kind: "agent", State: "active", GovernedBy: "warden"}, l)
+}
+
+func TestSys_LookupAlias_NotClaimed(t *testing.T) {
+	client, _ := newRoleServer(t, http.StatusNotFound, `{"errors":["native identity not claimed"]}`)
+	_, err := client.Sys().LookupAlias(AliasRef{Mount: "auth/jwt/", Name: "nobody"})
+	var respErr *ResponseError
+	require.ErrorAs(t, err, &respErr)
+	assert.Equal(t, http.StatusNotFound, respErr.StatusCode)
 }

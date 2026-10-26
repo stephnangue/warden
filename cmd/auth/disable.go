@@ -5,11 +5,13 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
 var (
-	disablePath string
+	disablePath  string
+	disableForce bool
 
 	DisableCmd = &cobra.Command{
 		Use:           "disable [PATH]",
@@ -22,10 +24,21 @@ Usage: warden auth disable [PATH]
   Disables an auth method at the given PATH. The PATH may be supplied
   either positionally or via -path (pick one — combining both is rejected).
 
+  A mount on which entities claim native identities is refused: a mount
+  enabled again is a new mount, and the claims would be left on this one.
+  Release or move them first ('warden identity alias'), or pass -force;
+  the claims are then orphaned, and listed by
+  'warden identity entity list -orphaned'. The entities claiming on a
+  mount:
+
+      $ warden identity entity list -o json \
+          | jq -r '.[] | select(any(.aliases[]; .mount == "auth/jwt/")) | .name'
+
   Disable the auth method enabled at jwt/:
 
       $ warden auth disable jwt/
       $ warden auth disable -path=jwt/
+      $ warden auth disable jwt/ -force
 `,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runDisable,
@@ -34,6 +47,8 @@ Usage: warden auth disable [PATH]
 
 func init() {
 	DisableCmd.Flags().StringVar(&disablePath, "path", "", "Mount path (alternative to the positional PATH argument)")
+	DisableCmd.Flags().BoolVar(&disableForce, "force", false,
+		"Disable even while native identities are claimed on the mount (their claims are orphaned)")
 }
 
 func runDisable(cmd *cobra.Command, args []string) error {
@@ -56,7 +71,7 @@ func runDisable(cmd *cobra.Command, args []string) error {
 
 	// Disable the auth method. Its warnings name groups whose rules still list
 	// the mount: they go to stderr and stay in the structured output.
-	warnings, err := c.Sys().DisableAuthWithWarnings(context.Background(), path)
+	warnings, err := c.Sys().DisableAuthWithOptions(context.Background(), path, &api.DisableAuthOptions{Force: disableForce})
 	if err != nil {
 		return fmt.Errorf("error disabling auth method at path %s: %w", path, err)
 	}

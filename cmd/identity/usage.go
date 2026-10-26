@@ -22,8 +22,8 @@ Usage: warden identity usage
 
   Count the current namespace's identity objects by kind, against their
   caps. Groups: every group, and the virtual groups with the selectors of
-  their rules ("mount" included). Needs read on sys/identity/usage; no
-  sudo.
+  their rules ("mount" included). Identities: the entities, and the native
+  identities they claim. Needs read on sys/identity/usage; no sudo.
 
   Output honors the global -output flag:
     table    one section per kind (default for TTY), each count shown
@@ -34,14 +34,20 @@ Usage: warden identity usage
                  virtual   <count>/<max>  <selectors>/<max>
                  total     <count>
 
+               IDENTITIES
+                 entities  <count>/<max>
+                 aliases   <count>
+
     json     the server's data as is:
              {"groups": {"total", "virtual": {"count", "max",
-             "selectors", "max_selectors"}}}
+             "selectors", "max_selectors"}},
+             "identities": {"entities", "max_entities", "aliases"}}
 
   Examples:
 
       $ warden identity usage
       $ warden identity usage -o json | jq .groups.virtual
+      $ warden identity usage -o json | jq .identities
 `,
 	Args: cobra.NoArgs,
 	RunE: runUsage,
@@ -87,5 +93,13 @@ func printUsage(w io.Writer, u *api.IdentityUsage) {
 	fmt.Fprintln(tw, "  TYPE\tCOUNT\tSELECTORS")
 	fmt.Fprintf(tw, "  virtual\t%d/%d\t%d/%d\n", g.Virtual.Count, g.Virtual.Max, g.Virtual.Selectors, g.Virtual.MaxSelectors)
 	fmt.Fprintf(tw, "  total\t%d\n", g.Total)
+	_ = tw.Flush()
+
+	id := u.Identities
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "IDENTITIES")
+	tw = tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	fmt.Fprintf(tw, "  entities\t%d/%d\n", id.Entities, id.MaxEntities)
+	fmt.Fprintf(tw, "  aliases\t%d\n", id.Aliases)
 	_ = tw.Flush()
 }
