@@ -59,8 +59,8 @@ type VirtualGroupsUsage struct {
 
 // GroupInput is the body of a group create or update. On update a nil field
 // keeps the stored value and a non-nil one replaces it, even when empty (an
-// empty Roles clears the roles). Type is required on create ("virtual") and
-// may be left empty on update.
+// empty Roles clears the roles). Type is required on create and on update, and
+// on update must be the stored type.
 type GroupInput struct {
 	Type        string
 	Description *string
@@ -149,17 +149,21 @@ func (c *Sys) CreateGroupWithContext(ctx context.Context, name string, input *Gr
 	return c.groupRequest(ctx, r)
 }
 
-// ReadGroup reads the group name.
-func (c *Sys) ReadGroup(name string) (*Group, error) {
-	return c.ReadGroupWithContext(context.Background(), name)
+// ReadGroup reads the group name. A non-empty groupType must be the stored
+// type; a policy that conditions the group paths on the type needs it.
+func (c *Sys) ReadGroup(name, groupType string) (*Group, error) {
+	return c.ReadGroupWithContext(context.Background(), name, groupType)
 }
 
 // ReadGroupWithContext reads the group name with context.
-func (c *Sys) ReadGroupWithContext(ctx context.Context, name string) (*Group, error) {
+func (c *Sys) ReadGroupWithContext(ctx context.Context, name, groupType string) (*Group, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
 	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/identity/group/%s", name))
+	if groupType != "" {
+		r.Params.Set("type", groupType)
+	}
 	return c.groupRequest(ctx, r)
 }
 
@@ -180,18 +184,20 @@ func (c *Sys) UpdateGroupWithContext(ctx context.Context, name string, input *Gr
 	return c.groupRequest(ctx, r)
 }
 
-// DeleteGroup deletes the group name. A non-empty expectedHash deletes it only
-// if it still has that hash.
-func (c *Sys) DeleteGroup(name, expectedHash string) error {
-	return c.DeleteGroupWithContext(context.Background(), name, expectedHash)
+// DeleteGroup deletes the group name, which must be of type groupType (the
+// server requires it). A non-empty expectedHash deletes it only if it still
+// has that hash.
+func (c *Sys) DeleteGroup(name, groupType, expectedHash string) error {
+	return c.DeleteGroupWithContext(context.Background(), name, groupType, expectedHash)
 }
 
 // DeleteGroupWithContext deletes the group name with context.
-func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, expectedHash string) error {
+func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, groupType, expectedHash string) error {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
 	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/identity/group/%s", name))
+	r.Params.Set("type", groupType)
 	if expectedHash != "" {
 		r.Params.Set("expected_hash", expectedHash)
 	}
@@ -204,13 +210,14 @@ func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, expectedHash str
 }
 
 // ListGroups lists the groups of the client's namespace, sorted by name. A
-// non-empty role lists only the groups that grant it.
-func (c *Sys) ListGroups(role string) ([]*Group, error) {
-	return c.ListGroupsWithContext(context.Background(), role)
+// non-empty role lists only the groups that grant it, a non-empty groupType
+// only the groups of that type.
+func (c *Sys) ListGroups(role, groupType string) ([]*Group, error) {
+	return c.ListGroupsWithContext(context.Background(), role, groupType)
 }
 
 // ListGroupsWithContext lists the groups with context.
-func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) ([]*Group, error) {
+func (c *Sys) ListGroupsWithContext(ctx context.Context, role, groupType string) ([]*Group, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -218,6 +225,9 @@ func (c *Sys) ListGroupsWithContext(ctx context.Context, role string) ([]*Group,
 	r.Params.Set("warden-list", "true")
 	if role != "" {
 		r.Params.Set("role", role)
+	}
+	if groupType != "" {
+		r.Params.Set("type", groupType)
 	}
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)

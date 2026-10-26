@@ -97,7 +97,7 @@ func GrantInNS(t *testing.T, port int, namespace, mount, role string, rule Rule)
 	for k, v := range rule {
 		selectors[k] = v
 	}
-	nsRequest(t, port, namespace, "DELETE", "sys/identity/group/"+group, "")
+	nsRequest(t, port, namespace, "DELETE", "sys/identity/group/"+group+"?type=virtual", "")
 	mustNS(t, port, namespace, "POST", "sys/identity/group/"+group, jsonBody(t, map[string]any{
 		"type":  "virtual",
 		"roles": []string{role},
@@ -109,7 +109,7 @@ func GrantInNS(t *testing.T, port int, namespace, mount, role string, rule Rule)
 // itself. A role still granted at another mount stops working there too.
 func RevokeRole(t *testing.T, port int, mount, role string) {
 	t.Helper()
-	nsRequest(t, port, "", "DELETE", "sys/identity/group/"+GrantGroup(mount, role), "")
+	nsRequest(t, port, "", "DELETE", "sys/identity/group/"+GrantGroup(mount, role)+"?type=virtual", "")
 	nsRequest(t, port, "", "DELETE", "sys/roles/"+role, "")
 }
 
@@ -125,7 +125,7 @@ func RevokeRoleInNSBestEffort(port int, namespace, mount, role string) {
 	if namespace != "" {
 		headers["X-Warden-Namespace"] = namespace
 	}
-	for _, p := range []string{"sys/identity/group/" + GrantGroup(mount, role), "sys/roles/" + role} {
+	for _, p := range []string{"sys/identity/group/" + GrantGroup(mount, role) + "?type=virtual", "sys/roles/" + role} {
 		TryRequest("DELETE", fmt.Sprintf("%s/v1/%s", NodeURL(port), p), headers, "")
 	}
 }
@@ -184,7 +184,7 @@ func WriteGroupInNS(t *testing.T, port int, namespace, name string, g Group) []s
 	if status != 200 && status != 201 && status != 204 {
 		t.Fatalf("write group %s (status %d): %s", name, status, resp)
 	}
-	t.Cleanup(func() { nsRequest(t, port, namespace, "DELETE", path, "") })
+	t.Cleanup(func() { nsRequest(t, port, namespace, "DELETE", path+"?type=virtual", "") })
 	var out struct {
 		Warnings []string `json:"warnings"`
 		Data     struct {

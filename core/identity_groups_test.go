@@ -123,8 +123,9 @@ func TestGroups_CRUD(t *testing.T) {
 	assert.Equal(t, "CI deployers", resp.Data["description"])
 	created := resp.Data["created_at"].(time.Time)
 
-	// An update replaces what it names and keeps the rest, type included.
+	// An update replaces what it names and keeps the rest.
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/deployers", map[string]any{
+		"type":        "virtual",
 		"roles":       []any{},
 		"valid_until": "",
 	})
@@ -150,12 +151,12 @@ func TestGroups_CRUD(t *testing.T) {
 	require.Len(t, items, 2)
 	assert.NotEmpty(t, items[0]["hash"], "a listed group carries its hash")
 
-	resp = groupRequest(t, c, logical.DeleteOperation, "group/deployers", nil)
+	resp = groupRequest(t, c, logical.DeleteOperation, "group/deployers", virtualType())
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, http.StatusNotFound, groupRequest(t, c, logical.ReadOperation, "group/deployers", nil).StatusCode)
-	assert.Equal(t, http.StatusNotFound, groupRequest(t, c, logical.DeleteOperation, "group/deployers", nil).StatusCode)
+	assert.Equal(t, http.StatusNotFound, groupRequest(t, c, logical.DeleteOperation, "group/deployers", virtualType()).StatusCode)
 	assert.Equal(t, http.StatusNotFound,
-		groupRequest(t, c, logical.UpdateOperation, "group/deployers", map[string]any{"description": "x"}).StatusCode)
+		groupRequest(t, c, logical.UpdateOperation, "group/deployers", map[string]any{"type": "virtual", "description": "x"}).StatusCode)
 
 	// A group handed out is a copy.
 	g, _, err := c.identityStore.GetGroup(ctx, "readers")
@@ -176,11 +177,11 @@ func TestGroups_CAS(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	h1 := resp.Data["hash"].(string)
 
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"description": "v2", "expected_hash": h1})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "description": "v2", "expected_hash": h1})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	h2 := resp.Data["hash"].(string)
 
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"description": "stale", "expected_hash": h1})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "description": "stale", "expected_hash": h1})
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 	assert.Contains(t, resp.Err.Error(), "expected_hash no longer matches")
 	g, hash, err := c.identityStore.GetGroup(ctx, "g")
@@ -189,7 +190,7 @@ func TestGroups_CAS(t *testing.T) {
 	assert.Equal(t, h2, hash)
 
 	assert.Equal(t, http.StatusConflict,
-		groupRequest(t, c, logical.DeleteOperation, "group/g", map[string]any{"expected_hash": h1}).StatusCode)
+		groupRequest(t, c, logical.DeleteOperation, "group/g", map[string]any{"type": "virtual", "expected_hash": h1}).StatusCode)
 	resp = groupRequest(t, c, logical.CreateOperation, "group/fresh", map[string]any{"expected_hash": "x", "type": "virtual"})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "expected_hash means nothing on a create")
 
@@ -200,7 +201,7 @@ func TestGroups_CAS(t *testing.T) {
 		_, err := c.identityStore.UpdateGroup(ctx, virtualGroup("g", "other"), "")
 		require.NoError(t, err)
 	}
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"description": "v3"})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "description": "v3"})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	g, _, err = c.identityStore.GetGroup(ctx, "g")
 	require.NoError(t, err)
@@ -218,7 +219,7 @@ func TestGroups_CAS(t *testing.T) {
 		require.NoError(t, err)
 	}
 	t.Cleanup(func() { c.identityStore.beforeGroupUpdate = nil })
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"description": "v4"})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "description": "v4"})
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 	assert.Contains(t, resp.Err.Error(), `group "g" changed concurrently; read it again and retry`)
 }
@@ -275,24 +276,69 @@ func TestGroups_Type(t *testing.T) {
 	}
 
 	require.Equal(t, http.StatusCreated, groupRequest(t, c, logical.CreateOperation, "group/g", deployersBody()).StatusCode)
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"description": "no type"})
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "type may be left out on update")
+
+	// Every write names the type, so a policy condition on it can tell who may
+	// write which type of group.
+	for _, typ := range []any{nil, ""} {
+		body := map[string]any{"description": "no type"}
+		if typ != nil {
+			body["type"] = typ
+		}
+		resp = groupRequest(t, c, logical.UpdateOperation, "group/g", body)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "update with type %v", typ)
+		assert.Contains(t, resp.Err.Error(), "type is required on update")
+		del := map[string]any{}
+		if typ != nil {
+			del["type"] = typ
+		}
+		resp = groupRequest(t, c, logical.DeleteOperation, "group/g", del)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "delete with type %v", typ)
+		assert.Contains(t, resp.Err.Error(), "type is required on delete")
+	}
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "description": "same"})
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "the same type may be repeated")
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "", "description": "empty"})
-	require.Equal(t, http.StatusOK, resp.StatusCode, "an empty type on update counts as left out: %v", resp.Err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	assert.Equal(t, "virtual", resp.Data["type"])
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "static"})
+
+	// A type other than the stored one is refused on every operation that names it.
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "static", "description": "x"})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), "type cannot change; create a new group")
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"members": []any{"bot"}})
+	assert.Contains(t, resp.Err.Error(), `type mismatch: group "g" is virtual`)
+	resp = groupRequest(t, c, logical.DeleteOperation, "group/g", map[string]any{"type": "static"})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), `type mismatch: group "g" is virtual`)
+	resp = groupRequest(t, c, logical.ReadOperation, "group/g", map[string]any{"type": "static"})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), `type mismatch: group "g" is virtual`)
+	resp = groupRequest(t, c, logical.ReadOperation, "group/g", map[string]any{"type": "selector"})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), "unknown group type")
+	resp = groupRequest(t, c, logical.ReadOperation, "group/g", virtualType())
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "a read naming the stored type")
+	resp = groupRequest(t, c, logical.ReadOperation, "group/g", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "type is optional on read")
+	_, _, err := c.identityStore.GetGroup(rootCtx(), "g")
+	require.NoError(t, err, "nothing was deleted")
+
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "members": []any{"bot"}})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
-	// The store refuses a type change too.
+	// The store refuses a type change too (static groups are refused before
+	// the type is compared, as long as they are not accepted), and a delete
+	// naming another type.
 	g := virtualGroup("g")
 	g.Type = logical.GroupTypeStatic
-	_, err := c.identityStore.UpdateGroup(rootCtx(), g, "")
+	_, err = c.identityStore.UpdateGroup(rootCtx(), g, "")
 	assert.Error(t, err)
+	var mismatch *GroupTypeMismatchError
+	err = c.identityStore.DeleteGroup(rootCtx(), "g", logical.GroupTypeStatic, "")
+	assert.ErrorAs(t, err, &mismatch)
+	assert.Equal(t, logical.GroupTypeVirtual, mismatch.Stored)
+}
+
+// virtualType is the request data naming the virtual type, for the operations
+// that carry nothing else.
+func virtualType() map[string]any {
+	return map[string]any{"type": "virtual"}
 }
 
 func TestGroups_Roles(t *testing.T) {
@@ -409,6 +455,7 @@ func TestGroups_ScalarSelectorValue(t *testing.T) {
 	assert.Equal(t, []map[string][]string{{"mount": {"auth/jwt/"}, "sub": {"a", "b"}}}, resp.Data["rules"])
 
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{
+		"type":  "virtual",
 		"rules": []any{map[string]any{"mount": "auth/k8s/", "workload": "ci"}},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
@@ -427,7 +474,7 @@ func TestGroups_FactNameWarnings(t *testing.T) {
 		g.Name, g.Type = "g", logical.GroupTypeVirtual
 		w, err := c.identityStore.CreateGroup(ctx, g)
 		require.NoError(t, err)
-		require.NoError(t, c.identityStore.DeleteGroup(ctx, "g", ""))
+		require.NoError(t, c.identityStore.DeleteGroup(ctx, "g", "", ""))
 		return w
 	}
 
@@ -498,25 +545,25 @@ func TestGroups_ValidUntil(t *testing.T) {
 
 	// A past value is stored, with a warning.
 	past := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": past.Format(time.RFC3339)})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "valid_until": past.Format(time.RFC3339)})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	assert.Contains(t, respWarnings(resp), pastWarning)
 	assert.Equal(t, past.Format(time.RFC3339), resp.Data["valid_until"])
 
 	// Sub-second precision survives a round trip.
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": "2099-01-02T03:04:05.123456789Z"})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "valid_until": "2099-01-02T03:04:05.123456789Z"})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	assert.Equal(t, "2099-01-02T03:04:05.123456789Z", resp.Data["valid_until"])
 
 	// Clearing it.
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": ""})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "valid_until": ""})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	g, _, err = c.identityStore.GetGroup(ctx, "g")
 	require.NoError(t, err)
 	assert.True(t, g.ValidUntil.IsZero())
 
 	for _, bad := range []string{"tomorrow", "2026-12-31", "10m", "1767225599"} {
-		resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"valid_until": bad})
+		resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "valid_until": bad})
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, bad)
 		assert.Contains(t, resp.Err.Error(), "valid_until must be an RFC 3339 timestamp", bad)
 	}
@@ -524,7 +571,7 @@ func TestGroups_ValidUntil(t *testing.T) {
 	// max_age is ignored as an unrecognised field, and changes nothing.
 	_, hash, err := c.identityStore.GetGroup(ctx, "g")
 	require.NoError(t, err)
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"max_age": "10m"})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "max_age": "10m"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Warnings, "Endpoint ignored these unrecognized parameters: [max_age]")
 	_, hash2, err := c.identityStore.GetGroup(ctx, "g")
@@ -608,6 +655,7 @@ func TestGroups_Caps(t *testing.T) {
 	_, err = c.identityStore.UpdateGroup(other, over, "")
 	assert.ErrorIs(t, err, ErrTooManySelectors)
 	resp = roleRequest(t, c, other, logical.UpdateOperation, "identity/group/a", map[string]any{
+		"type": "virtual",
 		"rules": []any{
 			map[string]any{"mount": "auth/jwt/", "sub": "x"},
 			map[string]any{"mount": "auth/jwt/", "sub": "y"},
@@ -623,7 +671,7 @@ func TestGroups_Caps(t *testing.T) {
 	assert.Equal(t, 7, c.identityStore.namespaceGroups("caps-ns").selectors)
 
 	// A create counts its selectors; a delete gives them back.
-	require.NoError(t, c.identityStore.DeleteGroup(other, "c", ""))
+	require.NoError(t, c.identityStore.DeleteGroup(other, "c", "", ""))
 	g = virtualGroup("e")
 	g.Rules[0]["iss"] = []string{"z"}
 	_, err = c.identityStore.CreateGroup(other, g)
@@ -682,6 +730,7 @@ func TestIdentityUsage(t *testing.T) {
 	}
 
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/readers", map[string]any{
+		"type":  "virtual",
 		"rules": []any{map[string]any{"mount": "auth/jwt/"}},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -693,7 +742,7 @@ func TestIdentityUsage(t *testing.T) {
 	assert.Equal(t, 1, resp.Data["rule_count"])
 	assert.Equal(t, 2, resp.Data["selector_count"])
 
-	require.Equal(t, http.StatusOK, groupRequest(t, c, logical.DeleteOperation, "group/deployers", nil).StatusCode)
+	require.Equal(t, http.StatusOK, groupRequest(t, c, logical.DeleteOperation, "group/deployers", virtualType()).StatusCode)
 	assert.Equal(t, want(1, 1), readUsage(t, c), "after a delete")
 
 	// Every listed group reports its own counts.
@@ -753,7 +802,7 @@ func TestGroups_OldSelectorsField(t *testing.T) {
 	require.Equal(t, http.StatusCreated, groupRequest(t, c, logical.CreateOperation, "group/g", deployersBody()).StatusCode)
 	before, hash, err := c.identityStore.GetGroup(rootCtx(), "g")
 	require.NoError(t, err)
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"selectors": old})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "virtual", "selectors": old})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Warnings, "Endpoint ignored these unrecognized parameters: [selectors]")
 	after, hash2, err := c.identityStore.GetGroup(rootCtx(), "g")
@@ -763,8 +812,8 @@ func TestGroups_OldSelectorsField(t *testing.T) {
 }
 
 // TestGroups_RoleFilterAndHTTP drives the paths through the request path:
-// LIST ?role= and DELETE ?expected_hash= reach the handlers, and the token is
-// checked.
+// LIST ?role= and ?type=, and DELETE ?type= and ?expected_hash=, reach the
+// handlers, and the token is checked.
 func TestGroups_RoleFilterAndHTTP(t *testing.T) {
 	c := createTestCore(t)
 	root, err := c.tokenStore.GenerateRootToken()
@@ -789,10 +838,20 @@ func TestGroups_RoleFilterAndHTTP(t *testing.T) {
 	assert.Equal(t, []string{}, resp.Data["keys"])
 	resp = roleHTTP(t, c, root, http.MethodGet, "/v1/sys/identity/group?warden-list=true", nil)
 	assert.Equal(t, []string{"deployers", "readers"}, resp.Data["keys"])
+	resp = roleHTTP(t, c, root, http.MethodGet, "/v1/sys/identity/group?warden-list=true&type=virtual", nil)
+	assert.Equal(t, []string{"deployers", "readers"}, resp.Data["keys"])
+	resp = roleHTTP(t, c, root, http.MethodGet, "/v1/sys/identity/group?warden-list=true&type=static", nil)
+	assert.Equal(t, []string{}, resp.Data["keys"], "no static group yet")
+	resp = roleHTTP(t, c, root, http.MethodGet, "/v1/sys/identity/group?warden-list=true&type=selector", nil)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
-	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/identity/group/deployers?expected_hash=stale", nil)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/identity/group/deployers?expected_hash="+hash, nil)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "a delete names the type")
+	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/identity/group/deployers?type=static&expected_hash="+hash, nil)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "a delete naming another type")
+	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/identity/group/deployers?type=virtual&expected_hash=stale", nil)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/identity/group/deployers?type=virtual&expected_hash="+hash, nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	_, _, err = c.identityStore.GetGroup(rootCtx(), "deployers")
 	assert.ErrorIs(t, err, ErrGroupNotFound)
@@ -830,6 +889,46 @@ func TestGroups_SudoRequired(t *testing.T) {
 		res = c.performPolicyChecks(ctx, withSudo, nil, req, &PolicyCheckOpts{RootPrivsRequired: c.router.RootPath(ctx, tc.path)})
 		assert.True(t, res.Allowed, "%s %s with sudo must be allowed", tc.op, tc.path)
 	}
+}
+
+// TestGroups_TypeConditionSeparatesWriters: since every group write names its
+// type, a policy condition on request.data.type lets one team write virtual
+// groups and nothing else. The condition is path-level, so it gates reads
+// too, and conditions merge with "unconditional wins": a second, unconditional
+// stanza on the same path, even read-only, makes every capability on it
+// unconditional.
+func TestGroups_TypeConditionSeparatesWriters(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	const path = "sys/identity/group/g"
+	recipe := testParsePolicy(t, `path "sys/identity/group/*" {
+		capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+		condition    = "has(request.data.type) && request.data.type == 'virtual'"
+	}`)
+	allowed := func(cbp *CBP, op logical.Operation, data map[string]any) bool {
+		t.Helper()
+		req := &logical.Request{Operation: op, Path: path, Data: data}
+		return c.performPolicyChecks(ctx, cbp, nil, req,
+			&PolicyCheckOpts{RootPrivsRequired: c.router.RootPath(ctx, path)}).Allowed
+	}
+
+	platform, err := NewCBP(ctx, []*Policy{recipe})
+	require.NoError(t, err)
+	for _, op := range []logical.Operation{logical.CreateOperation, logical.UpdateOperation, logical.DeleteOperation} {
+		assert.True(t, allowed(platform, op, map[string]any{"type": "virtual"}), "%s of a virtual group", op)
+		for _, typ := range []string{"static", "directory"} {
+			assert.False(t, allowed(platform, op, map[string]any{"type": typ}), "%s of a %s group", op, typ)
+		}
+		assert.False(t, allowed(platform, op, nil), "%s naming no type", op)
+	}
+	assert.True(t, allowed(platform, logical.ReadOperation, map[string]any{"type": "virtual"}), "a read naming the type")
+	assert.False(t, allowed(platform, logical.ReadOperation, nil), "the condition gates reads too")
+
+	readOnly := testParsePolicy(t, `path "sys/identity/group/*" { capabilities = ["read", "sudo"] }`)
+	merged, err := NewCBP(ctx, []*Policy{recipe, readOnly})
+	require.NoError(t, err)
+	assert.True(t, allowed(merged, logical.UpdateOperation, map[string]any{"type": "static"}),
+		"an unconditional stanza on the same path makes the recipe's writes unconditional")
 }
 
 // TestIdentityUsage_NormalACL: sys/identity/usage is not a root path. A token

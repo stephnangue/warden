@@ -27,7 +27,8 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 				"type": {
 					Type: framework.TypeString,
 					Description: `Where membership comes from: "virtual" (computed from the facts an auth mount verified). ` +
-						"Required on create and never changes; on update it may be left out, and if present must equal the stored type.",
+						"Required on every write (create, update, and delete, where it is a query parameter) and never changes: " +
+						"a write naming another type than the stored one is refused. Optional on read, where it must match too.",
 				},
 				"description": {
 					Type:        framework.TypeString,
@@ -98,6 +99,10 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 					Type:        framework.TypeString,
 					Description: "List only the groups that grant this role",
 				},
+				"type": {
+					Type:        framework.TypeString,
+					Description: "List only the groups of this type",
+				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.ListOperation: &framework.PathOperation{
@@ -106,7 +111,7 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 				},
 			},
 			HelpSynopsis:    "List namespace groups",
-			HelpDescription: "List every group of the namespace, optionally only those granting one role.",
+			HelpDescription: "List every group of the namespace, optionally only those granting one role or of one type.",
 		},
 		{
 			// A normal ACL path, not sudo: only the group paths are root paths.
@@ -172,6 +177,8 @@ func groupResponseData(g *logical.Group, hash string, warnings []string) map[str
 // groupErrorResponse maps an identity store error to its response.
 func groupErrorResponse(name string, err error) *logical.Response {
 	switch {
+	case errors.As(err, new(*GroupTypeMismatchError)):
+		return logical.ErrorResponse(logical.ErrBadRequest(err.Error()))
 	case errors.Is(err, ErrGroupNotFound):
 		return logical.ErrorResponse(logical.ErrNotFoundf("group %q not found", name))
 	case errors.Is(err, ErrGroupAlreadyExists):
@@ -196,6 +203,27 @@ func refuseOtherTypeFields(d *framework.FieldData, t logical.GroupType) error {
 		}
 	}
 	return nil
+}
+
+// requestType returns the type a request names, or "" when it names none. A
+// name that is no group type is refused.
+func requestType(d *framework.FieldData) (logical.GroupType, error) {
+	v, ok := d.GetOk("type")
+	if !ok || v.(string) == "" {
+		return "", nil
+	}
+	t, err := logical.ParseGroupType(v.(string))
+	if err != nil {
+		return "", logical.ErrBadRequest(err.Error())
+	}
+	return t, nil
+}
+
+// errGroupTypeRequired refuses a write that names no type. Every group write
+// carries it, so a policy condition on request.data.type can tell who may
+// write which type of group.
+func errGroupTypeRequired(op string) error {
+	return logical.ErrBadRequestf("type is required on %s: every group write names the group's type", op)
 }
 
 // parseRules converts the rules field of a write: a list of objects, each a
@@ -314,16 +342,23 @@ func (b *SystemBackend) handleGroupCreate(ctx context.Context, req *logical.Requ
 // handleGroupRead handles GET sys/identity/group/<name>.
 func (b *SystemBackend) handleGroupRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
+	t, err := requestType(d)
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 	g, hash, err := b.core.identityStore.GetGroup(ctx, name)
 	if err != nil {
 		return groupErrorResponse(name, err), nil
+	}
+	if t != "" && t != g.Type {
+		return groupErrorResponse(name, &GroupTypeMismatchError{Name: name, Stored: g.Type}), nil
 	}
 	return b.respondSuccess(groupResponseData(g, hash, nil)), nil
 }
 
 // handleGroupUpdate handles PUT sys/identity/group/<name>. A field present in
-// the request replaces the stored value; a field left out keeps it. type may
-// be left out, and if present must equal the stored type. The write applies
+// the request replaces the stored value; a field left out keeps it. type is
+// required and must equal the stored type. The write applies
 // only to the version it was merged onto, and, when expected_hash is set, only
 // if that version is the one the caller read.
 //
@@ -333,6 +368,13 @@ func (b *SystemBackend) handleGroupRead(ctx context.Context, req *logical.Reques
 func (b *SystemBackend) handleGroupUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 	expected := d.Get("expected_hash").(string)
+	t, err := requestType(d)
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+	if t == "" {
+		return logical.ErrorResponse(errGroupTypeRequired("update")), nil
+	}
 
 	for attempt := 1; ; attempt++ {
 		g, hash, err := b.core.identityStore.GetGroup(ctx, name)
@@ -343,11 +385,11 @@ func (b *SystemBackend) handleGroupUpdate(ctx context.Context, req *logical.Requ
 			return groupErrorResponse(name, ErrGroupChanged), nil
 		}
 		stored := g.Type
+		if t != stored {
+			return groupErrorResponse(name, &GroupTypeMismatchError{Name: name, Stored: stored}), nil
+		}
 		if err := mergeGroupFields(g, d); err != nil {
 			return logical.ErrorResponse(err), nil
-		}
-		if g.Type != stored {
-			return logical.ErrorResponse(errGroupTypeChange), nil
 		}
 		if err := refuseOtherTypeFields(d, stored); err != nil {
 			return logical.ErrorResponse(err), nil
@@ -368,11 +410,19 @@ func (b *SystemBackend) handleGroupUpdate(ctx context.Context, req *logical.Requ
 	}
 }
 
-// handleGroupDelete handles DELETE sys/identity/group/<name>, conditional on
-// expected_hash (a query parameter) when set.
+// handleGroupDelete handles DELETE sys/identity/group/<name>. type (a query
+// parameter) is required and must equal the stored type; expected_hash (a
+// query parameter) makes the delete conditional when set.
 func (b *SystemBackend) handleGroupDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
-	if err := b.core.identityStore.DeleteGroup(ctx, name, d.Get("expected_hash").(string)); err != nil {
+	t, err := requestType(d)
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+	if t == "" {
+		return logical.ErrorResponse(errGroupTypeRequired("delete")), nil
+	}
+	if err := b.core.identityStore.DeleteGroup(ctx, name, t, d.Get("expected_hash").(string)); err != nil {
 		return groupErrorResponse(name, err), nil
 	}
 	return b.respondSuccess(map[string]any{
@@ -383,18 +433,27 @@ func (b *SystemBackend) handleGroupDelete(ctx context.Context, req *logical.Requ
 
 // handleGroupList handles LIST sys/identity/group. It returns the names under
 // "keys" and the groups themselves (with their hashes) under "groups", both
-// sorted by name; ?role= keeps only the groups granting that role.
+// sorted by name; ?role= keeps only the groups granting that role, ?type= only
+// the groups of that type.
 func (b *SystemBackend) handleGroupList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	t, err := requestType(d)
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
 	groups, hashes, err := b.core.identityStore.ListGroups(ctx, d.Get("role").(string))
 	if err != nil {
 		return groupErrorResponse("", err), nil
 	}
-	keys := make([]string, len(groups))
-	items := make([]map[string]any, len(groups))
+	keys := make([]string, 0, len(groups))
+	items := make([]map[string]any, 0, len(groups))
 	for i, g := range groups {
-		keys[i] = g.Name
-		items[i] = groupToMap(g)
-		items[i]["hash"] = hashes[i]
+		if t != "" && g.Type != t {
+			continue
+		}
+		item := groupToMap(g)
+		item["hash"] = hashes[i]
+		keys = append(keys, g.Name)
+		items = append(items, item)
 	}
 	return b.respondSuccess(map[string]any{
 		"keys":   keys,

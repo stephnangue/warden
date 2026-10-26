@@ -127,8 +127,8 @@ func setupFake(t *testing.T, status int, body string) (*fakeWarden, *bytes.Buffe
 		createJSON, updateJSON, updateExpectedHash = "", "", ""
 		createFlags.reset()
 		updateFlags.reset()
-		deleteForce, deleteExpectedHash = false, ""
-		listRole = ""
+		deleteForce, deleteExpectedHash, deleteType = false, "", ""
+		listRole, listType, readType = "", "", ""
 	})
 	return f, stdout, stderr
 }
@@ -220,7 +220,7 @@ func TestGroupUpdate_ClearValidUntil(t *testing.T) {
 	cmd := freshUpdateCmd()
 	require.NoError(t, cmd.Flags().Set("valid-until", ""))
 	require.NoError(t, runGroupUpdate(cmd, []string{"g"}))
-	assert.Equal(t, map[string]any{"valid_until": ""}, f.last(t).body)
+	assert.Equal(t, map[string]any{"type": "virtual", "valid_until": ""}, f.last(t).body)
 }
 
 // TestGroupRuleFlag_ScalarValue: a -rule selector value written as one string
@@ -315,11 +315,32 @@ func TestGroupUpdate_TypedFlagsAndCAS(t *testing.T) {
 	require.NoError(t, cmd.Flags().Set("expected-hash", "h1"))
 
 	require.NoError(t, runGroupUpdate(cmd, []string{"ci-deployers"}))
+	require.Equal(t, 2, f.count(), "a read to learn the type, then the write")
+	assert.Equal(t, http.MethodGet, f.requests[0].method)
 	req := f.last(t)
 	assert.Equal(t, http.MethodPut, req.method)
-	assert.Equal(t, map[string]any{"roles": []any{}, "expected_hash": "h1"}, req.body,
-		"an empty -roles clears the roles; -expected-hash rides along")
+	assert.Equal(t, map[string]any{"type": "virtual", "roles": []any{}, "expected_hash": "h1"}, req.body,
+		"an empty -roles clears the roles; -expected-hash rides along; the stored type is sent")
 	assert.Equal(t, true, decodeOut(t, stdout)["updated"])
+}
+
+// TestGroupUpdate_TypeGivenSkipsRead: with -type (or "type" in -json) the
+// command sends it as given and reads nothing, which a caller whose policy
+// conditions reads on the type needs.
+func TestGroupUpdate_TypeGivenSkipsRead(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusOK, cannedGroup)
+	cmd := freshUpdateCmd()
+	require.NoError(t, cmd.Flags().Set("type", "virtual"))
+	require.NoError(t, cmd.Flags().Set("description", "x"))
+	require.NoError(t, runGroupUpdate(cmd, []string{"ci-deployers"}))
+	require.Equal(t, 1, f.count())
+	assert.Equal(t, map[string]any{"type": "virtual", "description": "x"}, f.last(t).body)
+
+	cmd = freshUpdateCmd()
+	updateJSON = `{"type": "virtual", "description": "y"}`
+	require.NoError(t, runGroupUpdate(cmd, []string{"ci-deployers"}))
+	require.Equal(t, 2, f.count())
+	assert.Equal(t, http.MethodPut, f.last(t).method)
 }
 
 func TestGroupUpdate_NothingToUpdate(t *testing.T) {
@@ -341,13 +362,13 @@ func TestGroupUpdate_DryRun(t *testing.T) {
 	assert.Zero(t, f.count())
 }
 
-func TestGroupUpdate_TypeChangeSurfaces(t *testing.T) {
-	setupFake(t, http.StatusBadRequest, `{"errors":["type cannot change; create a new group"]}`)
+func TestGroupUpdate_TypeMismatchSurfaces(t *testing.T) {
+	setupFake(t, http.StatusBadRequest, `{"errors":["type mismatch: group \"g\" is virtual"]}`)
 	cmd := freshUpdateCmd()
 	updateJSON = `{"type": "static"}`
 	err := runGroupUpdate(cmd, []string{"g"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "type cannot change; create a new group")
+	assert.Contains(t, err.Error(), `type mismatch: group "g" is virtual`)
 }
 
 func TestGroupRead_JSON(t *testing.T) {
@@ -362,13 +383,33 @@ func TestGroupRead_JSON(t *testing.T) {
 
 func TestGroupDelete(t *testing.T) {
 	f, stdout, _ := setupFake(t, http.StatusOK, `{"data":{"name":"g"}}`)
-	deleteForce, deleteExpectedHash = true, "h1"
+	deleteForce, deleteExpectedHash, deleteType = true, "h1", "virtual"
 	require.NoError(t, runGroupDelete(GroupDeleteCmd, []string{"g"}))
+	require.Equal(t, 1, f.count(), "-type skips the read")
 	req := f.last(t)
 	assert.Equal(t, http.MethodDelete, req.method)
 	assert.Equal(t, "/v1/sys/identity/group/g", req.path)
+	assert.Equal(t, "virtual", req.query.Get("type"))
 	assert.Equal(t, "h1", req.query.Get("expected_hash"))
 	assert.Equal(t, true, decodeOut(t, stdout)["deleted"])
+}
+
+// TestGroupDelete_ReadsType: without -type the command reads the group and
+// sends its stored type.
+func TestGroupDelete_ReadsType(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusOK, cannedGroup)
+	deleteForce = true
+	require.NoError(t, runGroupDelete(GroupDeleteCmd, []string{"ci-deployers"}))
+	require.Equal(t, 2, f.count())
+	assert.Equal(t, http.MethodGet, f.requests[0].method)
+	assert.Equal(t, "virtual", f.last(t).query.Get("type"))
+}
+
+func TestGroupRead_Type(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusOK, cannedGroup)
+	readType = "virtual"
+	require.NoError(t, runGroupRead(GroupReadCmd, []string{"ci-deployers"}))
+	assert.Equal(t, "virtual", f.last(t).query.Get("type"))
 }
 
 const listedGroups = `{"data":{
@@ -381,12 +422,13 @@ const listedGroups = `{"data":{
 // TestGroupList_JSON: -o json is a plain array of groups; -role filters.
 func TestGroupList_JSON(t *testing.T) {
 	f, stdout, _ := setupFake(t, http.StatusOK, listedGroups)
-	listRole = "deploy"
+	listRole, listType = "deploy", "virtual"
 	require.NoError(t, runGroupList(GroupListCmd, nil))
 	req := f.last(t)
 	assert.Equal(t, "/v1/sys/identity/group", req.path)
 	assert.Equal(t, "true", req.query.Get("warden-list"))
 	assert.Equal(t, "deploy", req.query.Get("role"))
+	assert.Equal(t, "virtual", req.query.Get("type"))
 
 	var items []map[string]any
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &items), "an array: %s", stdout.String())
