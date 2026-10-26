@@ -21,7 +21,7 @@ var acceptedSaltPaths = []string{
 	"response.credential.metadata", "response.credential.metadata.email",
 	"response.credential.credential_id", "response.credential.lease_id", "response.credential.token_id",
 	"response.auth_result.principal_id",
-	"auth.token_id", "auth.token_accessor", "auth.principal_id", "auth.created_by_ip",
+	"auth.token_id", "auth.token_accessor", "auth.principal_id", "auth.alias_name", "auth.created_by_ip",
 	"auth.policy_results.granting_policies",
 	"auth.policy_results.condition.inputs",
 	"auth.policy_results.condition.inputs.agent.metadata.env",
@@ -45,6 +45,7 @@ func TestCheckFieldPath_Accepted(t *testing.T) {
 	omit := []string{
 		"auth", "request", "response", "error",
 		"auth.groups", "auth.discovery", "auth.actors", "auth.user", "auth.principal_id",
+		"auth.alias_name", "auth.mount_accessor", "auth.entity_kind",
 		"auth.policy_results", "auth.policy_results.allowed", "auth.policy_results.granting_policies",
 		"auth.policy_results.mcp_decision", "auth.policy_results.mcp_client",
 		"auth.policy_results.condition", "auth.policy_results.condition.inputs",

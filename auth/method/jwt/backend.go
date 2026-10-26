@@ -171,7 +171,7 @@ func buildJWTConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, e
 
 	// Facts that do not compile are kept on the config, not returned: the
 	// caller decides whether to refuse them or fail closed.
-	config.Compile(jwtBuiltinFacts())
+	config.Compile(jwtBuiltinFacts(), jwtAliasPolicy)
 
 	var keySet jwt.KeySet
 
@@ -266,6 +266,7 @@ func normalizedJWTConfig(config *JWTAuthConfig) map[string]any {
 		"max_age":                config.MaxAge.String(),
 		"entity_kind":            config.EntityKind,
 		"facts":                  config.Facts,
+		"alias_name_source":      config.AliasNameSource,
 	}
 }
 

@@ -1237,6 +1237,24 @@ func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
 	assert.Greater(t, result.TokenTTL, int64(0))
 }
 
+// The admitting mount's accessor, the alias the credential presented and the
+// mount's entity kind are recorded from the token and its admission.
+func TestBuildAuditAuth_NativeIdentity(t *testing.T) {
+	adm := aliasAdmission(t, "sub", map[string]any{"sub": "agent-1"})
+	adm.AliasName = "agent-1"
+	te := &logical.TokenEntry{ID: "tok", MountAccessor: "auth_jwt_1", Admission: adm}
+	result := buildAuditAuth(nil, te)
+	require.NotNil(t, result)
+	assert.Equal(t, "auth_jwt_1", result.MountAccessor)
+	assert.Equal(t, "agent-1", result.AliasName)
+	assert.Equal(t, logical.EntityKindAgent, result.EntityKind)
+
+	root := buildAuditAuth(nil, &logical.TokenEntry{ID: "root"})
+	assert.Empty(t, root.MountAccessor, "a token no mount issued")
+	assert.Empty(t, root.AliasName)
+	assert.Empty(t, root.EntityKind)
+}
+
 func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	auth := &logical.Auth{
 		TokenAccessor: "auth-acc",

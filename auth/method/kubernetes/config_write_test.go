@@ -29,6 +29,29 @@ func writeConfig(b *kubernetesAuthBackend, raw map[string]any) *logical.Response
 	return resp
 }
 
+// alias_name_source on a kubernetes mount is the service account's username by
+// default, or its UID; any other field is refused.
+func TestConfigWrite_AliasNameSource(t *testing.T) {
+	b, _ := newTestBackend(t)
+	resp := writeConfig(b, map[string]any{
+		"kubernetes_host": "https://10.0.0.1:6443", "tls_skip_verify": true,
+		"bound_audiences": "warden",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, factUsername, b.mountFacts.Load().AliasSource, "username by default")
+
+	resp = writeConfig(b, map[string]any{"alias_name_source": "service_account_uid"})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, factServiceAccountUID, b.mountFacts.Load().AliasSource)
+
+	for _, bad := range []string{"service_account_name", "groups", "aud"} {
+		resp = writeConfig(b, map[string]any{"alias_name_source": bad})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, bad)
+		assert.Contains(t, resp.Err.Error(), "is not one of username, service_account_uid", bad)
+	}
+	assert.Equal(t, factServiceAccountUID, b.mountFacts.Load().AliasSource)
+}
+
 // A write that cannot be persisted is not installed either: TokenReviews keep
 // going to the cluster that storage names. Before, the new config — host, TLS
 // client and all — was live by the time the storage write failed.

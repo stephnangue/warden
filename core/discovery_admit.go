@@ -294,7 +294,7 @@ func (c *Core) admitAt(ctx context.Context, parent *logical.Request, mount strin
 	if !admitted || adm == nil {
 		return nil, nil
 	}
-	c.setAdmissionMountPath(ctx, childReq, adm)
+	c.setAdmissionMount(ctx, childReq, adm)
 	return adm, nil
 }
 

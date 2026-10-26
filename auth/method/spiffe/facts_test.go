@@ -40,7 +40,7 @@ import (
 // compileSPIFFEFacts compiles kind and facts as a spiffe mount config does.
 func compileSPIFFEFacts(kind string, facts map[string]string) (*logical.MountNaming, error) {
 	fc := helper.FactsConfig{EntityKind: kind, Facts: facts}
-	fc.CompileFields(spiffeBuiltinFacts())
+	fc.CompileFields(spiffeBuiltinFacts(), spiffeAliasPolicy)
 	return fc.Naming(), fc.Err()
 }
 
@@ -455,11 +455,12 @@ func TestConfigRead_UnconfiguredRendersDefaults(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, map[string]any{
-		"token_ttl":       "0s",
-		"bound_audiences": []string(nil),
-		"max_age":         "0s",
-		"entity_kind":     logical.EntityKindAgent,
-		"facts":           map[string]string(nil),
+		"alias_name_source": "",
+		"token_ttl":         "0s",
+		"bound_audiences":   []string(nil),
+		"max_age":           "0s",
+		"entity_kind":       logical.EntityKindAgent,
+		"facts":             map[string]string(nil),
 	}, resp.Data)
 	assert.Equal(t, resp.Data["entity_kind"], b.mountFacts.Load().Kind)
 	assert.Equal(t, slices.Sorted(slices.Values(spiffeBuiltinFacts())), b.FactNames(), "it answers the built-ins")

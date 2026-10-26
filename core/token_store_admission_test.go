@@ -164,10 +164,75 @@ func TestSetAdmissionMountPath(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			adm := &logical.Admission{MountPath: tc.preset}
-			core.setAdmissionMountPath(tc.ctx, tc.req, adm)
+			core.setAdmissionMount(tc.ctx, tc.req, adm)
 			assert.Equal(t, tc.want, adm.MountPath)
 		})
 	}
+}
+
+// aliasAdmission returns an admission of claims from a mount whose naming
+// takes the alias from source.
+func aliasAdmission(t *testing.T, source string, claims map[string]any) *logical.Admission {
+	t.Helper()
+	mapping, err := selector.CompileMapping([]string{"sub", "iss", "aud"}, map[string]string{"repository": "repo"})
+	require.NoError(t, err)
+	naming, err := logical.NewMountNaming(mapping, logical.EntityKindAgent)
+	require.NoError(t, err)
+	naming.AliasSource = source
+	mf := &logical.MountFacts{}
+	mf.Publish(naming)
+	return &logical.Admission{Facts: selector.NewClaims(claims), Mount: mf}
+}
+
+// setAdmissionMount names the admitting mount's accessor and derives the
+// alias under the naming in force, on a login as on a discovery admission
+// (both complete their admission through it); an alias that cannot be derived
+// is left empty and the login still succeeds.
+func TestSetAdmissionMount_AccessorAndAlias(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	req := &logical.Request{MountPoint: "auth/jwt/", MountAccessor: "auth_jwt_1"}
+
+	adm := aliasAdmission(t, "sub", map[string]any{"sub": "agent-1"})
+	core.setAdmissionMount(ctx, req, adm)
+	assert.Equal(t, "auth/jwt/", adm.MountPath)
+	assert.Equal(t, "auth_jwt_1", adm.MountAccessor)
+	assert.Equal(t, "agent-1", adm.AliasName)
+
+	adm = aliasAdmission(t, "repo", map[string]any{"sub": "x", "repository": "acme/deployer"})
+	core.setAdmissionMount(ctx, req, adm)
+	assert.Equal(t, "acme/deployer", adm.AliasName, "a mapped fact as the source")
+
+	adm = aliasAdmission(t, "repo", map[string]any{"sub": "x"})
+	core.setAdmissionMount(ctx, req, adm)
+	assert.Empty(t, adm.AliasName, "an absent source yields no alias")
+	assert.Equal(t, "auth_jwt_1", adm.MountAccessor, "the accessor is set regardless")
+
+	adm = aliasAdmission(t, "", map[string]any{"sub": "agent-1"})
+	core.setAdmissionMount(ctx, req, adm)
+	assert.Empty(t, adm.AliasName, "a mount naming no source")
+
+	// A login whose credential yields no alias still issues its token.
+	adm = aliasAdmission(t, "sub", map[string]any{"sub": map[string]any{"nested": true}})
+	resp := &logical.Response{
+		Data: map[string]any{},
+		Auth: &logical.Auth{TokenType: TypeServiceToken, PrincipalID: "p", Policies: []string{"default"},
+			TokenTTL: time.Hour, Admission: adm},
+	}
+	_, err := core.LoginCreateToken(ctx, &logical.Request{MountPoint: "auth/jwt/", MountAccessor: "auth_jwt_1"}, resp)
+	require.NoError(t, err)
+	assert.Empty(t, adm.AliasName)
+	entry, found := core.tokenStore.byID.Get(resp.Data["token_id"].(string))
+	require.True(t, found)
+	assert.Same(t, adm, entry.Admission)
+
+	// An admission already completed is kept as it is.
+	adm = aliasAdmission(t, "sub", map[string]any{"sub": "agent-1"})
+	adm.AliasName = "preset"
+	core.setAdmissionMount(ctx, req, adm)
+	assert.Equal(t, "preset", adm.AliasName)
+	assert.Empty(t, adm.MountAccessor)
 }
 
 // A login without an admission issues a token without one.

@@ -42,11 +42,19 @@ func spiffeBuiltinFacts() []string {
 	}
 }
 
+// spiffeAliasPolicy fixes an SVID's alias to its SPIFFE ID: it names the
+// workload already, and nothing else in an SVID does.
+var spiffeAliasPolicy = helper.AliasPolicy{Default: factSPIFFEID, Fixed: true}
+
+// spiffeAliasSources is the phrase the config path uses for
+// alias_name_source on a spiffe mount, where it cannot be set.
+const spiffeAliasSources = "fixed to spiffe_id on a spiffe mount; a write setting it is refused"
+
 // defaultNaming returns the naming of a mount with no config: the built-in
-// facts, and the agent kind. It always compiles.
+// facts, the agent kind, and the SPIFFE ID as the alias. It always compiles.
 func defaultNaming() *logical.MountNaming {
 	var fc helper.FactsConfig
-	fc.CompileFields(spiffeBuiltinFacts())
+	fc.CompileFields(spiffeBuiltinFacts(), spiffeAliasPolicy)
 	return fc.Naming()
 }
 

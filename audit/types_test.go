@@ -92,6 +92,33 @@ func TestCloneRoleGrant(t *testing.T) {
 	}
 }
 
+// The native identity fields survive a clone, and the clone does not share the
+// admitted mounts with the original.
+func TestCloneNativeIdentity(t *testing.T) {
+	entry := &LogEntry{Auth: &Auth{
+		MountAccessor: "auth_jwt_1",
+		AliasName:     "repo:acme/x",
+		EntityKind:    "agent",
+		Discovery:     &DiscoveryAuth{AdmittedBy: []AdmittedMount{{Mount: "jwt/", AliasName: "repo:acme/x"}}},
+	}}
+	clone := entry.Clone()
+	entry.Auth.Discovery.AdmittedBy[0].AliasName = "modified"
+	if clone.Auth.MountAccessor != "auth_jwt_1" || clone.Auth.AliasName != "repo:acme/x" || clone.Auth.EntityKind != "agent" {
+		t.Errorf("clone drops a native identity field: %+v", clone.Auth)
+	}
+	if clone.Auth.Discovery.AdmittedBy[0].AliasName != "repo:acme/x" {
+		t.Errorf("clone shares the admitted mounts: %+v", clone.Auth.Discovery.AdmittedBy)
+	}
+
+	b, err := json.Marshal(&Auth{MountAccessor: "auth_jwt_1", AliasName: "a", EntityKind: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"mount_accessor":"auth_jwt_1","alias_name":"a","entity_kind":"agent"}`; string(b) != want {
+		t.Errorf("got  %s\nwant %s", b, want)
+	}
+}
+
 // TestRoleGrant_JSONKeys: the new keys are omitempty, so an entry for a token
 // that carries its role serializes as before, and the wire names are pinned.
 func TestRoleGrant_JSONKeys(t *testing.T) {

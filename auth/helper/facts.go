@@ -21,29 +21,42 @@ import (
 )
 
 // FactsConfig is the part of an auth mount's configuration that names what it
-// admits: the kind of entity, and the facts it publishes beyond the method's
-// built-ins (source to canonical name). Methods embed it in their config
-// struct; encoding/json flattens the two exported fields into the config's
-// own keys and skips the compiled state.
+// admits: the kind of entity, the facts it publishes beyond the method's
+// built-ins (source to canonical name), and the fact its native identities
+// (aliases) are taken from. Methods embed it in their config struct;
+// encoding/json flattens the exported fields into the config's own keys and
+// skips the compiled state.
 //
 // A FactsConfig is compiled once, when the config is built, and is not changed
 // afterwards: the config that holds it is installed whole and read under the
 // mount's config lock, and the naming it compiled to is immutable.
 type FactsConfig struct {
-	EntityKind string            `json:"entity_kind,omitempty"`
-	Facts      map[string]string `json:"facts,omitempty"`
+	EntityKind      string            `json:"entity_kind,omitempty"`
+	Facts           map[string]string `json:"facts,omitempty"`
+	AliasNameSource string            `json:"alias_name_source,omitempty"`
 
 	naming    *logical.MountNaming
 	namingErr error
 }
 
-// Compile compiles EntityKind and Facts with the method's built-in fact names.
-// On success Naming returns the result; on failure Naming is nil and Err says
-// why, naming the config key at fault. Either way an empty EntityKind becomes
-// logical.EntityKindAgent, the default it stands for, so a config reads back
-// the same kind whether or not its facts compile; a kind that is set is left
-// as written.
-func (c *FactsConfig) Compile(builtins []string) {
+// AliasPolicy is what a method allows as its alias source: the fact an empty
+// alias_name_source means (Default), and the names it may be set to (Allowed;
+// nil allows any fact name visible on the mount, built-in or mapped). A Fixed
+// policy refuses alias_name_source altogether: the alias is always Default.
+type AliasPolicy struct {
+	Default string
+	Allowed []string
+	Fixed   bool
+}
+
+// Compile compiles EntityKind, Facts and AliasNameSource with the method's
+// built-in fact names and alias policy. On success Naming returns the result;
+// on failure Naming is nil and Err says why, naming the config key at fault.
+// Either way an empty EntityKind becomes logical.EntityKindAgent, the default
+// it stands for, so a config reads back the same kind whether or not its facts
+// compile; a kind that is set is left as written. An empty AliasNameSource
+// stays empty in the config and compiles to the policy's default.
+func (c *FactsConfig) Compile(builtins []string, alias AliasPolicy) {
 	c.naming, c.namingErr = nil, nil
 	c.defaultKind()
 	mapping, err := selector.CompileMapping(builtins, c.Facts)
@@ -56,8 +69,33 @@ func (c *FactsConfig) Compile(builtins []string) {
 		c.namingErr = fmt.Errorf("entity_kind: %w", err)
 		return
 	}
+	source, err := c.aliasSource(mapping, alias)
+	if err != nil {
+		c.namingErr = fmt.Errorf("alias_name_source: %w", err)
+		return
+	}
+	naming.AliasSource = source
 	c.naming = naming
 	c.EntityKind = naming.Kind
+}
+
+// aliasSource returns the fact the mount's aliases are taken from: the
+// configured one, or the policy's default when none is configured. A
+// configured name must be allowed by the policy and visible under mapping.
+func (c *FactsConfig) aliasSource(mapping *selector.Mapping, alias AliasPolicy) (string, error) {
+	source := c.AliasNameSource
+	switch {
+	case source == "":
+		return alias.Default, nil
+	case alias.Fixed:
+		return "", fmt.Errorf("cannot be set on this mount: the alias is always %q", alias.Default)
+	case alias.Allowed != nil && !slices.Contains(alias.Allowed, source):
+		return "", fmt.Errorf("%q is not one of %s", source, strings.Join(alias.Allowed, ", "))
+	case !slices.Contains(mapping.Names(), source):
+		return "", fmt.Errorf("%q is not a fact this mount publishes (one of %s)",
+			source, strings.Join(mapping.Names(), ", "))
+	}
+	return source, nil
 }
 
 // CompileFields is Compile for a method whose facts are a fixed set of fields
@@ -65,7 +103,7 @@ func (c *FactsConfig) Compile(builtins []string) {
 // may map, since a Table answers nothing else. A source outside fields fails
 // the compile, naming the fields that exist; EntityKind is defaulted as
 // Compile defaults it.
-func (c *FactsConfig) CompileFields(fields []string) {
+func (c *FactsConfig) CompileFields(fields []string, alias AliasPolicy) {
 	sources := slices.Sorted(maps.Keys(c.Facts))
 	for _, source := range sources {
 		if !slices.Contains(fields, source) {
@@ -76,7 +114,7 @@ func (c *FactsConfig) CompileFields(fields []string) {
 			return
 		}
 	}
-	c.Compile(fields)
+	c.Compile(fields, alias)
 }
 
 // defaultKind sets an empty EntityKind to logical.EntityKindAgent, the kind an
@@ -103,8 +141,8 @@ const FactsDoNotCompileLog = "auth mount facts do not compile; the mount answers
 // FactsWriteError returns why a config write must be refused over its facts,
 // or nil. built is the facts part of the config the write would install, with
 // the stored values merged under the request's; touched reports whether the
-// request carried facts or entity_kind. A write that left both out can only
-// fail on what is stored, and is told how to replace it.
+// request carried facts, entity_kind or alias_name_source. A write that left
+// them out can only fail on what is stored, and is told how to replace it.
 func FactsWriteError(built *FactsConfig, touched bool) error {
 	err := built.Err()
 	if err == nil {
@@ -119,10 +157,11 @@ func FactsWriteError(built *FactsConfig, touched bool) error {
 // FactsFieldSchemas returns the config fields every fact-naming auth method
 // accepts, so their descriptions stay alike. sources says what a source is on
 // the calling method, as a phrase ("a claim name, or …"; "one of the
-// TokenReview fields: …"). The map is fresh on each call, for the caller to
-// merge into its path's fields.
-func FactsFieldSchemas(sources string) map[string]*framework.FieldSchema {
-	return map[string]*framework.FieldSchema{
+// TokenReview fields: …"); aliases says what alias_name_source may name, as
+// a phrase, and is empty on a method whose alias is fixed. The map is fresh on
+// each call, for the caller to merge into its path's fields.
+func FactsFieldSchemas(sources, aliases string) map[string]*framework.FieldSchema {
+	fields := map[string]*framework.FieldSchema{
 		"entity_kind": {
 			Type:        framework.TypeString,
 			Description: "Kind of entity this mount admits: agent (default) or human.",
@@ -134,6 +173,25 @@ func FactsFieldSchemas(sources string) map[string]*framework.FieldSchema {
 				"A write replaces the whole map; an empty map clears it.",
 		},
 	}
+	if aliases != "" {
+		fields["alias_name_source"] = &framework.FieldSchema{
+			Type: framework.TypeString,
+			Description: "Fact whose first value is a credential's native identity (alias): " + aliases + ". " +
+				"Applies to credentials admitted after the change. An empty value restores the default.",
+		}
+	}
+	return fields
+}
+
+// ParseAliasNameSource converts the alias_name_source field of a config write.
+func ParseAliasNameSource(raw any) (string, error) {
+	switch v := raw.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return strings.TrimSpace(v), nil
+	}
+	return "", fmt.Errorf("alias_name_source: must be a string, got %T", raw)
 }
 
 // ParseBoundAudiences converts a bound_audiences value, from a config write,

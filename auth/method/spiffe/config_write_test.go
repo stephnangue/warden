@@ -29,6 +29,21 @@ func writeConfig(b *spiffeAuthBackend, raw map[string]any) *logical.Response {
 	return resp
 }
 
+// An SVID's alias is always its SPIFFE ID: a mount with no config names it,
+// and a write setting alias_name_source is refused, whatever it names.
+func TestConfigWrite_AliasNameSourceFixed(t *testing.T) {
+	b, _ := createTestBackend(t)
+	assert.Equal(t, factSPIFFEID, b.mountFacts.Load().AliasSource, "an unconfigured mount")
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"bound_audiences": "warden"}).StatusCode)
+	assert.Equal(t, factSPIFFEID, b.mountFacts.Load().AliasSource)
+
+	for _, v := range []string{"spiffe_id", "path"} {
+		resp := writeConfig(b, map[string]any{"alias_name_source": v})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, v)
+		assert.Contains(t, resp.Err.Error(), `alias_name_source: cannot be set on this mount: the alias is always "spiffe_id"`)
+	}
+}
+
 // A write that cannot be persisted is not installed either. Before, the new
 // config was live by the time the storage write failed.
 func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {

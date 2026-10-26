@@ -25,6 +25,24 @@ const (
 	factCA         = "ca"
 )
 
+// certAliasPolicy takes a certificate's alias from its common name by default,
+// or from another identity field (the fields principal_claim accepts).
+var certAliasPolicy = helper.AliasPolicy{
+	Default: factCommonName,
+	Allowed: []string{factCommonName, factDNSSAN, factEmailSAN, factURISAN, factSerial},
+}
+
+// certAliasSources is the phrase the config path uses for what
+// alias_name_source may name on a cert mount.
+const certAliasSources = "one of cn, dns_san, email_san, uri_san, serial; default cn"
+
+// cnAliasSpansAnchors is the warning a config write returns when aliases are
+// common names while the mount trusts more than one anchor: two CAs can issue
+// the same name, and both certificates would present one native identity.
+const cnAliasSpansAnchors = "alias_name_source is cn while trusted_ca_pem holds %d certificates: " +
+	"certificates from different CAs with the same common name present the same native identity; " +
+	"use uri_san, or one mount per CA"
+
 // certBuiltinFacts returns the fact names every cert mount publishes under
 // their own names. The slice is fresh on each call.
 func certBuiltinFacts() []string {

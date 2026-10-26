@@ -111,6 +111,13 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 		auditAuth.NamespaceID = te.NamespaceID
 		auditAuth.NamespacePath = te.NamespacePath
 		auditAuth.CreatedByIP = te.CreatedByIP
+		auditAuth.MountAccessor = te.MountAccessor
+		if adm := te.Admission; adm != nil {
+			auditAuth.AliasName = adm.AliasName
+			if n := adm.Mount.Load(); n != nil {
+				auditAuth.EntityKind = n.Kind
+			}
+		}
 
 		if !te.ExpireAt.IsZero() {
 			auditAuth.ExpiresAt = te.ExpireAt.Unix()
@@ -314,7 +321,7 @@ func stampDiscovery(entry *audit.LogEntry, req *logical.Request) {
 	if len(d.AdmittedBy) > 0 {
 		da.AdmittedBy = make([]audit.AdmittedMount, len(d.AdmittedBy))
 		for i, m := range d.AdmittedBy {
-			da.AdmittedBy[i] = audit.AdmittedMount{Mount: m.Mount, PrincipalID: m.PrincipalID}
+			da.AdmittedBy[i] = audit.AdmittedMount{Mount: m.Mount, PrincipalID: m.PrincipalID, AliasName: m.AliasName}
 		}
 	}
 	entry.Auth.Discovery = da

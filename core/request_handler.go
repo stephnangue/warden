@@ -843,7 +843,7 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 	}
 
 	if auth.Admission != nil {
-		c.setAdmissionMountPath(ctx, req, auth.Admission)
+		c.setAdmissionMount(ctx, req, auth.Admission)
 	}
 
 	// A login is an admission: the token carries no role and no credential
@@ -907,15 +907,23 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 	return resp, nil
 }
 
-// setAdmissionMountPath names the admitting mount on adm relative to the
-// namespace, the form a selector pins: req.MountPoint carries the namespace
-// prefix, which is cut off. Only this function sets MountPath, once per login,
-// before the token store shares the admission; one that arrives already set is
-// kept. When the mount cannot be named (no request, no namespace, a mount point
-// outside the namespace) MountPath stays empty and the "mount" fact is absent,
-// so no rule pinning a mount matches.
-func (c *Core) setAdmissionMountPath(ctx context.Context, req *logical.Request, adm *logical.Admission) {
-	if adm.MountPath != "" {
+// setAdmissionMount completes adm with what only core knows about the
+// admitting mount, once per admission (a login, or a discovery admission),
+// before the admission is shared: its accessor, the alias its credential
+// presents, and its path relative to the namespace. An admission that arrives
+// already completed is kept as it is.
+//
+// The alias is derived under the naming in force now, so a change to the
+// mount's alias_name_source reaches credentials admitted afterwards. An alias
+// that cannot be derived is left empty and logged once per mount; it never
+// fails a login.
+//
+// MountPath is the form a selector pins: req.MountPoint carries the namespace
+// prefix, which is cut off. When the mount cannot be named (no request, no
+// namespace, a mount point outside the namespace) MountPath stays empty and
+// the "mount" fact is absent, so no rule pinning a mount matches.
+func (c *Core) setAdmissionMount(ctx context.Context, req *logical.Request, adm *logical.Admission) {
+	if adm.MountPath != "" || adm.MountAccessor != "" || adm.AliasName != "" {
 		c.logger.Warn("admission already names its mount; keeping it",
 			logger.String("mount_path", adm.MountPath))
 		return
@@ -923,6 +931,13 @@ func (c *Core) setAdmissionMountPath(ctx context.Context, req *logical.Request, 
 	var mountPoint string
 	if req != nil {
 		mountPoint = req.MountPoint
+		adm.MountAccessor = req.MountAccessor
+	}
+	if n := adm.Mount.Load(); n != nil && n.AliasSource != "" {
+		adm.AliasName = adm.DeriveAlias(n)
+		if adm.AliasName == "" {
+			c.logAliasUnderivedOnce(adm.MountAccessor, mountPoint, n.AliasSource)
+		}
 	}
 	ns, err := namespace.FromContext(ctx)
 	if err != nil || ns == nil {
@@ -938,6 +953,21 @@ func (c *Core) setAdmissionMountPath(ctx context.Context, req *logical.Request, 
 		return
 	}
 	adm.MountPath = rel
+}
+
+// logAliasUnderivedOnce logs, once per mount accessor, that a credential the
+// mount admitted carries no usable value for its alias source: the fact is
+// absent, not a scalar, empty, too long, or not printable. Such a credential
+// has no native identity; the login itself is not refused.
+func (c *Core) logAliasUnderivedOnce(accessor, mountPoint, source string) {
+	if _, seen := c.aliasUnderivedLogged.LoadOrStore(accessor, struct{}{}); seen {
+		return
+	}
+	c.logger.Warn("credential admitted without a native identity: its alias source yields no usable value; "+
+		"check alias_name_source on the mount (logged once per mount)",
+		logger.String("mount_point", mountPoint),
+		logger.String("mount_accessor", accessor),
+		logger.String("alias_name_source", source))
 }
 
 func (c *Core) doRouting(ctx context.Context, req *logical.Request) (*logical.Response, error) {

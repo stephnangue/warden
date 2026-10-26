@@ -92,7 +92,7 @@ func login(t *testing.T, b *jwtAuthBackend, token string) *logical.Response {
 // compileFacts compiles kind and facts as a jwt mount config does.
 func compileFacts(kind string, facts map[string]string) (*logical.MountNaming, error) {
 	fc := helper.FactsConfig{EntityKind: kind, Facts: facts}
-	fc.Compile(jwtBuiltinFacts())
+	fc.Compile(jwtBuiltinFacts(), jwtAliasPolicy)
 	return fc.Naming(), fc.Err()
 }
 
@@ -458,6 +458,45 @@ func TestConfigWrite_Facts(t *testing.T) {
 	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"facts": map[string]any{}}).StatusCode)
 	assert.Empty(t, b.mountFacts.Load().Mapping.Mapped())
 	assert.Equal(t, []string{"aud", "iss", "sub"}, b.FactNames())
+}
+
+// alias_name_source on a jwt mount may name any fact the mount publishes,
+// built-in or mapped, and defaults to sub; a claim the mount does not publish
+// is refused, and so is removing the mapping a configured source relies on.
+func TestConfigWrite_AliasNameSource(t *testing.T) {
+	ctx := context.Background()
+	b, _ := factsBackend(t, nil)
+	assert.Equal(t, "sub", b.mountFacts.Load().AliasSource, "sub by default")
+
+	resp := writeConfig(b, map[string]any{
+		"facts":             map[string]any{"repository": "repo"},
+		"alias_name_source": "repo",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, "repo", b.mountFacts.Load().AliasSource)
+
+	read, err := b.handleConfigRead(ctx, &logical.Request{}, &framework.FieldData{})
+	require.NoError(t, err)
+	assert.Equal(t, "repo", read.Data["alias_name_source"])
+
+	reloaded, _ := createTestBackendWithStorage(t)
+	reloaded.storageView = b.storageView
+	require.NoError(t, reloaded.Initialize(ctx))
+	assert.Equal(t, "repo", reloaded.mountFacts.Load().AliasSource, "stored and reloaded")
+
+	resp = writeConfig(b, map[string]any{"alias_name_source": "repository"})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), `alias_name_source: "repository" is not a fact this mount publishes`,
+		"the raw claim is invisible; its mapped name is the fact")
+
+	resp = writeConfig(b, map[string]any{"facts": map[string]any{}})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "the source would no longer be published")
+	assert.Contains(t, resp.Err.Error(), "alias_name_source:")
+	assert.Equal(t, "repo", b.mountFacts.Load().AliasSource, "a refused write is not published")
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"alias_name_source": "iss"}).StatusCode)
+	assert.Equal(t, "iss", b.mountFacts.Load().AliasSource, "a built-in")
+	assert.Contains(t, b.pathConfig().Fields["alias_name_source"].Description, "default sub")
 }
 
 // The config read hands out copies: changing one leaves the live config alone.

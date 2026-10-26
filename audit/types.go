@@ -92,6 +92,19 @@ type Auth struct {
 	PrincipalID string `json:"principal_id,omitempty"`
 	RoleName    string `json:"role_name,omitempty"`
 
+	// MountAccessor is the accessor of the auth mount that admitted the
+	// credential; empty for a token no mount issued (root).
+	MountAccessor string `json:"mount_accessor,omitempty"`
+
+	// AliasName is the native identity the credential presented, as the
+	// admitting mount derived it (its alias_name_source). Salted like
+	// PrincipalID; omittable.
+	AliasName string `json:"alias_name,omitempty"`
+
+	// EntityKind is the kind of entity the admitting mount admits (agent or
+	// human).
+	EntityKind string `json:"entity_kind,omitempty"`
+
 	// RoleGrantedBy names the group that granted RoleName ("group:<name>")
 	// when the token takes its role per request; empty for a token that
 	// carries its role itself.
@@ -153,6 +166,9 @@ type DiscoveryAuth struct {
 type AdmittedMount struct {
 	Mount       string `json:"mount"`
 	PrincipalID string `json:"principal_id,omitempty"`
+	// AliasName is the native identity the credential presented there,
+	// salted like PrincipalID.
+	AliasName string `json:"alias_name,omitempty"`
 }
 
 // UserAttribution records the secondary (user) principal in an audit entry so a
@@ -372,6 +388,9 @@ func (e *LogEntry) Clone() *LogEntry {
 			TokenType:        e.Auth.TokenType,
 			PrincipalID:      e.Auth.PrincipalID,
 			RoleName:         e.Auth.RoleName,
+			MountAccessor:    e.Auth.MountAccessor,
+			AliasName:        e.Auth.AliasName,
+			EntityKind:       e.Auth.EntityKind,
 			RoleGrantedBy:    e.Auth.RoleGrantedBy,
 			RoleDeniedReason: e.Auth.RoleDeniedReason,
 			TokenTTL:         e.Auth.TokenTTL,

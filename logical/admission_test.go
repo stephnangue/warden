@@ -3,6 +3,7 @@ package logical
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -143,6 +144,54 @@ func TestAdmissionLookup_DoesNotAllocate(t *testing.T) {
 		}
 	})
 	assert.Zero(t, allocs)
+}
+
+// DeriveAlias takes the first value of the naming's alias source, rendered as
+// a fact renders; a value that cannot name a native identity yields none.
+func TestAdmissionDeriveAlias(t *testing.T) {
+	adm, naming := jwtAdmission(t)
+	alias := func(source string) string {
+		n := *naming
+		n.AliasSource = source
+		return adm.DeriveAlias(&n)
+	}
+	assert.Equal(t, "agent-1", alias("sub"))
+	assert.Equal(t, "acme/api", alias("repo"), "a mapped fact")
+	assert.Equal(t, "prod", alias("env"), "a mapped JSON pointer")
+	assert.Equal(t, "warden", alias("aud"), "the first value of a multi-valued fact")
+	assert.Equal(t, "auth/jwt/", alias("mount"), "the built-in mount is a fact too")
+	assert.Empty(t, alias("gone"), "a fact the credential does not carry")
+	assert.Empty(t, alias("email"), "a claim the mount does not publish is invisible")
+	assert.Empty(t, alias(""), "no source")
+	assert.Empty(t, adm.DeriveAlias(nil))
+	assert.Empty(t, (*Admission)(nil).DeriveAlias(naming))
+
+	numeric := &Admission{Facts: testClaims(t, `{"sub": 1234567890}`)}
+	n := testNaming(t, testMapping(t, []string{"sub"}, nil), "")
+	n.AliasSource = "sub"
+	assert.Equal(t, "1234567890", numeric.DeriveAlias(n), "a number renders as JSON encodes it")
+
+	for _, bad := range []string{
+		`{"sub": ""}`,
+		`{"sub": {"nested": true}}`,
+		`{"sub": "line\nbreak"}`,
+		fmt.Sprintf(`{"sub": %q}`, strings.Repeat("a", MaxAliasNameBytes+1)),
+	} {
+		a := &Admission{Facts: testClaims(t, bad)}
+		assert.Empty(t, a.DeriveAlias(n), bad)
+	}
+	long := strings.Repeat("a", MaxAliasNameBytes)
+	assert.Equal(t, long, (&Admission{Facts: testClaims(t, fmt.Sprintf(`{"sub": %q}`, long))}).DeriveAlias(n),
+		"exactly the cap")
+}
+
+func TestValidAliasName(t *testing.T) {
+	for _, s := range []string{"system:serviceaccount:ci:deployer", "spiffe://corp.example/ns/a", "repo:acme/x:ref:refs/heads/main", "é"} {
+		assert.True(t, ValidAliasName(s), s)
+	}
+	for _, s := range []string{"", "a\tb", "a\x00b", string([]byte{0xff}), strings.Repeat("x", MaxAliasNameBytes+1)} {
+		assert.False(t, ValidAliasName(s), "%q", s)
+	}
 }
 
 func TestParseEntityKind(t *testing.T) {
