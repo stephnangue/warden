@@ -545,15 +545,16 @@ func (c *Sys) UpdateEntityWithContext(ctx context.Context, name string, input *E
 }
 
 // DeleteEntity deletes the entity name, releasing the native identities it
-// claims. A non-empty expectedHash deletes it only if it still has that hash.
-// A retired entity is deleted only with force: its native identities are
-// unclaimed again.
-func (c *Sys) DeleteEntity(name, expectedHash string, force bool) error {
+// claims, and returns the server's warnings (nil when there are none). A
+// non-empty expectedHash deletes it only if it still has that hash. A retired
+// entity is deleted only with force: its native identities are unclaimed
+// again, which a warning says.
+func (c *Sys) DeleteEntity(name, expectedHash string, force bool) ([]string, error) {
 	return c.DeleteEntityWithContext(context.Background(), name, expectedHash, force)
 }
 
 // DeleteEntityWithContext deletes the entity name with context.
-func (c *Sys) DeleteEntityWithContext(ctx context.Context, name, expectedHash string, force bool) error {
+func (c *Sys) DeleteEntityWithContext(ctx context.Context, name, expectedHash string, force bool) ([]string, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -565,11 +566,18 @@ func (c *Sys) DeleteEntityWithContext(ctx context.Context, name, expectedHash st
 		r.Params.Set("force", "true")
 	}
 	resp, err := c.c.rawRequestWithContext(ctx, r)
-	if err != nil {
-		return err
+	if resp != nil {
+		defer resp.Body.Close()
 	}
-	defer resp.Body.Close()
-	return nil
+	if err != nil {
+		return nil, err
+	}
+	resource, perr := ParseResource(resp.Body)
+	if perr != nil || resource == nil || resource.Data == nil {
+		// The entity is deleted; a body that does not parse only loses warnings.
+		return nil, nil
+	}
+	return parseWarnings(resource.Data["warnings"]), nil
 }
 
 // ListEntities lists the entities of the client's namespace that f selects
