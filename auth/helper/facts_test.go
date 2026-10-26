@@ -237,6 +237,46 @@ func TestCompile_AliasSource(t *testing.T) {
 	assert.Empty(t, c.Naming().AliasSource, "a policy without a default names no source")
 }
 
+// AliasChange sees every write that changes how aliases are derived: the
+// source name, the raw key behind a mapped source, and the kind; a write that
+// changes none of them, or that would be refused, is no change.
+func TestAliasChange(t *testing.T) {
+	open := AliasPolicy{Default: "sub"}
+	compile := func(c *FactsConfig) { c.Compile(testBuiltins, open) }
+	cur := FactsConfig{Facts: map[string]string{"repository": "repo"}, AliasNameSource: "repo"}
+	compile(&cur)
+	require.NoError(t, cur.Err())
+	mf := &logical.MountFacts{}
+	mf.Publish(cur.Naming())
+
+	from, to := AliasChange(mf, cur, map[string]any{"bound_audiences": "x"}, compile)
+	assert.Equal(t, `kind agent, fact "repo" (source "repository")`, from)
+	assert.Equal(t, from, to, "a write without the keys")
+
+	cases := []struct {
+		name string
+		data map[string]any
+		want string
+	}{
+		{"source renamed", map[string]any{"alias_name_source": "sub"}, `kind agent, fact "sub"`},
+		{"raw key remapped", map[string]any{"facts": map[string]any{"job_workflow_ref": "repo"}},
+			`kind agent, fact "repo" (source "job_workflow_ref")`},
+		{"kind changed", map[string]any{"entity_kind": "human"}, `kind human, fact "repo" (source "repository")`},
+		{"default restored", map[string]any{"alias_name_source": ""}, `kind agent, fact "sub"`},
+		{"same mapping resent", map[string]any{"facts": map[string]any{"repository": "repo"}, "alias_name_source": "repo"}, from},
+		{"does not compile", map[string]any{"facts": map[string]any{}}, ""},
+		{"does not parse", map[string]any{"entity_kind": 5}, ""},
+	}
+	for _, tc := range cases {
+		_, to := AliasChange(mf, cur, tc.data, compile)
+		assert.Equal(t, tc.want, to, tc.name)
+	}
+	assert.Equal(t, map[string]string{"repository": "repo"}, cur.Facts, "the stored config is not changed")
+
+	from, _ = AliasChange(&logical.MountFacts{}, FactsConfig{}, nil, compile)
+	assert.Empty(t, from, "a mount with no naming derives nothing")
+}
+
 func TestParseAliasNameSource(t *testing.T) {
 	s, err := ParseAliasNameSource(" uri_san ")
 	require.NoError(t, err)

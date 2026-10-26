@@ -60,9 +60,13 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 				"dev/*",
 				"roles",
 				"roles/*",
-				// The group paths only: identity/usage is a normal ACL path.
+				// The group, entity and lookup paths: identity/usage is a
+				// normal ACL path.
 				"identity/group",
 				"identity/group/*",
+				"identity/entity",
+				"identity/entity/*",
+				"identity/lookup",
 				"step-down",
 			},
 		},
@@ -111,6 +115,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// Namespace groups
 	paths = append(paths, b.pathIdentityGroups()...)
+
+	// Namespace entities and their native identities
+	paths = append(paths, b.pathIdentityEntities()...)
 
 	// Audit paths
 	paths = append(paths, b.pathAudit()...)

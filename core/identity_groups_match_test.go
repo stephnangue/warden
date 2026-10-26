@@ -17,9 +17,9 @@ import (
 )
 
 // testNS compiles groups into a namespace snapshot at generation gen.
-func testNS(t testing.TB, gen uint64, groups ...*logical.Group) *nsGroups {
+func testNS(t testing.TB, gen uint64, groups ...*logical.Group) *nsIndex {
 	t.Helper()
-	byName := make(map[string]*compiledGroup, len(groups))
+	byName := make(map[string]*groupEntry, len(groups))
 	for _, g := range groups {
 		if g.Type == "" {
 			g.Type = logical.GroupTypeVirtual
@@ -29,9 +29,9 @@ func testNS(t testing.TB, gen uint64, groups ...*logical.Group) *nsGroups {
 		cg.Group, cg.hash = g, g.Hash()
 		byName[g.Name] = cg
 	}
-	gs := buildNSGroups(byName, gen)
+	gs := buildNSIndex(byName, nil, gen)
 	if gs == nil {
-		return emptyNSGroups
+		return emptyNSIndex
 	}
 	return gs
 }
@@ -191,8 +191,8 @@ func TestCompute_GrantsAndValidUntil(t *testing.T) {
 	assert.Equal(t, "group:c-none", m.Roles["write"].Label)
 	assert.NotContains(t, m.Roles, "admin")
 
-	// The labels are the compiled group's own strings, built once.
-	cg := gs.byName["b-ten"]
+	// The labels are the group entry's own strings, built once.
+	cg := gs.groupsByName["b-ten"]
 	assert.Equal(t, unsafe.StringData(cg.grants[0].grant.Label), unsafe.StringData(m.Roles["deploy"].Label))
 
 	// No valid_until among the matched groups: no bound.
@@ -204,11 +204,11 @@ func TestCompute_GrantsAndValidUntil(t *testing.T) {
 func TestCompute_MetadataFromNamingInForce(t *testing.T) {
 	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "agent-1", "repository": "acme/infra", "env": "prod"}, time.Time{})
 	n1 := adm.Mount.Load()
-	m := compute(adm, n1, emptyNSGroups, time.Now())
+	m := compute(adm, n1, emptyNSIndex, time.Now())
 	assert.Equal(t, map[string]string{"repo": "acme/infra", "sub": "agent-1"}, m.Metadata)
 
 	n2 := testNaming(t, "", map[string]string{"env": "environment"})
-	m = compute(adm, n2, emptyNSGroups, time.Now())
+	m = compute(adm, n2, emptyNSIndex, time.Now())
 	assert.Equal(t, map[string]string{"environment": "prod"}, m.Metadata, "rendered under the naming passed in")
 	assert.Same(t, n2, m.Naming)
 }
@@ -218,7 +218,7 @@ func TestCompute_MetadataFromNamingInForce(t *testing.T) {
 func TestCompute_AllocationsDoNotGrowWithRules(t *testing.T) {
 	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a"}, time.Time{})
 	n := adm.Mount.Load()
-	miss := func(count int) *nsGroups {
+	miss := func(count int) *nsIndex {
 		groups := make([]*logical.Group, count)
 		for i := range groups {
 			groups[i] = group(fmt.Sprintf("g%03d", i), nil, noEnd, rule("mount", []string{"auth/jwt/"}, "sub", []string{"nope"}))
@@ -246,7 +246,7 @@ func TestMountIndex(t *testing.T) {
 	names := func(mount string) []string {
 		var out []string
 		for _, i := range gs.candidates(mount) {
-			out = append(out, gs.selecting[i].Name)
+			out = append(out, gs.virtualGroups[i].Name)
 		}
 		return out
 	}
@@ -405,8 +405,8 @@ func TestMembership_ThroughStore(t *testing.T) {
 	admY := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a"}, time.Time{})
 
 	// No groups yet: the sentinel, generation 0.
-	gsY := s.namespaceGroups(nsY.ID)
-	assert.Same(t, emptyNSGroups, gsY)
+	gsY := s.namespaceIndex(nsY.ID)
+	assert.Same(t, emptyNSIndex, gsY)
 	mY := membership(admY, gsY, now)
 	assert.Zero(t, mY.Gen)
 	assert.Empty(t, mY.Groups)
@@ -416,7 +416,7 @@ func TestMembership_ThroughStore(t *testing.T) {
 	_, err = s.CreateGroup(ctxX, &logical.Group{Name: "xg", Type: logical.GroupTypeVirtual,
 		Rules: []logical.GroupRule{{"mount": {"auth/jwt/"}, "sub": {"a"}}}})
 	require.NoError(t, err)
-	mY = membership(admY, s.namespaceGroups(nsY.ID), now)
+	mY = membership(admY, s.namespaceIndex(nsY.ID), now)
 	assert.NotZero(t, mY.Gen)
 
 	// Readers keep computing while X publishes.
@@ -432,7 +432,7 @@ func TestMembership_ThroughStore(t *testing.T) {
 					return
 				default:
 				}
-				m := membership(admX, s.namespaceGroups(namespace.RootNamespaceID), time.Now())
+				m := membership(admX, s.namespaceIndex(namespace.RootNamespaceID), time.Now())
 				if len(m.Groups) > 1 {
 					t.Errorf("unexpected groups %v", m.Groups)
 					return
@@ -449,21 +449,21 @@ func TestMembership_ThroughStore(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	assert.Same(t, mY, membership(admY, s.namespaceGroups(nsY.ID), now),
+	assert.Same(t, mY, membership(admY, s.namespaceIndex(nsY.ID), now),
 		"publishes in another namespace leave this one's membership valid")
-	mX := membership(admX, s.namespaceGroups(namespace.RootNamespaceID), now)
+	mX := membership(admX, s.namespaceIndex(namespace.RootNamespaceID), now)
 	assert.Equal(t, []string{"xg"}, mX.Groups)
 
 	// A group change in Y recomputes Y.
 	require.NoError(t, s.DeleteGroup(ctxY, "yg", "", ""))
-	assert.Same(t, emptyNSGroups, s.namespaceGroups(nsY.ID), "a namespace whose last group is deleted is empty")
-	mY2 := membership(admY, s.namespaceGroups(nsY.ID), now)
+	assert.Same(t, emptyNSIndex, s.namespaceIndex(nsY.ID), "a namespace whose last group is deleted is empty")
+	mY2 := membership(admY, s.namespaceIndex(nsY.ID), now)
 	assert.NotSame(t, mY, mY2)
 	assert.Zero(t, mY2.Gen)
 
 	// Clearing X recomputes X to nothing.
 	require.NoError(t, s.ClearNamespace(ctxX))
-	mX2 := membership(admX, s.namespaceGroups(namespace.RootNamespaceID), now)
+	mX2 := membership(admX, s.namespaceIndex(namespace.RootNamespaceID), now)
 	assert.NotSame(t, mX, mX2)
 	assert.Empty(t, mX2.Groups)
 }
@@ -475,10 +475,10 @@ func TestMembership_GenerationNeverRepeats(t *testing.T) {
 	ctx := rootCtx()
 	_, err := c.identityStore.CreateGroup(ctx, virtualGroup("g", "deploy"))
 	require.NoError(t, err)
-	before := c.identityStore.namespaceGroups(namespace.RootNamespaceID).gen
+	before := c.identityStore.namespaceIndex(namespace.RootNamespaceID).gen
 
 	c.teardownIdentityStore()
 	require.NoError(t, c.setupIdentityStore(ctx, false))
-	after := c.identityStore.namespaceGroups(namespace.RootNamespaceID).gen
+	after := c.identityStore.namespaceIndex(namespace.RootNamespaceID).gen
 	assert.Greater(t, after, before)
 }

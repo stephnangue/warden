@@ -18,20 +18,9 @@ import (
 const maxGatewayBodySize = int64(10 << 20) // 10MB
 
 // Headers to remove before proxying
-var headersToRemove = []string{
+var headersToRemove = append(logical.WardenRequestHeaders(),
 	// Security headers (will be replaced with GCP Bearer token)
 	"Authorization",
-	"X-Warden-Token",
-	"X-Warden-Agent-Token",
-	// Retired in 0.20: the user credential now rides Authorization. Still
-	// stripped so a client that keeps sending the old header cannot leak the
-	// credential to the upstream.
-	"X-Warden-User-Token",
-	"X-Warden-Role",
-	"X-Warden-Provider",
-	"X-Warden-Namespace",
-	"X-Warden-Subject-Token",
-	"X-Warden-Actor-Token",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",
@@ -48,7 +37,7 @@ var headersToRemove = []string{
 	"X-Forwarded-Port",
 	"X-Real-Ip",
 	"Forwarded",
-}
+)
 
 // gcpCredentialInfo holds extracted credential information
 type gcpCredentialInfo struct {

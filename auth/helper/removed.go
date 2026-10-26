@@ -3,7 +3,9 @@ package helper
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -108,17 +110,28 @@ func SetWarnings(data map[string]any, warnings []string) {
 	}
 }
 
+// reservedConfigKeys are auth mount configuration keys kept for what is to
+// come, each with what it will mean, so no method gives one another meaning
+// first. A config write or a mount enable that sets one is refused.
+var reservedConfigKeys = map[string]string{
+	"agent_claim": "it will name the claim that selects one agent among several presenting one native identity",
+}
+
 // RefuseRemovedConfigKeys refuses, with a 400 naming each key and what
-// replaced it, a configuration that sets a removed key. raw is the write's
-// request data, or a mount's config when it is enabled.
+// replaced it, a configuration that sets a removed key, or a reserved one.
+// raw is the write's request data, or a mount's config when it is enabled.
 func RefuseRemovedConfigKeys(raw map[string]any) error {
-	keys := RemovedConfigKeys(raw)
-	if len(keys) == 0 {
-		return nil
+	var parts []string
+	for _, key := range RemovedConfigKeys(raw) {
+		parts = append(parts, key+" was removed: "+removedConfigKeys[key])
 	}
-	parts := make([]string, len(keys))
-	for i, key := range keys {
-		parts[i] = key + " was removed: " + removedConfigKeys[key]
+	for _, key := range slices.Sorted(maps.Keys(reservedConfigKeys)) {
+		if v, ok := raw[key]; ok && isSet(v) {
+			parts = append(parts, key+" is reserved: "+reservedConfigKeys[key])
+		}
+	}
+	if len(parts) == 0 {
+		return nil
 	}
 	return logical.ErrBadRequest(strings.Join(parts, "; "))
 }

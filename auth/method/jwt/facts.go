@@ -28,6 +28,19 @@ func (b *jwtAuthBackend) FactNames() []string { return helper.FactNames(b.mountF
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *jwtAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+// AliasChange implements logical.FactsProvider (see helper.AliasChange).
+func (b *jwtAuthBackend) AliasChange(data map[string]any) (from, to string) {
+	var cur helper.FactsConfig
+	b.configMu.RLock()
+	if b.config != nil {
+		cur = b.config.FactsConfig
+	}
+	b.configMu.RUnlock()
+	return helper.AliasChange(b.mountFacts, cur, data, func(c *helper.FactsConfig) {
+		c.Compile(jwtBuiltinFacts(), jwtAliasPolicy)
+	})
+}
+
 var _ logical.CredentialFormatProvider = (*jwtAuthBackend)(nil)
 
 // CredentialFormat implements logical.CredentialFormatProvider: the mount

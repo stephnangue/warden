@@ -714,6 +714,12 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 
 	// Get the backend/mount entry for this path
 	backend := c.router.MatchingBackend(ctx, path)
+	var authAccessor string
+	if isAuth {
+		if entry := c.router.MatchingMountEntry(ctx, path); entry != nil {
+			authAccessor = entry.Accessor
+		}
+	}
 
 	mountPath := strings.TrimPrefix(path, authRoutePrefix)
 
@@ -762,6 +768,11 @@ func (c *Core) unmountInternal(ctx context.Context, path string, updateStorage b
 	// Unmount the backend entirely
 	if err := c.router.Unmount(revokeCtx, path); err != nil {
 		return err
+	}
+	// An accessor is never given to another mount: forget that this one
+	// logged an alias it could not derive.
+	if authAccessor != "" {
+		c.aliasUnderivedLogged.Delete(authAccessor)
 	}
 
 	c.logger.Info("successfully unmounted",

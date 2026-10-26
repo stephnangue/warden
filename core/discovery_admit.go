@@ -201,7 +201,7 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	}
 	_ = g.Wait()
 
-	gs := c.grantGroups(ns.ID)
+	gs := c.grantIndex(ns.ID)
 	now := time.Now()
 	warnings := []string{}
 	grants := make(map[string]map[string]logical.GroupGrant, len(targets))

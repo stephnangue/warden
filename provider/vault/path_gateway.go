@@ -15,22 +15,11 @@ import (
 )
 
 // Headers to remove before proxying
-var headersToRemove = []string{
+var headersToRemove = append(logical.WardenRequestHeaders(),
 	// Security headers (will be replaced with real values)
 	"Authorization",   // Remove Warden auth token to prevent leakage
 	"X-Vault-Token",   // Will be replaced with real Vault token
 	"X-Vault-Request", // Internal Vault header
-	"X-Warden-Token",
-	"X-Warden-Agent-Token", // Warden-specific auth header
-	// Retired in 0.20: the user credential now rides Authorization. Still
-	// stripped so a client that keeps sending the old header cannot leak the
-	// credential to the upstream.
-	"X-Warden-User-Token",
-	"X-Warden-Role",          // Warden role header
-	"X-Warden-Provider",      // Warden provider-mount routing header
-	"X-Warden-Namespace",     // Warden namespace selector — names a tenant the upstream has no use for
-	"X-Warden-Subject-Token", // token-exchange subject token — internal-only, never forwarded
-	"X-Warden-Actor-Token",   // token-exchange actor token — internal-only, never forwarded
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",
@@ -47,7 +36,7 @@ var headersToRemove = []string{
 	"X-Forwarded-Port",
 	"X-Real-Ip",
 	"Forwarded",
-}
+)
 
 func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Read once: a config write may replace it mid-request.

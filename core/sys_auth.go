@@ -74,6 +74,12 @@ func (b *SystemBackend) pathAuth() []*framework.Path {
 					Type:        framework.TypeMap,
 					Description: "Auth method-specific configuration",
 				},
+				"force": {
+					Type: framework.TypeBool,
+					Description: "On disable (DELETE sys/auth/<path>?force=true): disable even while native " +
+						"identities are claimed on the mount; their claims are left on a mount that no longer " +
+						"exists, listed by LIST sys/identity/entity?orphaned=true",
+				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.CreateOperation: &framework.PathOperation{
@@ -201,9 +207,14 @@ func (b *SystemBackend) handleAuthRead(ctx context.Context, req *logical.Request
 func (b *SystemBackend) handleAuthDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	path := d.Get("path").(string)
 
+	forced, err := b.core.refuseAuthMountDisable(ctx, path, d.Get("force").(bool))
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	b.logger.Info("unmounting auth method", logger.String("path", path))
 
-	// Counted before the unmount, from the group snapshot it does not touch.
+	// Counted before the unmount, from the identity snapshot it does not touch.
 	listed := b.core.groupsListingAuthMount(ctx, path)
 
 	// Unmount via Core
@@ -216,6 +227,9 @@ func (b *SystemBackend) handleAuthDelete(ctx context.Context, req *logical.Reque
 	}
 	if listed > 0 {
 		appendWarnings(data, mountDisableGroupsWarning(path, listed))
+	}
+	if forced != "" {
+		appendWarnings(data, forced)
 	}
 	return b.respondSuccess(data), nil
 }
@@ -231,7 +245,7 @@ func (c *Core) groupsListingAuthMount(ctx context.Context, path string) int {
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
-	return len(c.grantGroups(ns.ID).candidates(authRoutePrefix + path))
+	return len(c.grantIndex(ns.ID).candidates(authRoutePrefix + path))
 }
 
 // mountDisableGroupsWarning is the warning for disabling the auth mount at

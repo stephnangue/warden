@@ -23,11 +23,25 @@ type factsBackend struct {
 	typ   string
 	names []string
 	kind  string // "" answers agent
+
+	// aliasSource is the fact aliases are taken from; a config write's
+	// alias_name_source replaces it in AliasChange's answer.
+	aliasSource string
 }
 
 var _ logical.FactsProvider = (*factsBackend)(nil)
 
 func (b *factsBackend) FactNames() []string { return b.names }
+func (b *factsBackend) AliasChange(data map[string]any) (string, string) {
+	if b.aliasSource == "" {
+		return "", ""
+	}
+	next, sent := data["alias_name_source"].(string)
+	if !sent {
+		next = b.aliasSource
+	}
+	return "from " + b.aliasSource, "from " + next
+}
 func (b *factsBackend) EntityKind() string {
 	if b.kind == "" {
 		return logical.EntityKindAgent
@@ -588,8 +602,8 @@ func TestGroups_ValidUntil(t *testing.T) {
 	g, _, err = c.identityStore.GetGroup(ctx, "g")
 	require.NoError(t, err)
 	assert.True(t, at.Equal(g.ValidUntil))
-	assert.True(t, at.Equal(c.identityStore.namespaceGroups(namespace.RootNamespaceID).byName["g"].ValidUntil),
-		"the compiled group carries it")
+	assert.True(t, at.Equal(c.identityStore.namespaceIndex(namespace.RootNamespaceID).groupsByName["g"].ValidUntil),
+		"the published group entry carries it")
 }
 
 // TestGroups_ValidUntilThroughMembership: a stored group grants through its
@@ -602,7 +616,7 @@ func TestGroups_ValidUntilThroughMembership(t *testing.T) {
 		Roles: []string{"deploy"}, Rules: []logical.GroupRule{{"mount": {"auth/jwt/"}, "sub": {"a"}}}, ValidUntil: end})
 	require.NoError(t, err)
 	adm := groupAdmission(t, "auth/jwt/", "", map[string]any{"sub": "a"}, time.Time{})
-	gs := c.identityStore.namespaceGroups(namespace.RootNamespaceID)
+	gs := c.identityStore.namespaceIndex(namespace.RootNamespaceID)
 
 	m := membership(adm, gs, end)
 	assert.Contains(t, m.Roles, "deploy", "granted at valid_until")
@@ -640,7 +654,7 @@ func TestGroups_Caps(t *testing.T) {
 		_, err := c.identityStore.CreateGroup(other, virtualGroup(n))
 		require.NoError(t, err)
 	}
-	assert.Equal(t, 6, c.identityStore.namespaceGroups("caps-ns").selectors)
+	assert.Equal(t, 6, c.identityStore.namespaceIndex("caps-ns").selectors)
 	_, err = c.identityStore.CreateGroup(other, virtualGroup("d"))
 	assert.ErrorIs(t, err, ErrTooManyVirtualGroups)
 	assert.EqualError(t, err, "too many virtual groups in the namespace: the namespace has 3/3 virtual groups")
@@ -668,7 +682,7 @@ func TestGroups_Caps(t *testing.T) {
 	at.Rules = append(at.Rules, logical.GroupRule{"mount": {"auth/jwt/"}})
 	_, err = c.identityStore.UpdateGroup(other, at, "")
 	require.NoError(t, err, "exactly at the cap")
-	assert.Equal(t, 7, c.identityStore.namespaceGroups("caps-ns").selectors)
+	assert.Equal(t, 7, c.identityStore.namespaceIndex("caps-ns").selectors)
 
 	// A create counts its selectors; a delete gives them back.
 	require.NoError(t, c.identityStore.DeleteGroup(other, "c", "", ""))
@@ -687,7 +701,7 @@ func readUsage(t *testing.T, c *Core) GroupsUsage {
 	t.Helper()
 	resp := roleRequest(t, c, rootCtx(), logical.ReadOperation, "identity/usage", nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
-	assert.Len(t, resp.Data, 1, "groups is the only kind yet")
+	assert.Len(t, resp.Data, 2, "groups and identities")
 	return resp.Data["groups"].(GroupsUsage)
 }
 
@@ -783,7 +797,8 @@ func TestIdentityUsage_HTTP(t *testing.T) {
 		"groups": {
 			"total": 1,
 			"virtual": {"count": 1, "max": 8000, "selectors": 2, "max_selectors": 16000}
-		}
+		},
+		"identities": {"entities": 0, "max_entities": 50000, "aliases": 0}
 	}`, string(raw))
 }
 
@@ -1061,7 +1076,7 @@ func TestGroups_LoadFromStorage(t *testing.T) {
 	c.teardownIdentityStore()
 	_, _, err = c.identityStore.GetGroup(ctx, "deployers")
 	assert.ErrorIs(t, err, ErrGroupNotFound, "an unloaded store serves nothing")
-	assert.Same(t, emptyNSGroups, c.identityStore.namespaceGroups(namespace.RootNamespaceID))
+	assert.Same(t, emptyNSIndex, c.identityStore.namespaceIndex(namespace.RootNamespaceID))
 	_, err = c.identityStore.CreateGroup(ctx, virtualGroup("x"))
 	assert.ErrorIs(t, err, ErrIdentityStoreNotLoaded)
 
@@ -1070,9 +1085,10 @@ func TestGroups_LoadFromStorage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want.ID, got.ID, "the first record by ID keeps the name")
 	assert.Equal(t, wantHash, hash)
-	gs := c.identityStore.namespaceGroups(namespace.RootNamespaceID)
-	require.Len(t, gs.selecting, 1)
-	assert.NotEmpty(t, gs.selecting[0].rules, "loaded groups are compiled")
+	gs := c.identityStore.namespaceIndex(namespace.RootNamespaceID)
+	require.Len(t, gs.virtualGroups, 1)
+	require.NotNil(t, gs.virtualGroups[0].rules)
+	assert.NotEmpty(t, gs.virtualGroups[0].rules.compiled, "loaded groups are compiled")
 
 	c.teardownIdentityStore()
 	require.NoError(t, c.setupIdentityStore(ctx, true))
@@ -1123,16 +1139,16 @@ func TestGroups_ClearNamespace(t *testing.T) {
 	}
 	_, err := c.identityStore.CreateGroup(rootCtx(), virtualGroup("keep"))
 	require.NoError(t, err)
-	rootGS := c.identityStore.namespaceGroups(namespace.RootNamespaceID)
+	rootGS := c.identityStore.namespaceIndex(namespace.RootNamespaceID)
 
 	require.NoError(t, c.namespaceStore.clearNamespaceResources(childCtx, child))
 
 	groups, _, err := c.identityStore.ListGroups(childCtx, "")
 	require.NoError(t, err)
 	assert.Empty(t, groups)
-	assert.Same(t, emptyNSGroups, c.identityStore.namespaceGroups(child.ID))
+	assert.Same(t, emptyNSIndex, c.identityStore.namespaceIndex(child.ID))
 	keys, err := c.identityStore.storage.List(context.Background(), groupListPrefix(child.UUID))
 	require.NoError(t, err)
 	assert.Empty(t, keys, "the namespace's records are deleted from storage")
-	assert.Same(t, rootGS, c.identityStore.namespaceGroups(namespace.RootNamespaceID), "other namespaces are untouched")
+	assert.Same(t, rootGS, c.identityStore.namespaceIndex(namespace.RootNamespaceID), "other namespaces are untouched")
 }

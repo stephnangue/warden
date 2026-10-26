@@ -308,6 +308,55 @@ func FactNames(mf *logical.MountFacts) []string {
 	return slices.Clone(n.Mapping.Names())
 }
 
+// AliasDerivation describes how n derives a credential's alias: the kind of
+// entity it admits, the fact the alias is taken from and, for a mapped fact,
+// the raw key it reads. Two namings with the same derivation derive the same
+// alias from every credential. It is "" for a nil naming.
+func AliasDerivation(n *logical.MountNaming) string {
+	if n == nil {
+		return ""
+	}
+	key, _ := n.Mapping.Resolve(n.AliasSource)
+	if key.Name == n.AliasSource {
+		return fmt.Sprintf("kind %s, fact %q", n.Kind, n.AliasSource)
+	}
+	return fmt.Sprintf("kind %s, fact %q (source %q)", n.Kind, n.AliasSource, key.Name)
+}
+
+// AliasChange returns how the mount whose live naming mf holds derives
+// aliases (from), and how it would once a config write carrying data is
+// installed (to): cur, the stored facts config, with the write's entity_kind,
+// facts and alias_name_source applied as the write applies them, compiled by
+// compile. A sent key replaces the stored value and an absent one keeps it.
+// to is "" when the write is refused anyway: a value that does not parse, or
+// facts that do not compile.
+func AliasChange(mf *logical.MountFacts, cur FactsConfig, data map[string]any, compile func(*FactsConfig)) (from, to string) {
+	next := FactsConfig{EntityKind: cur.EntityKind, Facts: cur.Facts, AliasNameSource: cur.AliasNameSource}
+	if raw, sent := data["entity_kind"]; sent {
+		kind, ok := raw.(string)
+		if !ok {
+			return "", ""
+		}
+		next.EntityKind = kind
+	}
+	if raw, sent := data["facts"]; sent {
+		facts, err := ParseFactsField(raw)
+		if err != nil {
+			return "", ""
+		}
+		next.Facts = facts
+	}
+	if raw, sent := data["alias_name_source"]; sent {
+		source, err := ParseAliasNameSource(raw)
+		if err != nil {
+			return "", ""
+		}
+		next.AliasNameSource = source
+	}
+	compile(&next)
+	return AliasDerivation(mf.Load()), AliasDerivation(next.Naming())
+}
+
 // EntityKind returns the kind of the naming mf holds, or "" when mf is nil or
 // holds no naming. It loads the naming without a lock.
 func EntityKind(mf *logical.MountFacts) string {
