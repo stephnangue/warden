@@ -18,6 +18,20 @@ const (
 	factAudiences               = "aud"
 )
 
+// kubernetesAliasPolicy takes a service account's alias from its username
+// (system:serviceaccount:<namespace>:<name>) by default, which a service
+// account re-created under the same name keeps, or from its UID, which it
+// does not.
+var kubernetesAliasPolicy = helper.AliasPolicy{
+	Default: factUsername,
+	Allowed: []string{factUsername, factServiceAccountUID},
+}
+
+// kubernetesAliasSources is the phrase the config path uses for what
+// alias_name_source may name on a kubernetes mount.
+const kubernetesAliasSources = "username (system:serviceaccount:<namespace>:<name>, the default) or service_account_uid " +
+	"(stricter: a service account re-created under the same name is a new identity)"
+
 // kubernetesBuiltinFacts returns the fact names every kubernetes mount
 // publishes under their own names. The slice is fresh on each call.
 func kubernetesBuiltinFacts() []string {

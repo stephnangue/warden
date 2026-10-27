@@ -27,4 +27,5 @@ type DiscoveryAdmission struct {
 type AdmittedMount struct {
 	Mount       string // the auth mount's path relative to the namespace, without "auth/"
 	PrincipalID string
+	AliasName   string // the native identity the credential presented there
 }

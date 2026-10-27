@@ -200,7 +200,7 @@ func buildCertConfig(_ context.Context, conf map[string]any) (*CertAuthConfig, e
 
 	// Facts that do not compile are kept on the config, not returned: the
 	// caller decides whether to refuse them or fail closed.
-	config.CompileFields(certBuiltinFacts())
+	config.CompileFields(certBuiltinFacts(), certAliasPolicy)
 
 	return config, nil
 }
@@ -210,14 +210,15 @@ func buildCertConfig(_ context.Context, conf map[string]any) (*CertAuthConfig, e
 // duration string, never a raw int from an HTTP request).
 func normalizedCertConfig(config *CertAuthConfig) map[string]any {
 	return map[string]any{
-		"trusted_ca_pem":  config.TrustedCAPEM,
-		"principal_claim": config.PrincipalClaim,
-		"token_ttl":       config.TokenTTL.String(),
-		"revocation_mode": config.RevocationMode,
-		"crl_cache_ttl":   config.CRLCacheTTL,
-		"ocsp_timeout":    config.OCSPTimeout,
-		"entity_kind":     config.EntityKind,
-		"facts":           config.Facts,
+		"trusted_ca_pem":    config.TrustedCAPEM,
+		"principal_claim":   config.PrincipalClaim,
+		"token_ttl":         config.TokenTTL.String(),
+		"revocation_mode":   config.RevocationMode,
+		"crl_cache_ttl":     config.CRLCacheTTL,
+		"ocsp_timeout":      config.OCSPTimeout,
+		"entity_kind":       config.EntityKind,
+		"facts":             config.Facts,
+		"alias_name_source": config.AliasNameSource,
 	}
 }
 

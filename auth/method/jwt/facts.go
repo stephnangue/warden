@@ -12,6 +12,14 @@ import (
 // The slice is fresh on each call.
 func jwtBuiltinFacts() []string { return []string{"sub", "iss", "aud"} }
 
+// jwtAliasPolicy takes a JWT's alias from sub by default, or from any fact
+// the mount publishes, built-in or mapped (e.g. a mapped repository claim).
+var jwtAliasPolicy = helper.AliasPolicy{Default: "sub"}
+
+// jwtAliasSources is the phrase the config path uses for what
+// alias_name_source may name on a jwt mount.
+const jwtAliasSources = "any fact this mount publishes, built-in (sub, iss, aud) or mapped; default sub"
+
 var _ logical.FactsProvider = (*jwtAuthBackend)(nil)
 
 // FactNames implements logical.FactsProvider (see helper.FactNames).

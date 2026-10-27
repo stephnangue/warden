@@ -32,7 +32,7 @@ func (b *spiffeAuthBackend) pathConfig() *framework.Path {
 				"0 or empty leaves it unset.",
 		},
 	}
-	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
+	maps.Copy(fields, helper.FactsFieldSchemas(factsSources, spiffeAliasSources))
 
 	return &framework.Path{
 		Pattern: "config",
@@ -72,11 +72,12 @@ func (b *spiffeAuthBackend) handleConfigRead(ctx context.Context, req *logical.R
 		config = unconfigured
 	}
 	data := map[string]any{
-		"token_ttl":       config.TokenTTL.String(),
-		"bound_audiences": slices.Clone(config.BoundAudiences),
-		"max_age":         config.MaxAge.String(),
-		"entity_kind":     config.EntityKind,
-		"facts":           maps.Clone(config.Facts),
+		"token_ttl":         config.TokenTTL.String(),
+		"bound_audiences":   slices.Clone(config.BoundAudiences),
+		"max_age":           config.MaxAge.String(),
+		"entity_kind":       config.EntityKind,
+		"facts":             maps.Clone(config.Facts),
+		"alias_name_source": config.AliasNameSource,
 	}
 	helper.SetWarnings(data, helper.RemovedConfigWarnings(config.removed))
 	return &logical.Response{
@@ -104,7 +105,8 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 
 	_, factsSent := d.GetOk("facts")
 	_, kindSent := d.GetOk("entity_kind")
-	factsTouched := factsSent || kindSent
+	_, aliasSent := d.GetOk("alias_name_source")
+	factsTouched := factsSent || kindSent || aliasSent
 
 	b.configMu.RLock()
 	if b.config != nil {
@@ -121,6 +123,7 @@ func (b *spiffeAuthBackend) handleConfigWrite(ctx context.Context, req *logical.
 		conf["max_age"] = b.config.MaxAge
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
+		conf["alias_name_source"] = b.config.AliasNameSource
 	}
 	b.configMu.RUnlock()
 

@@ -147,7 +147,7 @@ func login(t testing.TB, b *kubernetesAuthBackend, token string) *logical.Respon
 // compileFacts compiles kind and facts as a kubernetes mount config does.
 func compileFacts(kind string, facts map[string]string) (*logical.MountNaming, error) {
 	fc := helper.FactsConfig{EntityKind: kind, Facts: facts}
-	fc.CompileFields(kubernetesBuiltinFacts())
+	fc.CompileFields(kubernetesBuiltinFacts(), kubernetesAliasPolicy)
 	return fc.Naming(), fc.Err()
 }
 

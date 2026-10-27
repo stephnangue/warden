@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/stephnangue/warden/helper/selector"
 )
@@ -29,8 +31,8 @@ func ParseEntityKind(s string) (string, error) {
 
 // Admission is what an auth mount verified about one credential. The auth
 // method builds a fresh one for each login and core completes it in
-// LoginCreateToken (it sets MountPath) before the token is stored; from then on
-// its exported fields are never written.
+// LoginCreateToken (it sets MountPath, MountAccessor and AliasName) before the
+// token is stored; from then on its exported fields are never written.
 //
 // One *Admission is shared by pointer: the token store keeps it on the stored
 // TokenEntry, and every per-request copy of that entry holds the same pointer.
@@ -42,8 +44,22 @@ func ParseEntityKind(s string) (string, error) {
 type Admission struct {
 	// MountPath is the admitting mount's path relative to its namespace
 	// ("auth/jwt/", never "ns1/auth/jwt/"), answered as the fact "mount". Only
-	// LoginCreateToken sets it; an auth method leaves it empty.
+	// core sets it, when it completes the admission (a login, or a discovery
+	// admission); an auth method leaves it empty.
 	MountPath string
+
+	// MountAccessor is the admitting mount's accessor, set with MountPath.
+	// With AliasName it keys the native identity: a mount disabled and enabled
+	// again is a new accessor, and so a new trust root.
+	MountAccessor string
+
+	// AliasName is the native identity the credential presents: the first
+	// value of the fact the mount names as its alias source (MountNaming
+	// AliasSource), derived by DeriveAlias when core completes the admission,
+	// under the naming in force then. Empty when the mount names no source or
+	// the credential carries no usable value; an empty alias never fails a
+	// login.
+	AliasName string
 
 	// Facts are the raw verified facts, keyed by the names the credential
 	// carries (claims, certificate or service-account fields). They are never
@@ -187,10 +203,17 @@ func (m *MountFacts) Load() *MountNaming {
 }
 
 // MountNaming is how one mount configuration names its facts: the canonical
-// names it answers and the kind of entity it admits. It is immutable.
+// names it answers, the kind of entity it admits, and the fact its native
+// identities (aliases) are taken from. It is immutable once published.
 type MountNaming struct {
 	Mapping *selector.Mapping // built-in and mapped fact names
 	Kind    string            // EntityKindAgent or EntityKindHuman
+
+	// AliasSource is the fact name, visible under Mapping, whose first value
+	// is an admission's alias: the native identity the identity store keys
+	// entities by, with the mount accessor. Empty when the mount names none,
+	// and then no admission of the mount carries an alias.
+	AliasSource string
 }
 
 // NewMountNaming returns a naming for mapping and kind, which ParseEntityKind
@@ -279,6 +302,46 @@ func (a *Admission) Lookup(n *MountNaming, name string) selector.Cursor {
 		return selector.Cursor{}
 	}
 	return a.Facts.Lookup(key)
+}
+
+// MaxAliasNameBytes bounds an alias. A longer value yields no alias.
+const MaxAliasNameBytes = 512
+
+// DeriveAlias returns the alias the admission presents under naming n: the
+// first value of n.AliasSource, rendered by selector.FormatScalar. It is ""
+// when a or n is nil, n names no source, the fact is absent, or the value is
+// empty, longer than MaxAliasNameBytes, not valid UTF-8, or holds a control
+// character: such a value cannot name a native identity, and an alias that
+// cannot be derived never fails a login.
+func (a *Admission) DeriveAlias(n *MountNaming) string {
+	if a == nil || n == nil || n.AliasSource == "" {
+		return ""
+	}
+	cur := a.Lookup(n, n.AliasSource)
+	v, ok := cur.Next()
+	if !ok {
+		return ""
+	}
+	var buf [64]byte
+	s := string(selector.FormatScalar(buf[:0], v))
+	if !ValidAliasName(s) {
+		return ""
+	}
+	return s
+}
+
+// ValidAliasName reports whether s can name a native identity: non-empty, at
+// most MaxAliasNameBytes, valid UTF-8 and free of control characters.
+func ValidAliasName(s string) bool {
+	if s == "" || len(s) > MaxAliasNameBytes || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // RenderMetadata renders the facts n maps (not the built-ins, unless mapped to

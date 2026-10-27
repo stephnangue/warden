@@ -167,7 +167,7 @@ func buildSPIFFEConfig(conf map[string]any) (*SPIFFEAuthConfig, error) {
 	}
 	// Facts that do not compile are kept on the config, not returned: the
 	// caller decides whether to refuse them or fail closed.
-	config.CompileFields(spiffeBuiltinFacts())
+	config.CompileFields(spiffeBuiltinFacts(), spiffeAliasPolicy)
 	return config, nil
 }
 
@@ -175,11 +175,12 @@ func buildSPIFFEConfig(conf map[string]any) (*SPIFFEAuthConfig, error) {
 // parses consistent types.
 func normalizedSPIFFEConfig(config *SPIFFEAuthConfig) map[string]any {
 	return map[string]any{
-		"token_ttl":       config.TokenTTL.String(),
-		"bound_audiences": config.BoundAudiences,
-		"max_age":         config.MaxAge.String(),
-		"entity_kind":     config.EntityKind,
-		"facts":           config.Facts,
+		"token_ttl":         config.TokenTTL.String(),
+		"bound_audiences":   config.BoundAudiences,
+		"max_age":           config.MaxAge.String(),
+		"entity_kind":       config.EntityKind,
+		"facts":             config.Facts,
+		"alias_name_source": config.AliasNameSource,
 	}
 }
 

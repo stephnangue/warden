@@ -244,7 +244,7 @@ func (f *JSONFormat) saltField(ctx context.Context, entry *LogEntry, parts []str
 func (f *JSONFormat) saltAuthField(ctx context.Context, auth *Auth, parts []string) error {
 	name, rest := parts[0], parts[1:]
 	switch name {
-	case "token_id", "token_accessor", "principal_id", "created_by_ip":
+	case "token_id", "token_accessor", "principal_id", "alias_name", "created_by_ip":
 		if err := leaf(rest); err != nil {
 			return err
 		}
@@ -271,6 +271,20 @@ func (f *JSONFormat) saltAuthField(ctx context.Context, auth *Auth, parts []stri
 		return f.salt(ctx, &auth.TokenAccessor)
 	case "created_by_ip":
 		return f.salt(ctx, &auth.CreatedByIP)
+	case "alias_name":
+		// The aliases a discovery request was admitted as are the same
+		// identity, as for principal_id.
+		if err := f.salt(ctx, &auth.AliasName); err != nil {
+			return err
+		}
+		if d := auth.Discovery; d != nil {
+			for i := range d.AdmittedBy {
+				if err := f.salt(ctx, &d.AdmittedBy[i].AliasName); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	}
 	// principal_id. The principals a discovery request was admitted as are the
 	// same identity: left in clear beside the salted one, they would undo it.
@@ -428,6 +442,9 @@ var (
 		"token_accessor":     func(a *Auth) { a.TokenAccessor = "" },
 		"token_type":         func(a *Auth) { a.TokenType = "" },
 		"principal_id":       omitPrincipalID,
+		"alias_name":         omitAliasName,
+		"mount_accessor":     func(a *Auth) { a.MountAccessor = "" },
+		"entity_kind":        func(a *Auth) { a.EntityKind = "" },
 		"role_name":          func(a *Auth) { a.RoleName = "" },
 		"role_granted_by":    func(a *Auth) { a.RoleGrantedBy = "" },
 		"role_denied_reason": func(a *Auth) { a.RoleDeniedReason = "" },
@@ -498,6 +515,17 @@ func omitPrincipalID(a *Auth) {
 	if d := a.Discovery; d != nil {
 		for i := range d.AdmittedBy {
 			d.AdmittedBy[i].PrincipalID = ""
+		}
+	}
+}
+
+// omitAliasName clears the alias and the aliases a discovery request was
+// admitted as, the same identity.
+func omitAliasName(a *Auth) {
+	a.AliasName = ""
+	if d := a.Discovery; d != nil {
+		for i := range d.AdmittedBy {
+			d.AdmittedBy[i].AliasName = ""
 		}
 	}
 }

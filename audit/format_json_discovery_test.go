@@ -35,6 +35,46 @@ func TestJSONFormat_PrincipalSaltCoversDiscovery(t *testing.T) {
 	}
 }
 
+// Salting alias_name salts the aliases a discovery request was admitted as
+// too, as for principal_id; the principals are left alone.
+func TestJSONFormat_AliasSaltCoversDiscovery(t *testing.T) {
+	entry := discoveryEntry()
+	entry.Auth.AliasName = "repo:acme/x"
+	for i := range entry.Auth.Discovery.AdmittedBy {
+		entry.Auth.Discovery.AdmittedBy[i].AliasName = "repo:acme/x"
+	}
+	f := NewJSONFormat(
+		WithSaltFunc(func(_ context.Context, v string) (string, error) { return "hmac-sha256:" + strings.ToUpper(v), nil }),
+		WithSaltFields([]string{"auth.alias_name"}),
+	)
+	out, err := f.FormatRequest(context.Background(), entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), `"repo:acme/x"`) {
+		t.Errorf("an alias left in clear: %s", out)
+	}
+	if strings.Count(string(out), "hmac-sha256:REPO:ACME/X") != 3 {
+		t.Errorf("want the alias and both admitted aliases salted: %s", out)
+	}
+	if !strings.Contains(string(out), `"agent-1"`) {
+		t.Errorf("the principals are not salted by alias_name: %s", out)
+	}
+
+	f = NewJSONFormat(WithOmitFields([]string{"auth.alias_name"}))
+	entry.Auth.AliasName = "repo:acme/x"
+	for i := range entry.Auth.Discovery.AdmittedBy {
+		entry.Auth.Discovery.AdmittedBy[i].AliasName = "repo:acme/x"
+	}
+	out, err = f.FormatRequest(context.Background(), entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "repo:acme/x") {
+		t.Errorf("an alias left in after omit: %s", out)
+	}
+}
+
 // Omitting principal_id omits the admitted principals too; the mounts stay.
 func TestJSONFormat_PrincipalOmitCoversDiscovery(t *testing.T) {
 	f := NewJSONFormat(WithOmitFields([]string{"auth.principal_id"}))

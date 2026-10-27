@@ -217,6 +217,10 @@ type Core struct {
 	// against its snapshot.
 	identityStore *IdentityStore
 
+	// aliasUnderivedLogged holds the accessors of the mounts that have logged
+	// admitting a credential without a native identity, so each logs it once.
+	aliasUnderivedLogged sync.Map
+
 	// authRoleLeftovers counts, per auth mount UUID, the auth roles its
 	// storage still holds from before roles moved to the namespace. Built at
 	// unseal on the active node (detectAuthRoleLeftovers), read by sys/auth to

@@ -107,7 +107,7 @@ func (c *Core) admitRoleless(ctx context.Context, req *logical.Request) *logical
 
 	admittedBy := make([]logical.AdmittedMount, len(d.admitted))
 	for i, a := range d.admitted {
-		admittedBy[i] = logical.AdmittedMount{Mount: a.mount, PrincipalID: a.adm.PrincipalID}
+		admittedBy[i] = logical.AdmittedMount{Mount: a.mount, PrincipalID: a.adm.PrincipalID, AliasName: a.adm.AliasName}
 	}
 	req.Discovery = &logical.DiscoveryAdmission{AdmittedBy: admittedBy, RolesGranted: len(d.granted)}
 

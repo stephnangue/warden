@@ -2,6 +2,8 @@ package cert
 
 import (
 	"context"
+	"encoding/pem"
+	"fmt"
 	"maps"
 	"net/http"
 
@@ -45,7 +47,7 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 			Default:     "5s",
 		},
 	}
-	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
+	maps.Copy(fields, helper.FactsFieldSchemas(factsSources, certAliasSources))
 
 	return &framework.Path{
 		Pattern: "config",
@@ -93,15 +95,16 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 	}
 
 	data := map[string]any{
-		"trusted_ca_pem":   b.config.TrustedCAPEM,
-		"principal_claim":  b.config.PrincipalClaim,
-		"trusted_ca_count": certCount,
-		"token_ttl":        b.config.TokenTTL.String(),
-		"revocation_mode":  b.config.RevocationMode,
-		"crl_cache_ttl":    b.config.CRLCacheTTL,
-		"ocsp_timeout":     b.config.OCSPTimeout,
-		"entity_kind":      b.config.EntityKind,
-		"facts":            maps.Clone(b.config.Facts),
+		"trusted_ca_pem":    b.config.TrustedCAPEM,
+		"principal_claim":   b.config.PrincipalClaim,
+		"trusted_ca_count":  certCount,
+		"token_ttl":         b.config.TokenTTL.String(),
+		"revocation_mode":   b.config.RevocationMode,
+		"crl_cache_ttl":     b.config.CRLCacheTTL,
+		"ocsp_timeout":      b.config.OCSPTimeout,
+		"entity_kind":       b.config.EntityKind,
+		"facts":             maps.Clone(b.config.Facts),
+		"alias_name_source": b.config.AliasNameSource,
 	}
 	helper.SetWarnings(data, helper.RemovedConfigWarnings(b.config.removed))
 	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
@@ -129,7 +132,8 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 
 	_, factsSent := d.GetOk("facts")
 	_, kindSent := d.GetOk("entity_kind")
-	factsTouched := factsSent || kindSent
+	_, aliasSent := d.GetOk("alias_name_source")
+	factsTouched := factsSent || kindSent || aliasSent
 
 	// Copy existing config if present
 	b.configMu.RLock()
@@ -153,6 +157,7 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		conf["ocsp_timeout"] = b.config.OCSPTimeout
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
+		conf["alias_name_source"] = b.config.AliasNameSource
 	}
 	b.configMu.RUnlock()
 
@@ -211,10 +216,29 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 
 	b.installConfig(config)
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"message": "configuration updated",
-		},
-	}, nil
+	data := map[string]any{
+		"message": "configuration updated",
+	}
+	if n := config.Naming(); n != nil && n.AliasSource == factCommonName {
+		if anchors := countPEMCertificates(config.TrustedCAPEM); anchors > 1 {
+			helper.SetWarnings(data, []string{fmt.Sprintf(cnAliasSpansAnchors, anchors)})
+		}
+	}
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
+}
+
+// countPEMCertificates counts the CERTIFICATE blocks of a PEM bundle.
+func countPEMCertificates(bundle string) int {
+	n := 0
+	rest := []byte(bundle)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return n
+		}
+		if block.Type == "CERTIFICATE" {
+			n++
+		}
+	}
 }

@@ -213,7 +213,7 @@ func buildConfig(_ context.Context, conf map[string]any) (*KubernetesAuthConfig,
 	}
 	// Facts that do not compile are kept on the config, not returned: the
 	// caller decides whether to refuse them or fail closed.
-	cfg.CompileFields(kubernetesBuiltinFacts())
+	cfg.CompileFields(kubernetesBuiltinFacts(), kubernetesAliasPolicy)
 
 	client, err := buildKubernetesClient(cfg)
 	if err != nil {
@@ -239,6 +239,7 @@ func normalizedConfig(cfg *KubernetesAuthConfig) map[string]any {
 		"max_age":                cfg.MaxAge.String(),
 		"entity_kind":            cfg.EntityKind,
 		"facts":                  cfg.Facts,
+		"alias_name_source":      cfg.AliasNameSource,
 	}
 }
 

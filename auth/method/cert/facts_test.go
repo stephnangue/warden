@@ -156,7 +156,7 @@ func verifyChains(t testing.TB, leaf *x509.Certificate, roots []*authority, inte
 // compileCertFacts compiles kind and facts as a cert mount config does.
 func compileCertFacts(kind string, facts map[string]string) (*logical.MountNaming, error) {
 	fc := helper.FactsConfig{EntityKind: kind, Facts: facts}
-	fc.CompileFields(certBuiltinFacts())
+	fc.CompileFields(certBuiltinFacts(), certAliasPolicy)
 	return fc.Naming(), fc.Err()
 }
 
@@ -665,6 +665,51 @@ func TestConfigWrite_FactsRefused(t *testing.T) {
 			assert.Equal(t, beforeEntry.Value, afterEntry.Value, "a refused write is not stored")
 		})
 	}
+}
+
+// alias_name_source names the certificate field a native identity is taken
+// from: cn by default, or another identity field; it is stored, reloaded,
+// kept by a write that leaves it out, and refused when it names a field that
+// cannot be one. A cn alias over a bundle of several CAs warns.
+func TestConfigWrite_AliasNameSource(t *testing.T) {
+	ctx := context.Background()
+	root := issueCA(t, "Root", newFixtureKey(t), nil)
+	b := factsBackend(t, root, nil)
+	assert.Equal(t, factCommonName, b.mountFacts.Load().AliasSource, "cn by default")
+
+	resp := writeConfig(b, map[string]any{"alias_name_source": "uri_san"})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, "uri_san", b.mountFacts.Load().AliasSource)
+	read, err := b.handleConfigRead(ctx, &logical.Request{}, &framework.FieldData{})
+	require.NoError(t, err)
+	assert.Equal(t, "uri_san", read.Data["alias_name_source"])
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"ocsp_timeout": "3s"}).StatusCode)
+	assert.Equal(t, "uri_san", b.mountFacts.Load().AliasSource, "a write that leaves it out keeps it")
+
+	reloaded, _ := createTestBackend(t)
+	reloaded.storageView = b.storageView
+	require.NoError(t, reloaded.Initialize(ctx))
+	assert.Equal(t, "uri_san", reloaded.mountFacts.Load().AliasSource, "stored and reloaded")
+
+	for _, bad := range []string{"ou", "ca", "subject"} {
+		resp := writeConfig(b, map[string]any{"alias_name_source": bad})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, bad)
+		assert.Contains(t, resp.Err.Error(), "alias_name_source:", bad)
+	}
+	assert.Equal(t, "uri_san", b.mountFacts.Load().AliasSource, "a refused write is not published")
+
+	require.Equal(t, http.StatusOK, writeConfig(b, map[string]any{"alias_name_source": ""}).StatusCode)
+	assert.Equal(t, factCommonName, b.mountFacts.Load().AliasSource, "an empty value restores the default")
+
+	// One anchor: no warning. Two, with cn as the alias: a warning.
+	assert.Nil(t, writeConfig(b, map[string]any{"ocsp_timeout": "4s"}).Data["warnings"])
+	other := issueCA(t, "Other", newFixtureKey(t), nil)
+	resp = writeConfig(b, map[string]any{"trusted_ca_pem": root.pem + other.pem})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, []string{fmt.Sprintf(cnAliasSpansAnchors, 2)}, resp.Data["warnings"])
+	resp = writeConfig(b, map[string]any{"alias_name_source": "uri_san"})
+	assert.Nil(t, resp.Data["warnings"], "another field than cn")
 }
 
 // A stored config whose facts do not compile (written under looser rules, or

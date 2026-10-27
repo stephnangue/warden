@@ -22,7 +22,7 @@ var testBuiltins = []string{"sub", "iss", "aud"}
 
 func TestFactsConfig_Compile(t *testing.T) {
 	c := FactsConfig{Facts: map[string]string{"repository": "repo"}}
-	c.Compile(testBuiltins)
+	c.Compile(testBuiltins, AliasPolicy{})
 	require.NoError(t, c.Err())
 	require.NotNil(t, c.Naming())
 	assert.Equal(t, logical.EntityKindAgent, c.EntityKind, "an empty kind is normalized")
@@ -31,24 +31,24 @@ func TestFactsConfig_Compile(t *testing.T) {
 	assert.Equal(t, []string{"aud", "iss", "repo", "sub"}, c.Naming().Mapping.Names())
 
 	human := FactsConfig{EntityKind: logical.EntityKindHuman}
-	human.Compile(testBuiltins)
+	human.Compile(testBuiltins, AliasPolicy{})
 	require.NoError(t, human.Err())
 	assert.Equal(t, logical.EntityKindHuman, human.Naming().Kind)
 
 	badFacts := FactsConfig{Facts: map[string]string{"path": "mount"}}
-	badFacts.Compile(testBuiltins)
+	badFacts.Compile(testBuiltins, AliasPolicy{})
 	assert.Nil(t, badFacts.Naming())
 	assert.ErrorContains(t, badFacts.Err(), "facts: ")
 
 	badKind := FactsConfig{EntityKind: "robot"}
-	badKind.Compile(testBuiltins)
+	badKind.Compile(testBuiltins, AliasPolicy{})
 	assert.Nil(t, badKind.Naming())
 	assert.ErrorContains(t, badKind.Err(), "entity_kind: ")
 	assert.Equal(t, "robot", badKind.EntityKind, "a failed compile leaves the kind as written")
 
 	// Compiling again replaces the earlier result.
 	badKind.EntityKind = ""
-	badKind.Compile(testBuiltins)
+	badKind.Compile(testBuiltins, AliasPolicy{})
 	assert.NoError(t, badKind.Err())
 	assert.NotNil(t, badKind.Naming())
 }
@@ -58,24 +58,24 @@ func TestFactsConfig_CompileFields(t *testing.T) {
 	fields := []string{"username", "groups", "aud"}
 
 	ok := FactsConfig{Facts: map[string]string{"username": "workload", "groups": "groups"}}
-	ok.CompileFields(fields)
+	ok.CompileFields(fields, AliasPolicy{})
 	require.NoError(t, ok.Err())
 	assert.Equal(t, []string{"groups", "workload"}, ok.Naming().Mapping.Mapped())
 	assert.Equal(t, []string{"aud", "groups", "username", "workload"}, ok.Naming().Mapping.Names())
 
 	for _, source := range []string{"email", "/a/b", "Username"} {
 		c := FactsConfig{Facts: map[string]string{"username": "workload", source: "x"}}
-		c.CompileFields(fields)
+		c.CompileFields(fields, AliasPolicy{})
 		assert.Nil(t, c.Naming(), "source %q", source)
 		assert.EqualError(t, c.Err(), `facts: source "`+source+`" is not a field of this mount (one of aud, groups, username)`)
 	}
 
 	// Compile's own refusals still apply, and a later success replaces a failure.
 	c := FactsConfig{Facts: map[string]string{"username": "aud"}}
-	c.CompileFields(fields)
+	c.CompileFields(fields, AliasPolicy{})
 	assert.ErrorContains(t, c.Err(), "built-in")
 	c.Facts = nil
-	c.CompileFields(fields)
+	c.CompileFields(fields, AliasPolicy{})
 	require.NoError(t, c.Err())
 	assert.NotNil(t, c.Naming())
 }
@@ -88,15 +88,15 @@ func TestFactsConfig_FailedCompileDefaultsKind(t *testing.T) {
 	for name, compile := range map[string]func(*FactsConfig){
 		"unknown source": func(c *FactsConfig) {
 			c.Facts = map[string]string{"email": "email"}
-			c.CompileFields(fields)
+			c.CompileFields(fields, AliasPolicy{})
 		},
 		"mapping refused": func(c *FactsConfig) {
 			c.Facts = map[string]string{"username": "aud"}
-			c.CompileFields(fields)
+			c.CompileFields(fields, AliasPolicy{})
 		},
 		"mapping refused by Compile": func(c *FactsConfig) {
 			c.Facts = map[string]string{"path": "mount"}
-			c.Compile(testBuiltins)
+			c.Compile(testBuiltins, AliasPolicy{})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -124,7 +124,7 @@ func TestFactsConfig_JSON(t *testing.T) {
 		FactsConfig
 	}
 	in := config{URL: "u", FactsConfig: FactsConfig{EntityKind: "human", Facts: map[string]string{"a": "b"}}}
-	in.Compile(testBuiltins)
+	in.Compile(testBuiltins, AliasPolicy{})
 	raw, err := json.Marshal(in)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"url":"u","entity_kind":"human","facts":{"a":"b"}}`, string(raw))
@@ -138,12 +138,12 @@ func TestFactsConfig_JSON(t *testing.T) {
 
 func TestFactsWriteError(t *testing.T) {
 	ok := FactsConfig{}
-	ok.Compile(testBuiltins)
+	ok.Compile(testBuiltins, AliasPolicy{})
 	assert.NoError(t, FactsWriteError(&ok, true))
 	assert.NoError(t, FactsWriteError(&ok, false))
 
 	bad := FactsConfig{Facts: map[string]string{"a": "Bad"}}
-	bad.Compile(testBuiltins)
+	bad.Compile(testBuiltins, AliasPolicy{})
 	assert.Equal(t, bad.Err(), FactsWriteError(&bad, true), "a write that sent facts gets their error")
 	err := FactsWriteError(&bad, false)
 	require.Error(t, err)
@@ -175,16 +175,77 @@ func TestParseFactsField(t *testing.T) {
 }
 
 func TestFactsFieldSchemas(t *testing.T) {
-	s := FactsFieldSchemas("one of the fields: a, b")
-	require.Len(t, s, 2)
+	s := FactsFieldSchemas("one of the fields: a, b", "a or b; default a")
+	require.Len(t, s, 3)
 	assert.Equal(t, framework.TypeString, s["entity_kind"].Type)
 	assert.Equal(t, framework.TypeMap, s["facts"].Type)
+	assert.Equal(t, framework.TypeString, s["alias_name_source"].Type)
 	assert.NotEmpty(t, s["entity_kind"].Description)
 	assert.Contains(t, s["facts"].Description, "Map of a source (one of the fields: a, b) to the fact name")
 	assert.NotContains(t, s["facts"].Description, "Pointer", "the source phrase is the method's")
+	assert.Contains(t, s["alias_name_source"].Description, "a or b; default a")
+
+	assert.NotContains(t, FactsFieldSchemas("x", ""), "alias_name_source", "no alias phrase, no field")
 
 	s["facts"].Description = "changed"
-	assert.NotEqual(t, "changed", FactsFieldSchemas("x")["facts"].Description, "each call is fresh")
+	assert.NotEqual(t, "changed", FactsFieldSchemas("x", "")["facts"].Description, "each call is fresh")
+}
+
+// TestCompile_AliasSource: the alias source compiles into the naming, from the
+// configured name or the policy's default, and a name the policy or the
+// mount's facts do not allow fails the compile, naming the key.
+func TestCompile_AliasSource(t *testing.T) {
+	open := AliasPolicy{Default: "sub"}
+	var c FactsConfig
+	c.Compile(testBuiltins, open)
+	require.NoError(t, c.Err())
+	assert.Equal(t, "sub", c.Naming().AliasSource, "the default when none is configured")
+	assert.Empty(t, c.AliasNameSource, "the config keeps what was written")
+
+	c = FactsConfig{Facts: map[string]string{"repository": "repo"}, AliasNameSource: "repo"}
+	c.Compile(testBuiltins, open)
+	require.NoError(t, c.Err())
+	assert.Equal(t, "repo", c.Naming().AliasSource, "a mapped fact may be the source")
+
+	c = FactsConfig{AliasNameSource: "repository"}
+	c.Compile(testBuiltins, open)
+	assert.Nil(t, c.Naming())
+	assert.ErrorContains(t, c.Err(), `alias_name_source: "repository" is not a fact this mount publishes`,
+		"a claim that is not published is not visible")
+
+	limited := AliasPolicy{Default: "a", Allowed: []string{"a", "b"}}
+	c = FactsConfig{AliasNameSource: "c"}
+	c.CompileFields([]string{"a", "b", "c"}, limited)
+	assert.ErrorContains(t, c.Err(), `alias_name_source: "c" is not one of a, b`)
+	c = FactsConfig{AliasNameSource: "b"}
+	c.CompileFields([]string{"a", "b", "c"}, limited)
+	require.NoError(t, c.Err())
+	assert.Equal(t, "b", c.Naming().AliasSource)
+
+	fixed := AliasPolicy{Default: "a", Fixed: true}
+	c = FactsConfig{AliasNameSource: "a"}
+	c.CompileFields([]string{"a"}, fixed)
+	assert.ErrorContains(t, c.Err(), `alias_name_source: cannot be set on this mount: the alias is always "a"`)
+	c = FactsConfig{}
+	c.CompileFields([]string{"a"}, fixed)
+	require.NoError(t, c.Err())
+	assert.Equal(t, "a", c.Naming().AliasSource)
+
+	c = FactsConfig{}
+	c.Compile(testBuiltins, AliasPolicy{})
+	require.NoError(t, c.Err())
+	assert.Empty(t, c.Naming().AliasSource, "a policy without a default names no source")
+}
+
+func TestParseAliasNameSource(t *testing.T) {
+	s, err := ParseAliasNameSource(" uri_san ")
+	require.NoError(t, err)
+	assert.Equal(t, "uri_san", s)
+	s, err = ParseAliasNameSource(nil)
+	require.NoError(t, err)
+	assert.Empty(t, s)
+	_, err = ParseAliasNameSource(5)
+	assert.ErrorContains(t, err, "must be a string")
 }
 
 func TestParseBoundAudiences(t *testing.T) {
@@ -240,7 +301,7 @@ func TestFactNames(t *testing.T) {
 	assert.Nil(t, FactNames(mf))
 
 	c := FactsConfig{Facts: map[string]string{"repository": "repo"}}
-	c.Compile(testBuiltins)
+	c.Compile(testBuiltins, AliasPolicy{})
 	mf.Publish(c.Naming())
 	names := FactNames(mf)
 	assert.Equal(t, []string{"aud", "iss", "repo", "sub"}, names)

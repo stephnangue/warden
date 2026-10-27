@@ -53,7 +53,7 @@ func (b *kubernetesAuthBackend) pathConfig() *framework.Path {
 		},
 		"max_age": helper.MaxAgeFieldSchema(),
 	}
-	maps.Copy(fields, helper.FactsFieldSchemas(factsSources))
+	maps.Copy(fields, helper.FactsFieldSchemas(factsSources, kubernetesAliasSources))
 
 	return &framework.Path{
 		Pattern: "config",
@@ -114,6 +114,7 @@ func (b *kubernetesAuthBackend) handleConfigRead(_ context.Context, _ *logical.R
 		"max_age":                b.config.MaxAge.String(),
 		"entity_kind":            b.config.EntityKind,
 		"facts":                  maps.Clone(b.config.Facts),
+		"alias_name_source":      b.config.AliasNameSource,
 	}
 	helper.SetWarnings(data, warnings)
 	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
@@ -140,7 +141,8 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 
 	_, factsSent := d.GetOk("facts")
 	_, kindSent := d.GetOk("entity_kind")
-	factsTouched := factsSent || kindSent
+	_, aliasSent := d.GetOk("alias_name_source")
+	factsTouched := factsSent || kindSent || aliasSent
 
 	b.configMu.RLock()
 	if b.config != nil {
@@ -166,6 +168,7 @@ func (b *kubernetesAuthBackend) handleConfigWrite(ctx context.Context, _ *logica
 		conf["max_age"] = b.config.MaxAge
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
+		conf["alias_name_source"] = b.config.AliasNameSource
 	}
 	b.configMu.RUnlock()
 

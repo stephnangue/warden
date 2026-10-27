@@ -63,7 +63,7 @@ func (b *jwtAuthBackend) pathConfig() *framework.Path {
 		},
 		"max_age": helper.MaxAgeFieldSchema(),
 	}
-	maps.Copy(fields, helper.FactsFieldSchemas("a claim name, or a JSON Pointer with a leading / into nested claims"))
+	maps.Copy(fields, helper.FactsFieldSchemas("a claim name, or a JSON Pointer with a leading / into nested claims", jwtAliasSources))
 
 	return &framework.Path{
 		Pattern: "config",
@@ -125,6 +125,7 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 		"max_age":                b.config.MaxAge.String(),
 		"entity_kind":            b.config.EntityKind,
 		"facts":                  maps.Clone(b.config.Facts),
+		"alias_name_source":      b.config.AliasNameSource,
 	}
 	helper.SetWarnings(data, helper.RemovedConfigWarnings(b.config.removed))
 	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
@@ -152,7 +153,8 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 
 	_, factsSent := d.GetOk("facts")
 	_, kindSent := d.GetOk("entity_kind")
-	factsTouched := factsSent || kindSent
+	_, aliasSent := d.GetOk("alias_name_source")
+	factsTouched := factsSent || kindSent || aliasSent
 
 	// Copy existing config if present (under lock to avoid data race)
 	b.configMu.RLock()
@@ -183,6 +185,7 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["max_age"] = b.config.MaxAge
 		conf["entity_kind"] = b.config.EntityKind
 		conf["facts"] = b.config.Facts
+		conf["alias_name_source"] = b.config.AliasNameSource
 	}
 	b.configMu.RUnlock()
 
