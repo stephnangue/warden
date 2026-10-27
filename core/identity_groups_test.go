@@ -250,7 +250,7 @@ func TestGroups_Type(t *testing.T) {
 	resp = groupRequest(t, c, logical.CreateOperation, "group/g", body)
 	assert.Contains(t, resp.Err.Error(), "type is required", "an empty type is no type on create")
 
-	for _, typ := range []string{"internal", "directory"} {
+	for _, typ := range []string{"static", "directory"} {
 		body = deployersBody()
 		body["type"] = typ
 		resp = groupRequest(t, c, logical.CreateOperation, "group/g", body)
@@ -282,7 +282,7 @@ func TestGroups_Type(t *testing.T) {
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "", "description": "empty"})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "an empty type on update counts as left out: %v", resp.Err)
 	assert.Equal(t, "virtual", resp.Data["type"])
-	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "internal"})
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"type": "static"})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Contains(t, resp.Err.Error(), "type cannot change; create a new group")
 	resp = groupRequest(t, c, logical.UpdateOperation, "group/g", map[string]any{"members": []any{"bot"}})
@@ -290,7 +290,7 @@ func TestGroups_Type(t *testing.T) {
 
 	// The store refuses a type change too.
 	g := virtualGroup("g")
-	g.Type = logical.GroupTypeInternal
+	g.Type = logical.GroupTypeStatic
 	_, err := c.identityStore.UpdateGroup(rootCtx(), g, "")
 	assert.Error(t, err)
 }

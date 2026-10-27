@@ -19,9 +19,9 @@ const (
 	// group's selectors, so members cannot be listed.
 	GroupTypeVirtual GroupType = "virtual"
 
-	// GroupTypeInternal groups list their members explicitly. Reserved: not
-	// accepted yet.
-	GroupTypeInternal GroupType = "internal"
+	// GroupTypeStatic groups list their members explicitly, managed in Warden.
+	// Reserved: not accepted yet.
+	GroupTypeStatic GroupType = "static"
 
 	// GroupTypeDirectory groups take their membership from a directory.
 	// Reserved: not accepted yet.
@@ -32,11 +32,11 @@ const (
 // is no group type. It does not say whether the type can be created yet.
 func ParseGroupType(s string) (GroupType, error) {
 	switch t := GroupType(s); t {
-	case GroupTypeVirtual, GroupTypeInternal, GroupTypeDirectory:
+	case GroupTypeVirtual, GroupTypeStatic, GroupTypeDirectory:
 		return t, nil
 	}
 	return "", fmt.Errorf("unknown group type %q: one of %q, %q, %q",
-		s, GroupTypeVirtual, GroupTypeInternal, GroupTypeDirectory)
+		s, GroupTypeVirtual, GroupTypeStatic, GroupTypeDirectory)
 }
 
 // Bounds on a group. The bounds inside a rule (selectors per rule, values per
