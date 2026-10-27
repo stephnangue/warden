@@ -144,12 +144,21 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	}
 
 	// The Operator().Write method automatically adds /v1/ prefix
-	_, err = c.Operator().Write(path, data)
+	resource, err := c.Operator().Write(path, data)
 	if err != nil {
 		return fmt.Errorf("failed to write to %s: %w", path, err)
 	}
 
-	return helpers.RenderMap(map[string]any{"path": path, "written": true}, func() {
+	// The server's warnings (a forced change, a deprecated key) go to stderr
+	// and stay in the structured output.
+	out := map[string]any{"path": path, "written": true}
+	if resource != nil {
+		if warnings := helpers.WarningsFromData(resource.Data); len(warnings) > 0 {
+			helpers.PrintWarnings(warnings)
+			out["warnings"] = warnings
+		}
+	}
+	return helpers.RenderMap(out, func() {
 		fmt.Printf("Success! Data written to: %s\n", path)
 	})
 }

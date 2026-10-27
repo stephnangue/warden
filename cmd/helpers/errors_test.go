@@ -261,3 +261,46 @@ func TestDefaultHint_PerCategory(t *testing.T) {
 		}
 	}
 }
+
+// WithHint replaces the default hint in the JSON envelope without repeating
+// it in the message, follows the message in text output, and keeps the
+// error's classification, for a server error and a local one alike.
+func TestRenderError_WithHint(t *testing.T) {
+	_, stderr := setupCapture(t)
+	t.Cleanup(func() { SetOutputFormat("") })
+
+	for _, inner := range []error{
+		fmt.Errorf("deleting: %w", &api.ResponseError{StatusCode: 409, Errors: []string{"entity is retired"}}),
+		fmt.Errorf("deleting: %w", ErrConflict),
+	} {
+		err := WithHint(inner, "pass -retired")
+		if !errors.Is(err, inner) {
+			t.Fatal("WithHint must unwrap to the error it wraps")
+		}
+
+		SetOutputFormat("json")
+		stderr.Reset()
+		if exit := RenderError(err); exit != ExitConflict {
+			t.Fatalf("exit = %d; want %d", exit, ExitConflict)
+		}
+		var envelope struct {
+			Error WardenError `json:"error"`
+		}
+		if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+			t.Fatalf("stderr is not valid JSON: %v\noutput: %s", err, stderr.String())
+		}
+		if envelope.Error.Hint != "pass -retired" {
+			t.Errorf("hint = %q; want the command's", envelope.Error.Hint)
+		}
+		if strings.Contains(envelope.Error.Message, "pass -retired") {
+			t.Errorf("message = %q; the hint must not repeat in it", envelope.Error.Message)
+		}
+
+		SetOutputFormat("table")
+		stderr.Reset()
+		RenderError(err)
+		if got := stderr.String(); !strings.HasSuffix(strings.TrimSpace(got), "(pass -retired)") {
+			t.Errorf("text output = %q; want the hint after the message", got)
+		}
+	}
+}

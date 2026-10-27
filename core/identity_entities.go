@@ -221,7 +221,7 @@ func (s *IdentityStore) CreateEntity(ctx context.Context, e *logical.Entity) err
 		stored := newEntityEntry(e.Clone())
 		next, err := cur.with(entityChange{next: stored})
 		if err != nil {
-			return entityWriteError(err)
+			return err
 		}
 		if err := s.persistEntity(ctx, ns.UUID, stored); err != nil {
 			return err
@@ -281,7 +281,7 @@ func (s *IdentityStore) UpdateEntity(ctx context.Context, name string, next *log
 		stored := newEntityEntry(next.Clone())
 		ents, err := cur.with(entityChange{old: old, next: stored})
 		if err != nil {
-			return entityWriteError(err)
+			return err
 		}
 		if err := s.persistEntity(ctx, ns.UUID, stored); err != nil {
 			return err
@@ -334,7 +334,7 @@ func (s *IdentityStore) DeleteEntity(ctx context.Context, name, expectedHash str
 		}
 		ents, err := cur.with(entityChange{old: old})
 		if err != nil {
-			return entityWriteError(err)
+			return err
 		}
 		if err := s.storage.Delete(ctx, entityStorageKey(ns.UUID, old.ID)); err != nil {
 			return fmt.Errorf("failed to delete entity %q: %w", name, err)
@@ -397,9 +397,7 @@ func (s *IdentityStore) ClaimAlias(ctx context.Context, name, accessor, alias st
 		var changes []entityChange
 		if holder != nil {
 			if !move && holder.State != logical.EntityStateRetired {
-				return logical.ErrConflictf(
-					"native identity %q on mount %s is already claimed by entity %q; pass move to take it",
-					alias, accessor, holder.Name)
+				return &entityConflictError{accessor: accessor, alias: alias, entity: holder.Name, move: true}
 			}
 			loser := holder.Clone()
 			loser.Aliases = slices.DeleteFunc(loser.Aliases, func(a logical.EntityAlias) bool {
@@ -417,7 +415,7 @@ func (s *IdentityStore) ClaimAlias(ctx context.Context, name, accessor, alias st
 
 		ents, err := cur.with(changes...)
 		if err != nil {
-			return entityWriteError(err)
+			return err
 		}
 		for i, c := range changes {
 			if err := s.persistEntity(ctx, ns.UUID, c.next); err != nil {
@@ -479,7 +477,7 @@ func (s *IdentityStore) RemoveAlias(ctx context.Context, name, accessor, alias s
 		stored := newEntityEntry(next)
 		ents, err := cur.with(entityChange{old: old, next: stored})
 		if err != nil {
-			return entityWriteError(err)
+			return err
 		}
 		if err := s.persistEntity(ctx, ns.UUID, stored); err != nil {
 			return err
@@ -593,15 +591,6 @@ func (s *IdentityStore) clearEntitiesLocked(ctx context.Context, nsUUID string) 
 		}
 	}
 	return len(ids), nil
-}
-
-// entityWriteError maps an index refusal to its request error.
-func entityWriteError(err error) error {
-	var conflict *entityConflictError
-	if errors.As(err, &conflict) {
-		return logical.ErrConflict(conflict.Error())
-	}
-	return err
 }
 
 // validAccessor reports whether accessor can name a native identity's mount:

@@ -26,8 +26,9 @@ type recorded struct {
 	body         map[string]any
 }
 
-// fakeWarden answers sys/schema with the group path's body schema and every
-// other request with the canned status and body, recording it.
+// fakeWarden answers sys/schema with the body schema of the path asked for
+// (schemaDocs; the group path's by default) and every other request with the
+// canned status and body, recording it.
 type fakeWarden struct {
 	mu       sync.Mutex
 	requests []recorded
@@ -89,7 +90,11 @@ func setupFake(t *testing.T, status int, body string) (*fakeWarden, *bytes.Buffe
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/sys/schema" {
-			_, _ = w.Write([]byte(groupSchemaDoc))
+			doc, ok := schemaDocs[r.URL.Query().Get("path")]
+			if !ok {
+				doc = groupSchemaDoc
+			}
+			_, _ = w.Write([]byte(doc))
 			return
 		}
 		rec := recorded{method: r.Method, path: r.URL.Path, query: r.URL.Query()}
@@ -484,7 +489,8 @@ const usageJSON = `{"data":{
 	"groups":{
 		"total":42,
 		"virtual":{"count":42,"max":8000,"selectors":310,"max_selectors":16000}
-	}
+	},
+	"identities":{"entities":7,"max_entities":50000,"aliases":12}
 }}`
 
 // TestUsage_Table: one section per kind, counts against their caps.
@@ -500,6 +506,10 @@ func TestUsage_Table(t *testing.T) {
 		"  virtual   42/8000   310/16000",
 		"  total     42",
 		"",
+		"IDENTITIES",
+		"  entities   7/50000",
+		"  aliases    12",
+		"",
 	}, "\n"), out)
 }
 
@@ -511,7 +521,8 @@ func TestUsage_JSON(t *testing.T) {
 		"groups": {
 			"total": 42,
 			"virtual": {"count": 42, "max": 8000, "selectors": 310, "max_selectors": 16000}
-		}
+		},
+		"identities": {"entities": 7, "max_entities": 50000, "aliases": 12}
 	}`, stdout.String())
 }
 

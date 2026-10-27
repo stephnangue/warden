@@ -93,10 +93,27 @@ func (c *Sys) DisableAuthWithContext(ctx context.Context, path string) error {
 // server's non-fatal warnings (nil when there are none), such as groups whose
 // rules still name the disabled mount.
 func (c *Sys) DisableAuthWithWarnings(ctx context.Context, path string) ([]string, error) {
+	return c.DisableAuthWithOptions(ctx, path, nil)
+}
+
+// DisableAuthOptions are the options of DisableAuthWithOptions.
+type DisableAuthOptions struct {
+	// Force disables the mount even while native identities are claimed on
+	// it. Their claims are left on a mount that no longer exists (orphaned);
+	// the server says so in a warning.
+	Force bool
+}
+
+// DisableAuthWithOptions is DisableAuthWithWarnings with options; nil opts
+// is the zero options.
+func (c *Sys) DisableAuthWithOptions(ctx context.Context, path string, opts *DisableAuthOptions) ([]string, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
 	r := c.c.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/sys/auth/%s", path))
+	if opts != nil && opts.Force {
+		r.Params.Set("force", "true")
+	}
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
 	if resp != nil {

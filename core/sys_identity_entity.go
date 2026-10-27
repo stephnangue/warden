@@ -129,7 +129,7 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 				},
 				"state": {
 					Type:        framework.TypeString,
-					Description: `active (default), suspended (the reversible kill switch) or retired (final; the record becomes read-only)`,
+					Description: `active (default), suspended (reversible) or retired (final; the record becomes read-only)`,
 				},
 				"profile": {
 					Type:        framework.TypeMap,
@@ -315,9 +315,18 @@ func (b *SystemBackend) entityToMap(e *logical.Entity, hash string, paths *mount
 	}
 }
 
-// entityErrorResponse maps an identity store error to its response.
-func entityErrorResponse(name string, err error) *logical.Response {
+// entityErrorResponse maps an identity store error to its response. A
+// conflict names the mount by its path.
+func (b *SystemBackend) entityErrorResponse(name string, err error) *logical.Response {
+	var conflict *entityConflictError
 	switch {
+	case errors.As(err, &conflict):
+		return logical.ErrorResponse(logical.ErrConflict(conflict.message(func(accessor string) string {
+			if path := b.core.aliasMountPath(accessor); path != "" {
+				return path
+			}
+			return accessor
+		})))
 	case errors.Is(err, ErrEntityNotFound):
 		return logical.ErrorResponse(logical.ErrNotFoundf("entity %q not found", name))
 	case errors.Is(err, ErrEntityAlreadyExists):
@@ -435,7 +444,7 @@ func (b *SystemBackend) handleEntityCreate(ctx context.Context, req *logical.Req
 		}
 	}
 	if err := b.core.identityStore.CreateEntity(ctx, e); err != nil {
-		return entityErrorResponse(name, err), nil
+		return b.entityErrorResponse(name, err), nil
 	}
 	return b.respondCreated(b.entityToMap(e, e.Hash(), b.mountPaths())), nil
 }
@@ -462,7 +471,7 @@ func (b *SystemBackend) handleEntityRead(ctx context.Context, req *logical.Reque
 	name := d.Get("name").(string)
 	e, hash, err := b.core.identityStore.GetEntity(ctx, name)
 	if err != nil {
-		return entityErrorResponse(name, err), nil
+		return b.entityErrorResponse(name, err), nil
 	}
 	return b.respondSuccess(b.entityToMap(e, hash, b.mountPaths())), nil
 }
@@ -472,7 +481,7 @@ func (b *SystemBackend) handleEntityReadByID(ctx context.Context, req *logical.R
 	id := d.Get("id").(string)
 	e, hash, err := b.core.identityStore.GetEntityByID(ctx, id)
 	if err != nil {
-		return entityErrorResponse(id, err), nil
+		return b.entityErrorResponse(id, err), nil
 	}
 	return b.respondSuccess(b.entityToMap(e, hash, b.mountPaths())), nil
 }
@@ -492,10 +501,10 @@ func (b *SystemBackend) handleEntityUpdate(ctx context.Context, req *logical.Req
 	for attempt := 1; ; attempt++ {
 		e, hash, err := b.core.identityStore.GetEntity(ctx, name)
 		if err != nil {
-			return entityErrorResponse(name, err), nil
+			return b.entityErrorResponse(name, err), nil
 		}
 		if expected != "" && expected != hash {
-			return entityErrorResponse(name, ErrEntityChanged), nil
+			return b.entityErrorResponse(name, ErrEntityChanged), nil
 		}
 		if err := mergeEntityFields(e, d); err != nil {
 			return logical.ErrorResponse(err), nil
@@ -508,7 +517,7 @@ func (b *SystemBackend) handleEntityUpdate(ctx context.Context, req *logical.Req
 			continue
 		}
 		if err != nil {
-			return entityErrorResponse(name, err), nil
+			return b.entityErrorResponse(name, err), nil
 		}
 		return b.respondSuccess(b.entityToMap(e, e.Hash(), b.mountPaths())), nil
 	}
@@ -520,7 +529,7 @@ func (b *SystemBackend) handleEntityDelete(ctx context.Context, req *logical.Req
 	name := d.Get("name").(string)
 	err := b.core.identityStore.DeleteEntity(ctx, name, d.Get("expected_hash").(string), d.Get("force").(bool))
 	if err != nil {
-		return entityErrorResponse(name, err), nil
+		return b.entityErrorResponse(name, err), nil
 	}
 	return b.respondSuccess(map[string]any{
 		"name":    name,
@@ -550,7 +559,7 @@ func (b *SystemBackend) handleEntityList(ctx context.Context, req *logical.Reque
 	}
 	entities, hashes, err := b.core.identityStore.ListEntities(ctx, f)
 	if err != nil {
-		return entityErrorResponse("", err), nil
+		return b.entityErrorResponse("", err), nil
 	}
 	keys := make([]string, len(entities))
 	items := make([]map[string]any, len(entities))
@@ -566,7 +575,7 @@ func (b *SystemBackend) handleAliasClaim(ctx context.Context, req *logical.Reque
 	name := d.Get("entity").(string)
 	e, _, err := b.core.identityStore.GetEntity(ctx, name)
 	if err != nil {
-		return entityErrorResponse(name, err), nil
+		return b.entityErrorResponse(name, err), nil
 	}
 	mount := d.Get("mount").(string)
 	accessor, err := b.claimableMount(ctx, mount, e.Kind)
@@ -576,7 +585,7 @@ func (b *SystemBackend) handleAliasClaim(ctx context.Context, req *logical.Reque
 	alias := d.Get("name").(string)
 	from, err := b.core.identityStore.ClaimAlias(ctx, name, accessor, alias, d.Get("move").(bool))
 	if err != nil {
-		return entityErrorResponse(name, err), nil
+		return b.entityErrorResponse(name, err), nil
 	}
 	data := map[string]any{
 		"entity":         name,
@@ -598,7 +607,7 @@ func (b *SystemBackend) handleAliasRemove(ctx context.Context, req *logical.Requ
 		return logical.ErrorResponse(err), nil
 	}
 	if err := b.core.identityStore.RemoveAlias(ctx, name, accessor, d.Get("name").(string)); err != nil {
-		return entityErrorResponse(name, err), nil
+		return b.entityErrorResponse(name, err), nil
 	}
 	return b.respondSuccess(map[string]any{
 		"entity":  name,
@@ -614,7 +623,7 @@ func (b *SystemBackend) handleIdentityLookup(ctx context.Context, req *logical.R
 	}
 	e, err := b.core.identityStore.LookupAlias(ctx, accessor, d.Get("name").(string))
 	if err != nil {
-		return entityErrorResponse("", err), nil
+		return b.entityErrorResponse("", err), nil
 	}
 	return b.respondSuccess(map[string]any{
 		"entity":      e.Name,

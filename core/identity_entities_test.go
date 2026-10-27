@@ -236,7 +236,8 @@ func TestEntities_Aliases(t *testing.T) {
 
 	resp := claim("b", "repo:acme/x", false)
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
-	assert.Contains(t, resp.Err.Error(), `already claimed by entity "a"; pass move`)
+	assert.Contains(t, resp.Err.Error(), `native identity "repo:acme/x" on mount auth/jwt/ is already claimed by entity "a"; pass move`,
+		"the mount is named by its path")
 
 	resp = claim("b", "repo:acme/x", true)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
