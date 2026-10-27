@@ -35,7 +35,8 @@ var groupFlagNames = []struct{ flag, key string }{
 
 func (f *groupFlags) bind(cmd *cobra.Command) {
 	fs := cmd.Flags()
-	fs.StringVar(&f.typ, "type", "", `Where membership comes from: "virtual" (required on create; never changes)`)
+	fs.StringVar(&f.typ, "type", "",
+		`Where membership comes from: "virtual" (required on create; never changes; on update, read from the server when omitted)`)
 	fs.StringVar(&f.description, "description", "", "What the group is for")
 	fs.StringSliceVar(&f.roles, "roles", nil, "Roles membership grants (repeat or comma-separated)")
 	fs.StringArrayVar(&f.rules, "rule", nil,
@@ -103,6 +104,25 @@ func stringsToAny(s []string) []any {
 // path segment. The server applies the full naming rule.
 func validateGroupName(name string) error {
 	return helpers.ValidateIdentifier("group name", name)
+}
+
+// resolveGroupType returns the type an update or delete names: given when
+// set, otherwise the stored type, read from the server. The server requires a
+// type on every group write, so that a policy condition on it can tell who
+// may write which type of group; a caller whose policy conditions reads on
+// the type passes -type, since the read would be refused.
+func resolveGroupType(c *api.Client, name, given string) (string, error) {
+	if given != "" {
+		return given, nil
+	}
+	g, err := c.Sys().ReadGroup(name, "")
+	if err != nil {
+		return "", fmt.Errorf("reading group %q to learn its type (pass -type to skip the read): %w", name, err)
+	}
+	if g == nil || g.Type == "" {
+		return "", fmt.Errorf("group %q not found: %w", name, helpers.ErrNotFound)
+	}
+	return g.Type, nil
 }
 
 // formatRule renders one rule on one line, a selector at a time: "mount"

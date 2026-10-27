@@ -14,6 +14,7 @@ import (
 var (
 	deleteForce        bool
 	deleteExpectedHash string
+	deleteType         string
 
 	GroupDeleteCmd = &cobra.Command{
 		Use:           "delete <name>",
@@ -32,10 +33,14 @@ Usage: warden identity group delete <name> [options]
   explicit. -expected-hash deletes the group only if nobody changed it
   since you read it.
 
+  The server requires the group's type on every write. Without -type the
+  command reads the group to learn it; pass -type when your policy only
+  lets you write (and read) groups of one type.
+
   Examples:
 
       $ warden identity group delete ci-deployers
-      $ warden identity group delete ci-deployers -force
+      $ warden identity group delete ci-deployers -type virtual -force
       $ warden identity group delete ci-deployers -force \
           -expected-hash "$(warden identity group read ci-deployers -o json | jq -r .hash)"
 `,
@@ -48,6 +53,8 @@ func init() {
 	GroupDeleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Skip the confirmation prompt")
 	GroupDeleteCmd.Flags().StringVar(&deleteExpectedHash, "expected-hash", "",
 		"Delete only if the group still has this hash (from 'warden identity group read')")
+	GroupDeleteCmd.Flags().StringVar(&deleteType, "type", "",
+		"The group's type; read from the server when omitted")
 }
 
 func runGroupDelete(cmd *cobra.Command, args []string) error {
@@ -63,6 +70,10 @@ func runGroupDelete(cmd *cobra.Command, args []string) error {
 	if helpers.ResolveDryRun() {
 		return helpers.DryRun(c, "DELETE", "sys/identity/group/{name}", nil)
 	}
+	groupType, err := resolveGroupType(c, name, deleteType)
+	if err != nil {
+		return err
+	}
 
 	if !deleteForce && isatty.IsTerminal(os.Stdin.Fd()) {
 		fmt.Fprintf(os.Stderr, "Delete group %q? Its members lose the roles it grants. (y/N) ", name)
@@ -73,7 +84,7 @@ func runGroupDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := c.Sys().DeleteGroup(name, deleteExpectedHash); err != nil {
+	if err := c.Sys().DeleteGroup(name, groupType, deleteExpectedHash); err != nil {
 		return fmt.Errorf("error deleting group %q: %w", name, err)
 	}
 	return helpers.RenderMap(map[string]any{

@@ -10,6 +10,7 @@ import (
 
 var (
 	listRole string
+	listType string
 
 	GroupListCmd = &cobra.Command{
 		Use:           "list",
@@ -20,7 +21,9 @@ var (
 Usage: warden identity group list [options]
 
   List every group of the current namespace, or with -role only the
-  groups that grant one role. Requires a token with sudo on
+  groups that grant one role, with -type only the groups of one type
+  (needed when your policy only lets you see groups of one type).
+  Requires a token with sudo on
   sys/identity/group. 'warden identity usage' shows how much of the
   namespace's caps the groups use.
 
@@ -35,6 +38,7 @@ Usage: warden identity group list [options]
 
       $ warden identity group list
       $ warden identity group list -role deploy
+      $ warden identity group list -type virtual
       $ warden identity group list -o ndjson | jq -r .name
 `,
 		Args: cobra.NoArgs,
@@ -44,6 +48,7 @@ Usage: warden identity group list [options]
 
 func init() {
 	GroupListCmd.Flags().StringVar(&listRole, "role", "", "List only the groups that grant this role")
+	GroupListCmd.Flags().StringVar(&listType, "type", "", "List only the groups of this type")
 }
 
 func runGroupList(cmd *cobra.Command, args []string) error {
@@ -56,7 +61,7 @@ func runGroupList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	groups, err := c.Sys().ListGroups(listRole)
+	groups, err := c.Sys().ListGroups(listRole, listType)
 	if err != nil {
 		return fmt.Errorf("failed to list groups: %w", err)
 	}

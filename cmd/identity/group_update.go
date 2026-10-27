@@ -22,10 +22,14 @@ Usage: warden identity group update <name> [options]
 
   Update a group. A field you pass replaces the stored value, including
   with an empty one ("roles": [] stops the group granting anything); a
-  field you leave out keeps its value. "rules" is replaced whole.
-  "type" may be left out; if present it must equal the stored type. The
+  field you leave out keeps its value. "rules" is replaced whole. The
   change applies to callers on their next request. Requires a token with
   sudo on sys/identity/group.
+
+  The server requires the group's type on every write, and it must equal
+  the stored type. Without "type" (or -type) the command reads the group
+  to learn it; pass it when your policy only lets you write (and read)
+  groups of one type.
 
   Pass the hash from 'warden identity group read' as expected_hash to
   apply the update only if nobody changed the group since you read it;
@@ -36,6 +40,7 @@ Usage: warden identity group update <name> [options]
     Full JSON payload (agent-friendly):
 
       $ warden identity group update ci-deployers -json '{
+          "type": "virtual",
           "rules": [
             {
               "mount": ["auth/github-oidc/"],
@@ -107,6 +112,11 @@ func runGroupUpdate(cmd *cobra.Command, args []string) error {
 	}
 	if helpers.ResolveDryRun() {
 		return helpers.DryRun(c, "PUT", "sys/identity/group/{name}", payload)
+	}
+	if t, _ := payload["type"].(string); t == "" {
+		if payload["type"], err = resolveGroupType(c, name, ""); err != nil {
+			return err
+		}
 	}
 
 	resource, err := c.Operator().Write("sys/identity/group/"+name, payload)

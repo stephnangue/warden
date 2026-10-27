@@ -7,6 +7,8 @@ import (
 	"github.com/stephnangue/warden/cmd/helpers"
 )
 
+var readType string
+
 var GroupReadCmd = &cobra.Command{
 	Use:           "read <name>",
 	SilenceUsage:  true,
@@ -19,16 +21,22 @@ Usage: warden identity group read <name>
   a selector at a time: "#i  mount=…  name=v1|v2"), its rule and selector
   counts (what it adds to the namespace's usage), valid_until, metadata, and
   the hash a conditional update or delete passes back. Requires a token
-  with sudo on sys/identity/group.
+  with sudo on sys/identity/group. -type, when given, must be the group's
+  type; pass it when your policy only lets you read groups of one type.
 
   Examples:
 
       $ warden identity group read ci-deployers
+      $ warden identity group read ci-deployers -type virtual
       $ warden identity group read ci-deployers -o json
       $ warden identity group read ci-deployers -fields hash
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runGroupRead,
+}
+
+func init() {
+	GroupReadCmd.Flags().StringVar(&readType, "type", "", "The group's type (optional; refused if it is not the stored type)")
 }
 
 func runGroupRead(cmd *cobra.Command, args []string) error {
@@ -41,7 +49,11 @@ func runGroupRead(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	resource, err := c.Operator().Read("sys/identity/group/" + name)
+	var query map[string][]string
+	if readType != "" {
+		query = map[string][]string{"type": {readType}}
+	}
+	resource, err := c.Operator().ReadWithData("sys/identity/group/"+name, query)
 	if err != nil {
 		return fmt.Errorf("error reading group %q: %w", name, err)
 	}

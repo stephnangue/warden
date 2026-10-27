@@ -60,27 +60,33 @@ func TestSys_CreateGroup(t *testing.T) {
 func TestSys_ReadUpdateGroup(t *testing.T) {
 	client, rec := newRoleServer(t, http.StatusOK, deployersGroupJSON)
 
-	g, err := client.Sys().ReadGroup("deployers")
+	g, err := client.Sys().ReadGroup("deployers", "")
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, rec.method)
 	assert.Equal(t, "deployers", g.Name)
+	assert.False(t, rec.query.Has("type"), "no type when none is asked for")
 
-	_, err = client.Sys().UpdateGroup("deployers", &GroupInput{Roles: []string{}, ExpectedHash: "h1"})
+	_, err = client.Sys().ReadGroup("deployers", "virtual")
+	require.NoError(t, err)
+	assert.Equal(t, "virtual", rec.query.Get("type"))
+
+	_, err = client.Sys().UpdateGroup("deployers", &GroupInput{Type: "virtual", Roles: []string{}, ExpectedHash: "h1"})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPut, rec.method)
-	assert.Equal(t, map[string]any{"roles": []any{}, "expected_hash": "h1"}, rec.body,
-		"an empty list clears; type and valid_until are not sent when unset")
+	assert.Equal(t, map[string]any{"type": "virtual", "roles": []any{}, "expected_hash": "h1"}, rec.body,
+		"an empty list clears; valid_until is not sent when unset")
 
-	_, err = client.Sys().UpdateGroup("deployers", &GroupInput{ValidUntil: strPtr("")})
+	_, err = client.Sys().UpdateGroup("deployers", &GroupInput{Type: "virtual", ValidUntil: strPtr("")})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"valid_until": ""}, rec.body, "an empty valid_until is sent, to clear it")
+	assert.Equal(t, map[string]any{"type": "virtual", "valid_until": ""}, rec.body, "an empty valid_until is sent, to clear it")
 }
 
 func TestSys_DeleteGroup(t *testing.T) {
 	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"deployers"}}`)
-	require.NoError(t, client.Sys().DeleteGroup("deployers", "h1"))
+	require.NoError(t, client.Sys().DeleteGroup("deployers", "virtual", "h1"))
 	assert.Equal(t, http.MethodDelete, rec.method)
 	assert.Equal(t, "/v1/sys/identity/group/deployers", rec.path)
+	assert.Equal(t, "virtual", rec.query.Get("type"))
 	assert.Equal(t, "h1", rec.query.Get("expected_hash"))
 }
 
@@ -93,22 +99,24 @@ func TestSys_ListGroups(t *testing.T) {
 		]
 	}}`)
 
-	groups, err := client.Sys().ListGroups("deploy")
+	groups, err := client.Sys().ListGroups("deploy", "")
 	require.NoError(t, err)
 	assert.Equal(t, "/v1/sys/identity/group", rec.path)
 	assert.Equal(t, "true", rec.query.Get("warden-list"))
 	assert.Equal(t, "deploy", rec.query.Get("role"))
+	assert.False(t, rec.query.Has("type"))
 	require.Len(t, groups, 2)
 	assert.Equal(t, []string{"deploy", "read"}, groups[0].Roles)
 
-	_, err = client.Sys().ListGroups("")
+	_, err = client.Sys().ListGroups("", "virtual")
 	require.NoError(t, err)
 	assert.False(t, rec.query.Has("role"))
+	assert.Equal(t, "virtual", rec.query.Get("type"))
 }
 
 func TestSys_ListGroups_Empty(t *testing.T) {
 	client, _ := newRoleServer(t, http.StatusOK, `{"data":{"keys":[],"groups":[]}}`)
-	groups, err := client.Sys().ListGroups("")
+	groups, err := client.Sys().ListGroups("", "")
 	require.NoError(t, err)
 	assert.Empty(t, groups)
 	assert.NotNil(t, groups)

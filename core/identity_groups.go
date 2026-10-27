@@ -32,6 +32,18 @@ var (
 	ErrGroupChanged = errors.New("group changed concurrently")
 )
 
+// GroupTypeMismatchError is returned when a request names a group type other
+// than the stored one. Every group write carries the type, so a policy
+// condition on it can tell who may write which type of group.
+type GroupTypeMismatchError struct {
+	Name   string
+	Stored logical.GroupType
+}
+
+func (e *GroupTypeMismatchError) Error() string {
+	return fmt.Sprintf("type mismatch: group %q is %s", e.Name, e.Stored)
+}
+
 // Storage layout, under the barrier view at identityStorePath:
 //
 //	{namespace-uuid}/group/{id} -> JSON-encoded StoredGroup
@@ -343,7 +355,7 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 			return ErrGroupChanged
 		}
 		if g.Type != old.Type {
-			return errGroupTypeChange
+			return &GroupTypeMismatchError{Name: g.Name, Stored: old.Type}
 		}
 		if err := s.checkSelectorsLocked(cur, old, cg); err != nil {
 			return err
@@ -359,8 +371,6 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 		logger.String("name", g.Name))
 	return warnings, nil
 }
-
-var errGroupTypeChange = logical.ErrBadRequest("type cannot change; create a new group")
 
 // checkSelectorsLocked refuses a write that would take the namespace past its
 // cap on the selectors of virtual groups' rules: cur's total, less old's
@@ -395,9 +405,11 @@ func (s *IdentityStore) commitLocked(ctx context.Context, ns *namespace.Namespac
 	return nil
 }
 
-// DeleteGroup removes a group from the namespace in ctx. expectedHash makes it
-// conditional, as for UpdateGroup.
-func (s *IdentityStore) DeleteGroup(ctx context.Context, name, expectedHash string) error {
+// DeleteGroup removes a group from the namespace in ctx. A non-empty t must be
+// the stored type, checked under the lock so that a group deleted and
+// recreated with another type between the caller's read and this write is
+// refused. expectedHash makes the delete conditional, as for UpdateGroup.
+func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.GroupType, expectedHash string) error {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
 		return ErrNamespaceNotInContext
@@ -414,6 +426,9 @@ func (s *IdentityStore) DeleteGroup(ctx context.Context, name, expectedHash stri
 		old := cur.byName[name]
 		if old == nil {
 			return ErrGroupNotFound
+		}
+		if t != "" && old.Type != t {
+			return &GroupTypeMismatchError{Name: name, Stored: old.Type}
 		}
 		if expectedHash != "" && old.hash != expectedHash {
 			return ErrGroupChanged

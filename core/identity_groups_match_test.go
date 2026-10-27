@@ -455,7 +455,7 @@ func TestMembership_ThroughStore(t *testing.T) {
 	assert.Equal(t, []string{"xg"}, mX.Groups)
 
 	// A group change in Y recomputes Y.
-	require.NoError(t, s.DeleteGroup(ctxY, "yg", ""))
+	require.NoError(t, s.DeleteGroup(ctxY, "yg", "", ""))
 	assert.Same(t, emptyNSGroups, s.namespaceGroups(nsY.ID), "a namespace whose last group is deleted is empty")
 	mY2 := membership(admY, s.namespaceGroups(nsY.ID), now)
 	assert.NotSame(t, mY, mY2)
