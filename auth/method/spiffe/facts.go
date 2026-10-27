@@ -66,6 +66,21 @@ func (b *spiffeAuthBackend) FactNames() []string { return helper.FactNames(b.mou
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *spiffeAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+// AliasChange implements logical.FactsProvider (see helper.AliasChange). A
+// spiffe mount's alias is fixed to the SPIFFE ID, so only an entity_kind
+// change, or a facts map renaming spiffe_id, changes how it is derived.
+func (b *spiffeAuthBackend) AliasChange(data map[string]any) (from, to string) {
+	var cur helper.FactsConfig
+	b.configMu.RLock()
+	if b.config != nil {
+		cur = b.config.FactsConfig
+	}
+	b.configMu.RUnlock()
+	return helper.AliasChange(b.mountFacts, cur, data, func(c *helper.FactsConfig) {
+		c.CompileFields(spiffeBuiltinFacts(), spiffeAliasPolicy)
+	})
+}
+
 var _ logical.CredentialFormatProvider = (*spiffeAuthBackend)(nil)
 
 // CredentialFormat implements logical.CredentialFormatProvider: the mount

@@ -1387,8 +1387,31 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		}
 	}
 
+	// A change to how an auth mount derives aliases is refused while native
+	// identities are claimed on the mount; the backend cannot know. Only a
+	// write to an auth path can be one: gateway and streaming traffic skips
+	// it on the first test. It runs after CheckToken, so only an authorized
+	// writer learns that identities are claimed on the mount.
+	var forcedWarning string
+	if !req.Streamed && strings.HasPrefix(req.Path, authRoutePrefix) {
+		w, err := c.refuseAliasChange(ctx, req)
+		if err != nil {
+			return logical.ErrorResponse(err), auth, nil
+		}
+		forcedWarning = w
+	}
+
 	// Route the request
 	resp, routeErr := c.doRouting(ctx, req)
+
+	// A forced alias change says so on the write's response, when the write
+	// went through.
+	if forcedWarning != "" && routeErr == nil && resp != nil && !resp.IsError() {
+		if resp.Data == nil {
+			resp.Data = map[string]any{}
+		}
+		appendWarnings(resp.Data, forcedWarning)
+	}
 
 	// A provider's config read also says, ahead of time, when its user leg
 	// would refuse every user credential, or an auth path names a mount of the
@@ -2762,7 +2785,7 @@ func (c *Core) checkUserAudience(ctx context.Context, adm *logical.Admission, ns
 // zero-allocation steady state is lost, but each request still gets the
 // membership of its own leg, so correctness is not affected.
 func userMetadata(adm *logical.Admission) map[string]string {
-	return membership(adm, emptyNSGroups, time.Time{}).Metadata
+	return membership(adm, emptyNSIndex, time.Time{}).Metadata
 }
 
 // resolveUserAuthConfig resolves the secondary (user) auth configuration for a

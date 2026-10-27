@@ -28,11 +28,7 @@ import (
 // those too. A provider that injects into Authorization overwrites it a few
 // lines later; one that authenticates with some other header used to forward it
 // untouched, which is how a caller's Warden token reached the vendor.
-var wardenCredentialHeaders = []string{
-	"Authorization",
-	"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider", "X-Warden-Namespace",
-	"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token",
-}
+var wardenCredentialHeaders = append(logical.WardenRequestHeaders(), "Authorization")
 
 // hopByHopHeaders do not survive a proxy hop by definition, plus the forwarding
 // metadata this hop has no reason to pass on.

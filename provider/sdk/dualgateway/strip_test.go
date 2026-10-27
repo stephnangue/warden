@@ -21,11 +21,7 @@ import (
 // token or a user's bearer arriving there is a credential it could replay.
 func TestStripInboundCredentials_RemovesEveryWardenChannel(t *testing.T) {
 	h := http.Header{}
-	for _, name := range []string{
-		"Authorization",
-		"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider", "X-Warden-Namespace",
-		"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token",
-	} {
+	for _, name := range append(logical.WardenRequestHeaders(), "Authorization") {
 		h.Set(name, "sensitive")
 	}
 	h.Set("X-Trace-Id", "keep-me")

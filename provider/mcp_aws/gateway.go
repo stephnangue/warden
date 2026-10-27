@@ -17,24 +17,13 @@ import (
 // headersToStrip removes client-supplied auth/identity headers before signing.
 // SigV4-irrelevant hop-by-hop and proxy headers are removed by
 // sigv4.NormalizeRequest, so we only need the Warden-specific set here.
-var headersToStrip = []string{
+var headersToStrip = append(logical.WardenRequestHeaders(),
 	"Authorization",
-	"X-Warden-Token",
-	"X-Warden-Agent-Token",
-	// Retired in 0.20: the user credential now rides Authorization. Still
-	// stripped so a client that keeps sending the old header cannot leak the
-	// credential to the upstream.
-	"X-Warden-User-Token",
-	"X-Warden-Namespace",
-	"X-Warden-Provider",
-	"X-Warden-Role",
-	"X-Warden-Subject-Token",
-	"X-Warden-Actor-Token",
 	// Cookie carries client session identity that AWS will ignore but that
 	// would otherwise bleed across the trust boundary. Strip explicitly —
 	// sigv4.NormalizeRequest doesn't touch it.
 	"Cookie",
-}
+)
 
 // handleGateway signs the incoming MCP request with AWS SigV4 using credentials
 // minted by core's implicit-auth pipeline, then forwards to the upstream MCP

@@ -241,6 +241,13 @@ type FactsProvider interface {
 	// current configuration (EntityKindAgent or EntityKindHuman), or "" when
 	// it publishes no naming.
 	EntityKind() string
+	// AliasChange returns how the mount derives aliases under its current
+	// configuration (from), and how it would once a config write carrying data
+	// is installed (to): the kind it admits, the fact aliases are taken from and
+	// the raw key that fact reads, as a phrase. Equal phrases derive the same
+	// alias from every credential. from is "" when the mount publishes no
+	// naming, and to is "" when the write would be refused anyway.
+	AliasChange(data map[string]any) (from, to string)
 }
 
 // CredentialFormat names the credential a transparent auth method admits, which

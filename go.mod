@@ -52,6 +52,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.109.1
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.40.1
 	github.com/aws/smithy-go v1.28.1
+	github.com/cilium/statedb v0.9.3
 	go.yaml.in/yaml/v3 v3.0.5
 )
 

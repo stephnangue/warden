@@ -10,6 +10,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Every X-Warden-* header a client can send is on the list every gateway
+// strips, the reserved X-Warden-Agent included, and the list is fresh per
+// call so no gateway's append can change another's.
+func TestWardenRequestHeaders(t *testing.T) {
+	assert.ElementsMatch(t, []string{
+		"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider", "X-Warden-Namespace",
+		"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token", "X-Warden-Agent",
+	}, WardenRequestHeaders())
+	a := WardenRequestHeaders()
+	a[0] = "changed"
+	assert.Equal(t, HeaderWardenToken, WardenRequestHeaders()[0])
+}
+
 // withCert returns r carrying a trusted client certificate the way the API
 // listener's middleware presents one — via the request context, never a header.
 func withCert(r *http.Request) *http.Request {

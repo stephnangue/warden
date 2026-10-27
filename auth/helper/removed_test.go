@@ -59,6 +59,14 @@ func TestRemovedConfigKeys(t *testing.T) {
 	assert.NoError(t, RefuseRemovedConfigKeys(map[string]any{"default_role": ""}))
 	assert.NoError(t, RefuseRemovedConfigKeys(nil))
 
+	// A reserved key is refused too, but is no removed key: nothing stored
+	// carries it.
+	err = RefuseRemovedConfigKeys(map[string]any{"agent_claim": "agent_id"})
+	require.Error(t, err)
+	assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+	assert.Contains(t, err.Error(), "agent_claim is reserved")
+	assert.Nil(t, RemovedConfigKeys(map[string]any{"agent_claim": "agent_id"}))
+
 	data := map[string]any{}
 	SetWarnings(data, nil)
 	assert.NotContains(t, data, "warnings")

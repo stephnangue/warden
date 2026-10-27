@@ -125,7 +125,8 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 			HelpSynopsis: "Read the namespace's identity usage",
 			HelpDescription: "Count the namespace's identity objects by kind against their caps. groups.total counts " +
 				"every group; groups.virtual counts virtual groups and the selectors of their rules (\"mount\" " +
-				"included) against max and max_selectors.",
+				"included) against max and max_selectors. identities counts the entities against max_entities, and " +
+				"the native identities they claim.",
 		},
 	}
 }
@@ -469,6 +470,7 @@ func (b *SystemBackend) handleIdentityUsage(ctx context.Context, req *logical.Re
 		return groupErrorResponse("", err), nil
 	}
 	return b.respondSuccess(map[string]any{
-		"groups": usage.Groups,
+		"groups":     usage.Groups,
+		"identities": usage.Identities,
 	}), nil
 }

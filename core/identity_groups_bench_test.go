@@ -13,7 +13,7 @@ import (
 // benchGroup returns a virtual group named name whose rules each list mount
 // and require repo to be one the bench admission never carries, so every rule
 // is evaluated in full and fails on its last name.
-func benchGroup(tb testing.TB, name, mount string, rules int) *compiledGroup {
+func benchGroup(tb testing.TB, name, mount string, rules int) *groupEntry {
 	tb.Helper()
 	g := &logical.Group{Name: name, Type: logical.GroupTypeVirtual, Roles: []string{"deploy", "read"}}
 	for i := range rules {
@@ -35,8 +35,8 @@ func benchGroup(tb testing.TB, name, mount string, rules int) *compiledGroup {
 // mounts (auth/m0/ … ), with the bench admission's mount auth/m0/ getting 1/spread
 // of them; spread == 1 puts every group on auth/m0/, the worst case for the
 // index.
-func benchGroups(tb testing.TB, n, rules, spread int) map[string]*compiledGroup {
-	byName := make(map[string]*compiledGroup, n)
+func benchGroups(tb testing.TB, n, rules, spread int) map[string]*groupEntry {
+	byName := make(map[string]*groupEntry, n)
 	for i := range n {
 		name := fmt.Sprintf("g%05d", i)
 		byName[name] = benchGroup(tb, name, fmt.Sprintf("auth/m%d/", i%spread), rules)
@@ -85,8 +85,8 @@ func BenchmarkGroupCompute(b *testing.B) {
 		// caps allow (each bench rule has three selectors).
 		capped := min(logical.MaxVirtualGroupsPerNamespace, logical.MaxSelectorsPerNamespace/(3*rules))
 		for _, n := range []int{100, 1000, capped, 10000} {
-			spread := buildNSGroups(benchGroups(b, n, rules, 10), 1)
-			worst := buildNSGroups(benchGroups(b, n, rules, 1), 1)
+			spread := buildNSIndex(benchGroups(b, n, rules, 10), nil, 1)
+			worst := buildNSIndex(benchGroups(b, n, rules, 1), nil, 1)
 			b.Run(fmt.Sprintf("rules=%d/groups=%d/index", rules, n), func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
@@ -144,9 +144,9 @@ func wideAdmission(tb testing.TB) *logical.Admission {
 // fails and a glob that matches, so it is compared twice; the last selector
 // matches only when match is set, so without it every rule fails on its last
 // selector.
-func wideGroups(tb testing.TB, n int, match bool) *nsGroups {
+func wideGroups(tb testing.TB, n int, match bool) *nsIndex {
 	tb.Helper()
-	byName := make(map[string]*compiledGroup, n)
+	byName := make(map[string]*groupEntry, n)
 	for i := range n {
 		s := logical.GroupRule{"mount": {"auth/m0/"}}
 		for j := range wideNames {
@@ -164,7 +164,7 @@ func wideGroups(tb testing.TB, n int, match bool) *nsGroups {
 		cg.Group, cg.hash = g, g.Hash()
 		byName[g.Name] = cg
 	}
-	return buildNSGroups(byName, 1)
+	return buildNSIndex(byName, nil, 1)
 }
 
 // BenchmarkGroupComputeWide measures the worst case per selector: every group
@@ -208,7 +208,7 @@ func BenchmarkGroupComputeAllMatch(b *testing.B) {
 		{logical.MaxVirtualGroupsPerNamespace, logical.MaxSelectorsPerNamespace / logical.MaxVirtualGroupsPerNamespace},
 	} {
 		n := tc.n
-		byName := make(map[string]*compiledGroup, n)
+		byName := make(map[string]*groupEntry, n)
 		for i := range n {
 			s := logical.GroupRule{"mount": {"auth/m0/"}}
 			if tc.selectors >= 2 {
@@ -226,7 +226,7 @@ func BenchmarkGroupComputeAllMatch(b *testing.B) {
 			cg.Group, cg.hash = g, g.Hash()
 			byName[g.Name] = cg
 		}
-		gs := buildNSGroups(byName, 1)
+		gs := buildNSIndex(byName, nil, 1)
 		b.Run(fmt.Sprintf("selectors=%d/groups=%d", tc.selectors, n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
@@ -247,12 +247,12 @@ func BenchmarkGroupPublish(b *testing.B) {
 		b.Run(fmt.Sprintf("groups=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				next := make(map[string]*compiledGroup, len(byName)+1)
+				next := make(map[string]*groupEntry, len(byName)+1)
 				for k, v := range byName {
 					next[k] = v
 				}
 				next[cg.Name] = cg
-				buildNSGroups(next, 2)
+				buildNSIndex(next, nil, 2)
 			}
 		})
 	}
@@ -278,7 +278,7 @@ func BenchmarkGroupWrite(b *testing.B) {
 			if err := s.persistGroup(ctx, namespace.RootNamespaceUUID, target); err != nil {
 				b.Fatal(err)
 			}
-			s.publishLocked(namespace.RootNamespaceID, byName)
+			s.publishGroupsLocked(namespace.RootNamespaceID, byName)
 			s.mu.Unlock()
 			b.ReportAllocs()
 			i := 0
@@ -299,7 +299,7 @@ func BenchmarkGroupWrite(b *testing.B) {
 // admitted credential takes once its membership is computed.
 func BenchmarkMembershipSteadyState(b *testing.B) {
 	adm := benchAdmission(b)
-	gs := buildNSGroups(benchGroups(b, 1000, 1, 10), 1)
+	gs := buildNSIndex(benchGroups(b, 1000, 1, 10), nil, 1)
 	now := time.Now()
 	membership(adm, gs, now)
 	b.ReportAllocs()

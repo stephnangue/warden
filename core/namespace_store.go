@@ -988,6 +988,15 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 		}
 	}
 
+	// clear groups and entities, before the credential sources: an identity
+	// object may reference a source, and nothing may be left pointing at one
+	// that is gone
+	if ns.core.identityStore != nil {
+		if err := ns.core.identityStore.ClearNamespace(nsCtx); err != nil {
+			return fmt.Errorf("failed to clear identity objects: %w", err)
+		}
+	}
+
 	// clear credential specs and sources
 	if ns.core.credConfigStore != nil {
 		if err := ns.core.credConfigStore.ClearNamespace(nsCtx); err != nil {
@@ -999,13 +1008,6 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 	if ns.core.roleStore != nil {
 		if err := ns.core.roleStore.ClearNamespace(nsCtx); err != nil {
 			return fmt.Errorf("failed to clear roles: %w", err)
-		}
-	}
-
-	// clear groups
-	if ns.core.identityStore != nil {
-		if err := ns.core.identityStore.ClearNamespace(nsCtx); err != nil {
-			return fmt.Errorf("failed to clear groups: %w", err)
 		}
 	}
 

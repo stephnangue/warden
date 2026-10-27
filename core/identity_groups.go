@@ -8,8 +8,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-uuid"
@@ -21,11 +19,10 @@ import (
 )
 
 var (
-	ErrIdentityStoreNotLoaded = errors.New("identity store is not loaded")
-	ErrGroupNotFound          = errors.New("group not found")
-	ErrGroupAlreadyExists     = errors.New("group already exists")
-	ErrTooManyVirtualGroups   = errors.New("too many virtual groups in the namespace")
-	ErrTooManySelectors       = errors.New("too many selectors in the namespace")
+	ErrGroupNotFound        = errors.New("group not found")
+	ErrGroupAlreadyExists   = errors.New("group already exists")
+	ErrTooManyVirtualGroups = errors.New("too many virtual groups in the namespace")
+	ErrTooManySelectors     = errors.New("too many selectors in the namespace")
 
 	// ErrGroupChanged is returned by UpdateGroup and DeleteGroup when the
 	// caller passed an expected hash and the stored group no longer has it.
@@ -48,10 +45,10 @@ func (e *GroupTypeMismatchError) Error() string {
 //
 //	{namespace-uuid}/group/{id} -> JSON-encoded StoredGroup
 //
-// A group is stored under its ID, not its name, so that the identity objects
-// added to this store later reference groups by a key that never changes.
+// A group is stored under its ID, not its name, so that what references a
+// group (a static group's members, in time) does so by a key that never
+// changes.
 const (
-	identityStorePath  = "core/identity/"
 	groupKeySegment    = "group/"
 	storedGroupVersion = 1
 )
@@ -68,166 +65,18 @@ func groupListPrefix(nsUUID string) string { return nsUUID + "/" + groupKeySegme
 
 func groupStorageKey(nsUUID, id string) string { return groupListPrefix(nsUUID) + id }
 
-// IdentityStore holds the namespace groups: durable records in storage and an
-// in-memory snapshot, compiled and indexed, that serves every read and every
-// membership computation.
-//
-// # Thread safety
-//
-// Readers never lock. They load the snapshot pointer once and read from it; a
-// published snapshot, its namespaces, their indexes and the groups they hold
-// are never written again. A write builds the next namespace value (cloning
-// the namespace's name map and rebuilding its index, other namespaces shared
-// by pointer) and swaps the snapshot in. A reader holding an older snapshot
-// keeps seeing it whole.
-//
-// mu serializes writers and guards storage and loaded. Each mutator validates
-// holding no lock (validation reads the role store and asks the auth mounts
-// for their fact names), then commits under mu: the existence, count and
-// expected-hash checks, the storage write and the publish.
-//
-// gen is the store-wide publish counter. Every publish of a namespace takes
-// the next value, so a namespace's generation changes exactly when its groups
-// do, and a publish in one namespace leaves every other namespace's generation,
-// and the memberships computed from it, as they were. It is never reset, not
-// even across Unload and Load, so a generation never names two different
-// states of one namespace.
-//
-// # Lifecycle
-//
-// Load runs on the active node only, after the mounts are set up; Unload drops
-// the snapshot when the node seals or steps down. Until Load runs every read
-// answers "not found", every namespace has no groups, and every write is
-// refused.
-type IdentityStore struct {
-	core   *Core
-	logger *logger.GatedLogger
-
-	groups atomic.Pointer[groupSnapshot]
-	gen    atomic.Uint64
-
-	mu      sync.Mutex
-	storage sdklogical.Storage // barrier view at identityStorePath
-	loaded  bool
-
-	// maxVirtualGroups and maxSelectors are the namespace caps a write checks
-	// and Usage reports: logical.MaxVirtualGroupsPerNamespace and
-	// logical.MaxSelectorsPerNamespace, lowered by tests only. Atomic, so Usage
-	// reads them without taking mu.
-	maxVirtualGroups, maxSelectors atomic.Int64
-
-	// beforeGroupUpdate, when set, runs in UpdateGroup after validation and
-	// before the commit. Nil outside tests.
-	beforeGroupUpdate func()
-}
-
-// NewIdentityStore constructs the store. Storage is wired up by Load once the
-// barrier is unsealed.
-func NewIdentityStore(c *Core) *IdentityStore {
-	s := &IdentityStore{
-		core:   c,
-		logger: c.logger.WithSystem("identity.store"),
-	}
-	s.maxVirtualGroups.Store(logical.MaxVirtualGroupsPerNamespace)
-	s.maxSelectors.Store(logical.MaxSelectorsPerNamespace)
-	s.groups.Store(emptyGroupSnapshot)
-	return s
-}
-
-// namespaceGroups returns the published groups of namespace nsID, or the
-// empty namespace when it has none. Lock-free; does not allocate.
-func (s *IdentityStore) namespaceGroups(nsID string) *nsGroups {
-	return s.groups.Load().namespace(nsID)
-}
-
-// IdentityUsage is a namespace's identity objects counted by kind, against
-// their caps. Each kind is one top-level key; groups is the only one yet.
-type IdentityUsage struct {
-	Groups GroupsUsage `json:"groups"`
-}
-
-// GroupsUsage counts a namespace's groups: all of them, then by type, each
-// type with the caps that apply to it.
-type GroupsUsage struct {
-	Total   int                `json:"total"`
-	Virtual VirtualGroupsUsage `json:"virtual"`
-}
-
-// VirtualGroupsUsage counts a namespace's virtual groups and the selectors of
-// their rules ("mount" included), against MaxVirtualGroupsPerNamespace and
-// MaxSelectorsPerNamespace.
-type VirtualGroupsUsage struct {
-	Count        int `json:"count"`
-	Max          int `json:"max"`
-	Selectors    int `json:"selectors"`
-	MaxSelectors int `json:"max_selectors"`
-}
-
-// Usage reports the identity usage of the namespace in ctx. It reads one
-// snapshot, takes no lock and reads no storage.
-func (s *IdentityStore) Usage(ctx context.Context) (IdentityUsage, error) {
-	ns, err := namespace.FromContext(ctx)
-	if err != nil {
-		return IdentityUsage{}, ErrNamespaceNotInContext
-	}
-	gs := s.namespaceGroups(ns.ID)
-	return IdentityUsage{Groups: GroupsUsage{
-		Total: len(gs.byName),
-		Virtual: VirtualGroupsUsage{
-			Count:        len(gs.selecting),
-			Max:          int(s.maxVirtualGroups.Load()),
-			Selectors:    gs.selectors,
-			MaxSelectors: int(s.maxSelectors.Load()),
-		},
-	}}, nil
-}
-
 // GroupsListingRole returns the names of the groups of namespace nsID that
 // list role, sorted.
 func (s *IdentityStore) GroupsListingRole(nsID, role string) []string {
-	return s.namespaceGroups(nsID).listing(role)
+	return s.namespaceIndex(nsID).listing(role)
 }
 
-// publishLocked makes byName the namespace's groups under the next generation.
-// Caller holds mu and hands over byName.
-func (s *IdentityStore) publishLocked(nsID string, byName map[string]*compiledGroup) {
-	snap := s.groups.Load()
-	s.groups.Store(snap.withNamespace(nsID, buildNSGroups(byName, s.gen.Add(1))))
-}
-
-// Load reads every group from storage, compiles and publishes them. Called on
-// the active node during unseal, after the namespaces and mounts are loaded.
-func (s *IdentityStore) Load(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.storage == nil {
-		s.storage = NewBarrierView(s.core.barrier, identityStorePath)
-	}
-	snap, count, err := s.loadAllLocked(ctx)
-	if err != nil {
-		return err
-	}
-	s.groups.Store(snap)
-	s.loaded = true
-	s.logger.Debug("identity store loaded", logger.Int("groups", count))
-	return nil
-}
-
-// Unload drops the snapshot. The records stay in storage for the next Load.
-func (s *IdentityStore) Unload() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.groups.Store(emptyGroupSnapshot)
-	s.loaded = false
-}
-
-func (s *IdentityStore) writableLocked() error {
-	if !s.loaded || s.storage == nil {
-		return ErrIdentityStoreNotLoaded
-	}
-	return nil
+// publishGroupsLocked makes byName the namespace's groups under the next generation,
+// keeping its entities as published. Caller holds mu and hands over byName.
+func (s *IdentityStore) publishGroupsLocked(nsID string, byName map[string]*groupEntry) {
+	snap := s.snapshot.Load()
+	ents := snap.namespace(nsID).entities
+	s.snapshot.Store(snap.withNamespace(nsID, buildNSIndex(byName, ents, s.gen.Add(1))))
 }
 
 // GetGroup returns a copy of the group name in the namespace in ctx, and the
@@ -237,7 +86,7 @@ func (s *IdentityStore) GetGroup(ctx context.Context, name string) (*logical.Gro
 	if err != nil {
 		return nil, "", ErrNamespaceNotInContext
 	}
-	cg := s.namespaceGroups(ns.ID).byName[name]
+	cg := s.namespaceIndex(ns.ID).groupsByName[name]
 	if cg == nil {
 		return nil, "", ErrGroupNotFound
 	}
@@ -251,9 +100,9 @@ func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical
 	if err != nil {
 		return nil, nil, ErrNamespaceNotInContext
 	}
-	gs := s.namespaceGroups(ns.ID)
-	names := make([]string, 0, len(gs.byName))
-	for name, cg := range gs.byName {
+	gs := s.namespaceIndex(ns.ID)
+	names := make([]string, 0, len(gs.groupsByName))
+	for name, cg := range gs.groupsByName {
 		if role == "" || slices.Contains(cg.Roles, role) {
 			names = append(names, name)
 		}
@@ -262,7 +111,7 @@ func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical
 	groups := make([]*logical.Group, len(names))
 	hashes := make([]string, len(names))
 	for i, name := range names {
-		cg := gs.byName[name]
+		cg := gs.groupsByName[name]
 		groups[i], hashes[i] = cg.Group.Clone(), cg.hash
 	}
 	return groups, hashes, nil
@@ -293,13 +142,13 @@ func (s *IdentityStore) CreateGroup(ctx context.Context, g *logical.Group) ([]st
 		if err := s.writableLocked(); err != nil {
 			return err
 		}
-		cur := s.namespaceGroups(ns.ID)
-		if cur.byName[g.Name] != nil {
+		cur := s.namespaceIndex(ns.ID)
+		if cur.groupsByName[g.Name] != nil {
 			return ErrGroupAlreadyExists
 		}
 		// The caps bound what recomputes evaluate: virtual groups only.
-		if max := int(s.maxVirtualGroups.Load()); g.Type == logical.GroupTypeVirtual && len(cur.selecting) >= max {
-			return fmt.Errorf("%w: the namespace has %d/%d virtual groups", ErrTooManyVirtualGroups, len(cur.selecting), max)
+		if max := int(s.maxVirtualGroups.Load()); g.Type == logical.GroupTypeVirtual && len(cur.virtualGroups) >= max {
+			return fmt.Errorf("%w: the namespace has %d/%d virtual groups", ErrTooManyVirtualGroups, len(cur.virtualGroups), max)
 		}
 		if err := s.checkSelectorsLocked(cur, nil, cg); err != nil {
 			return err
@@ -346,8 +195,8 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 		if err := s.writableLocked(); err != nil {
 			return err
 		}
-		cur := s.namespaceGroups(ns.ID)
-		old := cur.byName[g.Name]
+		cur := s.namespaceIndex(ns.ID)
+		old := cur.groupsByName[g.Name]
 		if old == nil {
 			return ErrGroupNotFound
 		}
@@ -375,10 +224,10 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 // checkSelectorsLocked refuses a write that would take the namespace past its
 // cap on the selectors of virtual groups' rules: cur's total, less old's
 // selectors (the group replaced, if any), plus next's. Caller holds mu.
-func (s *IdentityStore) checkSelectorsLocked(cur *nsGroups, old, next *compiledGroup) error {
-	total := cur.selectors + next.selectors
+func (s *IdentityStore) checkSelectorsLocked(cur *nsIndex, old, next *groupEntry) error {
+	total := cur.selectors + next.selectors()
 	if old != nil {
-		total -= old.selectors
+		total -= old.selectors()
 	}
 	if maxSelectors := int(s.maxSelectors.Load()); total > maxSelectors {
 		return fmt.Errorf("%w: this write would make %d/%d virtual selectors (currently %d; every key of every rule counts, \"mount\" included)",
@@ -390,18 +239,18 @@ func (s *IdentityStore) checkSelectorsLocked(cur *nsGroups, old, next *compiledG
 // commitLocked stores g and publishes it with its compiled form cg in place of
 // any group of the same name. Caller holds mu; cur is the namespace as
 // published.
-func (s *IdentityStore) commitLocked(ctx context.Context, ns *namespace.Namespace, cur *nsGroups, g *logical.Group, cg *compiledGroup) error {
+func (s *IdentityStore) commitLocked(ctx context.Context, ns *namespace.Namespace, cur *nsIndex, g *logical.Group, cg *groupEntry) error {
 	stored := g.Clone()
 	cg.Group, cg.hash = stored, stored.Hash()
 	if err := s.persistGroup(ctx, ns.UUID, cg); err != nil {
 		return err
 	}
-	byName := make(map[string]*compiledGroup, len(cur.byName)+1)
-	for k, v := range cur.byName {
+	byName := make(map[string]*groupEntry, len(cur.groupsByName)+1)
+	for k, v := range cur.groupsByName {
 		byName[k] = v
 	}
 	byName[g.Name] = cg
-	s.publishLocked(ns.ID, byName)
+	s.publishGroupsLocked(ns.ID, byName)
 	return nil
 }
 
@@ -422,8 +271,8 @@ func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.
 		if err := s.writableLocked(); err != nil {
 			return err
 		}
-		cur := s.namespaceGroups(ns.ID)
-		old := cur.byName[name]
+		cur := s.namespaceIndex(ns.ID)
+		old := cur.groupsByName[name]
 		if old == nil {
 			return ErrGroupNotFound
 		}
@@ -436,13 +285,13 @@ func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.
 		if err := s.storage.Delete(ctx, groupStorageKey(ns.UUID, old.ID)); err != nil {
 			return fmt.Errorf("failed to delete group %q: %w", name, err)
 		}
-		byName := make(map[string]*compiledGroup, len(cur.byName))
-		for k, v := range cur.byName {
+		byName := make(map[string]*groupEntry, len(cur.groupsByName))
+		for k, v := range cur.groupsByName {
 			if k != name {
 				byName[k] = v
 			}
 		}
-		s.publishLocked(ns.ID, byName)
+		s.publishGroupsLocked(ns.ID, byName)
 		return nil
 	}()
 	if err != nil {
@@ -454,45 +303,23 @@ func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.
 	return nil
 }
 
-// ClearNamespace deletes every group of the namespace in ctx, from storage and
-// from the snapshot. Called during namespace deletion. It sweeps what storage
-// holds, so a record the snapshot skipped at load is removed too.
-func (s *IdentityStore) ClearNamespace(ctx context.Context) error {
-	ns, err := namespace.FromContext(ctx)
+// clearGroupsLocked deletes every stored group of the namespace and returns
+// how many it deleted. Caller holds mu.
+func (s *IdentityStore) clearGroupsLocked(ctx context.Context, nsUUID string) (int, error) {
+	ids, err := s.storage.List(ctx, groupListPrefix(nsUUID))
 	if err != nil {
-		return ErrNamespaceNotInContext
-	}
-
-	// One critical section for the whole sweep: a create landing part-way
-	// through would otherwise survive the namespace deletion.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.storage == nil {
-		return nil
-	}
-	ids, err := s.storage.List(ctx, groupListPrefix(ns.UUID))
-	if err != nil {
-		return fmt.Errorf("failed to list groups for namespace cleanup: %w", err)
+		return 0, fmt.Errorf("failed to list groups for namespace cleanup: %w", err)
 	}
 	for _, id := range ids {
-		if err := s.storage.Delete(ctx, groupStorageKey(ns.UUID, id)); err != nil {
-			return fmt.Errorf("failed to delete group %s during namespace cleanup: %w", id, err)
+		if err := s.storage.Delete(ctx, groupStorageKey(nsUUID, id)); err != nil {
+			return 0, fmt.Errorf("failed to delete group %s during namespace cleanup: %w", id, err)
 		}
 	}
-	if snap := s.groups.Load(); snap.byNS[ns.ID] != nil {
-		s.groups.Store(snap.withNamespace(ns.ID, nil))
-	}
-	if len(ids) > 0 {
-		s.logger.Info("cleared groups for namespace",
-			logger.String("namespace", ns.UUID),
-			logger.Int("groups_deleted", len(ids)))
-	}
-	return nil
+	return len(ids), nil
 }
 
 // persistGroup writes cg's group to storage. Caller holds mu.
-func (s *IdentityStore) persistGroup(ctx context.Context, nsUUID string, cg *compiledGroup) error {
+func (s *IdentityStore) persistGroup(ctx context.Context, nsUUID string, cg *groupEntry) error {
 	data, err := json.Marshal(&StoredGroup{Version: storedGroupVersion, Group: cg.Group, Hash: cg.hash})
 	if err != nil {
 		return fmt.Errorf("failed to marshal group: %w", err)
@@ -506,65 +333,40 @@ func (s *IdentityStore) persistGroup(ctx context.Context, nsUUID string, cg *com
 	return nil
 }
 
-// loadAllLocked reads every stored group into a new snapshot and returns it
-// with the number of groups it holds. A listing that fails fails the load; a
-// record that does not decode or compile, whose namespace no longer exists, or
+// loadGroupsLocked reads the stored groups of a namespace, by name. A listing
+// that fails fails the load; a record that does not decode or compile, or
 // whose name another record of the namespace already holds, is logged and
 // skipped. Caller holds mu.
-func (s *IdentityStore) loadAllLocked(ctx context.Context) (*groupSnapshot, int, error) {
-	nsKeys, err := s.storage.List(ctx, "")
+func (s *IdentityStore) loadGroupsLocked(ctx context.Context, ns *namespace.Namespace) (map[string]*groupEntry, error) {
+	ids, err := s.storage.List(ctx, groupListPrefix(ns.UUID))
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to list identity namespaces: %w", err)
+		return nil, fmt.Errorf("failed to list groups of namespace %q: %w", ns.Path, err)
 	}
-
-	snap := &groupSnapshot{byNS: make(map[string]*nsGroups, len(nsKeys))}
-	count := 0
-	for _, nsKey := range nsKeys {
-		nsUUID := strings.TrimSuffix(nsKey, "/")
-		ns, err := s.core.namespaceStore.GetNamespace(ctx, nsUUID)
+	byName := make(map[string]*groupEntry, len(ids))
+	for _, id := range ids {
+		cg, err := s.readGroup(ctx, ns.UUID, id)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to resolve namespace %q of stored groups: %w", nsUUID, err)
-		}
-		if ns == nil {
-			s.logger.Warn("skipping groups stored for a namespace that does not exist",
-				logger.String("namespace_uuid", nsUUID))
+			s.logger.Warn("skipping a stored group that cannot be read",
+				logger.String("namespace", ns.Path),
+				logger.String("id", id),
+				logger.Err(err))
 			continue
 		}
-
-		ids, err := s.storage.List(ctx, groupListPrefix(nsUUID))
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to list groups of namespace %q: %w", ns.Path, err)
+		if prev := byName[cg.Name]; prev != nil {
+			s.logger.Warn("skipping a stored group whose name another group holds",
+				logger.String("namespace", ns.Path),
+				logger.String("name", cg.Name),
+				logger.String("id", id),
+				logger.String("kept_id", prev.ID))
+			continue
 		}
-		byName := make(map[string]*compiledGroup, len(ids))
-		for _, id := range ids {
-			cg, err := s.readGroup(ctx, nsUUID, id)
-			if err != nil {
-				s.logger.Warn("skipping a stored group that cannot be read",
-					logger.String("namespace", ns.Path),
-					logger.String("id", id),
-					logger.Err(err))
-				continue
-			}
-			if prev := byName[cg.Name]; prev != nil {
-				s.logger.Warn("skipping a stored group whose name another group holds",
-					logger.String("namespace", ns.Path),
-					logger.String("name", cg.Name),
-					logger.String("id", id),
-					logger.String("kept_id", prev.ID))
-				continue
-			}
-			byName[cg.Name] = cg
-		}
-		if g := buildNSGroups(byName, s.gen.Add(1)); g != nil {
-			snap.byNS[ns.ID] = g
-			count += len(byName)
-		}
+		byName[cg.Name] = cg
 	}
-	return snap, count, nil
+	return byName, nil
 }
 
 // readGroup reads, decodes and compiles one stored group.
-func (s *IdentityStore) readGroup(ctx context.Context, nsUUID, id string) (*compiledGroup, error) {
+func (s *IdentityStore) readGroup(ctx context.Context, nsUUID, id string) (*groupEntry, error) {
 	entry, err := s.storage.Get(ctx, groupStorageKey(nsUUID, id))
 	if err != nil {
 		return nil, err
@@ -603,7 +405,7 @@ func (s *IdentityStore) readGroup(ctx context.Context, nsUUID, id string) (*comp
 // role store and the auth mounts, so it runs before mu is taken. A role that
 // does not exist, or a fact or mount nothing in the namespace answers, is a
 // warning, not an error: either may be created after the group.
-func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespace, g *logical.Group) (*compiledGroup, []string, error) {
+func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespace, g *logical.Group) (*groupEntry, []string, error) {
 	if g == nil {
 		return nil, nil, logical.ErrBadRequest("group is required")
 	}
@@ -802,24 +604,4 @@ func ruleWarnings(g *logical.Group, mounts []authMountFacts) []string {
 		}
 	}
 	return warnings
-}
-
-// setupIdentityStore wires the identity store to the unsealed barrier and, on
-// the active node, loads it. A standby loads nothing: it forwards every
-// request, and it loads when it becomes active.
-func (c *Core) setupIdentityStore(ctx context.Context, standby bool) error {
-	if c.identityStore == nil {
-		return fmt.Errorf("identity store not initialized")
-	}
-	if standby {
-		return nil
-	}
-	return c.identityStore.Load(ctx)
-}
-
-// teardownIdentityStore is the seal-time inverse of setupIdentityStore.
-func (c *Core) teardownIdentityStore() {
-	if c.identityStore != nil {
-		c.identityStore.Unload()
-	}
 }

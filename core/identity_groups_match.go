@@ -31,7 +31,7 @@ var noGroups = []string{}
 // and clear it after the last one returns.
 var testHookRuleMatch func()
 
-// membership returns adm's membership under the namespace groups gs at now.
+// membership returns adm's membership under the namespace index gs at now.
 // The cached one is returned while it was computed from gs's generation and
 // the mount's naming in force, and none of its groups has passed its
 // valid_until; otherwise a new one is computed and cached. The fast path takes
@@ -44,7 +44,7 @@ var testHookRuleMatch func()
 // a group's valid_until may compute different ones, but the one kept never
 // outlives that instant: its ValidUntil makes the first request past it
 // compute again.
-func membership(adm *logical.Admission, gs *nsGroups, now time.Time) *logical.Membership {
+func membership(adm *logical.Admission, gs *nsIndex, now time.Time) *logical.Membership {
 	n := adm.Mount.Load()
 	m := adm.LoadMembership()
 	if m != nil && m.Gen == gs.gen && m.Naming == n &&
@@ -60,14 +60,14 @@ func membership(adm *logical.Admission, gs *nsGroups, now time.Time) *logical.Me
 // groups whose rules name adm's mount (through the mount index) and match its
 // facts under naming n, the roles they grant, and the mount's facts rendered
 // as metadata under n. It never reads or writes the cache.
-func compute(adm *logical.Admission, n *logical.MountNaming, gs *nsGroups, now time.Time) *logical.Membership {
+func compute(adm *logical.Admission, n *logical.MountNaming, gs *nsIndex, now time.Time) *logical.Membership {
 	return computeOver(adm, n, gs, now, gs.candidates(adm.MountPath), false)
 }
 
-// computeOver evaluates the groups of gs.selecting at the indexes in cands, in
+// computeOver evaluates the groups of gs.virtualGroups at the indexes in cands, in
 // order (ascending, so the groups come out sorted by name), or every group
 // when all is set. The full scan exists to measure and test the index against.
-func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsGroups, now time.Time, cands []int32, all bool) *logical.Membership {
+func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsIndex, now time.Time, cands []int32, all bool) *logical.Membership {
 	m := &logical.Membership{
 		Gen:      gs.gen,
 		Naming:   n,
@@ -76,21 +76,21 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsGroups, n
 	}
 	count := len(cands)
 	if all {
-		count = len(gs.selecting)
+		count = len(gs.virtualGroups)
 	}
 	if count == 0 {
 		return m
 	}
 
 	mc := &matchCtx{adm: adm, n: n}
-	var matched []*compiledGroup
+	var matched []*groupEntry
 	grants := 0
 	for i := range count {
 		idx := i
 		if !all {
 			idx = int(cands[i])
 		}
-		g := gs.selecting[idx]
+		g := gs.virtualGroups[idx]
 
 		// A group grants through its valid_until, inclusive, and nothing after.
 		until := g.Group.ValidUntil
@@ -127,9 +127,10 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsGroups, n
 	return m
 }
 
-// matchesAny reports whether any of g's rules matches mc.
-func matchesAny(g *compiledGroup, mc *matchCtx) bool {
-	for _, r := range g.rules {
+// matchesAny reports whether any of g's rules matches mc. g is a virtual
+// group: its rules are never nil.
+func matchesAny(g *groupEntry, mc *matchCtx) bool {
+	for _, r := range g.rules.compiled {
 		if h := testHookRuleMatch; h != nil {
 			h()
 		}

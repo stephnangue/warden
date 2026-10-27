@@ -127,7 +127,7 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	// The membership's metadata map is shared by every request of this
 	// credential. TokenEntry.Metadata is read only on every copy, so it is
 	// projected as is, not copied.
-	m := membership(adm, c.grantGroups(te.NamespaceID), now)
+	m := membership(adm, c.grantIndex(te.NamespaceID), now)
 	rg.Groups = m.Groups
 	te.Metadata = m.Metadata
 
@@ -165,14 +165,14 @@ func withholdRoleGrant(req *logical.Request, te *logical.TokenEntry) {
 	}
 }
 
-// grantGroups returns the published groups of namespace nsID: none when the
-// namespace has none or the store is not loaded (a standby, a sealed node), so
-// nothing is granted there.
-func (c *Core) grantGroups(nsID string) *nsGroups {
+// grantIndex returns the published identity index of namespace nsID, its
+// groups and entities: emptyNSIndex when the namespace has neither or the
+// store is not loaded (a standby, a sealed node), so nothing is granted there.
+func (c *Core) grantIndex(nsID string) *nsIndex {
 	if c.identityStore == nil {
-		return emptyNSGroups
+		return emptyNSIndex
 	}
-	return c.identityStore.namespaceGroups(nsID)
+	return c.identityStore.namespaceIndex(nsID)
 }
 
 // grantRole returns the published role name of namespace nsID, or nil when

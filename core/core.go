@@ -212,9 +212,9 @@ type Core struct {
 	// node only; reads are lock-free against its snapshot.
 	roleStore *RoleStore
 
-	// identityStore holds the namespace groups (sys/identity/group). Loaded on
-	// the active node only; reads and membership computations are lock-free
-	// against its snapshot.
+	// identityStore holds the namespace groups and entities (sys/identity/*).
+	// Loaded on the active node only; reads and membership computations are
+	// lock-free against its snapshot.
 	identityStore *IdentityStore
 
 	// aliasUnderivedLogged holds the accessors of the mounts that have logged
@@ -2043,7 +2043,7 @@ func (c *Core) preSeal() error {
 	// loads them).
 	c.teardownRoleStore()
 
-	// Drop the group snapshot likewise.
+	// Drop the identity snapshot (groups and entities) likewise.
 	c.teardownIdentityStore()
 
 	// The next active node counts leftover auth roles again.

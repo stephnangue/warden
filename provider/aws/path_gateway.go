@@ -16,19 +16,11 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
-// wardenHeadersToStrip are the Warden headers removed before re-signing: each
-// carries a caller credential, or a routing selector (role, provider,
-// namespace), that has no meaning to AWS and must not reach it.
-var wardenHeadersToStrip = []string{
-	"X-Warden-Token",
-	"X-Warden-Agent-Token",
-	"X-Warden-User-Token",
-	"X-Warden-Subject-Token",
-	"X-Warden-Actor-Token",
-	"X-Warden-Role",
-	"X-Warden-Provider",
-	"X-Warden-Namespace",
-}
+// wardenHeadersToStrip are the Warden headers removed before re-signing
+// (logical.WardenRequestHeaders): each carries a caller credential, a routing
+// selector (role, provider, namespace) or a reserved name, none of which means
+// anything to AWS, and none may reach it.
+var wardenHeadersToStrip = logical.WardenRequestHeaders()
 
 func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
