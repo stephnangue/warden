@@ -35,12 +35,12 @@ func TestMultiMount_OneRoleOneGroup(t *testing.T) {
 		firstScope = "scope0"
 	)
 	caPEM, caKey := newCA(t)
-	enableAuth(t, port, "", jwtMount, "jwt", hydraConfig(map[string]any{
+	h.EnableAuth(t, port, "", jwtMount, "jwt", h.HydraJWTConfig(map[string]any{
 		"facts": map[string]string{"/scp/0": firstScope},
 	}))
-	enableAuth(t, port, "", certMount, "cert", certConfig([]string{caPEM}, nil))
-	jwtPolicy := vaultProvider(t, port, "", jwtVault, jwtMount)
-	certPolicy := vaultProvider(t, port, "", certVault, certMount)
+	h.EnableAuth(t, port, "", certMount, "cert", h.CertMountConfig([]string{caPEM}, nil))
+	jwtPolicy := h.VaultProvider(t, port, "", jwtVault, jwtMount)
+	certPolicy := h.VaultProvider(t, port, "", certVault, certMount)
 	writeRole(t, port, "", role, h.Role{Policies: []string{jwtPolicy, certPolicy}, CredSpec: "vault-token-reader"})
 
 	rules := func(scope string) []map[string][]string {

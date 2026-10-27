@@ -26,69 +26,6 @@ import (
 // reads.
 const secretPath = "v1/secret/data/e2e/app-config"
 
-// enableAuth mounts an auth method of type kind at mount in namespace (the
-// root namespace when empty), writes config, and disables it when the test
-// ends.
-func enableAuth(t *testing.T, port int, namespace, mount, kind string, config map[string]any) {
-	t.Helper()
-	path := strings.TrimSuffix(h.AuthMountPath(mount), "/")
-	h.NSRequestBestEffort(port, namespace, "DELETE", "sys/"+path)
-	h.MustNS(t, port, namespace, "POST", "sys/"+path, fmt.Sprintf(`{"type":%q}`, kind))
-	t.Cleanup(func() { h.NSRequestBestEffort(port, namespace, "DELETE", "sys/"+path) })
-	if config != nil {
-		h.MustNS(t, port, namespace, "PUT", path+"/config", mustJSON(t, config))
-	}
-}
-
-// hydraConfig is the config of a jwt mount admitting the suites' Hydra tokens,
-// with extra merged over it.
-func hydraConfig(extra map[string]any) map[string]any {
-	cfg := map[string]any{
-		"mode":               "oidc",
-		"oidc_discovery_url": h.HydraIssuer,
-		"bound_issuer":       h.HydraIssuer,
-		"bound_audiences":    []string{h.HydraAudience},
-		"user_claim":         "sub",
-	}
-	for k, v := range extra {
-		cfg[k] = v
-	}
-	return cfg
-}
-
-// certConfig is the config of a cert mount trusting the CAs in cas, with extra
-// merged over it.
-func certConfig(cas []string, extra map[string]any) map[string]any {
-	cfg := map[string]any{"trusted_ca_pem": strings.Join(cas, "\n")}
-	for k, v := range extra {
-		cfg[k] = v
-	}
-	return cfg
-}
-
-// vaultProvider mounts a vault provider at mount in namespace, admitting its
-// gateway requests through authMount, plus a policy granting read on its
-// gateway, and returns the policy's name. Both go when the test ends.
-func vaultProvider(t *testing.T, port int, namespace, mount, authMount string) string {
-	t.Helper()
-	h.NSRequestBestEffort(port, namespace, "DELETE", "sys/providers/"+mount)
-	h.MustNS(t, port, namespace, "POST", "sys/providers/"+mount, `{"type":"vault"}`)
-	t.Cleanup(func() { h.NSRequestBestEffort(port, namespace, "DELETE", "sys/providers/"+mount) })
-	h.MustNS(t, port, namespace, "POST", mount+"/config", mustJSON(t, map[string]any{
-		"vault_address":   "http://127.0.0.1:8200",
-		"tls_skip_verify": true,
-		"timeout":         "30s",
-		"auto_auth_path":  h.AuthMountPath(authMount),
-	}))
-	policy := mount + "-access"
-	h.MustNS(t, port, namespace, "POST", "sys/policies/cbp/"+policy, mustJSON(t, map[string]any{
-		"policy": fmt.Sprintf("path %q {\n  capabilities = [\"read\"]\n}\npath %q {\n  capabilities = [\"read\"]\n}\n",
-			mount+"/role/+/gateway*", mount+"/gateway*"),
-	}))
-	t.Cleanup(func() { h.NSRequestBestEffort(port, namespace, "DELETE", "sys/policies/cbp/"+policy) })
-	return policy
-}
-
 // writeRole (re)creates role in namespace and deletes it when the test ends.
 func writeRole(t *testing.T, port int, namespace, role string, r h.Role) {
 	t.Helper()
