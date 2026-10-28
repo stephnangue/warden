@@ -82,7 +82,8 @@ func runEntityDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := c.Sys().DeleteEntity(name, entityDeleteExpectedHash, entityDeleteRetired); err != nil {
+	warnings, err := c.Sys().DeleteEntity(name, entityDeleteExpectedHash, entityDeleteRetired)
+	if err != nil {
 		// The server asks for force, which this command sends as -retired;
 		// -force only skips the prompt.
 		var re *api.ResponseError
@@ -93,10 +94,15 @@ func runEntityDelete(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("error deleting entity %q: %w", name, err)
 	}
-	return helpers.RenderMap(map[string]any{
-		"name":    name,
-		"deleted": true,
-	}, func() {
+	// A forced delete of a retired entity says so: to stderr, and in the
+	// structured output.
+	helpers.PrintWarnings(warnings)
+
+	data := map[string]any{"name": name, "deleted": true}
+	if len(warnings) > 0 {
+		data["warnings"] = warnings
+	}
+	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Deleted entity: %s\n", name)
 	})
 }

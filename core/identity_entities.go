@@ -300,12 +300,13 @@ func (s *IdentityStore) UpdateEntity(ctx context.Context, name string, next *log
 
 // DeleteEntity removes the entity name from the namespace in ctx, releasing
 // the native identities it claimed. expectedHash makes it conditional. A
-// retired entity is deleted only with force, which is logged: its native
-// identities would be unclaimed again.
-func (s *IdentityStore) DeleteEntity(ctx context.Context, name, expectedHash string, force bool) error {
+// retired entity is deleted only with force, which is logged and returns a
+// warning for the delete's response: its native identities are unclaimed
+// again.
+func (s *IdentityStore) DeleteEntity(ctx context.Context, name, expectedHash string, force bool) (warning string, err error) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
-		return ErrNamespaceNotInContext
+		return "", ErrNamespaceNotInContext
 	}
 
 	err = func() error {
@@ -331,6 +332,8 @@ func (s *IdentityStore) DeleteEntity(ctx context.Context, name, expectedHash str
 				logger.String("namespace", ns.Path),
 				logger.String("name", name),
 				logger.Int("aliases", len(old.Aliases)))
+			warning = fmt.Sprintf("forced: retired entity %q deleted; the %d native identities it claimed are unclaimed again",
+				name, len(old.Aliases))
 		}
 		ents, err := cur.with(entityChange{old: old})
 		if err != nil {
@@ -343,12 +346,12 @@ func (s *IdentityStore) DeleteEntity(ctx context.Context, name, expectedHash str
 		return nil
 	}()
 	if err != nil {
-		return err
+		return "", err
 	}
 	s.logger.Info("deleted entity",
 		logger.String("namespace", ns.Path),
 		logger.String("name", name))
-	return nil
+	return warning, nil
 }
 
 // ClaimAlias adds the native identity (accessor, alias) to the entity name in

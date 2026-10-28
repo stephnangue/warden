@@ -449,7 +449,7 @@ func TestEntities_IndexConsistency(t *testing.T) {
 		case 0:
 			err = c.identityStore.CreateEntity(ctx, &logical.Entity{Name: name})
 		case 1:
-			err = c.identityStore.DeleteEntity(ctx, name, "", false)
+			_, err = c.identityStore.DeleteEntity(ctx, name, "", false)
 		case 2:
 			_, err = c.identityStore.ClaimAlias(ctx, name, jwt, aliases[rng.Intn(len(aliases))], rng.Intn(2) == 0)
 		case 3:
@@ -616,6 +616,8 @@ func TestEntities_RetiredKeepsClaims(t *testing.T) {
 
 	resp = entityRequest(t, c, logical.DeleteOperation, "entity/a", map[string]any{"force": true})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, []string{`forced: retired entity "a" deleted; the 2 native identities it claimed are unclaimed again`},
+		respWarnings(resp), "a forced delete says what it released")
 	assert.Nil(t, c.identityStore.EntityByAlias(namespace.RootNamespaceID, accessorOf(t, c, "k8s/"), "system:serviceaccount:billing:agent"))
 }
 

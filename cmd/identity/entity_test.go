@@ -203,6 +203,17 @@ func TestEntityDelete_Retired(t *testing.T) {
 	assert.Contains(t, stdout.String(), `"deleted": true`)
 }
 
+// The server's warning on a forced delete goes to stderr and stays in the
+// structured output.
+func TestEntityDelete_RetiredWarns(t *testing.T) {
+	_, stdout, stderr := setupEntityFake(t, http.StatusOK,
+		`{"data":{"name":"a","warnings":["forced: retired entity \"a\" deleted; the 2 native identities it claimed are unclaimed again"]}}`)
+	entityDeleteForce, entityDeleteRetired = true, true
+	require.NoError(t, runEntityDelete(EntityDeleteCmd, []string{"a"}))
+	assert.Contains(t, stderr.String(), `warning: forced: retired entity "a" deleted`)
+	assert.Contains(t, stdout.String(), `"warnings": [`)
+}
+
 // A retired entity refused without -retired says which flag sends force.
 func TestEntityDelete_RetiredHint(t *testing.T) {
 	setupEntityFake(t, http.StatusConflict,

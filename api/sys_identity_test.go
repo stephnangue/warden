@@ -232,14 +232,22 @@ func TestSys_ReadUpdateEntity(t *testing.T) {
 
 func TestSys_DeleteEntity(t *testing.T) {
 	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"billing-agent"}}`)
-	require.NoError(t, client.Sys().DeleteEntity("billing-agent", "", false))
+	warnings, err := client.Sys().DeleteEntity("billing-agent", "", false)
+	require.NoError(t, err)
+	assert.Nil(t, warnings)
 	assert.Equal(t, http.MethodDelete, rec.method)
 	assert.Equal(t, "/v1/sys/identity/entity/billing-agent", rec.path)
 	assert.Empty(t, rec.query, "no expected_hash and no force unless asked")
 
-	require.NoError(t, client.Sys().DeleteEntity("billing-agent", "e1", true))
+	_, err = client.Sys().DeleteEntity("billing-agent", "e1", true)
+	require.NoError(t, err)
 	assert.Equal(t, "e1", rec.query.Get("expected_hash"))
 	assert.Equal(t, "true", rec.query.Get("force"))
+
+	client, _ = newRoleServer(t, http.StatusOK, `{"data":{"name":"old-agent","warnings":["forced: retired entity \"old-agent\" deleted"]}}`)
+	warnings, err = client.Sys().DeleteEntity("old-agent", "", true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{`forced: retired entity "old-agent" deleted`}, warnings, "the server's warnings are returned")
 }
 
 func TestSys_ListEntities(t *testing.T) {

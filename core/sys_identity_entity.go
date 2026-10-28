@@ -527,14 +527,18 @@ func (b *SystemBackend) handleEntityUpdate(ctx context.Context, req *logical.Req
 // expected_hash (a query parameter) when set; a retired entity needs force.
 func (b *SystemBackend) handleEntityDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
-	err := b.core.identityStore.DeleteEntity(ctx, name, d.Get("expected_hash").(string), d.Get("force").(bool))
+	forced, err := b.core.identityStore.DeleteEntity(ctx, name, d.Get("expected_hash").(string), d.Get("force").(bool))
 	if err != nil {
 		return b.entityErrorResponse(name, err), nil
 	}
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"name":    name,
 		"message": fmt.Sprintf("Successfully deleted entity %s", name),
-	}), nil
+	}
+	if forced != "" {
+		appendWarnings(data, forced)
+	}
+	return b.respondSuccess(data), nil
 }
 
 // handleEntityList handles LIST sys/identity/entity. It returns the names
