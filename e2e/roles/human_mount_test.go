@@ -23,7 +23,7 @@ func TestHumanMount_RefusedOnTheAgentLeg(t *testing.T) {
 		mcp   = "e2e-roles-mcp"
 		role  = "e2e-roles-human-agent"
 	)
-	enableAuth(t, port, "", mount, "jwt", hydraConfig(map[string]any{"entity_kind": "human"}))
+	h.EnableAuth(t, port, "", mount, "jwt", h.HydraJWTConfig(map[string]any{"entity_kind": "human"}))
 
 	upstream := h.StartRecordingUpstream(t)
 	t.Cleanup(upstream.Close)

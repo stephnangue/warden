@@ -32,11 +32,11 @@ func TestNormalisation_OneFactNameAcrossMounts(t *testing.T) {
 		"facts":           map[string]string{"service_account_name": "workload"},
 	})
 	caPEM, caKey := newCA(t)
-	enableAuth(t, port, "", certMount, "cert", certConfig([]string{caPEM}, map[string]any{
+	h.EnableAuth(t, port, "", certMount, "cert", h.CertMountConfig([]string{caPEM}, map[string]any{
 		"facts": map[string]string{"cn": "workload"},
 	}))
-	k8sPolicy := vaultProvider(t, port, "", k8sVault, k8sMount)
-	certPolicy := vaultProvider(t, port, "", certVault, certMount)
+	k8sPolicy := h.VaultProvider(t, port, "", k8sVault, k8sMount)
+	certPolicy := h.VaultProvider(t, port, "", certVault, certMount)
 	writeRole(t, port, "", role, h.Role{Policies: []string{k8sPolicy, certPolicy}, CredSpec: "vault-token-reader"})
 
 	grant := func(mounts ...string) {

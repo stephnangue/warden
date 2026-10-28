@@ -219,6 +219,69 @@ func NSRequestBestEffort(port int, namespace, method, path string) {
 	TryRequest(method, fmt.Sprintf("%s/v1/%s", NodeURL(port), path), headers, "")
 }
 
+// EnableAuth mounts an auth method of type kind at mount in namespace (the
+// root namespace when empty), writes config, and disables it when the test
+// ends.
+func EnableAuth(t *testing.T, port int, namespace, mount, kind string, config map[string]any) {
+	t.Helper()
+	path := strings.TrimSuffix(AuthMountPath(mount), "/")
+	NSRequestBestEffort(port, namespace, "DELETE", "sys/"+path)
+	MustNS(t, port, namespace, "POST", "sys/"+path, fmt.Sprintf(`{"type":%q}`, kind))
+	t.Cleanup(func() { NSRequestBestEffort(port, namespace, "DELETE", "sys/"+path) })
+	if config != nil {
+		MustNS(t, port, namespace, "PUT", path+"/config", JSON(t, config))
+	}
+}
+
+// HydraJWTConfig is the config of a jwt mount admitting the suites' Hydra
+// tokens, with extra merged over it.
+func HydraJWTConfig(extra map[string]any) map[string]any {
+	cfg := map[string]any{
+		"mode":               "oidc",
+		"oidc_discovery_url": HydraIssuer,
+		"bound_issuer":       HydraIssuer,
+		"bound_audiences":    []string{HydraAudience},
+		"user_claim":         "sub",
+	}
+	for k, v := range extra {
+		cfg[k] = v
+	}
+	return cfg
+}
+
+// CertMountConfig is the config of a cert mount trusting the CAs in cas,
+// with extra merged over it.
+func CertMountConfig(cas []string, extra map[string]any) map[string]any {
+	cfg := map[string]any{"trusted_ca_pem": strings.Join(cas, "\n")}
+	for k, v := range extra {
+		cfg[k] = v
+	}
+	return cfg
+}
+
+// VaultProvider mounts a vault provider at mount in namespace, admitting its
+// gateway requests through authMount, plus a policy granting read on its
+// gateway, and returns the policy's name. Both go when the test ends.
+func VaultProvider(t *testing.T, port int, namespace, mount, authMount string) string {
+	t.Helper()
+	NSRequestBestEffort(port, namespace, "DELETE", "sys/providers/"+mount)
+	MustNS(t, port, namespace, "POST", "sys/providers/"+mount, `{"type":"vault"}`)
+	t.Cleanup(func() { NSRequestBestEffort(port, namespace, "DELETE", "sys/providers/"+mount) })
+	MustNS(t, port, namespace, "POST", mount+"/config", JSON(t, map[string]any{
+		"vault_address":   "http://127.0.0.1:8200",
+		"tls_skip_verify": true,
+		"timeout":         "30s",
+		"auto_auth_path":  AuthMountPath(authMount),
+	}))
+	policy := mount + "-access"
+	MustNS(t, port, namespace, "POST", "sys/policies/cbp/"+policy, JSON(t, map[string]any{
+		"policy": fmt.Sprintf("path %q {\n  capabilities = [\"read\"]\n}\npath %q {\n  capabilities = [\"read\"]\n}\n",
+			mount+"/role/+/gateway*", mount+"/gateway*"),
+	}))
+	t.Cleanup(func() { NSRequestBestEffort(port, namespace, "DELETE", "sys/policies/cbp/"+policy) })
+	return policy
+}
+
 // JSON returns v encoded as JSON.
 func JSON(t *testing.T, v any) string {
 	t.Helper()

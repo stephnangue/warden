@@ -27,7 +27,7 @@ func TestHumanMount_RefusedOnAccessBackends(t *testing.T) {
 		grant  = "app"
 		dbHost = "e2e-db.cluster-abc.eu-west-1.rds.amazonaws.com"
 	)
-	enableAuth(t, port, "", mount, "jwt", hydraConfig(map[string]any{"entity_kind": "human"}))
+	h.EnableAuth(t, port, "", mount, "jwt", h.HydraJWTConfig(map[string]any{"entity_kind": "human"}))
 	policy := rdsProvider(t, port, rds, mount, grant, dbHost)
 	writeRole(t, port, "", role, h.Role{Policies: []string{policy}})
 	h.WriteGroupInNS(t, port, "", role, h.Group{Roles: []string{role}, Rules: []map[string][]string{{"mount": {mount}}}})

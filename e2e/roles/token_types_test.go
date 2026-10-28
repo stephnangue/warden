@@ -36,12 +36,12 @@ func TestTokenTypes_AuditAndCEL(t *testing.T) {
 	start := time.Now()
 	jwt := h.GetDefaultJWT(t)
 
-	enableAuth(t, port, "", jwtMount, "jwt", hydraConfig(nil))
+	h.EnableAuth(t, port, "", jwtMount, "jwt", h.HydraJWTConfig(nil))
 	reviewer := h.StartTokenReviewer(t)
 	reviewer.Register(jwt, h.ServiceAccount{Namespace: "ci", Name: "e2e-agent", UID: "uid-e2e-agent", Audiences: []string{h.HydraAudience}})
 	h.EnableKubernetesAuth(t, port, "", k8sMount, reviewer, map[string]any{"bound_audiences": []string{h.HydraAudience}})
-	vaultProvider(t, port, "", jwtVault, jwtMount)
-	vaultProvider(t, port, "", k8sVault, k8sMount)
+	h.VaultProvider(t, port, "", jwtVault, jwtMount)
+	h.VaultProvider(t, port, "", k8sVault, k8sMount)
 
 	// Two policies over both gateways, conditioned on the token type.
 	for name, tokenType := range map[string]string{identity: "identity_token", service: "service_token"} {

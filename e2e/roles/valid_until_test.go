@@ -23,8 +23,8 @@ func TestValidUntil_GroupGrantsUntilItsEnd(t *testing.T) {
 		past     = "e2e-roles-until-past"
 		soon     = "e2e-roles-until-soon"
 	)
-	enableAuth(t, port, "", mount, "jwt", hydraConfig(nil))
-	policy := vaultProvider(t, port, "", provider, mount)
+	h.EnableAuth(t, port, "", mount, "jwt", h.HydraJWTConfig(nil))
+	policy := h.VaultProvider(t, port, "", provider, mount)
 	rule := []map[string][]string{{"mount": {mount}, "sub": {"e2e-agent"}}}
 	jwt := h.GetDefaultJWT(t)
 

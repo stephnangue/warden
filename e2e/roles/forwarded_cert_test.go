@@ -33,7 +33,7 @@ func TestForwardedCert_TransparentOperations(t *testing.T) {
 
 	pinnedPEM, pinnedKey := newCA(t)
 	otherPEM, otherKey := newCA(t)
-	enableAuth(t, port, ns, mount, "cert", certConfig([]string{pinnedPEM, otherPEM}, nil))
+	h.EnableAuth(t, port, ns, mount, "cert", h.CertMountConfig([]string{pinnedPEM, otherPEM}, nil))
 	h.MustNS(t, port, ns, "POST", "sys/policies/cbp/"+policy,
 		`{"policy":"path \"auth/cert/config\" {\n  capabilities = [\"read\"]\n}"}`)
 	writeRole(t, port, ns, role, h.Role{Policies: []string{policy}})

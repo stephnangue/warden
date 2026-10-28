@@ -20,7 +20,7 @@ func kubernetesEnv(t *testing.T, port int, namespace, mount, provider, role, sa 
 	t.Helper()
 	reviewer := h.StartTokenReviewer(t)
 	h.EnableKubernetesAuth(t, port, namespace, mount, reviewer, config)
-	policy := vaultProvider(t, port, namespace, provider, mount)
+	policy := h.VaultProvider(t, port, namespace, provider, mount)
 	writeRole(t, port, namespace, role, h.Role{Policies: []string{policy}, CredSpec: "vault-token-reader", ProviderPath: provider})
 	h.WriteGroupInNS(t, port, namespace, role, h.Group{
 		Roles: []string{role},
