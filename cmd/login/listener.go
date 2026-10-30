@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
 // callbackPath is the path the identity provider redirects the browser to.
-// The mount's allowed_redirect_uris lists http://127.0.0.1/oidc/callback,
-// which matches any port.
 const callbackPath = "/oidc/callback"
+
+// defaultCallbackPort is the port the sign-in redirect lands on by default:
+// fixed, so it can be registered at an identity provider that matches
+// redirect URIs exactly (http://localhost:8251/oidc/callback). It is neither
+// OpenBao's 8250 nor Warden's dev listener's 8400.
+const defaultCallbackPort = 8251
 
 // callbackResult is what the identity provider sent back: a code, or an
 // error.
@@ -28,7 +34,8 @@ type callbackResult struct {
 // request is answered 404 and ignored without ending the login, so a local
 // process that finds the port cannot end it early or feed it a code.
 type callbackListener struct {
-	ln     net.Listener
+	lns    []net.Listener
+	port   int
 	srv    *http.Server
 	result chan callbackResult
 
@@ -37,20 +44,44 @@ type callbackListener struct {
 	once  sync.Once
 }
 
-// newCallbackListener listens on a port the system picks on 127.0.0.1.
-func newCallbackListener() (*callbackListener, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// newCallbackListener listens on port on the loopback addresses localhost
+// may resolve to: 127.0.0.1, and ::1 where the host has IPv6. Port 0 picks a
+// free port. A port already in use on either address is an error, naming
+// -callback-port: whoever holds ::1 would otherwise receive the redirect of a
+// browser that resolves localhost there.
+func newCallbackListener(port int) (*callbackListener, error) {
+	v4, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
-		return nil, fmt.Errorf("cannot listen for the sign-in redirect: %w", err)
+		return nil, listenError(port, err)
 	}
-	l := &callbackListener{ln: ln, result: make(chan callbackResult, 1)}
+	port = v4.Addr().(*net.TCPAddr).Port
+	lns := []net.Listener{v4}
+	v6, err := net.Listen("tcp", net.JoinHostPort("::1", strconv.Itoa(port)))
+	switch {
+	case err == nil:
+		lns = append(lns, v6)
+	case errors.Is(err, syscall.EADDRINUSE):
+		_ = v4.Close()
+		return nil, listenError(port, err)
+	default:
+		// No IPv6 loopback on this host: localhost resolves to 127.0.0.1.
+	}
+	l := &callbackListener{lns: lns, port: port, result: make(chan callbackResult, 1)}
 	l.srv = &http.Server{Handler: http.HandlerFunc(l.handle), ReadHeaderTimeout: 10 * time.Second}
 	return l, nil
 }
 
+func listenError(port int, err error) error {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return fmt.Errorf("port %d is in use: choose another with -callback-port, and register http://localhost:<port>%s "+
+			"at the identity provider (or use -callback-port=0 if it accepts any loopback port)", port, callbackPath)
+	}
+	return fmt.Errorf("cannot listen for the sign-in redirect on port %d: %w", port, err)
+}
+
 // RedirectURI is the redirect URI the login passes to auth_url.
 func (l *callbackListener) RedirectURI() string {
-	return fmt.Sprintf("http://127.0.0.1:%d%s", l.ln.Addr().(*net.TCPAddr).Port, callbackPath)
+	return fmt.Sprintf("http://localhost:%d%s", l.port, callbackPath)
 }
 
 // Serve starts answering redirects carrying state.
@@ -58,7 +89,9 @@ func (l *callbackListener) Serve(state string) {
 	l.mu.Lock()
 	l.state = state
 	l.mu.Unlock()
-	go func() { _ = l.srv.Serve(l.ln) }()
+	for _, ln := range l.lns {
+		go func() { _ = l.srv.Serve(ln) }()
+	}
 }
 
 func (l *callbackListener) handle(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +132,9 @@ func (l *callbackListener) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = l.srv.Shutdown(ctx)
-	_ = l.ln.Close()
+	for _, ln := range l.lns {
+		_ = ln.Close()
+	}
 }
 
 func page(title, body string) string {

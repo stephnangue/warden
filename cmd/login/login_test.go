@@ -137,7 +137,7 @@ func login(t *testing.T, f *fakeWarden, env map[string]string, set func()) login
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
-	flagMethod, flagPath, flagNoBrowser, flagNoStore, flagTimeout = "oidc", "", false, false, 5*time.Second
+	flagMethod, flagPath, flagNoBrowser, flagNoStore, flagTimeout, flagPort = "oidc", "", false, false, 5*time.Second, 0
 	openBrowser = f.browser("state=st-1&code=code-1")
 	interactive := helpers.Interactive
 	helpers.Interactive = func() bool { return false }
@@ -177,7 +177,7 @@ func TestLogin_Defaults(t *testing.T) {
 	run := login(t, f, nil, nil)
 	require.NoError(t, run.err, run.stderr)
 
-	assert.True(t, strings.HasPrefix(f.redirectURI, "http://127.0.0.1:"), f.redirectURI)
+	assert.True(t, strings.HasPrefix(f.redirectURI, "http://localhost:"), f.redirectURI)
 	assert.True(t, strings.HasSuffix(f.redirectURI, "/oidc/callback"))
 	assert.Contains(t, run.stderr, "auth/oidc/")
 	assert.Contains(t, run.stderr, `Using role "operator"`, "one role is chosen without asking")
@@ -347,4 +347,16 @@ func TestNewBinding(t *testing.T) {
 	assert.Equal(t, base64.RawURLEncoding.EncodeToString(sum[:]), binding)
 	other, _, _ := newBinding()
 	assert.NotEqual(t, binding, other, fmt.Sprint("a fresh secret per login"))
+}
+
+func TestLogin_CallbackPortFlag(t *testing.T) {
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	port := freePort(t)
+	run := login(t, f, nil, func() { flagPort = port })
+	require.NoError(t, run.err, run.stderr)
+	assert.Equal(t, fmt.Sprintf("http://localhost:%d/oidc/callback", port), f.redirectURI)
+
+	run = login(t, f, nil, func() { flagPort = 70000 })
+	assert.ErrorIs(t, run.err, helpers.ErrUsage)
 }
