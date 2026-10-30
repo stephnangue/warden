@@ -115,10 +115,11 @@ type Request struct {
 	// audit only; never disclosed to the caller. Nil on every other request.
 	Discovery *DiscoveryAdmission `json:"-"`
 
-	// RequestedRole is the role a transparent request asks for (X-Warden-Role,
-	// the role/<name>/ segment, ?role=, the provider's default_role), set by
-	// implicit auth alongside Transparent and never from client input
-	// directly. Empty when the request named none, or is not transparent.
+	// RequestedRole is the role a transparent or ticket-admitted request asks
+	// for (X-Warden-Role, the role/<name>/ segment, ?role=, the provider's
+	// default_role), set by core alongside Transparent or TicketAdmitted and
+	// never from client input directly. Empty when the request named none, or
+	// is neither.
 	RequestedRole string `json:"-"`
 
 	// Request metadata
@@ -139,6 +140,12 @@ type Request struct {
 	// (JWT-based implicit authentication). Credentials for transparent
 	// requests are cache-only, not persisted to storage.
 	Transparent bool `json:"-"`
+
+	// TicketAdmitted indicates core admitted the ticket token this request
+	// presents, on this request: its seal was checked, so the request may ask
+	// for a role (RequestedRole) as a transparent one does. Only core's ticket
+	// hook sets it; it says nothing about transparent mode.
+	TicketAdmitted bool `json:"-"`
 
 	// Internal marks a request core builds and routes in process, never one
 	// that arrived over HTTP. Paths that hand back in-process values (an auth

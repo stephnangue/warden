@@ -117,6 +117,14 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 			if n := adm.Mount.Load(); n != nil {
 				auditAuth.EntityKind = n.Kind
 			}
+			if !adm.AuthTime.IsZero() {
+				auditAuth.AuthTime = adm.AuthTime.Unix()
+			}
+			// A ticket on an identity path names no mount, so it takes no
+			// role; the mount that admitted it is still the issuing one.
+			if auditAuth.MountAccessor == "" && te.Type == logical.TokenTypeTicket {
+				auditAuth.MountAccessor = adm.MountAccessor
+			}
 		}
 
 		if !te.ExpireAt.IsZero() {

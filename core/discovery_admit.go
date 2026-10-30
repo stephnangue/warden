@@ -80,15 +80,23 @@ type discoveryAdmitted struct {
 // credential.
 var errDiscoveryNoCredential = errors.New("introspection requires a JWT bearer token or TLS client certificate")
 
+// errDiscoveryTicket refuses to discover from admissions for a ticket, whose
+// discovery only core makes (discoveryFromTicket).
+var errDiscoveryTicket = errors.New("a ticket is admitted by core, not by an auth mount")
+
 // hasDiscoveryCredential reports whether req carries a credential discovery
-// can present to an auth mount: a forwarded TLS client certificate, or an
-// Authorization bearer, its scheme matched case-insensitively as the gateway
-// matches it. It looks at neither: the target mounts verify it.
+// can use: a forwarded TLS client certificate, an Authorization bearer, its
+// scheme matched case-insensitively as the gateway matches it, or a ticket on
+// X-Warden-Token. It looks at none: the target mounts verify the first two,
+// core the ticket.
 func hasDiscoveryCredential(req *logical.Request) bool {
 	if req.HTTPRequest == nil {
 		return false
 	}
 	if listener.ForwardedClientCert(req.HTTPRequest.Context()) != nil {
+		return true
+	}
+	if isTicketValue(req.HTTPRequest.Header.Get(logical.HeaderWardenToken)) {
 		return true
 	}
 	return logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")) != ""
@@ -140,6 +148,12 @@ func admitFailurePhrase(err error) string {
 func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request) (*admissionDiscovery, error) {
 	if !hasDiscoveryCredential(req) {
 		return nil, errDiscoveryNoCredential
+	}
+	// A ticket's discovery is seeded by core (admitTicket); presented to an
+	// auth mount it would admit nowhere, and it is never handed to one.
+	if isTicketValue(req.HTTPRequest.Header.Get(logical.HeaderWardenToken)) ||
+		isTicketValue(logical.StripBearer(req.HTTPRequest.Header.Get("Authorization"))) {
+		return nil, errDiscoveryTicket
 	}
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
