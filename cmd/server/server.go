@@ -30,6 +30,7 @@ import (
 	"github.com/stephnangue/warden/auth/method/cert"
 	"github.com/stephnangue/warden/auth/method/jwt"
 	authk8s "github.com/stephnangue/warden/auth/method/kubernetes"
+	authoidc "github.com/stephnangue/warden/auth/method/oidc"
 	"github.com/stephnangue/warden/auth/method/spiffe"
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core"
@@ -230,6 +231,7 @@ Usage: warden server [options]
 		"cert":       cert.Factory,
 		"kubernetes": authk8s.Factory,
 		"spiffe":     spiffe.Factory,
+		"oidc":       authoidc.Factory,
 	}
 
 	storageBackends = map[string]physical.Factory{
