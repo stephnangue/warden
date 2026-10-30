@@ -77,10 +77,10 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 
 // resolveRoleGrant decides the role req runs under when its token te takes its
 // role per request, and projects that role onto te. The role asked for is
-// req.RequestedRole, which only implicit auth sets (with req.Transparent): a
-// qualifying token on a request that is not transparent was presented
-// explicitly and is refused. For any other token it clears the request's
-// grant and leaves te untouched.
+// req.RequestedRole, which only implicit auth (with req.Transparent) and the
+// ticket hook (with req.TicketAdmitted) set: a qualifying token on a request
+// that is neither was presented explicitly and is refused. For any other token
+// it clears the request's grant and leaves te untouched.
 //
 // te must be this request's own copy of the token entry: the role, its
 // policies and spec, and the membership's metadata are written onto it, and
@@ -110,9 +110,10 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	te.Policies = nil
 	te.CredentialSpec = ""
 
-	if !req.Transparent {
-		// Only implicit auth, admitting this request's own credential, asks
-		// for a role: this admission token arrived as a Warden token.
+	if !req.Transparent && !req.TicketAdmitted {
+		// Only core, admitting this request's own credential (implicit auth,
+		// or a ticket whose seal it checked), asks for a role: this admission
+		// token arrived as a Warden token.
 		req.SetRoleGrant(logical.RoleGrant{DeniedReason: logical.RoleDeniedExplicitAdmission, Groups: noGroups})
 		return
 	}

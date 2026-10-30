@@ -85,7 +85,7 @@ func (b *SystemBackend) handleIntrospectRoles(ctx context.Context, req *logical.
 	} else {
 		d, err = b.core.discoverFromAdmissions(ctx, req)
 	}
-	if errors.Is(err, errDiscoveryNoCredential) {
+	if errors.Is(err, errDiscoveryNoCredential) || errors.Is(err, errDiscoveryTicket) {
 		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: err}, nil
 	}
 	if err == nil && d == nil {
