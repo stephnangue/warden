@@ -66,6 +66,9 @@ func (b *certAuthBackend) FactNames() []string { return helper.FactNames(b.mount
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *certAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+// MountFacts implements logical.FactsProvider.
+func (b *certAuthBackend) MountFacts() *logical.MountFacts { return b.mountFacts }
+
 // AliasChange implements logical.FactsProvider (see helper.AliasChange).
 func (b *certAuthBackend) AliasChange(data map[string]any) (from, to string) {
 	var cur helper.FactsConfig

@@ -42,6 +42,7 @@ func (b *factsBackend) AliasChange(data map[string]any) (string, string) {
 	}
 	return "from " + b.aliasSource, "from " + next
 }
+func (b *factsBackend) MountFacts() *logical.MountFacts { return nil }
 func (b *factsBackend) EntityKind() string {
 	if b.kind == "" {
 		return logical.EntityKindAgent

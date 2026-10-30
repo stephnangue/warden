@@ -19,11 +19,13 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// The two token types: a persisted bearer token carrying its own policies, and
-// the cache-only token of a caller admitted by a transparent auth method.
+// The three token types: a persisted bearer token carrying its own policies,
+// the cache-only token of a caller admitted by a transparent auth method, and
+// the self-contained session token an explicit login hands out.
 const (
 	TypeServiceToken  = logical.TokenTypeService
 	TypeIdentityToken = logical.TokenTypeIdentity
+	TypeTicketToken   = logical.TokenTypeTicket
 )
 
 // Storage path constants for token store organization
@@ -308,6 +310,7 @@ func (s *TokenStore) registerBuiltinTypes() error {
 	builtinTypes := []TokenType{
 		&ServiceTokenType{},
 		identityTokenType,
+		&TicketTokenType{core: s.core},
 	}
 
 	for _, tokenType := range builtinTypes {
@@ -402,12 +405,15 @@ func (s *TokenStore) generateWithCollisionDetection(
 			Admission:     authData.Admission,
 		}
 
-		// Generate accessor (Tier 2)
-		accessor, err := generateAccessor()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate accessor: %w", err)
+		// Generate accessor (Tier 2). A stateless token has none: nothing could
+		// look it up by one, since its entry is rebuilt from the value alone.
+		if !meta.Stateless {
+			accessor, err := generateAccessor()
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate accessor: %w", err)
+			}
+			entry.Accessor = accessor
 		}
-		entry.Accessor = accessor
 
 		// Let the token type generate its values
 		clientData, err := tokenType.Generate(ctx, authData, entry)
@@ -455,7 +461,9 @@ func (s *TokenStore) generateWithCollisionDetection(
 		s.byID.SetWithTTL(entry.ID, entry, entryCost(entry), cacheTTL)
 
 		// Tier 2: Store accessor mapping with same TTL
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		if entry.Accessor != "" {
+			s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		}
 
 		// Wait for all cache writes to complete
 		s.byID.Wait()
@@ -470,9 +478,10 @@ func (s *TokenStore) generateWithCollisionDetection(
 		}
 
 		// Register token with expiration manager for timer-based TTL enforcement.
-		// Transparent token types are cache-only, so don't persist their expiration entries.
+		// Transparent and stateless token types are cache-only, so don't persist
+		// their expiration entries.
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil && ttl > 0 {
-			persist := !s.registry.IsTransparent(entry.Type)
+			persist := !s.registry.isCacheOnly(entry.Type)
 			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, persist); err != nil {
 				s.logger.Warn("failed to register token with expiration manager",
 					logger.String("token_id", entry.ID),
@@ -503,6 +512,14 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		return "", ErrStoreClosed
 	}
 	s.mu.RUnlock()
+
+	if isTicketValue(tokenValue) {
+		te, err := s.core.lookupTicket(ctx, tokenValue)
+		if err != nil {
+			return "", err
+		}
+		return te.PrincipalID, nil
+	}
 
 	// Extract namespace from context
 	ns, err := namespace.FromContext(ctx)
@@ -1033,8 +1050,9 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 // Uses a transaction to ensure atomicity: both token and accessor are stored together
 // or neither is stored if any operation fails
 func (s *TokenStore) persistToken(entry *TokenEntry) error {
-	// Skip persistence for transparent token types — they are cache-only.
-	if s.registry.IsTransparent(entry.Type) {
+	// Skip persistence for transparent and stateless token types — they are
+	// cache-only. A ticket entry holds its raw value, so it must never be stored.
+	if s.registry.isCacheOnly(entry.Type) {
 		return nil
 	}
 
@@ -1207,7 +1225,7 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 // not depend on the token type's name, and a token any auth mount issued
 // is never the root, whatever principal its identity provider mapped.
 func (s *TokenStore) isRootTokenEntry(entry *TokenEntry) bool {
-	if entry == nil || entry.MountAccessor != "" || s.registry.IsTransparent(entry.Type) {
+	if entry == nil || entry.MountAccessor != "" || s.registry.isCacheOnly(entry.Type) {
 		return false
 	}
 	return entry.PrincipalID == namespace.RootNamespaceUUID || entry.PrincipalID == "root"
@@ -1321,8 +1339,9 @@ func (s *TokenStore) loadTokenByAccessor(accessor string) (*TokenEntry, error) {
 // Uses a transaction to ensure atomicity: both token and accessor are deleted together
 // or neither is deleted if any operation fails
 func (s *TokenStore) deleteToken(entry *TokenEntry) error {
-	// Skip storage operations for transparent token types — they are cache-only.
-	if s.registry.IsTransparent(entry.Type) {
+	// Skip storage operations for transparent and stateless token types — they
+	// are cache-only.
+	if s.registry.isCacheOnly(entry.Type) {
 		return nil
 	}
 
@@ -1399,6 +1418,12 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 		return nil, ErrStoreClosed
 	}
 	s.mu.RUnlock()
+
+	// A ticket is never in storage: its entry is the cache's, or rebuilt from
+	// the value.
+	if isTicketValue(tokenValue) {
+		return c.lookupTicket(ctx, tokenValue)
+	}
 
 	// Extract namespace from context
 	ns, err := namespace.FromContext(ctx)

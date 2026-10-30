@@ -240,6 +240,38 @@ func (r *Router) MatchingMountByAccessor(mountAccessor string) *MountEntry {
 	return raw.(*MountEntry)
 }
 
+// MatchingBackendByAccessor returns the mount whose accessor is exactly
+// mountAccessor, and its backend; both are nil when there is none. Unlike
+// MatchingMountByAccessor it never matches a mount whose accessor merely starts
+// with mountAccessor, so an accessor taken from a credential cannot name a
+// mount it does not spell out in full.
+func (r *Router) MatchingBackendByAccessor(mountAccessor string) (*MountEntry, logical.Backend) {
+	if mountAccessor == "" {
+		return nil, nil
+	}
+
+	r.mu.RLock()
+	raw, ok := r.mountAccessorCache.Get(mountAccessor)
+	if !ok {
+		r.mu.RUnlock()
+		return nil, nil
+	}
+	entry := raw.(*MountEntry)
+	routed, ok := r.root.Get(entry.APIPath())
+	r.mu.RUnlock()
+	if !ok {
+		return nil, nil
+	}
+
+	re := routed.(*routeEntry)
+	re.l.RLock()
+	defer re.l.RUnlock()
+	if re.mountEntry != entry {
+		return nil, nil
+	}
+	return entry, re.backend
+}
+
 // MountConflict determines if there are potential path conflicts
 func (r *Router) MountConflict(ctx context.Context, path string) string {
 	r.mu.RLock()

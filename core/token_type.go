@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,11 @@ type TokenTypeMetadata struct {
 
 	// DefaultTTL is the recommended TTL for this token type (0 = use system default)
 	DefaultTTL time.Duration
+
+	// Stateless marks a type whose value carries the whole token: an entry of
+	// it is never written to storage, has no accessor and is never indexed by
+	// one, and is rebuilt from the value when the cache does not hold it.
+	Stateless bool
 }
 
 // TokenType defines the interface for pluggable token types
@@ -84,9 +90,24 @@ type TransparentTokenType interface {
 	IsTransparent() bool
 }
 
+// tokenIDHashLen is the length of the hash part of a token ID.
+const tokenIDHashLen = 32
+
 // hashTokenID returns the hash part of a token ID: the first 32 hex characters
 // of the SHA-256 of lookupValue.
 func hashTokenID(lookupValue string) string {
+	return tokenID("", lookupValue)
+}
+
+// tokenID returns prefix followed by hashTokenID(lookupValue), built in one
+// allocation: every request presenting a token computes it.
+func tokenID(prefix, lookupValue string) string {
 	h := sha256.Sum256([]byte(lookupValue))
-	return hex.EncodeToString(h[:])[:32]
+	var hexHash [tokenIDHashLen]byte
+	hex.Encode(hexHash[:], h[:tokenIDHashLen/2])
+	var b strings.Builder
+	b.Grow(len(prefix) + tokenIDHashLen)
+	b.WriteString(prefix)
+	b.Write(hexHash[:])
+	return b.String()
 }

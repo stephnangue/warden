@@ -113,6 +113,17 @@ type Claims struct {
 // int or a []string, is invisible.
 func NewClaims(m map[string]any) *Claims { return &Claims{m: m} }
 
+// EncodeJSON returns the claims as a JSON object, from which NewClaims over a
+// json.Unmarshal of it answers every lookup as c does. A nil c encodes as an
+// empty object. It is deliberately not MarshalJSON: claims are verified facts
+// and leave the process only where a caller asks for them by name.
+func (c *Claims) EncodeJSON() ([]byte, error) {
+	if c == nil || c.m == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(c.m)
+}
+
 // Lookup returns the claim key names. A plain name is a top-level claim. A
 // pointer walks objects by member name and arrays by index, where an index is
 // "0" or a decimal number without a leading zero; a step through a scalar, a

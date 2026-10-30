@@ -53,6 +53,9 @@ func (b *kubernetesAuthBackend) FactNames() []string { return helper.FactNames(b
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *kubernetesAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+// MountFacts implements logical.FactsProvider.
+func (b *kubernetesAuthBackend) MountFacts() *logical.MountFacts { return b.mountFacts }
+
 // AliasChange implements logical.FactsProvider (see helper.AliasChange).
 func (b *kubernetesAuthBackend) AliasChange(data map[string]any) (from, to string) {
 	var cur helper.FactsConfig
