@@ -27,6 +27,7 @@ var (
 	flagNoBrowser bool
 	flagNoStore   bool
 	flagTimeout   time.Duration
+	flagPort      int
 
 	LoginCmd = &cobra.Command{
 		Use:           "login",
@@ -51,6 +52,11 @@ Usage: warden login [options]
   you in to that namespace's mount; a session of a parent namespace also
   serves its children.
 
+  The identity provider sends the browser back to
+  http://localhost:8251/oidc/callback: register that redirect URI at the
+  provider. -callback-port changes the port; -callback-port=0 picks a free one,
+  for a provider that accepts any loopback port.
+
   Examples:
 
       $ warden login
@@ -58,6 +64,7 @@ Usage: warden login [options]
       $ warden login -role=operator
       $ warden login -n team-a
       $ warden login -no-browser
+      $ warden login -callback-port=9000
 `,
 		Args: cobra.NoArgs,
 		RunE: runLogin,
@@ -70,6 +77,8 @@ func init() {
 	LoginCmd.Flags().BoolVar(&flagNoBrowser, "no-browser", false, "Print the sign-in URL instead of opening a browser")
 	LoginCmd.Flags().BoolVar(&flagNoStore, "no-store", false, "Print the session token on stdout instead of saving the session")
 	LoginCmd.Flags().DurationVar(&flagTimeout, "timeout", 5*time.Minute, "How long to wait for the sign-in to finish in the browser")
+	LoginCmd.Flags().IntVar(&flagPort, "callback-port", defaultCallbackPort,
+		"Port of the sign-in redirect, http://localhost:<port>/oidc/callback; 0 picks a free one")
 }
 
 func runLogin(cmd *cobra.Command, _ []string) error {
@@ -127,7 +136,10 @@ func signIn(ctx context.Context, client *api.Client, mount string, stderr io.Wri
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	l, err := newCallbackListener()
+	if flagPort < 0 || flagPort > 65535 {
+		return nil, fmt.Errorf("-callback-port %d is not a port: %w", flagPort, helpers.ErrUsage)
+	}
+	l, err := newCallbackListener(flagPort)
 	if err != nil {
 		return nil, err
 	}

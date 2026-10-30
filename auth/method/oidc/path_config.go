@@ -56,7 +56,8 @@ func (b *oidcAuthBackend) pathConfig() *framework.Path {
 		"allowed_redirect_uris": {
 			Type: framework.TypeCommaStringSlice,
 			Description: "Redirect URIs a login may use, matched exactly; a loopback URI (127.0.0.1, ::1, localhost) " +
-				"matches on any port. The warden CLI uses http://127.0.0.1/oidc/callback.",
+				"matches on any port. warden login uses http://localhost:8251/oidc/callback by default; " +
+				"http://localhost/oidc/callback here allows it on any port.",
 		},
 		"scopes": {
 			Type:        framework.TypeCommaStringSlice,
