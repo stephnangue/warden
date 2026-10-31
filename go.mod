@@ -54,6 +54,7 @@ require (
 	github.com/aws/smithy-go v1.28.1
 	github.com/cilium/statedb v0.9.3
 	go.yaml.in/yaml/v3 v3.0.5
+	golang.org/x/term v0.45.0
 )
 
 require (

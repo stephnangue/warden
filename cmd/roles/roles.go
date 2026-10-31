@@ -33,6 +33,10 @@ Usage: warden role <subcommand> [options]
 
       $ warden role list -all
 
+  Choose the role your warden login session runs under:
+
+      $ warden role use
+
   Please see the individual subcommand help for detailed usage information.
 `,
 }
@@ -43,4 +47,5 @@ func init() {
 	RolesCmd.AddCommand(ReadCmd)
 	RolesCmd.AddCommand(UpdateCmd)
 	RolesCmd.AddCommand(DeleteCmd)
+	RolesCmd.AddCommand(UseCmd)
 }

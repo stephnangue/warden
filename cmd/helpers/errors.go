@@ -254,7 +254,7 @@ func humanMessage(err error) string {
 func DefaultHint(code ErrorCode) string {
 	switch code {
 	case CodeAuth:
-		return "Set WARDEN_TOKEN, configure WARDEN_CLIENT_CERT/WARDEN_CLIENT_KEY for mTLS, or pass an Authorization: Bearer JWT"
+		return "Run warden login, set WARDEN_TOKEN, configure WARDEN_CLIENT_CERT/WARDEN_CLIENT_KEY for mTLS, or pass an Authorization: Bearer JWT"
 	case CodeForbidden:
 		return "Your identity does not have permission for this operation; check your role or policy"
 	case CodeNetwork:
