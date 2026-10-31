@@ -129,7 +129,15 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	if !flagForce && !flagNoStore {
 		if cur, err := helpers.LoadSession(addr, ns); err == nil && cur != nil &&
 			cur.Mount == "auth/"+mount+"/" && time.Until(cur.ExpiresAt) > reuseMargin {
-			return keepSession(cmd, client, cur, requested)
+			accepted, err := sessionAccepted(client, cur)
+			if err != nil {
+				return err
+			}
+			if accepted {
+				return keepSession(cmd, client, cur, requested)
+			}
+			fmt.Fprintln(stderr, "The saved session is no longer accepted; signing in again.")
+			helpers.ClearCredentials(client)
 		}
 	}
 
@@ -154,6 +162,24 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(stderr, "Using role %q for warden commands. Switch with: warden role use\n", role)
 	}
 	return roleErr
+}
+
+// sessionAccepted asks the server whether s's ticket is still accepted: the
+// file says nothing of a mount disabled since (which ends every session it
+// issued), a deleted namespace, or a keyring restored without the ticket's
+// key. One read of sys/introspect/roles, which takes no role, answers it: a
+// refusal (401, 403) means it is not, any other failure is returned.
+func sessionAccepted(client *api.Client, s *helpers.Session) (bool, error) {
+	client.SetToken(s.Token)
+	_, err := client.Operator().ReadWithData("sys/introspect/roles", nil)
+	if err == nil {
+		return true, nil
+	}
+	var re *api.ResponseError
+	if errors.As(err, &re) && (re.StatusCode == http.StatusUnauthorized || re.StatusCode == http.StatusForbidden) {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking the saved session: %w", err)
 }
 
 // keepSession answers warden login when s is still valid: it says so, and

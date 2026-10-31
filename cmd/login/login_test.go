@@ -36,6 +36,11 @@ type fakeWarden struct {
 	namespace   string
 	rolesSeen   http.Header
 	callback    map[string]any
+
+	// refused is a ticket sys/introspect/roles answers refusedStatus to:
+	// one whose mount was disabled, or a server failing.
+	refused       string
+	refusedStatus int
 }
 
 const fakeTicket = "wdt.fake-ticket"
@@ -96,6 +101,10 @@ func (f *fakeWarden) serve(w http.ResponseWriter, r *http.Request) {
 		}})
 	case "/v1/sys/introspect/roles":
 		f.rolesSeen = r.Header.Clone()
+		if f.refused != "" && r.Header.Get("X-Warden-Token") == f.refused {
+			reply(f.refusedStatus, map[string]any{"errors": []string{"the presented ticket is not valid here"}})
+			return
+		}
 		reply(http.StatusOK, map[string]any{"data": map[string]any{"roles": f.roles, "warnings": []string{}}})
 	default:
 		reply(http.StatusNotFound, map[string]any{"errors": []string{"no handler for " + r.URL.Path}})
@@ -440,4 +449,44 @@ func TestLogin_SignsInAgain(t *testing.T) {
 			assert.NotContains(t, run.stderr, "Already signed in")
 		})
 	}
+}
+
+// A saved session the server no longer accepts (its mount disabled, its
+// namespace deleted) is not kept: warden login signs in again.
+func TestLogin_RefusedSessionSignsInAgain(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		useSessions(t)
+		f := newFakeWarden(t, "operator")
+		f.refused, f.refusedStatus = existingTicket, status
+		preSave(t, f, "", "auth/oidc/", "operator", time.Hour)
+
+		run := login(t, f, nil, nil)
+		require.NoError(t, run.err, run.stderr)
+		assert.Contains(t, run.stderr, "no longer accepted; signing in again", "status %d", status)
+		assert.True(t, f.signedIn())
+		assert.Equal(t, fakeTicket, savedSession(t, f, "").Token)
+	}
+}
+
+// The check sends the saved ticket, and no role.
+func TestLogin_KeptSessionIsChecked(t *testing.T) {
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	preSave(t, f, "", "auth/oidc/", "operator", time.Hour)
+	run := login(t, f, nil, nil)
+	require.NoError(t, run.err)
+	assert.False(t, f.signedIn())
+	assert.Equal(t, existingTicket, f.rolesSeen.Get("X-Warden-Token"))
+	assert.Empty(t, f.rolesSeen.Get(api.RoleHeaderName))
+}
+
+// A server that cannot answer is an error, not a reason to sign in.
+func TestLogin_SessionCheckFails(t *testing.T) {
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	f.refused, f.refusedStatus = existingTicket, http.StatusInternalServerError
+	preSave(t, f, "", "auth/oidc/", "operator", time.Hour)
+	run := login(t, f, nil, nil)
+	assert.ErrorContains(t, run.err, "checking the saved session")
+	assert.False(t, f.signedIn())
 }
