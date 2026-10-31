@@ -28,6 +28,7 @@ var (
 	flagNoStore   bool
 	flagTimeout   time.Duration
 	flagPort      int
+	flagForce     bool
 
 	LoginCmd = &cobra.Command{
 		Use:           "login",
@@ -48,6 +49,11 @@ Usage: warden login [options]
   select). With one role it is chosen for you; with -role (or WARDEN_ROLE) it
   is checked and chosen without asking. Switch later with warden role use.
 
+  A session of the same namespace and mount with more than 5 minutes left is
+  kept: no new sign-in, only the role -role names, if any, is applied. -force
+  signs in again, which is how a change to your groups at the identity provider
+  reaches the session: its claims are fixed when it is issued.
+
   The mount defaults to auth/oidc/; name another with -path. -namespace signs
   you in to that namespace's mount; a session of a parent namespace also
   serves its children.
@@ -65,6 +71,7 @@ Usage: warden login [options]
       $ warden login -n team-a
       $ warden login -no-browser
       $ warden login -callback-port=9000
+      $ warden login -force
 `,
 		Args: cobra.NoArgs,
 		RunE: runLogin,
@@ -79,11 +86,19 @@ func init() {
 	LoginCmd.Flags().DurationVar(&flagTimeout, "timeout", 5*time.Minute, "How long to wait for the sign-in to finish in the browser")
 	LoginCmd.Flags().IntVar(&flagPort, "callback-port", defaultCallbackPort,
 		"Port of the sign-in redirect, http://localhost:<port>/oidc/callback; 0 picks a free one")
+	LoginCmd.Flags().BoolVar(&flagForce, "force", false, "Sign in again even when a session of this namespace and mount is still valid")
 }
+
+// reuseMargin is how much life a session needs left for warden login to keep
+// it rather than sign in again.
+const reuseMargin = 5 * time.Minute
 
 func runLogin(cmd *cobra.Command, _ []string) error {
 	if flagMethod != "oidc" {
 		return fmt.Errorf("-method %q: oidc is the one method warden login signs in with: %w", flagMethod, helpers.ErrUsage)
+	}
+	if flagPort < 0 || flagPort > 65535 {
+		return fmt.Errorf("-callback-port %d is not a port: %w", flagPort, helpers.ErrUsage)
 	}
 	mount := strings.Trim(flagPath, "/")
 	if mount == "" {
@@ -105,6 +120,18 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	ns := helpers.NormalizeNamespace(client.Namespace())
+
+	// A valid session of this very namespace and mount is kept: signing in
+	// again would only issue another ticket, and the one replaced stays
+	// valid until it expires. An ancestor's session does not count (this
+	// namespace's mount was asked for), nor does -no-store, which is for a
+	// fresh token.
+	if !flagForce && !flagNoStore {
+		if cur, err := helpers.LoadSession(addr, ns); err == nil && cur != nil &&
+			cur.Mount == "auth/"+mount+"/" && time.Until(cur.ExpiresAt) > reuseMargin {
+			return keepSession(cmd, client, cur, requested)
+		}
+	}
 
 	s, err := signIn(cmd.Context(), client, mount, stderr)
 	if err != nil {
@@ -129,15 +156,36 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	return roleErr
 }
 
+// keepSession answers warden login when s is still valid: it says so, and
+// applies the role requested (-role, WARDEN_ROLE), checked against the roles
+// the session can assume, as warden role use <name> would.
+func keepSession(cmd *cobra.Command, client *api.Client, s *helpers.Session, requested string) error {
+	stderr := cmd.ErrOrStderr()
+	fmt.Fprintf(stderr, "Already signed in to namespace %s through %s; session valid until %s.\n",
+		helpers.DisplayNamespace(s.Namespace), s.Mount, s.ExpiresAt.Local().Format("15:04"))
+	fmt.Fprintln(stderr, "Use -force to sign in again (for example after your groups changed).")
+	if requested == "" || requested == s.Role {
+		return nil
+	}
+	client.SetToken(s.Token)
+	role, err := roles.ChooseRole(client, requested)
+	if err != nil {
+		return err
+	}
+	s.Role = role
+	if err := helpers.SaveSession(s); err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "Using role %q for warden commands.\n", role)
+	return nil
+}
+
 // signIn runs the login against the oidc mount at auth/<mount>/: auth_url,
 // the browser, the loopback redirect, then callback. It returns the session
 // with its token, mount and expiry.
 func signIn(ctx context.Context, client *api.Client, mount string, stderr io.Writer) (*helpers.Session, error) {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if flagPort < 0 || flagPort > 65535 {
-		return nil, fmt.Errorf("-callback-port %d is not a port: %w", flagPort, helpers.ErrUsage)
 	}
 	l, err := newCallbackListener(flagPort)
 	if err != nil {

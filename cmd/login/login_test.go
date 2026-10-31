@@ -137,7 +137,7 @@ func login(t *testing.T, f *fakeWarden, env map[string]string, set func()) login
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
-	flagMethod, flagPath, flagNoBrowser, flagNoStore, flagTimeout, flagPort = "oidc", "", false, false, 5*time.Second, 0
+	flagMethod, flagPath, flagNoBrowser, flagNoStore, flagTimeout, flagPort, flagForce = "oidc", "", false, false, 5*time.Second, 0, false
 	openBrowser = f.browser("state=st-1&code=code-1")
 	interactive := helpers.Interactive
 	helpers.Interactive = func() bool { return false }
@@ -359,4 +359,85 @@ func TestLogin_CallbackPortFlag(t *testing.T) {
 
 	run = login(t, f, nil, func() { flagPort = 70000 })
 	assert.ErrorIs(t, run.err, helpers.ErrUsage)
+}
+
+const existingTicket = "wdt.existing-ticket"
+
+// preSave saves a session for f's address, as an earlier warden login did.
+func preSave(t *testing.T, f *fakeWarden, ns, mount, role string, ttl time.Duration) {
+	t.Helper()
+	addr, err := helpers.NormalizeAddr(f.srv.URL)
+	require.NoError(t, err)
+	require.NoError(t, helpers.SaveSession(&helpers.Session{Addr: addr, Namespace: ns, Mount: mount,
+		Token: existingTicket, Role: role, ExpiresAt: time.Now().Add(ttl)}))
+}
+
+func (f *fakeWarden) signedIn() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.redirectURI != ""
+}
+
+// A valid session of the same namespace and mount is kept: no sign-in, no
+// new ticket.
+func TestLogin_KeepsValidSession(t *testing.T) {
+	useSessions(t)
+	f := newFakeWarden(t, "operator", "auditor")
+	preSave(t, f, "", "auth/oidc/", "operator", time.Hour)
+
+	run := login(t, f, nil, nil)
+	require.NoError(t, run.err)
+	assert.False(t, f.signedIn(), "no sign-in")
+	assert.Contains(t, run.stderr, "Already signed in to namespace root through auth/oidc/")
+	assert.Contains(t, run.stderr, "-force")
+	s := savedSession(t, f, "")
+	assert.Equal(t, existingTicket, s.Token)
+	assert.Equal(t, "operator", s.Role)
+}
+
+// -role on a kept session switches the role, checked with the session's own
+// ticket.
+func TestLogin_KeptSessionTakesRequestedRole(t *testing.T) {
+	useSessions(t)
+	f := newFakeWarden(t, "operator", "auditor")
+	preSave(t, f, "", "auth/oidc/", "operator", time.Hour)
+
+	run := login(t, f, map[string]string{api.EnvWardenRole: "auditor"}, nil)
+	require.NoError(t, run.err)
+	assert.False(t, f.signedIn())
+	assert.Equal(t, existingTicket, f.rolesSeen.Get("X-Warden-Token"))
+	assert.Equal(t, "auditor", savedSession(t, f, "").Role)
+	assert.Contains(t, run.stderr, `Using role "auditor"`)
+
+	run = login(t, f, map[string]string{api.EnvWardenRole: "admin"}, nil)
+	assert.ErrorContains(t, run.err, `role "admin" is not one you can assume here`)
+	assert.Equal(t, "auditor", savedSession(t, f, "").Role, "unchanged")
+}
+
+// Anything else signs in again: an expired session, one about to expire, one
+// of another mount, -force, -no-store, or only an ancestor namespace's
+// session.
+func TestLogin_SignsInAgain(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ns, savedNS, mount string
+		ttl                time.Duration
+		set                func()
+	}{
+		"expired":                    {"", "", "auth/oidc/", -time.Minute, nil},
+		"4 minutes left":             {"", "", "auth/oidc/", 4 * time.Minute, nil},
+		"another mount":              {"", "", "auth/oidc-prod/", time.Hour, nil},
+		"-force":                     {"", "", "auth/oidc/", time.Hour, func() { flagForce = true }},
+		"-no-store":                  {"", "", "auth/oidc/", time.Hour, func() { flagNoStore = true }},
+		"only an ancestor's session": {"team-a", "", "auth/oidc/", time.Hour, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			useSessions(t)
+			f := newFakeWarden(t, "operator")
+			preSave(t, f, tc.savedNS, tc.mount, "operator", tc.ttl)
+			run := login(t, f, map[string]string{api.EnvWardenNamespace: tc.ns}, tc.set)
+			require.NoError(t, run.err, run.stderr)
+			assert.True(t, f.signedIn(), "signed in again")
+			assert.NotContains(t, run.stderr, "Already signed in")
+		})
+	}
 }
