@@ -75,6 +75,7 @@ func setupTestCredentialConfigStore(t *testing.T) (*CredentialConfigStore, conte
 	if err != nil {
 		t.Fatalf("failed to create credential config store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	store.storage = storage
 
 	// Create test namespace context

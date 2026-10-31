@@ -2450,7 +2450,7 @@ func (c *Core) teardownCredentialConfigStore() error {
 
 // setupCredentialManager creates and initializes the global credential manager
 // This is called during unseal after setupCredentialConfigStore
-func (c *Core) setupCredentialManager(ctx context.Context) error {
+func (c *Core) setupCredentialManager(ctx context.Context, opts ...credential.ManagerOption) error {
 	// Create global Manager with CredentialConfigStore as ConfigStoreAccessor
 	// Note: Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
 	manager, err := credential.NewManager(
@@ -2458,6 +2458,7 @@ func (c *Core) setupCredentialManager(ctx context.Context) error {
 		c.credentialDriverRegistry,
 		c.credConfigStore, // Implements ConfigStoreAccessor interface
 		c.logger.WithSystem("credential.manager"),
+		opts...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create credential manager: %w", err)

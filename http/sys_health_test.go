@@ -296,6 +296,7 @@ func createTestCoreForHTTP(t *testing.T) (*core.Core, *logger.GatedLogger) {
 		},
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Shutdown() })
 	return c, log
 }
 

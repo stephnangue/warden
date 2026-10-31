@@ -548,7 +548,11 @@ func (c *Core) Shutdown() error {
 	}
 
 	// Seal the core, which triggers the full preSeal teardown sequence
-	if err := c.Seal(); err != nil {
+	err := c.Seal()
+	// The stores NewCore built outlive every seal; a core shut down needs them
+	// no more, sealed or not.
+	c.closeStores()
+	if err != nil {
 		c.logger.Error("error during seal on shutdown", logger.Err(err))
 		return err
 	}
@@ -556,6 +560,19 @@ func (c *Core) Shutdown() error {
 	c.logger.Info("core shutdown successfully")
 
 	return nil
+}
+
+// closeStores closes the token store and the credential config store, which
+// NewCore builds once per core. Their caches run goroutines until closed,
+// which keep the caches, and the core, reachable. Each store refuses calls
+// once closed; closing twice is a no-op.
+func (c *Core) closeStores() {
+	if c.tokenStore != nil {
+		c.tokenStore.Close()
+	}
+	if c.credConfigStore != nil {
+		_ = c.credConfigStore.Close()
+	}
 }
 
 // CreateCore conducts static validations on the Core Config

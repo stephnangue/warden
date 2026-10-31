@@ -994,6 +994,7 @@ func TestNamespaceStore_ClearNamespaceResourcesClosesDrivers(t *testing.T) {
 	credManager, err := credential.NewManager(
 		core.credentialTypeRegistry, core.credentialDriverRegistry, core.credConfigStore, core.logger)
 	require.NoError(t, err)
+	core.credentialManager.Stop()
 	core.credentialManager = credManager
 
 	childNs := &namespace.Namespace{

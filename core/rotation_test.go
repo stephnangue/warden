@@ -600,6 +600,7 @@ func createTestRotationManagerWithFactory(t *testing.T, factory *mockDriverFacto
 	log := core.logger
 	credManager, err := credential.NewManager(core.credentialTypeRegistry, core.credentialDriverRegistry, core.credConfigStore, log)
 	require.NoError(t, err)
+	core.credentialManager.Stop()
 	core.credentialManager = credManager
 
 	// Create source in config store

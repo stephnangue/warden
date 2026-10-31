@@ -34,6 +34,7 @@ func createHACore(t *testing.T, backend physical.Backend, haBackend physical.HAB
 
 	c, err := NewCore(conf)
 	require.NoError(t, err)
+	t.Cleanup(c.closeStores)
 	return c
 }
 
