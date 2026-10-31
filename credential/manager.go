@@ -191,13 +191,36 @@ func newChainedSecret(credB *Credential) chainedSecret {
 	return cs
 }
 
+// defaultCacheNumCounters is the number of keys the credential cache tracks.
+const defaultCacheNumCounters = 5_000_000
+
+// ManagerOption tunes a Manager when it is created.
+type ManagerOption func(*managerOptions)
+
+type managerOptions struct {
+	cacheNumCounters int64
+}
+
+// WithCacheNumCounters sets the number of keys the credential cache tracks to
+// decide what to evict once full (default 5,000,000). The counters are
+// allocated up front, a few bytes per key, whatever the cache holds.
+func WithCacheNumCounters(n int64) ManagerOption {
+	return func(o *managerOptions) { o.cacheNumCounters = n }
+}
+
 // NewManager creates a new global credential manager
 func NewManager(
 	typeRegistry *TypeRegistry,
 	driverRegistry *DriverRegistry,
 	configStore ConfigStoreAccessor,
 	logger *logger.GatedLogger,
+	opts ...ManagerOption,
 ) (*Manager, error) {
+	o := managerOptions{cacheNumCounters: defaultCacheNumCounters}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	// Create focused components for better testability
 	specResolver := NewSpecResolver(configStore, logger.WithSubsystem("spec-resolver"))
 	driverCoordinator := NewDriverCoordinator(driverRegistry, configStore, logger.WithSubsystem("driver-coordinator"))
@@ -219,7 +242,7 @@ func NewManager(
 
 	// Create Ristretto cache
 	cache, err := ristretto.NewCache(&ristretto.Config[string, *Credential]{
-		NumCounters: 5_000_000,
+		NumCounters: o.cacheNumCounters,
 		MaxCost:     50 << 20, // 50 MB
 		BufferItems: 64,
 	})

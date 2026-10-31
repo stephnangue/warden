@@ -512,6 +512,9 @@ func newMockProvider() *mockProvider {
 	return &mockProvider{}
 }
 
+// testCacheNumCounters is the number of keys a test core's caches track.
+const testCacheNumCounters = 10_000
+
 // Helper function to create a test core with all dependencies
 func createTestCore(t testing.TB) *Core {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
@@ -555,12 +558,18 @@ func createTestCore(t testing.TB) *Core {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	core.namespaceStore, _ = NewNamespaceStore(ctx, core, log)
 
-	// Initialize token store
-	core.tokenStore, _ = NewTokenStore(core, DefaultTokenStoreConfig())
+	// Initialize token store. The caches keep their production cost limits but
+	// track far fewer keys: their frequency counters are allocated up front
+	// (some 100 MB at the defaults), and they decide only which entry to evict
+	// from a full cache, which no test fills.
+	tokenConfig := DefaultTokenStoreConfig()
+	tokenConfig.CacheNumCounters = testCacheNumCounters
+	core.tokenStore, _ = NewTokenStore(core, tokenConfig)
 
 	// Initialize credential config store
 	credStorage := NewBarrierView(barrier, credentialConfigStorePath)
 	credConfig := DefaultCredConfigStoreConfig()
+	credConfig.CacheNumCounters = testCacheNumCounters
 	credConfig.SkipSpecVerification = true // Skip verification in tests (no real Vault/AWS/etc servers)
 	core.credConfigStore, _ = NewCredentialConfigStore(core, credConfig)
 	core.credConfigStore.storage = credStorage
@@ -573,8 +582,17 @@ func createTestCore(t testing.TB) *Core {
 	_ = types.RegisterBuiltinTypes(core.credentialTypeRegistry)
 	_ = drivers.RegisterBuiltinDrivers(core.credentialDriverRegistry)
 
-	// Initialize credential manager (required for source/spec operations)
-	_ = core.setupCredentialManager(ctx)
+	// Initialize credential manager (required for source/spec operations),
+	// its cache tracking as few keys as the stores'.
+	_ = core.setupCredentialManager(ctx, credential.WithCacheNumCounters(testCacheNumCounters))
+
+	// The core is never sealed, so release its caches when the test ends:
+	// each runs goroutines that would keep it, and some hundred MB of cache
+	// bookkeeping, alive for the rest of the run.
+	t.Cleanup(func() {
+		_ = core.teardownCredentialManager()
+		core.closeStores()
+	})
 
 	// Initialize skill store
 	core.skillStore = NewSkillStore(core)
