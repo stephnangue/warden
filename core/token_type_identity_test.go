@@ -68,9 +68,13 @@ func TestIdentityTokenType_Registry(t *testing.T) {
 	core := createTestCore(t)
 	defer core.tokenStore.Close()
 
-	assert.ElementsMatch(t, []string{"identity_token", "service_token"}, core.tokenStore.ListTokenTypes())
+	assert.ElementsMatch(t, []string{"identity_token", "service_token", "ticket_token"}, core.tokenStore.ListTokenTypes())
 	assert.True(t, core.tokenStore.IsTransparentType("identity_token"))
 	assert.False(t, core.tokenStore.IsTransparentType("service_token"))
+	assert.False(t, core.tokenStore.IsTransparentType("ticket_token"), "a ticket is logged in explicitly")
+	assert.True(t, core.tokenStore.registry.IsStateless("ticket_token"))
+	assert.False(t, core.tokenStore.registry.IsStateless("identity_token"), "an identity token keeps its accessor")
+	assert.False(t, core.tokenStore.registry.IsStateless("service_token"))
 	assert.False(t, core.tokenStore.IsTransparentType("warden_token"), "a type stored by an earlier release stays persisted")
 	for _, old := range []string{"jwt_role", "cert_role", "kubernetes_role", "spiffe_role"} {
 		assert.False(t, core.tokenStore.IsTransparentType(old), old)

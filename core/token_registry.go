@@ -75,6 +75,23 @@ func (r *TokenTypeRegistry) IsTransparent(name string) bool {
 	return tt.IsTransparent()
 }
 
+// IsStateless reports whether the named token type is registered with
+// Metadata().Stateless set. Returns false for unknown types.
+func (r *TokenTypeRegistry) IsStateless(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	tokenType, ok := r.types[name]
+	return ok && tokenType.Metadata().Stateless
+}
+
+// isCacheOnly reports whether entries of the named type live in the cache
+// only: transparent types (one entry per credential, rebuilt by implicit auth)
+// and stateless ones (rebuilt from the value).
+func (r *TokenTypeRegistry) isCacheOnly(name string) bool {
+	return r.IsTransparent(name) || r.IsStateless(name)
+}
+
 // GetByName retrieves a token type by its name
 func (r *TokenTypeRegistry) GetByName(name string) (TokenType, error) {
 	r.mu.RLock()

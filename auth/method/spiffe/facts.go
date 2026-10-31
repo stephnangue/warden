@@ -66,6 +66,9 @@ func (b *spiffeAuthBackend) FactNames() []string { return helper.FactNames(b.mou
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *spiffeAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+// MountFacts implements logical.FactsProvider.
+func (b *spiffeAuthBackend) MountFacts() *logical.MountFacts { return b.mountFacts }
+
 // AliasChange implements logical.FactsProvider (see helper.AliasChange). A
 // spiffe mount's alias is fixed to the SPIFFE ID, so only an entity_kind
 // change, or a facts map renaming spiffe_id, changes how it is derived.

@@ -28,6 +28,9 @@ func (b *jwtAuthBackend) FactNames() []string { return helper.FactNames(b.mountF
 // EntityKind implements logical.FactsProvider (see helper.EntityKind).
 func (b *jwtAuthBackend) EntityKind() string { return helper.EntityKind(b.mountFacts) }
 
+// MountFacts implements logical.FactsProvider.
+func (b *jwtAuthBackend) MountFacts() *logical.MountFacts { return b.mountFacts }
+
 // AliasChange implements logical.FactsProvider (see helper.AliasChange).
 func (b *jwtAuthBackend) AliasChange(data map[string]any) (from, to string) {
 	var cur helper.FactsConfig

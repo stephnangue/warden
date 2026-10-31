@@ -115,3 +115,17 @@ func (m *Mapping) Mapped() []string {
 	}
 	return m.mapped
 }
+
+// Sources returns the raw key every name reads, built-in and mapped, in the
+// order of Names: the facts a credential must keep for the mapping to answer
+// all of its names. It allocates a new slice on each call.
+func (m *Mapping) Sources() []Key {
+	if m == nil {
+		return nil
+	}
+	keys := make([]Key, len(m.all))
+	for i, name := range m.all {
+		keys[i] = m.names[name]
+	}
+	return keys
+}
