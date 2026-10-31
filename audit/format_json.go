@@ -452,6 +452,7 @@ var (
 		"policies":           func(a *Auth) { a.Policies = nil },
 		"token_ttl":          func(a *Auth) { a.TokenTTL = 0 },
 		"expires_at":         func(a *Auth) { a.ExpiresAt = 0 },
+		"auth_time":          func(a *Auth) { a.AuthTime = 0 },
 		"namespace_id":       func(a *Auth) { a.NamespaceID = "" },
 		"namespace_path":     func(a *Auth) { a.NamespacePath = "" },
 		"created_by_ip":      func(a *Auth) { a.CreatedByIP = "" },

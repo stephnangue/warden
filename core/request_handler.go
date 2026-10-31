@@ -1021,33 +1021,45 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		provider, authRole, providerAuth := c.providerTransparentSurface(ctx, req, entry)
 		if providerAuth {
 			req.ClientToken, _ = provider.ExtractTokens(req.HTTPRequest, false)
+		} else {
+			req.ClientToken = extractToken(req.HTTPRequest)
+		}
+
+		// A ticket is admitted before anything else looks at the credential,
+		// whatever surface the request is on (admitTicket). An access path is
+		// its provider's surface for a ticket on either header: X-Warden-Token
+		// opts out of implicit auth, not out of the surface.
+		if refusal := c.admitTicket(ctx, req, identityPath, func() (string, func(error) *logical.Response) {
+			if b := c.providerSurfaceBackend(ctx, req, entry); b != nil {
+				return providerTicketSurface(req, b, noRoleSelectedAccess)()
+			}
+			return operationsTicketSurface(req)()
+		}); refusal != nil {
+			return refusal, nil, nil
+		}
+
+		if providerAuth && req.TokenEntry() == nil {
 			if failure := c.authenticateImplicitly(ctx, req, provider, authRole, noRoleSelectedAccess); failure != nil {
 				return failure, nil, nil
 			}
-		} else {
-			req.ClientToken = extractToken(req.HTTPRequest)
 		}
 
 		// Transparent operations: implicit auth on non-gateway endpoints.
 		// Triggered when there's no explicit X-Warden-Token but an auth path
 		// is configured on the namespace. The Authorization: Bearer value is
-		// treated as a JWT credential, not a Warden token.
-		// Role precedence: ?role= query param > X-Warden-Role header; an empty
-		// ?role= selects nothing, so it leaves the header in force. There is
-		// no provider here, so no default_role: a request selecting neither is
-		// refused before its credential is admitted.
-		if !providerAuth && !identityPath && req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
+		// treated as a JWT credential, not a Warden token, unless it is a
+		// ticket, which admitTicket admitted above.
+		// Role precedence: ?role= query param > X-Warden-Role header
+		// (operationsRole). There is no provider here, so no default_role: a
+		// request selecting neither is refused before its credential is
+		// admitted.
+		if !providerAuth && !identityPath && req.TokenEntry() == nil && req.HTTPRequest != nil && req.HTTPRequest.Header.Get("X-Warden-Token") == "" {
 			var authPath string
 			if ns, _ := namespace.FromContext(ctx); ns != nil {
 				authPath = ns.CustomMetadata["auto_auth_path"]
 			}
 			if authPath != "" {
-				var authRole string
-				if role, _ := req.Data["role"].(string); role != "" {
-					authRole = role
-				} else {
-					authRole = req.HTTPRequest.Header.Get("X-Warden-Role")
-				}
+				authRole := operationsRole(req)
 				if err := c.performImplicitAuth(ctx, req, authPath, authRole); err != nil {
 					c.logger.Warn("transparent operations auth failed",
 						logger.Err(err),
@@ -1169,6 +1181,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		var userCred string
 		req.ClientToken, userCred = matchingBackend.ExtractTokens(req.HTTPRequest, userLeg)
 
+		// A ticket is admitted before anything else looks at the credential
+		// (admitTicket); implicit auth below then has nothing to do.
+		if refusal := c.admitTicket(ctx, req, identityPath,
+			providerTicketSurface(req, matchingBackend, noRoleSelectedGateway)); refusal != nil {
+			return refusal, nil, nil
+		}
+
 		// Check for unauthenticated paths on streaming backends.
 		//
 		// A user credential is what makes passthrough unsafe: it would skip
@@ -1196,7 +1215,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// Perform implicit auth if needed
 		// Skip if already marked as unauthenticated (handled above), and on an
 		// identity path, which takes no role (the role-less leg admits it).
-		if !req.StreamUnauthenticated && !identityPath {
+		if !req.StreamUnauthenticated && !identityPath && req.TokenEntry() == nil {
 			if isTransparent, role := c.isTransparentRequest(req, matchingBackend); isTransparent {
 				if failure := c.authenticateImplicitly(ctx, req, matchingBackend, role, noRoleSelectedGateway); failure != nil {
 					return failure, nil, nil
@@ -1253,8 +1272,11 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// The role-less leg: an identity path without a service token is admitted
 	// on the credential it presents and runs under the built-in policies.
 	// Both branches above reach here, and the request's token entry is in
-	// place before CheckToken looks for one.
-	if identityPath && req.HTTPRequest.Header.Get(logical.HeaderWardenToken) == "" {
+	// place before CheckToken looks for one. A ticket that needed the caller's
+	// identity was admitted by admitTicket; one on an anonymous call runs
+	// anonymously here, on whichever header it rides.
+	if identityPath && req.TokenEntry() == nil &&
+		(req.HTTPRequest.Header.Get(logical.HeaderWardenToken) == "" || isTicketValue(req.HTTPRequest.Header.Get(logical.HeaderWardenToken))) {
 		if refusal := c.admitRoleless(ctx, req); refusal != nil {
 			return refusal, nil, nil
 		}
@@ -2499,27 +2521,40 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 		return false, ""
 	}
 
-	// Role resolution precedence (highest wins):
-	//   1. X-Warden-Role header
-	//   2. Request-encoded role (URL path segment, query param)
-	//   3. Provider transparent extractor (SigV4 access key, Basic Auth user)
-	//   4. Provider default_role (a namespace role)
-	//
-	// Request-encoded role: path segment for streaming backends, query param
-	// for access backends. The provider decides what counts.
-	authRole := tmp.GetAuthRole(relativePath, req)
+	return true, providerRole(req, backend)
+}
 
-	// Provider transparent extractor: SigV4 Authorization header (AWS,
-	// Alibaba Cloud), Basic Auth username (Git smart-HTTP), etc.
-	if authRole == "" && req.HTTPRequest != nil {
-		if ext, ok := backend.(logical.TransparentAuthRoleExtractor); ok {
-			authRole = ext.GetAuthRoleFromRequest(req.HTTPRequest)
+// providerRole returns the role a request on a provider's surface asks for.
+// Precedence (highest wins):
+//  1. X-Warden-Role header
+//  2. Request-encoded role (URL path segment, query param)
+//  3. Provider transparent extractor (SigV4 access key, Basic Auth user)
+//  4. Provider default_role (a namespace role)
+//
+// Request-encoded role: path segment for streaming backends, query param for
+// access backends. The provider decides what counts; a backend that is no
+// TransparentModeProvider encodes none, so only the header selects a role.
+func providerRole(req *logical.Request, backend logical.Backend) string {
+	var authRole string
+	if tmp, ok := backend.(logical.TransparentModeProvider); ok {
+		relativePath := req.Path
+		if req.MountPoint != "" {
+			relativePath = strings.TrimPrefix(req.Path, req.MountPoint)
 		}
-	}
+		authRole = tmp.GetAuthRole(relativePath, req)
 
-	// Provider default_role.
-	if authRole == "" {
-		authRole = tmp.GetDefaultAuthRole()
+		// Provider transparent extractor: SigV4 Authorization header (AWS,
+		// Alibaba Cloud), Basic Auth username (Git smart-HTTP), etc.
+		if authRole == "" && req.HTTPRequest != nil {
+			if ext, ok := backend.(logical.TransparentAuthRoleExtractor); ok {
+				authRole = ext.GetAuthRoleFromRequest(req.HTTPRequest)
+			}
+		}
+
+		// Provider default_role.
+		if authRole == "" {
+			authRole = tmp.GetDefaultAuthRole()
+		}
 	}
 
 	// X-Warden-Role header overrides everything. HandleRequest also rewrites
@@ -2531,8 +2566,21 @@ func (c *Core) isTransparentRequest(req *logical.Request, backend logical.Backen
 			authRole = headerRole
 		}
 	}
+	return authRole
+}
 
-	return true, authRole
+// operationsRole returns the role a request off a provider's transparent
+// surface asks for: the role query parameter, else X-Warden-Role. An empty
+// ?role= selects nothing, so it leaves the header in force. There is no
+// provider here, so no default_role.
+func operationsRole(req *logical.Request) string {
+	if role, _ := req.Data["role"].(string); role != "" {
+		return role
+	}
+	if req.HTTPRequest != nil {
+		return req.HTTPRequest.Header.Get("X-Warden-Role")
+	}
+	return ""
 }
 
 // handleTransparentAuth performs implicit authentication for gateway and access requests.
@@ -2594,6 +2642,31 @@ func (c *Core) providerTransparentSurface(ctx context.Context, req *logical.Requ
 	return backend, authRole, true
 }
 
+// providerSurfaceBackend returns the routed provider when a request that takes
+// the non-streaming branch is on its gateway or access surface (the path is
+// one the provider authenticates implicitly), or nil. Unlike
+// providerTransparentSurface it ignores whether implicit auth would run (an
+// auto_auth_path, no X-Warden-Token): a ticket is admitted on that surface
+// whatever header carries it, and takes its role and refusals from it.
+func (c *Core) providerSurfaceBackend(ctx context.Context, req *logical.Request, entry *MountEntry) logical.Backend {
+	if entry == nil || entry.Class != mountClassProvider || req.Operation == logical.HelpOperation {
+		return nil
+	}
+	backend := c.router.MatchingBackend(ctx, req.Path)
+	tmp, ok := backend.(logical.TransparentModeProvider)
+	if !ok {
+		return nil
+	}
+	relativePath := req.Path
+	if req.MountPoint != "" {
+		relativePath = strings.TrimPrefix(req.Path, req.MountPoint)
+	}
+	if !tmp.IsTransparentPath(relativePath) {
+		return nil
+	}
+	return backend
+}
+
 // captureUserContext resolves the request's secondary (user) principal and
 // attaches it to req.User when the provider or namespace configures per-user auth
 // (user_auth_path) AND the request actually carries a user credential. It runs
@@ -2633,6 +2706,10 @@ func (c *Core) captureUserContext(ctx context.Context, req *logical.Request, use
 		// flow that genuinely needs the user (assertion_user_claims, a templated
 		// secret_path) fail closed on its own; a flow that does not is unaffected.
 		return nil
+	}
+
+	if isTicketValue(userCred) {
+		return errTicketInUserSlot
 	}
 
 	// Fail closed if the user credential is the agent's own token. The two legs

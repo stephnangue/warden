@@ -126,6 +126,11 @@ type Auth struct {
 	TokenTTL  int64 `json:"token_ttl,omitempty"`  // Seconds remaining
 	ExpiresAt int64 `json:"expires_at,omitempty"` // Unix timestamp
 
+	// AuthTime is when the person behind the credential last authenticated
+	// to its identity provider (Unix timestamp), when the credential records
+	// it (a ticket does).
+	AuthTime int64 `json:"auth_time,omitempty"`
+
 	// Namespace binding
 	NamespaceID   string `json:"namespace_id,omitempty"`
 	NamespacePath string `json:"namespace_path,omitempty"`
