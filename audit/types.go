@@ -2,6 +2,8 @@ package audit
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/stephnangue/warden/logger"
@@ -308,154 +310,66 @@ func (e *LogEntry) Clone() *LogEntry {
 		return nil
 	}
 
-	clone := &LogEntry{
-		Type:      e.Type,
-		Timestamp: e.Timestamp,
-		Error:     e.Error,
-	}
+	// Every struct is copied by value first, then each of its reference fields
+	// (slices, maps, pointers) is copied anew, so devices writing the same
+	// entry share nothing. Copying by value is what keeps a field added later
+	// from being lost: a field-by-field copy once dropped the user principal,
+	// and then auth_time, from every written entry, because the JSON formatter
+	// clones before serialising. TestCloneKeepsEverythingSharesNothing pins it.
+	clone := *e
 
-	// Clone Request
 	if e.Request != nil {
-		clone.Request = &Request{
-			ID:              e.Request.ID,
-			Operation:       e.Request.Operation,
-			Path:            e.Request.Path,
-			MountPoint:      e.Request.MountPoint,
-			MountType:       e.Request.MountType,
-			MountClass:      e.Request.MountClass,
-			Method:          e.Request.Method,
-			ClientIP:        e.Request.ClientIP,
-			NamespaceID:     e.Request.NamespaceID,
-			NamespacePath:   e.Request.NamespacePath,
-			Unauthenticated: e.Request.Unauthenticated,
-			Streamed:        e.Request.Streamed,
-			Transparent:     e.Request.Transparent,
-		}
+		req := *e.Request
+		clone.Request = &req
 	}
 
-	// Clone Response
 	if e.Response != nil {
-		clone.Response = &Response{
-			StatusCode:    e.Response.StatusCode,
-			StatusMessage: e.Response.StatusMessage,
-			MountClass:    e.Response.MountClass,
-			Streamed:      e.Response.Streamed,
-			UpstreamURL:   e.Response.UpstreamURL,
+		resp := *e.Response
+		resp.Warnings = slices.Clone(e.Response.Warnings)
+		if c := e.Response.Credential; c != nil {
+			cred := *c
+			cred.Data = maps.Clone(c.Data)
+			cred.Metadata = maps.Clone(c.Metadata)
+			resp.Credential = &cred
 		}
-		if e.Response.Warnings != nil {
-			clone.Response.Warnings = make([]string, len(e.Response.Warnings))
-			copy(clone.Response.Warnings, e.Response.Warnings)
+		if ar := e.Response.AuthResult; ar != nil {
+			result := *ar
+			result.Policies = slices.Clone(ar.Policies)
+			resp.AuthResult = &result
 		}
-		if e.Response.Credential != nil {
-			clone.Response.Credential = &Credential{
-				CredentialID: e.Response.Credential.CredentialID,
-				Type:         e.Response.Credential.Type,
-				Category:     e.Response.Credential.Category,
-				LeaseTTL:     e.Response.Credential.LeaseTTL,
-				LeaseID:      e.Response.Credential.LeaseID,
-				TokenID:      e.Response.Credential.TokenID,
-				SourceName:   e.Response.Credential.SourceName,
-				SourceType:   e.Response.Credential.SourceType,
-				SpecName:     e.Response.Credential.SpecName,
-				Revocable:    e.Response.Credential.Revocable,
-			}
-			if e.Response.Credential.Data != nil {
-				clone.Response.Credential.Data = make(map[string]string, len(e.Response.Credential.Data))
-				for k, v := range e.Response.Credential.Data {
-					clone.Response.Credential.Data[k] = v
-				}
-			}
-			if e.Response.Credential.Metadata != nil {
-				clone.Response.Credential.Metadata = make(map[string]string, len(e.Response.Credential.Metadata))
-				for k, v := range e.Response.Credential.Metadata {
-					clone.Response.Credential.Metadata[k] = v
-				}
-			}
-		}
-		if e.Response.AuthResult != nil {
-			clone.Response.AuthResult = &AuthResult{
-				TokenType:   e.Response.AuthResult.TokenType,
-				PrincipalID: e.Response.AuthResult.PrincipalID,
-				TokenTTL:    e.Response.AuthResult.TokenTTL,
-			}
-			if e.Response.AuthResult.Policies != nil {
-				clone.Response.AuthResult.Policies = make([]string, len(e.Response.AuthResult.Policies))
-				copy(clone.Response.AuthResult.Policies, e.Response.AuthResult.Policies)
-			}
-		}
+		clone.Response = &resp
 	}
 
-	// Clone Auth
 	if e.Auth != nil {
-		clone.Auth = &Auth{
-			TokenID:          e.Auth.TokenID,
-			TokenAccessor:    e.Auth.TokenAccessor,
-			TokenType:        e.Auth.TokenType,
-			PrincipalID:      e.Auth.PrincipalID,
-			RoleName:         e.Auth.RoleName,
-			MountAccessor:    e.Auth.MountAccessor,
-			AliasName:        e.Auth.AliasName,
-			EntityKind:       e.Auth.EntityKind,
-			RoleGrantedBy:    e.Auth.RoleGrantedBy,
-			RoleDeniedReason: e.Auth.RoleDeniedReason,
-			TokenTTL:         e.Auth.TokenTTL,
-			ExpiresAt:        e.Auth.ExpiresAt,
-			NamespaceID:      e.Auth.NamespaceID,
-			NamespacePath:    e.Auth.NamespacePath,
-			CreatedByIP:      e.Auth.CreatedByIP,
-		}
-		if e.Auth.Policies != nil {
-			clone.Auth.Policies = make([]string, len(e.Auth.Policies))
-			copy(clone.Auth.Policies, e.Auth.Policies)
-		}
-		if e.Auth.Groups != nil {
-			clone.Auth.Groups = make([]string, len(e.Auth.Groups))
-			copy(clone.Auth.Groups, e.Auth.Groups)
-		}
+		auth := *e.Auth
+		auth.Policies = slices.Clone(e.Auth.Policies)
+		auth.Groups = slices.Clone(e.Auth.Groups)
+		auth.Actors = slices.Clone(e.Auth.Actors)
 		if d := e.Auth.Discovery; d != nil {
 			dc := *d
-			if d.AdmittedBy != nil {
-				dc.AdmittedBy = make([]AdmittedMount, len(d.AdmittedBy))
-				copy(dc.AdmittedBy, d.AdmittedBy)
-			}
-			clone.Auth.Discovery = &dc
+			dc.AdmittedBy = slices.Clone(d.AdmittedBy)
+			auth.Discovery = &dc
 		}
-		if e.Auth.PolicyResults != nil {
-			clone.Auth.PolicyResults = &PolicyResults{
-				Allowed:     e.Auth.PolicyResults.Allowed,
-				MCPDecision: e.Auth.PolicyResults.MCPDecision.Clone(),
-				Condition:   e.Auth.PolicyResults.Condition.Clone(),
-			}
-			if mc := e.Auth.PolicyResults.MCPClient; mc != nil {
+		if pr := e.Auth.PolicyResults; pr != nil {
+			results := *pr
+			results.GrantingPolicies = slices.Clone(pr.GrantingPolicies)
+			results.MCPDecision = pr.MCPDecision.Clone()
+			results.Condition = pr.Condition.Clone()
+			if mc := pr.MCPClient; mc != nil {
 				mcCopy := *mc
-				clone.Auth.PolicyResults.MCPClient = &mcCopy
+				results.MCPClient = &mcCopy
 			}
-			if e.Auth.PolicyResults.GrantingPolicies != nil {
-				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))
-				copy(clone.Auth.PolicyResults.GrantingPolicies, e.Auth.PolicyResults.GrantingPolicies)
-			}
+			auth.PolicyResults = &results
 		}
-		if e.Auth.Actors != nil {
-			clone.Auth.Actors = make([]ActorRef, len(e.Auth.Actors))
-			copy(clone.Auth.Actors, e.Auth.Actors)
+		if u := e.Auth.User; u != nil {
+			user := *u
+			user.Actors = slices.Clone(u.Actors)
+			auth.User = &user
 		}
-		// The secondary (user) principal. Omitting it here silently dropped
-		// per-user attribution from every written entry, because the JSON
-		// formatter clones before serialising — the field was set correctly in
-		// memory and lost on the way to disk.
-		if e.Auth.User != nil {
-			user := *e.Auth.User
-			// The struct copy shares the chain's backing array; copy it too, or
-			// devices writing the same entry would share (and could race on) it.
-			if e.Auth.User.Actors != nil {
-				user.Actors = make([]ActorRef, len(e.Auth.User.Actors))
-				copy(user.Actors, e.Auth.User.Actors)
-			}
-			clone.Auth.User = &user
-		}
+		clone.Auth = &auth
 	}
 
-	return clone
+	return &clone
 }
 
 // Format defines the serialization format for audit logs
