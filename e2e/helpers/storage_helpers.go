@@ -128,6 +128,16 @@ func (s *ClusterStorage) Get(t *testing.T, key string) []byte {
 	return e.Value
 }
 
+// List returns the keys directly under prefix.
+func (s *ClusterStorage) List(t *testing.T, prefix string) []string {
+	t.Helper()
+	keys, err := s.barrier.List(context.Background(), prefix)
+	if err != nil {
+		t.Fatalf("list %s: %v", prefix, err)
+	}
+	return keys
+}
+
 // Delete removes key.
 func (s *ClusterStorage) Delete(t *testing.T, key string) {
 	t.Helper()

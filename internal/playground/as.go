@@ -50,6 +50,9 @@ type AuthServerConfig struct {
 	Audiences []string
 	// AccessTokenTTL defaults to DefaultAccessTokenTTL.
 	AccessTokenTTL time.Duration
+	// People are the persons the authorization endpoint signs in, by subject,
+	// each with the extra claims of their ID token. Nil is DefaultPeople.
+	People map[string]map[string]any
 }
 
 // AuthServer is the bank's authorization server. Its one grant is the RFC 8693
@@ -66,6 +69,10 @@ type AuthServer struct {
 	wardenKeys   *capjwt.Validator
 	audiences    []string
 	ttl          time.Duration
+
+	// The authorization code flow (as_code.go).
+	people map[string]map[string]any
+	codes  *codeStore
 }
 
 // NewAuthServer builds the authorization server. Warden's keys are fetched lazily,
@@ -94,28 +101,39 @@ func NewAuthServer(cfg AuthServerConfig) (*AuthServer, error) {
 	if ttl == 0 {
 		ttl = DefaultAccessTokenTTL
 	}
+	people := cfg.People
+	if people == nil {
+		people = DefaultPeople()
+	}
 	return &AuthServer{
 		idp:          cfg.IdP,
 		wardenIssuer: strings.TrimRight(cfg.WardenIssuer, "/"),
 		wardenKeys:   validator,
 		audiences:    slices.Clone(cfg.Audiences),
 		ttl:          ttl,
+		people:       people,
+		codes:        newCodeStore(),
 	}, nil
 }
 
-// Handler serves the IdP's discovery documents and keys and the token endpoint.
+// Handler serves the IdP's discovery documents and keys, the authorization
+// endpoint (people signing in, for the oidc auth method) and the token
+// endpoint.
 func (a *AuthServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	issuer := a.idp.Issuer()
 	metadata := map[string]any{
 		"issuer":                                issuer,
 		"jwks_uri":                              issuer + "/jwks",
+		"authorization_endpoint":                issuer + "/authorize",
 		"token_endpoint":                        issuer + "/token",
-		"grant_types_supported":                 []string{grantTypeTokenExchange},
+		"grant_types_supported":                 []string{grantTypeTokenExchange, grantTypeAuthorizationCode},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"id_token_signing_alg_values_supported": []string{"ES256"},
 		"subject_types_supported":               []string{"public"},
-		"response_types_supported":              []string{"id_token"},
+		"response_types_supported":              []string{"code"},
+		"code_challenge_methods_supported":      []string{"S256"},
+		"scopes_supported":                      []string{"openid", "profile"},
 	}
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, metadata)
@@ -126,6 +144,7 @@ func (a *AuthServer) Handler() http.Handler {
 	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, a.idp.JWKS())
 	})
+	mux.HandleFunc("GET /authorize", a.handleAuthorize)
 	mux.HandleFunc("POST /token", a.handleToken)
 	return mux
 }
@@ -148,6 +167,10 @@ type oauthError struct {
 func (a *AuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		writeJSON(w, http.StatusBadRequest, oauthError{"invalid_request", "the token request body is not form-encoded"})
+		return
+	}
+	if r.PostForm.Get("grant_type") == grantTypeAuthorizationCode {
+		a.handleCodeGrant(w, r)
 		return
 	}
 	resp, oerr := a.exchange(r.Context(), r.PostForm)
