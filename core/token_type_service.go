@@ -70,7 +70,7 @@ func (t *ServiceTokenType) ComputeID(lookupValue string) string {
 	if strings.HasPrefix(lookupValue, legacyServiceTokenValuePrefix) {
 		prefix = legacyServiceTokenIDPrefix
 	}
-	return prefix + hashTokenID(lookupValue)
+	return tokenID(prefix, lookupValue)
 }
 
 func (t *ServiceTokenType) LookupKey() string {

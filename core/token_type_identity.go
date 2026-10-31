@@ -60,7 +60,7 @@ func (t *IdentityTokenType) Generate(_ context.Context, authData *AuthData, entr
 func (t *IdentityTokenType) ValidateValue(string) bool { return true }
 
 func (t *IdentityTokenType) ComputeID(lookupValue string) string {
-	return identityTokenIDPrefix + hashTokenID(lookupValue)
+	return tokenID(identityTokenIDPrefix, lookupValue)
 }
 
 func (t *IdentityTokenType) LookupKey() string { return identityTokenLookupKey }

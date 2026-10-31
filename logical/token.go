@@ -19,6 +19,13 @@ const (
 	// TokenTypeService is a bearer token Warden issues and persists, carrying
 	// its own policies (the root token is one).
 	TokenTypeService = "service_token"
+
+	// TokenTypeTicket is a self-contained session token: the verified identity,
+	// its facts and an expiry, encrypted under Warden's key and handed to the
+	// caller, who presents it on every request. It carries no role and no
+	// policies (a role grants them per request), is never stored, and cannot be
+	// renewed or revoked before it expires.
+	TokenTypeTicket = "ticket_token"
 )
 
 // TokenEntry represents a token with comprehensive metadata for
@@ -27,7 +34,7 @@ type TokenEntry struct {
 	// Core Identity (Two-Tier Cache)
 	ID       string // Primary hash-based ID (Tier 1: in-memory cache)
 	Accessor string // Reference ID for safe operations (Tier 2: in-memory cache)
-	Type     string // Token type (TokenTypeIdentity, TokenTypeService)
+	Type     string // Token type (TokenTypeIdentity, TokenTypeService, TokenTypeTicket)
 
 	// Namespace Binding
 	NamespaceID   string // ID (not UUID) of the namespace the token was created in

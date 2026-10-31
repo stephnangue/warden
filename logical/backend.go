@@ -117,6 +117,27 @@ type BackendConfig struct {
 	// back to itself uses this, never a request's Host header. Nil for backends
 	// mounted outside core.
 	ExternalBaseURL func(ctx context.Context) string
+
+	// Sealer encrypts and authenticates small values under Warden's key for
+	// this mount alone. Set for auth mounts; nil for backends mounted outside
+	// core, so a backend that needs it checks at setup.
+	Sealer Sealer
+}
+
+// Sealer seals values a backend hands out and takes back later (a pending
+// login carried in an OAuth state parameter), so the backend keeps no server
+// state for them. Seal encrypts and authenticates plaintext under Warden's
+// encryption key; Open returns it, or an error when the value was not sealed by
+// this mount for this purpose, was altered, or its key is gone.
+//
+// Core binds every sealed value to the mount and to purpose, a short non-empty
+// name ("oidc-login-state/v1"): a value sealed by one mount never
+// opens on another, nor under another purpose, and nothing a backend seals can
+// ever be taken for a value core seals for itself. A version suffix in purpose
+// lets a backend change a format without opening old values as new ones.
+type Sealer interface {
+	Seal(ctx context.Context, purpose string, plaintext []byte) ([]byte, error)
+	Open(ctx context.Context, purpose string, ciphertext []byte) ([]byte, error)
 }
 
 // Factory is the factory function to create a logical backend.

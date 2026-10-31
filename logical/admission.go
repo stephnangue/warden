@@ -81,6 +81,18 @@ type Admission struct {
 	// otherwise.
 	IssuedAt time.Time
 
+	// Kind is the kind of entity the mount admitted the credential as, recorded
+	// only on an admission that outlives the request it was made on (a ticket
+	// token's), so a mount that now admits another kind can refuse it; "" on
+	// every other admission. Lookup never reads it: the fact "kind" is always
+	// the live naming's.
+	Kind string
+
+	// AuthTime is when the person behind the credential last authenticated to
+	// its identity provider, when the credential says so; zero otherwise. It is
+	// recorded, never checked.
+	AuthTime time.Time
+
 	// AudienceBound reports that the credential's audience was checked
 	// against the mount's bound_audiences when it was admitted. It records
 	// what that admission verified, so a later config edit neither grants nor
@@ -229,10 +241,12 @@ func NewMountNaming(mapping *selector.Mapping, kind string) (*MountNaming, error
 
 // FactsProvider is implemented by auth backends that admit credentials as
 // facts. Backends are reached through the router as logical.Backend, like
-// AuthorizationServerProvider. Core consults it only to warn: when a group is
+// AuthorizationServerProvider. Core consults it to warn, when a group is
 // written (about a fact name no mount produces) and when a provider
-// configuration is read (about an auth path naming a mount of the wrong
-// kind), never on the request path.
+// configuration is read (about an auth path naming a mount of the wrong kind),
+// and on the request path for one thing only: the live naming of the mount
+// that issued a ticket token (MountFacts), an atomic load. No request is ever
+// routed to the mount for it.
 type FactsProvider interface {
 	// FactNames returns every fact name the mount answers, built-in and
 	// mapped, under its current configuration.
@@ -248,6 +262,10 @@ type FactsProvider interface {
 	// alias from every credential. from is "" when the mount publishes no
 	// naming, and to is "" when the write would be refused anyway.
 	AliasChange(data map[string]any) (from, to string)
+	// MountFacts returns the mount's live naming: the pointer its admissions
+	// carry, so a mapping edit reaches them. Never nil once the mount is set
+	// up.
+	MountFacts() *MountFacts
 }
 
 // CredentialFormat names the credential a transparent auth method admits, which
