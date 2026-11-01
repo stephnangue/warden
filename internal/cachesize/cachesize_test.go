@@ -41,6 +41,41 @@ func TestEntries(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestStringMapBytes(t *testing.T) {
+	assert.Zero(t, StringMapBytes(nil))
+	assert.Equal(t, int64(mapHeaderBytes), StringMapBytes(map[string]string{}), "an empty map is its header")
+	assert.Equal(t, int64(mapHeaderBytes+mapGroupBytes+2), StringMapBytes(map[string]string{"k": "v"}))
+	nine := map[string]string{}
+	for i := range 9 {
+		nine[strconv.Itoa(i)] = ""
+	}
+	assert.Equal(t, int64(mapHeaderBytes+2*mapGroupBytes+9), StringMapBytes(nine), "a second group past eight entries")
+	assert.Zero(t, testing.AllocsPerRun(100, func() { _ = StringMapBytes(nine) }))
+}
+
+var mapSink []map[string]string
+
+// The map constants are what the runtime allocates: 2,000 one-entry maps
+// cost, on average, within a small margin of what StringMapBytes charges for
+// one (its strings are constants and allocate nothing). A Go release that
+// changes the map layout fails here.
+func TestStringMapBytesMatchesTheRuntime(t *testing.T) {
+	const count = 2000
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	mapSink = make([]map[string]string, count)
+	for i := range mapSink {
+		m := make(map[string]string)
+		m["k"] = "v"
+		mapSink[i] = m
+	}
+	runtime.ReadMemStats(&after)
+	mapSink = nil
+	perMap := int64(after.TotalAlloc-before.TotalAlloc)/count - 8 // less the slice's slot
+	assert.InDelta(t, mapHeaderBytes+mapGroupBytes, perMap, 64, "measured %d B per one-entry map", perMap)
+}
+
 // fill sets n keys, each charged cost, and returns how many the cache kept.
 // Ristretto applies Sets in order once Wait returns; under its 32K-deep set
 // buffer none is dropped.

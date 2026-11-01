@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -72,10 +74,13 @@ const (
 
 // TokenStoreConfig holds configuration for the token store
 type TokenStoreConfig struct {
-	// CacheMaxCost is the maximum cost of cache (in bytes, roughly)
+	// CacheMaxCost is the memory budget of the token cache, in bytes: each
+	// entry is charged its approximate size (entryCost). The accessor index
+	// holds as many entries as the smallest entries fill it with.
 	CacheMaxCost int64
 
-	// CacheNumCounters is the number of keys to track frequency
+	// CacheNumCounters overrides the number of keys each cache tracks to
+	// decide what to evict; 0 derives it from the entries the cache can hold.
 	CacheNumCounters int64
 
 	// EnableMetrics enables collection of operational metrics
@@ -87,17 +92,17 @@ type TokenStoreConfig struct {
 	// "required" - reject tokens without IP binding or requests without client IP
 	IPBindingPolicy IPBindingPolicy
 
-	// CacheMinRetention is the minimum time to retain tokens in cache
-	// regardless of cost-based eviction. This prevents high token volume
-	// from evicting valid tokens prematurely. Defaults to 5 minutes.
+	// CacheMinRetention is the shortest cache TTL a token is given: a token
+	// closer than this to its expiry stays cached this long (its expiry is
+	// still checked on every lookup). It does not shield a token from being
+	// evicted from a full cache. Defaults to 5 minutes.
 	CacheMinRetention time.Duration
 }
 
 // DefaultTokenStoreConfig returns a production-ready default configuration
 func DefaultTokenStoreConfig() *TokenStoreConfig {
 	return &TokenStoreConfig{
-		CacheMaxCost:      100 << 20, // 100 MB
-		CacheNumCounters:  1e7,       // 10 million
+		CacheMaxCost:      100 << 20, // 100 MiB
 		EnableMetrics:     true,
 		IPBindingPolicy:   IPBindingOptional,
 		CacheMinRetention: 5 * time.Minute,
@@ -214,23 +219,24 @@ func NewTokenStore(core *Core, config *TokenStoreConfig) (*TokenStore, error) {
 		rootTokenManager: NewRootTokenManager(),
 	}
 
-	// Initialize primary cache (by ID)
-	cacheByID, err := ristretto.NewCache(&ristretto.Config[string, *TokenEntry]{
-		NumCounters: config.CacheNumCounters,
-		MaxCost:     config.CacheMaxCost,
-		BufferItems: 64,
-	})
+	// The primary cache (by ID) is bounded in bytes, each entry charged its
+	// size. The accessor index holds as many entries as the primary cache can,
+	// each charged 1, so it never runs out of room first; the two still evict
+	// independently once both are full.
+	byIDConfig := cachesize.Bytes[string, *TokenEntry](config.CacheMaxCost, tokenEntryStructBytes)
+	byAccessorConfig := cachesize.Entries[string, string](cachesize.MaxEntries(config.CacheMaxCost, tokenEntryStructBytes))
+	if config.CacheNumCounters > 0 {
+		byIDConfig.NumCounters = config.CacheNumCounters
+		byAccessorConfig.NumCounters = config.CacheNumCounters
+	}
+
+	cacheByID, err := ristretto.NewCache(byIDConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize ID cache: %w", err)
 	}
 	store.byID = cacheByID
 
-	// Initialize accessor cache (Tier 2)
-	cacheByAccessor, err := ristretto.NewCache(&ristretto.Config[string, string]{
-		NumCounters: config.CacheNumCounters / 10, // Smaller for accessor mappings
-		MaxCost:     config.CacheMaxCost / 10,
-		BufferItems: 64,
-	})
+	cacheByAccessor, err := ristretto.NewCache(byAccessorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize accessor cache: %w", err)
 	}
@@ -456,13 +462,12 @@ func (s *TokenStore) generateWithCollisionDetection(
 
 		// Tier 1: Store in primary cache (byID) with TTL
 		// TTL is computed as max(remaining token lifetime, minimum retention)
-		// This prevents high token volume from evicting valid tokens prematurely
 		cacheTTL := s.computeCacheTTL(entry)
 		s.byID.SetWithTTL(entry.ID, entry, entryCost(entry), cacheTTL)
 
 		// Tier 2: Store accessor mapping with same TTL
 		if entry.Accessor != "" {
-			s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+			s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
 		}
 
 		// Wait for all cache writes to complete
@@ -1023,7 +1028,7 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 
 	// Store new entry in cache (no TTL for root token)
 	s.byID.SetWithTTL(newEntry.ID, newEntry, entryCost(newEntry), 0)
-	s.byAccessor.SetWithTTL(newEntry.Accessor, newEntry.ID, 10, 0)
+	s.byAccessor.SetWithTTL(newEntry.Accessor, newEntry.ID, 1, 0)
 	s.byID.Wait()
 	s.byAccessor.Wait()
 
@@ -1174,7 +1179,7 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 		// Store in cache with TTL computed from remaining lifetime and minimum retention
 		cacheTTL := s.computeCacheTTL(entry)
 		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
 		s.byID.Wait()
 		s.byAccessor.Wait()
 
@@ -1197,7 +1202,7 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 		// No expiration (non-expiring token) - use minimum retention for cache TTL
 		cacheTTL := s.computeCacheTTL(entry)
 		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
 		s.byID.Wait()
 		s.byAccessor.Wait()
 
@@ -1276,7 +1281,7 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 		// Restore to cache with TTL computed from remaining lifetime and minimum retention
 		cacheTTL := s.computeCacheTTL(entry)
 		s.byID.SetWithTTL(entry.ID, entry, entryCost(entry), cacheTTL)
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
 
 		// Register the root token with the root token manager so it can be
 		// revoked or replaced after a restart. Only one root should exist;
@@ -1773,14 +1778,36 @@ func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entr
 	return nil
 }
 
-// baseEntryCost is the token cache cost of an entry without an admission.
-const baseEntryCost = int64(200)
+// The sizes of the structs a cached token holds, before the strings, slices
+// and maps they point to.
+var (
+	tokenEntryStructBytes = int64(reflect.TypeFor[TokenEntry]().Size())
+	actorRefBytes         = int64(reflect.TypeFor[logical.ActorRef]().Size())
+	admissionStructBytes  = int64(reflect.TypeFor[logical.Admission]().Size())
+)
 
-// entryCost is the token cache cost of entry: the base cost plus the facts its
-// admission retains, so a cache holding large admissions evicts sooner. Every
-// write of a TokenEntry to the cache uses it.
-func entryCost(entry *TokenEntry) int64 {
-	return baseEntryCost + entry.Admission.Size()
+// entryCost is the token cache cost of entry: its approximate size in memory,
+// the struct, the strings, policies, data, metadata and actors it holds, and
+// the facts its admission retains, so the cache's budget is bytes it really
+// holds. Every write of a TokenEntry to the cache uses it: a token created,
+// restored from storage on a lookup miss, or a ticket decoded. It reads only
+// fields set before the entry is cached, and allocates nothing.
+func entryCost(e *TokenEntry) int64 {
+	n := tokenEntryStructBytes + int64(len(e.ID)+len(e.Accessor)+len(e.Type)+
+		len(e.NamespaceID)+len(e.NamespacePath)+len(e.CreatedByIP)+len(e.CreatedByReqID)+
+		len(e.PrincipalID)+len(e.RoleName)+len(e.MountAccessor)+len(e.CredentialSpec))
+	for _, p := range e.Policies {
+		n += int64(len(p))
+	}
+	n += cachesize.StringMapBytes(e.Data) + cachesize.StringMapBytes(e.Metadata)
+	n += int64(len(e.Actors)) * actorRefBytes
+	for _, a := range e.Actors {
+		n += int64(len(a.Subject) + len(a.Issuer))
+	}
+	if e.Admission != nil {
+		n += admissionStructBytes + e.Admission.Size()
+	}
+	return n
 }
 
 // computeCacheTTL calculates the cache TTL for a token entry.
