@@ -72,6 +72,28 @@ func TestLoadConfig_IPBindingPolicy(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_CacheBudgets(t *testing.T) {
+	cfg, err := loadFromHCL(t, minimalConfigHCL+"\ntoken_cache_megabytes = 256\ncredential_cache_megabytes = 128\n")
+	require.NoError(t, err)
+	assert.Equal(t, 256, cfg.TokenCacheMegabytes)
+	assert.Equal(t, 128, cfg.CredentialCacheMegabytes)
+
+	cfg, err = loadFromHCL(t, minimalConfigHCL)
+	require.NoError(t, err)
+	assert.Zero(t, cfg.TokenCacheMegabytes, "unset: the built-in default")
+	assert.Zero(t, cfg.CredentialCacheMegabytes)
+
+	for _, body := range []string{
+		"token_cache_megabytes = -1",
+		"credential_cache_megabytes = -64",
+		"token_cache_megabytes = 1048577",
+	} {
+		_, err := loadFromHCL(t, minimalConfigHCL+"\n"+body+"\n")
+		require.Error(t, err, body)
+		assert.Contains(t, err.Error(), "must be 0 (the default) or between 1 and 1048576", body)
+	}
+}
+
 func TestLoadConfig_RotationPeriodBounds(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -747,5 +769,10 @@ func TestMergeConfig(t *testing.T) {
 		overlay := &Config{LogRotateMegabytes: 500}
 		mergeConfig(base, overlay)
 		assert.Equal(t, 500, base.LogRotateMegabytes)
+
+		base = &Config{TokenCacheMegabytes: 100, CredentialCacheMegabytes: 64}
+		mergeConfig(base, &Config{TokenCacheMegabytes: 256})
+		assert.Equal(t, 256, base.TokenCacheMegabytes)
+		assert.Equal(t, 64, base.CredentialCacheMegabytes, "an unset overlay keeps the base")
 	})
 }
