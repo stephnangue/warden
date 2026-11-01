@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
@@ -330,7 +332,7 @@ func (t *mockCredentialType) FieldSchemas() map[string]*CredentialFieldSchema {
 // Test Helpers
 // ============================================================================
 
-func createTestManager(t testing.TB) (*Manager, *mockConfigStore, *mockSourceDriverFactory) {
+func createTestManager(t testing.TB, opts ...ManagerOption) (*Manager, *mockConfigStore, *mockSourceDriverFactory) {
 	t.Helper()
 
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
@@ -351,7 +353,7 @@ func createTestManager(t testing.TB) (*Manager, *mockConfigStore, *mockSourceDri
 	require.NoError(t, err)
 
 	// Create manager (credentials are cache-only, no storage needed)
-	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log)
+	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log, opts...)
 	require.NoError(t, err)
 
 	return manager, configStore, factory
@@ -404,6 +406,91 @@ func TestNewManager_SecretCacheHoldsItsEntries(t *testing.T) {
 		}
 	}
 	assert.Equal(t, secretCacheMaxEntries, kept)
+}
+
+// The credential cache is bounded in bytes: 64 MiB unless the manager is
+// given another budget.
+func TestNewManager_CredentialCacheBudget(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	budget := func(opts ...ManagerOption) int64 {
+		m, err := NewManager(NewTypeRegistry(), NewDriverRegistry(nil), newMockConfigStore(), log, opts...)
+		require.NoError(t, err)
+		defer m.Stop()
+		return m.cache.MaxCost()
+	}
+	assert.Equal(t, int64(64<<20), budget())
+	assert.Equal(t, int64(8<<20), budget(WithCacheMaxBytes(8<<20)))
+	assert.Equal(t, int64(64<<20), budget(WithCacheMaxBytes(0)), "0 keeps the default")
+}
+
+// A credential is charged its approximate size: the struct, its strings and
+// its data and metadata maps.
+func TestCredentialCost(t *testing.T) {
+	assert.Equal(t, credentialStructBytes, credentialCost(&Credential{}))
+	assert.InDelta(t, 192, credentialStructBytes, 32, "measured, not assumed")
+
+	cred := &Credential{
+		CredentialID: "id",        // 2
+		Type:         "aws_keys",  // 8
+		SourceName:   "aws-prod",  // 8
+		SpecName:     "s3-reader", // 9
+		Data:         map[string]string{"access_key_id": "AKIA0000", "session_token": "token"},
+		Metadata:     map[string]string{"region": "eu-west-1"},
+	}
+	want := credentialStructBytes + 2 + 8 + 8 + 9 +
+		cachesize.StringMapBytes(cred.Data) + cachesize.StringMapBytes(cred.Metadata)
+	assert.Equal(t, want, credentialCost(cred))
+
+	bigger := *cred
+	bigger.Data = map[string]string{"access_key_id": "AKIA0000", "session_token": strings.Repeat("t", 1000)}
+	assert.Equal(t, credentialCost(cred)+995, credentialCost(&bigger), "a longer session token costs its bytes")
+
+	// It runs once per mint, inside the coalesced issue: it allocates nothing.
+	assert.Zero(t, testing.AllocsPerRun(1000, func() { _ = credentialCost(cred) }))
+}
+
+// A full cache may reject or evict the credentials it is handed. Every mint
+// still returns its credential and registers its lease, and revoking one the
+// cache no longer holds still reaches the source.
+func TestManager_IssueCredential_FullCache(t *testing.T) {
+	// 8 KiB: room for about three of these 2 KB credentials.
+	manager, configStore, factory := createTestManager(t, WithCacheMaxBytes(8<<10))
+	defer manager.Stop()
+	registrar := &recordingRegistrar{}
+	manager.SetExpirationRegistrar(registrar)
+	factory.driver.mintFunc = func(context.Context, *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"username": "test-user", "password": strings.Repeat("p", 2000)},
+			nil, time.Hour, "lease-123", nil
+	}
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	const n = 40
+	var first *Credential
+	for i := range n {
+		cred, err := issueForTest(manager, ctx, "token-"+strconv.Itoa(i), "test-spec", time.Hour, nil)
+		require.NoError(t, err)
+		require.NotNil(t, cred)
+		assert.Len(t, cred.Data["password"], 2000)
+		if first == nil {
+			first = cred
+		}
+	}
+	assert.Equal(t, int32(n), factory.driver.mintCalls.Load(), "each caller minted its own")
+	assert.Len(t, registrar.registered(), n, "every lease is registered, cached or not")
+
+	// The cache did fill: asked again, the callers it did not keep mint anew.
+	for i := range n {
+		_, err := issueForTest(manager, ctx, "token-"+strconv.Itoa(i), "test-spec", time.Hour, nil)
+		require.NoError(t, err)
+	}
+	assert.Greater(t, factory.driver.mintCalls.Load(), int32(n+n/2), "most no longer cached")
+	assert.Len(t, registrar.registered(), int(factory.driver.mintCalls.Load()), "and each new mint is registered")
+
+	err := manager.RevokeByExpiration(ctx, first.CredentialID, "test-namespace-id:token-0", first.LeaseID, "test-source", true)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.revokeCalls.Load(), "the source revokes the lease")
 }
 
 func TestManager_IssueCredential_Success(t *testing.T) {

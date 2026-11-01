@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -192,22 +193,52 @@ func newChainedSecret(credB *Credential) chainedSecret {
 	return cs
 }
 
-// defaultCacheNumCounters is the number of keys the credential cache tracks.
-const defaultCacheNumCounters = 5_000_000
+// defaultCacheMaxBytes is the memory budget of the credential cache: about
+// 40,000 cloud credentials with session tokens (~1.7 KB each), or 90,000
+// static API keys (~700 B each).
+const defaultCacheMaxBytes = 64 << 20
 
 // secretCacheMaxEntries is how many chained secrets the secret cache holds.
 const secretCacheMaxEntries = 10_000
+
+// credentialStructBytes is the size of a Credential itself, before the strings
+// and maps it points to.
+var credentialStructBytes = int64(reflect.TypeFor[Credential]().Size())
+
+// credentialCost is the credential cache cost of cred: its approximate size in
+// memory, the struct, its strings and its data and metadata maps, so the
+// cache's budget is bytes it really holds. It runs once per mint, before the
+// credential is shared, and allocates nothing.
+func credentialCost(cred *Credential) int64 {
+	return credentialStructBytes + int64(len(cred.CredentialID)+len(cred.Type)+len(cred.Category)+
+		len(cred.LeaseID)+len(cred.TokenID)+len(cred.SourceName)+len(cred.SourceType)+len(cred.SpecName)) +
+		cachesize.StringMapBytes(cred.Data) + cachesize.StringMapBytes(cred.Metadata)
+}
 
 // ManagerOption tunes a Manager when it is created.
 type ManagerOption func(*managerOptions)
 
 type managerOptions struct {
+	cacheMaxBytes    int64
 	cacheNumCounters int64
 }
 
-// WithCacheNumCounters sets the number of keys the credential cache tracks to
-// decide what to evict once full (default 5,000,000). The counters are
-// allocated up front, a few bytes per key, whatever the cache holds.
+// WithCacheMaxBytes sets the memory budget of the credential cache, in bytes
+// (default defaultCacheMaxBytes); 0 keeps the default. A credential evicted
+// from a full cache is minted again on its next use, and the evicted one's
+// lease stays live at its source until it expires.
+func WithCacheMaxBytes(n int64) ManagerOption {
+	return func(o *managerOptions) {
+		if n > 0 {
+			o.cacheMaxBytes = n
+		}
+	}
+}
+
+// WithCacheNumCounters overrides the number of keys the credential cache tracks
+// to decide what to evict once full, derived by default from the most
+// credentials its budget holds. The counters are allocated up front, a few
+// bytes per key, whatever the cache holds.
 func WithCacheNumCounters(n int64) ManagerOption {
 	return func(o *managerOptions) { o.cacheNumCounters = n }
 }
@@ -220,7 +251,7 @@ func NewManager(
 	logger *logger.GatedLogger,
 	opts ...ManagerOption,
 ) (*Manager, error) {
-	o := managerOptions{cacheNumCounters: defaultCacheNumCounters}
+	o := managerOptions{cacheMaxBytes: defaultCacheMaxBytes}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -244,13 +275,13 @@ func NewManager(
 	m.stopCtx, m.stopCancel = context.WithCancel(context.Background())
 	m.buildFlights()
 
-	// Create Ristretto cache
-	cache, err := ristretto.NewCache(&ristretto.Config[string, *Credential]{
-		NumCounters: o.cacheNumCounters,
-		MaxCost:     50 << 20, // 50 MB
-		BufferItems: 64,
-	})
-
+	// The credential cache is bounded in bytes, each credential charged its
+	// size (credentialCost).
+	cacheConfig := cachesize.Bytes[string, *Credential](o.cacheMaxBytes, credentialStructBytes)
+	if o.cacheNumCounters > 0 {
+		cacheConfig.NumCounters = o.cacheNumCounters
+	}
+	cache, err := ristretto.NewCache(cacheConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
@@ -420,9 +451,9 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 		}
 
 		if ttl > 0 {
-			m.cache.SetWithTTL(cacheKey, cred, 1, ttl)
+			m.cache.SetWithTTL(cacheKey, cred, credentialCost(cred), ttl)
 		} else {
-			m.cache.Set(cacheKey, cred, 1)
+			m.cache.Set(cacheKey, cred, credentialCost(cred))
 		}
 
 		// Wait for value to be processed (Ristretto is async)
