@@ -735,6 +735,23 @@ func (a *CBP) CheckAllowedFromNonExactPaths(path string, bareMount bool) *CBPPer
 	return checkAllowedFromNonExactPaths(a.prefixRules, a.segmentWildcardPaths, path, bareMount)
 }
 
+// anyWildcardCandidate reports whether any of the segment-wildcard paths could
+// match path: one does only when path starts with the literal text before its
+// first "+", which every matched segment before it must equal. It neither
+// allocates nor splits.
+func anyWildcardCandidate(segmentWildcardPaths map[string]interface{}, path string) bool {
+	for wc := range segmentWildcardPaths {
+		lit := wc
+		if i := strings.IndexByte(wc, '+'); i >= 0 {
+			lit = wc[:i]
+		}
+		if strings.HasPrefix(path, lit) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkAllowedFromNonExactPaths is the resolution itself, taking the two
 // indexes it reads rather than a receiver so the capability index and the MCP
 // index resolve by exactly the same ranking. Duplicating this logic per index
@@ -745,12 +762,14 @@ func checkAllowedFromNonExactPaths(
 	path string,
 	bareMount bool,
 ) *CBPPermissions {
-	// Without segment wildcards there is nothing to rank: the longest prefix
-	// wins, or nothing does, whatever bareMount says. Answered before the
-	// ranking slice is made, so the common lookup allocates nothing. The tree
-	// is nil until a prefix stanza is indexed, and a nil *radix.Tree cannot be
-	// searched.
-	if len(segmentWildcardPaths) == 0 {
+	// Without a segment wildcard that could match there is nothing to rank:
+	// the longest prefix wins, or nothing does. Answered before the ranking
+	// slice is made, so the common lookup allocates nothing, even when the
+	// built-ins attached to every request hold "+" stanzas for paths of their
+	// own. A bare-mount check ranks every wildcard, as it may match one deeper
+	// than the path. The tree is nil until a prefix stanza is indexed, and a
+	// nil *radix.Tree cannot be searched.
+	if len(segmentWildcardPaths) == 0 || (!bareMount && !anyWildcardCandidate(segmentWildcardPaths, path)) {
 		if prefixRules == nil {
 			return nil
 		}
@@ -760,7 +779,18 @@ func checkAllowedFromNonExactPaths(
 		}
 		return raw.(*CBPPermissions)
 	}
+	return rankNonExactPaths(prefixRules, segmentWildcardPaths, path, bareMount)
+}
 
+// rankNonExactPaths ranks the longest prefix rule against every segment
+// wildcard that matches path and returns the winner's permissions, or for a
+// bare-mount check the first wildcard under it granting anything.
+func rankNonExactPaths(
+	prefixRules *radix.Tree,
+	segmentWildcardPaths map[string]interface{},
+	path string,
+	bareMount bool,
+) *CBPPermissions {
 	wcPathDescrs := make([]wcPathDescr, 0, len(segmentWildcardPaths)+1)
 
 	less := func(i, j int) bool {

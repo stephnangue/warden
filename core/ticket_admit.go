@@ -149,7 +149,9 @@ func (c *Core) admitTicketRoleless(ctx context.Context, req *logical.Request, te
 	if err != nil || ns == nil {
 		return logical.ErrorResponse(logical.ErrInternal("namespace missing"))
 	}
-	d, err := c.discoveryFromTicket(ctx, te, time.Now())
+	// The sponsor handlers read the ticket's membership, never a role's
+	// provider, so there is nothing to resolve for them.
+	d, err := c.discoveryFromTicket(ctx, te, time.Now(), !isSponsorPath(req.Path))
 	if err != nil {
 		c.logger.Error("ticket discovery failed", logger.Err(err), logger.String("path", req.Path))
 		return logical.ErrorResponse(logical.ErrInternal("discovery failed"))
@@ -186,8 +188,9 @@ func (c *Core) admitTicketRoleless(ctx context.Context, req *logical.Request, te
 // ticket, whatever provider it is used with. The membership is computed afresh
 // (compute), as discoverFromAdmissions computes it, never cached onto the
 // shared admission. The mount is named with its namespace, since it may not be
-// the request's.
-func (c *Core) discoveryFromTicket(ctx context.Context, te *logical.TokenEntry, now time.Time) (*admissionDiscovery, error) {
+// the request's. withProviders resolves the granted roles' providers, which
+// only discovery renders.
+func (c *Core) discoveryFromTicket(ctx context.Context, te *logical.TokenEntry, now time.Time, withProviders bool) (*admissionDiscovery, error) {
 	adm := te.Admission
 	if adm == nil {
 		return nil, errors.New("ticket entry carries no admission")
@@ -211,13 +214,15 @@ func (c *Core) discoveryFromTicket(ctx context.Context, te *logical.TokenEntry, 
 			}
 		}
 	}
-	paths := make([]string, len(granted))
-	for i, r := range granted {
-		paths[i] = r.ProviderPath
-	}
-	providers, err := c.resolveDiscoveryProviders(namespace.ContextWithNamespace(ctx, issuing), paths)
-	if err != nil {
-		return nil, err
+	var providers map[string]discoveryProvider
+	if withProviders {
+		paths := make([]string, len(granted))
+		for i, r := range granted {
+			paths[i] = r.ProviderPath
+		}
+		if providers, err = c.resolveDiscoveryProviders(namespace.ContextWithNamespace(ctx, issuing), paths); err != nil {
+			return nil, err
+		}
 	}
 	return &admissionDiscovery{
 		ns:        issuing,

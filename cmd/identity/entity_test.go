@@ -58,6 +58,7 @@ func setupEntityFake(t *testing.T, status int, body string) (*fakeWarden, *bytes
 		entityListFilter = api.EntityFilter{}
 		sponsorProposeGroup, sponsorProposeNamespace, sponsorProposeExpectedHash, sponsorProposeJSON = "", "", "", ""
 		sponsorRemovePending, sponsorRemoveExpectedHash, entityStateExpectedHash = false, "", ""
+		sponsorHandoverGroup, sponsorHandoverNamespace, sponsorHandoverCancel = "", "", false
 		for _, cmd := range []*cobra.Command{EntitySponsorProposeCmd, EntitySponsorRemoveCmd, EntityStateCmd} {
 			cmd.Flags().Visit(func(f *pflag.Flag) { f.Changed = false })
 		}
@@ -318,6 +319,38 @@ func TestIdentityCommands_KeepTheGlobalNamespaceFlag(t *testing.T) {
 		}
 	}
 	walk(IdentityCmd)
+}
+
+// The sponsor commands reach the sponsor paths; handover takes a group or
+// -cancel, never both.
+func TestSponsorCommands(t *testing.T) {
+	f, stdout, _ := setupEntityFake(t, http.StatusOK, cannedEntity)
+	require.NoError(t, runSponsorRead(SponsorReadCmd, []string{"billing-agent"}))
+	assert.Equal(t, http.MethodGet, f.last(t).method)
+	assert.Equal(t, "/v1/sys/identity/sponsor/billing-agent", f.last(t).path)
+	assert.Contains(t, stdout.String(), `"billing-leads"`)
+
+	require.NoError(t, SponsorSuspendCmd.RunE(SponsorSuspendCmd, []string{"billing-agent"}))
+	assert.Equal(t, "/v1/sys/identity/sponsor/billing-agent/suspend", f.last(t).path)
+	require.NoError(t, SponsorAcceptCmd.RunE(SponsorAcceptCmd, []string{"billing-agent"}))
+	assert.Equal(t, "/v1/sys/identity/sponsor/billing-agent/accept", f.last(t).path)
+
+	sponsorHandoverGroup, sponsorHandoverNamespace = "finance-oncall", "/"
+	require.NoError(t, runSponsorHandover(SponsorHandoverCmd, []string{"billing-agent"}))
+	assert.Equal(t, "/v1/sys/identity/sponsor/billing-agent/handover", f.last(t).path)
+	assert.Equal(t, map[string]any{"group": "finance-oncall", "namespace": "/"}, f.last(t).body)
+
+	sponsorHandoverCancel = true
+	err := runSponsorHandover(SponsorHandoverCmd, []string{"billing-agent"})
+	assert.True(t, errors.Is(err, helpers.ErrUsage), "-cancel with -group")
+	sponsorHandoverGroup, sponsorHandoverNamespace = "", ""
+	require.NoError(t, runSponsorHandover(SponsorHandoverCmd, []string{"billing-agent"}))
+	assert.Equal(t, map[string]any{"cancel": true}, f.last(t).body)
+
+	sponsorHandoverCancel = false
+	err = runSponsorHandover(SponsorHandoverCmd, []string{"billing-agent"})
+	assert.True(t, errors.Is(err, helpers.ErrUsage), "neither")
+	assert.Equal(t, 5, f.count())
 }
 
 func TestEntityState(t *testing.T) {
