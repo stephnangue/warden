@@ -71,6 +71,12 @@ func mergeConfig(dst, src *Config) {
 	if src.IPBindingPolicy != "" {
 		dst.IPBindingPolicy = src.IPBindingPolicy
 	}
+	if src.TokenCacheMegabytes != 0 {
+		dst.TokenCacheMegabytes = src.TokenCacheMegabytes
+	}
+	if src.CredentialCacheMegabytes != 0 {
+		dst.CredentialCacheMegabytes = src.CredentialCacheMegabytes
+	}
 	if src.KeylessEnforcementLevel != "" {
 		dst.KeylessEnforcementLevel = src.KeylessEnforcementLevel
 	}

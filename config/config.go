@@ -57,6 +57,18 @@ type Config struct {
 	// Defaults to "optional" if not specified.
 	IPBindingPolicy string `hcl:"ip_binding_policy,optional"`
 
+	// TokenCacheMegabytes is the memory budget of the in-memory token cache, in
+	// MiB. 0 means the built-in default (100). A token evicted from a full
+	// cache is read from storage, or its caller authenticates again, on its
+	// next use. Takes effect on restart.
+	TokenCacheMegabytes int `hcl:"token_cache_megabytes,optional"`
+
+	// CredentialCacheMegabytes is the memory budget of the in-memory credential
+	// cache, in MiB. 0 means the built-in default (64). A credential evicted
+	// from a full cache is minted again on its next use. Takes effect on
+	// restart.
+	CredentialCacheMegabytes int `hcl:"credential_cache_megabytes,optional"`
+
 	// KeylessEnforcementLevel controls operator writes to credential sources and
 	// specs that would leave a long-lived secret stored on the server.
 	// Valid values: "off" (accept), "warn" (accept with a warning), "enforce"
@@ -592,6 +604,10 @@ func InterpolateEnv(src []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// maxCacheMegabytes bounds token_cache_megabytes and credential_cache_megabytes:
+// 1 TiB, far above any node, and far below what overflows a byte count.
+const maxCacheMegabytes = 1 << 20
+
 // validateConfig checks the cross-field invariants on a Config. Split out
 // of LoadConfig so LoadConfigDir can validate the merged result once,
 // rather than validating each partial file independently.
@@ -652,6 +668,19 @@ func validateConfig(config *Config) error {
 			// valid
 		default:
 			return fmt.Errorf("invalid ip_binding_policy %q: must be one of: disabled, optional, required", config.IPBindingPolicy)
+		}
+	}
+
+	// Validate the cache budgets if set
+	for _, budget := range []struct {
+		key string
+		mib int
+	}{
+		{"token_cache_megabytes", config.TokenCacheMegabytes},
+		{"credential_cache_megabytes", config.CredentialCacheMegabytes},
+	} {
+		if budget.mib < 0 || budget.mib > maxCacheMegabytes {
+			return fmt.Errorf("%s must be 0 (the default) or between 1 and %d, got %d", budget.key, maxCacheMegabytes, budget.mib)
 		}
 	}
 

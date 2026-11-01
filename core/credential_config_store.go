@@ -2458,6 +2458,9 @@ func (c *Core) teardownCredentialConfigStore() error {
 func (c *Core) setupCredentialManager(ctx context.Context, opts ...credential.ManagerOption) error {
 	// Create global Manager with CredentialConfigStore as ConfigStoreAccessor
 	// Note: Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
+	// The configured cache budget comes first, so options the caller passes
+	// win; 0 keeps the manager's default.
+	opts = append([]credential.ManagerOption{credential.WithCacheMaxBytes(c.credentialCacheMaxBytes())}, opts...)
 	manager, err := credential.NewManager(
 		c.credentialTypeRegistry,
 		c.credentialDriverRegistry,

@@ -562,6 +562,26 @@ func (c *Core) Shutdown() error {
 	return nil
 }
 
+// tokenCacheMaxBytes is the token cache budget the server config sets
+// (token_cache_megabytes), in bytes: 0 when unset, which keeps the built-in
+// default.
+func (c *Core) tokenCacheMaxBytes() int64 {
+	if rawConf, ok := c.rawConfig.Load().(*config.Config); ok && rawConf != nil {
+		return int64(rawConf.TokenCacheMegabytes) << 20
+	}
+	return 0
+}
+
+// credentialCacheMaxBytes is the credential cache budget the server config
+// sets (credential_cache_megabytes), in bytes: 0 when unset, which keeps the
+// credential manager's default.
+func (c *Core) credentialCacheMaxBytes() int64 {
+	if rawConf, ok := c.rawConfig.Load().(*config.Config); ok && rawConf != nil {
+		return int64(rawConf.CredentialCacheMegabytes) << 20
+	}
+	return 0
+}
+
 // closeStores closes the token store and the credential config store, which
 // NewCore builds once per core. Their caches run goroutines until closed,
 // which keep the caches, and the core, reachable. Each store refuses calls
@@ -725,6 +745,9 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	// Apply ip_binding_policy from config if set
 	if rawConf, ok := c.rawConfig.Load().(*config.Config); ok && rawConf != nil && rawConf.IPBindingPolicy != "" {
 		tokenStoreConfig.IPBindingPolicy = IPBindingPolicy(rawConf.IPBindingPolicy)
+	}
+	if budget := c.tokenCacheMaxBytes(); budget > 0 {
+		tokenStoreConfig.CacheMaxCost = budget
 	}
 	tokenStore, err := NewTokenStore(c, tokenStoreConfig)
 	if err != nil {
