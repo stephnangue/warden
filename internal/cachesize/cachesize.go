@@ -20,6 +20,28 @@ const RecordBytes = 56
 // its recommended value.
 const bufferItems = 64
 
+// The memory of a map[string]string, measured with Go 1.26: a non-nil map's
+// header, and a group of eight slots for every eight entries, before the
+// strings. TestStringMapBytesMatchesTheRuntime pins them.
+const (
+	mapHeaderBytes = 48
+	mapGroupBytes  = 296
+)
+
+// StringMapBytes is the approximate memory of m, for a cost function: nothing
+// when nil, else its header, its groups of slots and its strings. It
+// allocates nothing.
+func StringMapBytes(m map[string]string) int64 {
+	if m == nil {
+		return 0
+	}
+	n := mapHeaderBytes + int64((len(m)+7)/8)*mapGroupBytes
+	for k, v := range m {
+		n += int64(len(k) + len(v))
+	}
+	return n
+}
+
 // Counters returns the NumCounters of a cache that holds at most maxEntries.
 func Counters(maxEntries int64) int64 {
 	return CountersPerEntry * max(maxEntries, 1)

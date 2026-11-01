@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/helper/selector"
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -19,12 +20,45 @@ func testAdmission() *logical.Admission {
 	}
 }
 
-// The cache counts the facts an admission retains in the cost of its entry.
+// The cache charges an entry its approximate size: the struct, what its
+// strings, policies, data, metadata and actors hold, and the facts its
+// admission retains.
 func TestEntryCost(t *testing.T) {
-	assert.Equal(t, baseEntryCost, entryCost(&TokenEntry{}), "no admission")
-	assert.Equal(t, baseEntryCost, entryCost(&TokenEntry{Admission: &logical.Admission{}}), "no estimate")
-	assert.Equal(t, baseEntryCost+4096, entryCost(&TokenEntry{Admission: &logical.Admission{Bytes: 4096}}))
-	assert.Equal(t, baseEntryCost, entryCost(&TokenEntry{Admission: &logical.Admission{Bytes: -1}}))
+	base := tokenEntryStructBytes
+	assert.Equal(t, base, entryCost(&TokenEntry{}), "an empty entry")
+	assert.Equal(t, base+admissionStructBytes, entryCost(&TokenEntry{Admission: &logical.Admission{}}), "no estimate")
+	assert.Equal(t, base+admissionStructBytes+4096, entryCost(&TokenEntry{Admission: &logical.Admission{Bytes: 4096}}))
+	assert.Equal(t, base+admissionStructBytes, entryCost(&TokenEntry{Admission: &logical.Admission{Bytes: -1}}))
+
+	full := &TokenEntry{
+		ID:             "wds_0123456789", // 14
+		Accessor:       "acc",            // 3
+		NamespacePath:  "team/",          // 5
+		Policies:       []string{"a", "bc"},
+		Data:           map[string]string{"k": "vv"},
+		Metadata:       map[string]string{"mm": "n"},
+		Actors:         []logical.ActorRef{{Subject: "agent", Issuer: "iss"}},
+		CredentialSpec: "spec", // 4
+	}
+	want := base + 14 + 3 + 5 + 4 + (1 + 2) +
+		cachesize.StringMapBytes(full.Data) + cachesize.StringMapBytes(full.Metadata) + actorRefBytes + 5 + 3
+	assert.Equal(t, want, entryCost(full))
+
+	// The struct sizes are measured, not assumed: within reach of what the
+	// structs hold today, so a struct that grows is charged for it.
+	assert.InDelta(t, 328, tokenEntryStructBytes, 200)
+	assert.InDelta(t, 176, admissionStructBytes, 150)
+}
+
+// entryCost runs on every cache insert, lookup misses and ticket decodes
+// included, so it allocates nothing.
+func TestEntryCost_NoAllocations(t *testing.T) {
+	e := &TokenEntry{
+		ID: "wds_x", Policies: []string{"p"}, Data: map[string]string{"k": "v"},
+		Metadata: map[string]string{"m": "n"}, Actors: []logical.ActorRef{{Subject: "s"}},
+		Admission: &logical.Admission{Bytes: 512},
+	}
+	assert.Zero(t, testing.AllocsPerRun(1000, func() { _ = entryCost(e) }))
 }
 
 // Every copy the token store hands out shares the one *Admission of the cached

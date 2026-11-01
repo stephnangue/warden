@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -1479,9 +1480,62 @@ func TestTokenStore_LookupToken_CustomDevRootToken_NonExistent(t *testing.T) {
 func TestDefaultTokenStoreConfig(t *testing.T) {
 	config := DefaultTokenStoreConfig()
 
-	assert.Equal(t, int64(100<<20), config.CacheMaxCost, "default cache max cost should be 100MB")
-	assert.Equal(t, int64(1e7), config.CacheNumCounters, "default cache num counters should be 10 million")
+	assert.Equal(t, int64(100<<20), config.CacheMaxCost, "default cache budget should be 100 MiB")
+	assert.Zero(t, config.CacheNumCounters, "counters derived from the entries the cache holds")
 	assert.True(t, config.EnableMetrics, "metrics should be enabled by default")
 	assert.Equal(t, IPBindingOptional, config.IPBindingPolicy, "default IP binding policy should be optional")
 	assert.Equal(t, 5*time.Minute, config.CacheMinRetention, "default cache min retention should be 5 minutes")
+}
+
+// The accessor index holds as many entries as the primary cache can, so it
+// does not run out of room first.
+func TestNewTokenStore_AccessorIndexMatchesThePrimaryCache(t *testing.T) {
+	c := createTestCore(t)
+	ts := c.tokenStore
+	assert.Equal(t, int64(100<<20), ts.byID.MaxCost())
+	assert.Equal(t, cachesize.MaxEntries(100<<20, tokenEntryStructBytes), ts.byAccessor.MaxCost())
+	t.Logf("100 MiB holds at most %d entries", ts.byAccessor.MaxCost())
+}
+
+// benchServiceToken returns a core holding one service token, and its entry.
+func benchServiceToken(b *testing.B) (*Core, *TokenEntry) {
+	b.Helper()
+	c := createTestCore(b)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	entry, err := c.tokenStore.GenerateToken(ctx, TypeServiceToken, &AuthData{
+		PrincipalID: "bench-user",
+		ExpireAt:    time.Now().Add(time.Hour),
+		Policies:    []string{"default"},
+	})
+	require.NoError(b, err)
+	c.tokenStore.byID.Wait()
+	return c, entry
+}
+
+// A service token found in the cache.
+func BenchmarkLookupTokenHit(b *testing.B) {
+	c, entry := benchServiceToken(b)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	value := entry.Data["token"]
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := c.LookupToken(ctx, value); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// A service token missing from the cache, read from storage and cached again:
+// the path that charges entryCost on a lookup.
+func BenchmarkLookupTokenMiss(b *testing.B) {
+	c, entry := benchServiceToken(b)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	value := entry.Data["token"]
+	b.ReportAllocs()
+	for b.Loop() {
+		c.tokenStore.byID.Del(entry.ID)
+		if _, err := c.LookupToken(ctx, value); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
