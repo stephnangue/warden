@@ -14,6 +14,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -44,16 +45,22 @@ var (
 
 // CredentialConfigStoreConfig holds configuration for the credential config store
 type CredentialConfigStoreConfig struct {
-	CacheMaxCost         int64 // Maximum cache cost in bytes (default: 50 MB)
-	CacheNumCounters     int64 // Number of counters for Ristretto (default: 1 million)
-	SkipSpecVerification bool  // Skip SpecVerifier validation (for testing only)
+	// CacheMaxEntries is how many specs, and how many sources, the store's
+	// caches each hold (default: 100,000, across every namespace). A spec or
+	// source evicted from a full cache is read from storage on its next use,
+	// and a gateway request reads its spec and source on every credential
+	// mint, cache hit or not.
+	CacheMaxEntries int64
+	// CacheNumCounters overrides the number of keys each cache tracks to decide
+	// what to evict; 0 derives it from CacheMaxEntries.
+	CacheNumCounters     int64
+	SkipSpecVerification bool // Skip SpecVerifier validation (for testing only)
 }
 
 // DefaultCredConfigStoreConfig returns the default configuration
 func DefaultCredConfigStoreConfig() *CredentialConfigStoreConfig {
 	return &CredentialConfigStoreConfig{
-		CacheMaxCost:     50 << 20, // 50 MB
-		CacheNumCounters: 1e6,      // 1 million
+		CacheMaxEntries: 100_000,
 	}
 }
 
@@ -97,23 +104,21 @@ func NewCredentialConfigStore(c *Core, config *CredentialConfigStoreConfig) (*Cr
 		config: config,
 	}
 
-	// Create Ristretto cache for specs
-	specsCache, err := ristretto.NewCache(&ristretto.Config[string, *credential.CredSpec]{
-		NumCounters: config.CacheNumCounters,
-		MaxCost:     config.CacheMaxCost / 2, // Split cache budget
-		BufferItems: 64,
-	})
+	// Each spec and source is charged 1: the caches hold CacheMaxEntries each.
+	specsConfig := cachesize.Entries[string, *credential.CredSpec](config.CacheMaxEntries)
+	sourcesConfig := cachesize.Entries[string, *credential.CredSource](config.CacheMaxEntries)
+	if config.CacheNumCounters > 0 {
+		specsConfig.NumCounters = config.CacheNumCounters
+		sourcesConfig.NumCounters = config.CacheNumCounters
+	}
+
+	specsCache, err := ristretto.NewCache(specsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create specs cache: %w", err)
 	}
 	s.specsByID = specsCache
 
-	// Create Ristretto cache for sources
-	sourcesCache, err := ristretto.NewCache(&ristretto.Config[string, *credential.CredSource]{
-		NumCounters: config.CacheNumCounters,
-		MaxCost:     config.CacheMaxCost / 2, // Split cache budget
-		BufferItems: 64,
-	})
+	sourcesCache, err := ristretto.NewCache(sourcesConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sources cache: %w", err)
 	}
