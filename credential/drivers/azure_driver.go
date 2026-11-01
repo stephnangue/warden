@@ -1352,6 +1352,11 @@ func (d *AzureDriver) getSourceTokenWith(ctx context.Context, resourceURI string
 		// The fetch runs detached from the request that started it and is bounded by
 		// the group's default timeout; each caller waits on its own ctx.
 		r, err := d.tokenFlight.Do(ctx, fmt.Sprintf("%d|%s", gen, resourceURI), func(ctx context.Context) (sourceTokenResult, error) {
+			// A fetch that finished between this caller's miss and this flight has
+			// already stored the token: take it rather than fetch (and sign) again.
+			if token, _, ok := d.tokenCache.Get(resourceURI, azureSourceTokenRefreshBuffer); ok {
+				return sourceTokenResult{token: token, stored: true}, nil
+			}
 			tenantID, clientID, clientSecret := d.sourceCreds()
 			var token string
 			var expiresIn int
