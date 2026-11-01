@@ -19,10 +19,11 @@ Usage: warden identity entity read <name>
        warden identity entity read -id <id>
 
   Read one entity, by name or by ID (which never changes): its kind and
-  state, governed_by (or why it is ungoverned), sponsors, profile, metadata,
-  the native identities it claims (one line each, "<mount>  <name>"; a
-  mount disabled since shows by accessor), and the hash a conditional
-  update or delete passes back. Requires a token with sudo on
+  state, governed_by (or why it is ungoverned), its sponsor and any pending
+  handover (the group, and who accepted or proposed it), profile,
+  metadata, the native identities it claims (one line each, "<mount>
+  <name>"; a mount disabled since shows by accessor), and the hash a
+  conditional write passes back. Requires a token with sudo on
   sys/identity/entity.
 
   Examples:

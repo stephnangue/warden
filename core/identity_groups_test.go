@@ -345,7 +345,7 @@ func TestGroups_Type(t *testing.T) {
 	_, err = c.identityStore.UpdateGroup(rootCtx(), g, "")
 	assert.Error(t, err)
 	var mismatch *GroupTypeMismatchError
-	err = c.identityStore.DeleteGroup(rootCtx(), "g", logical.GroupTypeStatic, "")
+	_, err = c.identityStore.DeleteGroup(rootCtx(), "g", logical.GroupTypeStatic, "", false)
 	assert.ErrorAs(t, err, &mismatch)
 	assert.Equal(t, logical.GroupTypeVirtual, mismatch.Stored)
 }
@@ -489,7 +489,8 @@ func TestGroups_FactNameWarnings(t *testing.T) {
 		g.Name, g.Type = "g", logical.GroupTypeVirtual
 		w, err := c.identityStore.CreateGroup(ctx, g)
 		require.NoError(t, err)
-		require.NoError(t, c.identityStore.DeleteGroup(ctx, "g", "", ""))
+		_, err = c.identityStore.DeleteGroup(ctx, "g", "", "", false)
+		require.NoError(t, err)
 		return w
 	}
 
@@ -686,7 +687,8 @@ func TestGroups_Caps(t *testing.T) {
 	assert.Equal(t, 7, c.identityStore.namespaceIndex("caps-ns").selectors)
 
 	// A create counts its selectors; a delete gives them back.
-	require.NoError(t, c.identityStore.DeleteGroup(other, "c", "", ""))
+	_, err = c.identityStore.DeleteGroup(other, "c", "", "", false)
+	require.NoError(t, err)
 	g = virtualGroup("e")
 	g.Rules[0]["iss"] = []string{"z"}
 	_, err = c.identityStore.CreateGroup(other, g)

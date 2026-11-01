@@ -20,7 +20,7 @@ func benchEntities(n int) []*entityEntry {
 			Kind:        logical.EntityKindAgent,
 			State:       logical.EntityStateActive,
 			Description: "Reconciles supplier invoices against purchase orders",
-			Sponsors:    []string{"alice@corp.example"},
+			Sponsor:     benchSponsor,
 			Aliases: []logical.EntityAlias{
 				{MountAccessor: acc, Name: fmt.Sprintf("repo:corp/agent-%06d:ref:refs/heads/main", i)},
 				{MountAccessor: "auth_k8s_00000001", Name: fmt.Sprintf("system:serviceaccount:agents:agent-%06d", i)},
@@ -28,6 +28,13 @@ func benchEntities(n int) []*entityEntry {
 		})
 	}
 	return out
+}
+
+// benchSponsor is an accepted sponsor shared by every benchmark entity.
+var benchSponsor = &logical.EntitySponsor{
+	Type: logical.SponsorTypeGroup, Namespace: "root", GroupID: "4b1d6f6e-0000-0000-0000-000000000001", Group: "billing-leads",
+	AddedBy:    logical.SponsorActor{MountAccessor: "auth_oidc_00000001", Alias: "0583c1a7-oid", Principal: "0583c1a7-oid"},
+	AcceptedBy: logical.SponsorActor{MountAccessor: "auth_oidc_00000001", Alias: "0583c1a7-oid", Principal: "0583c1a7-oid"},
 }
 
 func noSkip(tb testing.TB) func(*entityEntry, error) {
