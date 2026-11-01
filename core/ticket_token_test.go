@@ -26,6 +26,10 @@ import (
 type ticketIssuer struct {
 	mf     *logical.MountFacts
 	sealer logical.Sealer
+
+	// requests counts the requests routed to the mount: a ticket in use
+	// never routes one.
+	requests atomic.Int32
 }
 
 var _ logical.FactsProvider = (*ticketIssuer)(nil)
@@ -35,6 +39,7 @@ func (b *ticketIssuer) EntityKind() string                          { return b.m
 func (b *ticketIssuer) AliasChange(map[string]any) (string, string) { return "", "" }
 func (b *ticketIssuer) MountFacts() *logical.MountFacts             { return b.mf }
 func (b *ticketIssuer) HandleRequest(context.Context, *logical.Request) (*logical.Response, error) {
+	b.requests.Add(1)
 	return nil, nil
 }
 func (b *ticketIssuer) Cleanup(context.Context)                             {}

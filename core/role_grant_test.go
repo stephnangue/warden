@@ -845,7 +845,7 @@ func TestRoleGrant_SingleWriters(t *testing.T) {
 					switch n := n.(type) {
 					case *ast.AssignStmt:
 						for _, lhs := range n.Lhs {
-							if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "RequestedRole" || sel.Sel.Name == "Transparent") {
+							if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "RequestedRole" || sel.Sel.Name == "Transparent" || sel.Sel.Name == "TicketAdmitted") {
 								writers[sel.Sel.Name] = append(writers[sel.Sel.Name], fn.Name.Name)
 							}
 						}
@@ -859,8 +859,9 @@ func TestRoleGrant_SingleWriters(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, []string{"performImplicitAuth"}, writers["RequestedRole"])
+	assert.ElementsMatch(t, []string{"performImplicitAuth", "admitTicket"}, writers["RequestedRole"])
 	assert.Equal(t, []string{"performImplicitAuth"}, writers["Transparent"])
+	assert.Equal(t, []string{"admitTicket"}, writers["TicketAdmitted"], "only the ticket hook admits a ticket")
 	assert.NotEmpty(t, writers["grant"])
 	for _, w := range writers["grant"] {
 		assert.Contains(t, []string{"resolveRoleGrant", "withholdRoleGrant"}, w,
@@ -871,6 +872,9 @@ func TestRoleGrant_SingleWriters(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "-", f.Tag.Get("json"))
 	f, ok = reflect.TypeOf(logical.Request{}).FieldByName("Transparent")
+	require.True(t, ok)
+	assert.Equal(t, "-", f.Tag.Get("json"))
+	f, ok = reflect.TypeOf(logical.Request{}).FieldByName("TicketAdmitted")
 	require.True(t, ok)
 	assert.Equal(t, "-", f.Tag.Get("json"))
 }
