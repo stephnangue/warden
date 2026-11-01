@@ -56,7 +56,7 @@ func TestRoleless_IntrospectAuditedAsIdentity(t *testing.T) {
 	assert.Equal(t, TypeIdentityToken, entry.Auth.TokenType)
 	assert.Equal(t, wantID, entry.Auth.TokenID, "the gateway's identity token ID for this credential")
 	assert.Equal(t, "agent-1", entry.Auth.PrincipalID)
-	assert.Equal(t, []string{builtinCBPPolicy, builtinMCPPolicy}, entry.Auth.Policies)
+	assert.Equal(t, []string{builtinCBPPolicy, builtinMCPPolicy, builtinSponsorPolicy}, entry.Auth.Policies)
 	require.NotNil(t, entry.Auth.Discovery)
 	assert.Equal(t, []audit.AdmittedMount{{Mount: "jwt/", PrincipalID: "agent-1"}}, entry.Auth.Discovery.AdmittedBy)
 	assert.Equal(t, 1, entry.Auth.Discovery.RolesGranted)

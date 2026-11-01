@@ -44,6 +44,9 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 			Identity: []string{
 				"introspect/roles",
 				"mcp",
+				// The sponsor surface: tickets only (isSponsorPath), outside
+				// identity/entity/, whose paths are root paths.
+				"identity/sponsor/*",
 			},
 			// The discovery server reads its JSON-RPC body raw, under the MCP
 			// gate, and writes its own response, a notification stream
@@ -118,6 +121,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// Namespace entities and their native identities
 	paths = append(paths, b.pathIdentityEntities()...)
+
+	// The sponsors' own paths on the entities they sponsor
+	paths = append(paths, b.pathIdentitySponsor()...)
 
 	// Audit paths
 	paths = append(paths, b.pathAudit()...)

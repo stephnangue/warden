@@ -169,8 +169,9 @@ func TestBuiltinPolicies_SeedConflict(t *testing.T) {
 
 	got, err := c.policyStore.appendDefaultPolicies(ctx, nil)
 	require.NoError(t, err)
-	require.Len(t, got, 1)
+	require.Len(t, got, 2)
 	assert.Equal(t, builtinMCPPolicy, got[0].Name)
+	assert.Equal(t, builtinSponsorPolicy, got[1].Name)
 }
 
 // A missing built-in is remembered as missing, and forgotten once it is
@@ -182,7 +183,7 @@ func TestBuiltinPolicies_MissingIsRememberedUntilWritten(t *testing.T) {
 
 	got, err := c.policyStore.appendDefaultPolicies(ctx, nil)
 	require.NoError(t, err)
-	require.Len(t, got, 1)
+	require.Len(t, got, 2)
 	key := c.policyStore.cacheKey(namespace.RootNamespace, builtinCBPPolicy, PolicyTypeCBP)
 	seen, ok := c.policyStore.missingBuiltins.Load(key)
 	require.True(t, ok)
@@ -191,7 +192,7 @@ func TestBuiltinPolicies_MissingIsRememberedUntilWritten(t *testing.T) {
 	require.NoError(t, c.seedNamespacePolicies(ctx))
 	got, err = c.policyStore.appendDefaultPolicies(ctx, nil)
 	require.NoError(t, err)
-	assert.Len(t, got, 2, "the reseeded built-in is attached again")
+	assert.Len(t, got, 3, "the reseeded built-in is attached again")
 }
 
 // buildCBP attaches the built-ins to every request that is not a root
@@ -443,6 +444,21 @@ path "pre/*" { capabilities = ["read"] }
 		require.True(t, cbp.AllowOperation(ctx, req, nil, false).Allowed, path)
 		assert.Equal(t, 1.0, testing.AllocsPerRun(200, func() { cbp.AllowOperation(ctx, req, nil, false) }), "AllowOperation on %s", path)
 	}
+
+	// With the built-ins attached, as on every request: their "+" sponsor
+	// shapes cost a path outside them nothing.
+	builtins, err := c.policyStore.appendDefaultPolicies(ctx, nil)
+	require.NoError(t, err)
+	withBuiltins, err := NewCBP(ctx, append([]*Policy{prefixOnly}, builtins...))
+	require.NoError(t, err)
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "pre/foo/bar"}
+	require.True(t, withBuiltins.AllowOperation(ctx, req, nil, false).Allowed)
+	assert.Equal(t, 1.0, testing.AllocsPerRun(200, func() { withBuiltins.AllowOperation(ctx, req, nil, false) }),
+		"AllowOperation on a prefix path beside the sponsor shapes")
+	sponsor := &logical.Request{Operation: logical.ReadOperation, Path: "sys/identity/sponsor/billing-agent"}
+	assert.True(t, withBuiltins.AllowOperation(ctx, sponsor, nil, false).Allowed, "the sponsor shape still matches")
+	deeper := &logical.Request{Operation: logical.ReadOperation, Path: "sys/identity/sponsor/billing-agent/x/y"}
+	assert.False(t, withBuiltins.AllowOperation(ctx, deeper, nil, false).Allowed)
 }
 
 // The write-time warnings: a built-in reaching beyond the discovery paths,

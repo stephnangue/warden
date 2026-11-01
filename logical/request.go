@@ -115,6 +115,12 @@ type Request struct {
 	// audit only; never disclosed to the caller. Nil on every other request.
 	Discovery *DiscoveryAdmission `json:"-"`
 
+	// SponsoredBy names the group a request on a sponsor path acted through
+	// ("group:<name>"): the entity's sponsor, or for an accept (and a read by
+	// one of its members) the pending handover. Set by the sponsor handlers on
+	// success only; for the audit. Empty on every other request.
+	SponsoredBy string `json:"-"`
+
 	// RequestedRole is the role a transparent or ticket-admitted request asks
 	// for (X-Warden-Role, the role/<name>/ segment, ?role=, the provider's
 	// default_role), set by core alongside Transparent or TicketAdmitted and

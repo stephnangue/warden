@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/armon/go-radix"
+
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -2094,4 +2096,60 @@ path "mcp/x" {
 	res = cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "secret/y"}, nil, false)
 	require.True(t, res.Allowed)
 	assert.Equal(t, []string{"good-prefetched"}, grantingNames(res.GrantingPolicies))
+}
+
+// The fast path taken when no segment wildcard can match decides exactly as
+// the full ranking does, denies included: it only skips rules the ranking
+// would itself discard.
+func TestCheckAllowedFromNonExactPaths_FastPathMatchesRanking(t *testing.T) {
+	wildcards := []string{
+		"sys/identity/sponsor/+",
+		"sys/identity/sponsor/+/suspend",
+		"secret/+/deny",
+		"secret/+/data*",
+		"+/x",
+		"a+b/+/c",
+		"foo/+/ba*",
+		"foo/+/+/baz",
+		"prov/role/+/gateway*",
+	}
+	prefixes := []string{"secret/", "sys/", "foo/b", "prov/", ""}
+	paths := []string{
+		"secret/a/deny", "secret/a/data", "secret/a/database/x", "secret/a/other", "secret/x",
+		"sys/identity/sponsor", "sys/identity/sponsor/x", "sys/identity/sponsor/x/suspend", "sys/identity/sponsorX/a",
+		"z/x", "x", "a+b/z/c", "a/z/c", "a+bc/z/c", "foo/q/bar", "foo/q/b", "foo/1/2/baz", "foo/bar",
+		"prov/role/r/gateway", "prov/role/r/gateway/v1/x", "prov/role/gateway", "other/path", "",
+	}
+	perms := func(i int, deny bool) *CBPPermissions {
+		if deny {
+			return &CBPPermissions{CapabilitiesBitmap: DenyCapabilityInt}
+		}
+		return &CBPPermissions{CapabilitiesBitmap: ReadCapabilityInt << uint(i%3)}
+	}
+
+	// Every subset of the wildcards, beside every prefix rule set: small
+	// enough to enumerate.
+	for mask := 0; mask < 1<<len(wildcards); mask++ {
+		wc := map[string]interface{}{}
+		for i, w := range wildcards {
+			if mask&(1<<i) != 0 {
+				wc[w] = perms(i, i%2 == 0)
+			}
+		}
+		for pmask := 0; pmask < 1<<len(prefixes); pmask += 3 {
+			tree := radix.New()
+			for i, p := range prefixes {
+				if pmask&(1<<i) != 0 {
+					tree.Insert(p, perms(i, i%2 == 1))
+				}
+			}
+			for _, path := range paths {
+				got := checkAllowedFromNonExactPaths(tree, wc, path, false)
+				want := rankNonExactPaths(tree, wc, path, false)
+				if got != want {
+					t.Fatalf("path %q, wildcards %v, prefix mask %b: fast path %+v, ranking %+v", path, wc, pmask, got, want)
+				}
+			}
+		}
+	}
 }
