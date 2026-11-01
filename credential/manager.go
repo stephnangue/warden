@@ -15,6 +15,7 @@ import (
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/google/uuid"
 	"github.com/stephnangue/warden/helper/flight"
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
@@ -194,6 +195,9 @@ func newChainedSecret(credB *Credential) chainedSecret {
 // defaultCacheNumCounters is the number of keys the credential cache tracks.
 const defaultCacheNumCounters = 5_000_000
 
+// secretCacheMaxEntries is how many chained secrets the secret cache holds.
+const secretCacheMaxEntries = 10_000
+
 // ManagerOption tunes a Manager when it is created.
 type ManagerOption func(*managerOptions)
 
@@ -255,13 +259,9 @@ func NewManager(
 
 	// Separate cache for credential-chaining secret material (opt-in via
 	// ConfigSecretCacheTTL). Entries are (namespace, secret_spec, agent identity [,
-	// user]) tuples — far fewer than issued credentials. Each entry has cost 1, so
-	// MaxCost bounds the entry COUNT; NumCounters is ~10x that for TinyLFU admission.
-	secretCache, err := ristretto.NewCache(&ristretto.Config[string, chainedSecret]{
-		NumCounters: 100_000,
-		MaxCost:     10_000,
-		BufferItems: 64,
-	})
+	// user]) tuples — far fewer than issued credentials — each charged 1, so the
+	// cache holds secretCacheMaxEntries of them.
+	secretCache, err := ristretto.NewCache(cachesize.Entries[string, chainedSecret](secretCacheMaxEntries))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create secret cache: %w", err)
 	}

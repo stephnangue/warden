@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -87,6 +88,37 @@ func setupTestCredentialConfigStore(t *testing.T) (*CredentialConfigStore, conte
 	ctx := namespace.ContextWithNamespace(context.Background(), rootNS)
 
 	return store, ctx
+}
+
+// The spec and source caches each hold CacheMaxEntries entries, charged 1
+// each: ristretto's per-entry record is not counted against the limit.
+func TestCredentialConfigStore_CachesHoldTheirEntries(t *testing.T) {
+	store, _ := setupTestCredentialConfigStore(t)
+	const n = 100_000
+	assert.Equal(t, int64(n), store.config.CacheMaxEntries, "the default")
+	assert.Equal(t, int64(n), store.specsByID.MaxCost())
+	assert.Equal(t, int64(n), store.sourcesByID.MaxCost())
+
+	// Ristretto drops Sets past its 32K-deep buffer: wait every 10,000.
+	for i := range n {
+		store.specsByID.Set(strconv.Itoa(i), &credential.CredSpec{}, 1)
+		store.sourcesByID.Set(strconv.Itoa(i), &credential.CredSource{}, 1)
+		if i%10_000 == 9_999 {
+			store.specsByID.Wait()
+			store.sourcesByID.Wait()
+		}
+	}
+	specs, sources := 0, 0
+	for i := range n {
+		if _, ok := store.specsByID.Get(strconv.Itoa(i)); ok {
+			specs++
+		}
+		if _, ok := store.sourcesByID.Get(strconv.Itoa(i)); ok {
+			sources++
+		}
+	}
+	assert.Equal(t, n, specs)
+	assert.Equal(t, n, sources)
 }
 
 // TestCredentialConfigStore_CreateSpec tests creating a credential spec

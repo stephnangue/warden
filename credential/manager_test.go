@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -382,6 +383,27 @@ func TestNewManager(t *testing.T) {
 	assert.NotNil(t, manager.cache)
 
 	manager.Stop()
+}
+
+// The secret cache holds secretCacheMaxEntries chained secrets. Charged 1 plus
+// ristretto's per-entry record against a cost limit of 10,000, it used to
+// hold 175, and every further consumer refetched its secret upstream.
+func TestNewManager_SecretCacheHoldsItsEntries(t *testing.T) {
+	manager, _, _ := createTestManager(t)
+	defer manager.Stop()
+
+	assert.Equal(t, int64(secretCacheMaxEntries), manager.secretCache.MaxCost())
+	for i := range secretCacheMaxEntries {
+		manager.secretCache.SetWithTTL(strconv.Itoa(i), chainedSecret{}, 1, time.Hour)
+	}
+	manager.secretCache.Wait()
+	kept := 0
+	for i := range secretCacheMaxEntries {
+		if _, ok := manager.secretCache.Get(strconv.Itoa(i)); ok {
+			kept++
+		}
+	}
+	assert.Equal(t, secretCacheMaxEntries, kept)
 }
 
 func TestManager_IssueCredential_Success(t *testing.T) {
