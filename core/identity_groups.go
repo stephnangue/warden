@@ -254,16 +254,38 @@ func (s *IdentityStore) commitLocked(ctx context.Context, ns *namespace.Namespac
 	return nil
 }
 
+// GroupSponsorsError refuses the delete of a group that sponsors entities or
+// is a pending handover for some, in any namespace, without force.
+type GroupSponsorsError struct {
+	Name              string
+	Sponsors, Pending int
+}
+
+func (e *GroupSponsorsError) Error() string {
+	return fmt.Sprintf("group %q sponsors %d entities and is a pending handover for %d; hand them over first, or pass force=true",
+		e.Name, e.Sponsors, e.Pending)
+}
+
+// maxNamedInWarning bounds the entities a warning names; the rest are counted.
+const maxNamedInWarning = 10
+
 // DeleteGroup removes a group from the namespace in ctx. A non-empty t must be
 // the stored type, checked under the lock so that a group deleted and
 // recreated with another type between the caller's read and this write is
 // refused. expectedHash makes the delete conditional, as for UpdateGroup.
-func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.GroupType, expectedHash string) error {
+//
+// A group that sponsors entities, or is a pending handover for some, in any
+// namespace, is refused (GroupSponsorsError) unless force: then, in the same
+// hold of the lock, every handover to it is cancelled and every entity it
+// sponsors loses its sponsor, and is ungoverned. The returned warnings name
+// those entities.
+func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.GroupType, expectedHash string, force bool) ([]string, error) {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
-		return ErrNamespaceNotInContext
+		return nil, ErrNamespaceNotInContext
 	}
 
+	var warnings []string
 	err = func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -282,6 +304,11 @@ func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.
 		if expectedHash != "" && old.hash != expectedHash {
 			return ErrGroupChanged
 		}
+		w, err := s.releaseSponsorGroupLocked(ctx, ns.ID, old, force)
+		if err != nil {
+			return err
+		}
+		warnings = w
 		if err := s.storage.Delete(ctx, groupStorageKey(ns.UUID, old.ID)); err != nil {
 			return fmt.Errorf("failed to delete group %q: %w", name, err)
 		}
@@ -295,12 +322,119 @@ func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.
 		return nil
 	}()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.logger.Info("deleted group",
 		logger.String("namespace", ns.Path),
 		logger.String("name", name))
-	return nil
+	return warnings, nil
+}
+
+// releaseSponsorGroupLocked finds the entities, in every namespace, whose
+// sponsor or pending handover is the group g of namespace nsID. Without force
+// any is a GroupSponsorsError. With force it cancels the handovers and removes
+// the sponsors, writing each entity and publishing each namespace once, and
+// returns the warnings naming them. Entries name the group by ID, so a scan
+// finds them without walking the namespace tree. Caller holds mu.
+//
+// A retired entity is rewritten too, read-only as it is: an entry never names
+// a group that is gone. Each change is logged as it is stored, so it is
+// recorded even when the group's own delete then fails.
+func (s *IdentityStore) releaseSponsorGroupLocked(ctx context.Context, nsID string, g *groupEntry, force bool) ([]string, error) {
+	names := func(sp *logical.EntitySponsor) bool {
+		return sp != nil && sp.Namespace == nsID && sp.GroupID == g.ID
+	}
+	changes := map[string][]entityChange{}
+	sponsors, pending := 0, 0
+	now := time.Now().UTC()
+	for id, idx := range s.snapshot.Load().byNS {
+		idx.entities.all(func(en *entityEntry) bool {
+			sp, pp := names(en.Sponsor), names(en.PendingSponsor)
+			if !sp && !pp {
+				return true
+			}
+			if sp {
+				sponsors++
+			}
+			if pp {
+				pending++
+			}
+			if force {
+				next := en.Clone()
+				if sp {
+					next.Sponsor = nil
+				}
+				if pp {
+					next.PendingSponsor = nil
+				}
+				next.UpdatedAt = now
+				changes[id] = append(changes[id], entityChange{old: en, next: newEntityEntry(next)})
+			}
+			return true
+		})
+	}
+	if sponsors+pending == 0 {
+		return nil, nil
+	}
+	if !force {
+		return nil, &GroupSponsorsError{Name: g.Name, Sponsors: sponsors, Pending: pending}
+	}
+
+	var ungoverned []string
+	for _, id := range slices.Sorted(maps.Keys(changes)) {
+		target, err := s.core.namespaceStore.GetNamespaceByAccessor(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if target == nil {
+			return nil, fmt.Errorf("namespace %q of a sponsored entity not found", id)
+		}
+		cs := changes[id]
+		cur := s.namespaceEntities(id)
+		ents, err := cur.with(cs...)
+		if err != nil {
+			return nil, err
+		}
+		for i, c := range cs {
+			if err := s.persistEntity(ctx, target.UUID, c.next); err != nil {
+				// Publish what storage holds: the entities written so far
+				// without the group, the others still naming it.
+				if i > 0 {
+					if stored, werr := cur.with(cs[:i]...); werr == nil {
+						s.publishEntitiesLocked(id, stored)
+					}
+				}
+				return nil, err
+			}
+		}
+		s.publishEntitiesLocked(id, ents)
+		for _, c := range cs {
+			if names(c.old.Sponsor) {
+				ungoverned = append(ungoverned, qualifiedName(target.Path, c.next.Name))
+			}
+			s.logger.Warn("forced group delete: removed the group from an entity's sponsor or pending handover",
+				logger.String("namespace", target.Path),
+				logger.String("entity", c.next.Name),
+				logger.String("group", g.Name),
+				logger.Bool("was_sponsor", names(c.old.Sponsor)))
+		}
+	}
+
+	var warnings []string
+	if len(ungoverned) > 0 {
+		slices.Sort(ungoverned)
+		listed := ungoverned[:min(len(ungoverned), maxNamedInWarning)]
+		msg := fmt.Sprintf("forced: group %q sponsored %d entities; their sponsor was removed and they are ungoverned: %s",
+			g.Name, len(ungoverned), strings.Join(listed, ", "))
+		if more := len(ungoverned) - len(listed); more > 0 {
+			msg += fmt.Sprintf(" and %d more", more)
+		}
+		warnings = append(warnings, msg)
+	}
+	if pending > 0 {
+		warnings = append(warnings, fmt.Sprintf("forced: %d pending sponsor handovers to group %q were cancelled", pending, g.Name))
+	}
+	return warnings, nil
 }
 
 // clearGroupsLocked deletes every stored group of the namespace and returns
@@ -494,6 +628,7 @@ func normalizeGroupRoles(roles []string) ([]string, error) {
 type authMountFacts struct {
 	path  string   // namespace-relative, "auth/<path>/": what "mount" answers
 	names []string // the fact names the mount answers; nil when it publishes none
+	kind  string   // the kind of entity the mount admits; "" when it publishes no facts
 }
 
 // namespaceAuthMountFacts lists the auth mounts of the namespace in ctx with
@@ -519,11 +654,44 @@ func (c *Core) namespaceAuthMountFacts(ctx context.Context) []authMountFacts {
 		if c.router != nil {
 			if fp, ok := c.router.MatchingBackend(ctx, path).(logical.FactsProvider); ok {
 				m.names = fp.FactNames()
+				if m.kind = fp.EntityKind(); m.kind == "" {
+					m.kind = logical.EntityKindAgent
+				}
 			}
 		}
 		out = append(out, m)
 	}
 	return out
+}
+
+// ruleTrustsMount reports whether rule's "mount" selector lists the auth mount
+// at path, exactly or by a pattern.
+func ruleTrustsMount(rule logical.GroupRule, path string) bool {
+	return selectorValuesMatch(rule[selector.NameMount], path)
+}
+
+// ruleAdmitsKind reports whether rule can match an admission of kind: it has
+// no "kind" selector, or one whose values match kind.
+func ruleAdmitsKind(rule logical.GroupRule, kind string) bool {
+	values, ok := rule[selector.NameKind]
+	return !ok || selectorValuesMatch(values, kind)
+}
+
+// selectorValuesMatch reports whether one of a selector's values matches v,
+// exactly or as a pattern.
+func selectorValuesMatch(values []string, v string) bool {
+	for _, val := range values {
+		if selector.IsPattern(val) {
+			if gl, err := selector.CompileGlob(val); err == nil && gl.Match(v) {
+				return true
+			}
+			continue
+		}
+		if lit, err := selector.Unescape(val); err == nil && lit == v {
+			return true
+		}
+	}
+	return false
 }
 
 // ruleWarnings checks each rule of g against the namespace's auth mounts: the

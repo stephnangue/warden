@@ -19,14 +19,15 @@ var (
 		Long: `
 Usage: warden identity entity create <name> [options]
 
-  Create an entity: an agent of record, the humans accountable for it, its
-  lifecycle state, and the native identities it presents through auth
-  mounts. "kind" is "agent" (the default; the only kind yet) and never
-  changes. Requires a token with sudo on sys/identity/entity.
+  Create an entity: an agent of record and the native identities it
+  presents through auth mounts. "kind" is "agent" (the default; the only
+  kind yet) and never changes. An entity is created active and without a
+  sponsor: propose one afterwards ('warden identity entity sponsor
+  propose'). Requires a token with sudo on sys/identity/entity.
 
-  "governed_by" is derived, never written: "warden" once the entity has a
-  sponsor and a description, empty before ('warden identity entity list
-  -ungoverned' lists those).
+  "governed_by" is derived, never written: "warden" once the entity has an
+  accepted sponsor and a description, empty before ('warden identity
+  entity list -ungoverned' lists those).
 
   "aliases" claims native identities, each as the auth mount derives it
   from a credential (its alias_name_source) through the mount by path. A
@@ -41,7 +42,6 @@ Usage: warden identity entity create <name> [options]
       $ warden identity entity create billing-agent -json '{
           "kind": "agent",
           "description": "Reconciles supplier invoices against purchase orders",
-          "sponsors": ["alice@corp.example"],
           "profile": {
             "purpose": "billing",
             "runtime": "langgraph",
@@ -62,7 +62,6 @@ Usage: warden identity entity create <name> [options]
 
       $ warden identity entity create billing-agent \
           -description="Reconciles supplier invoices" \
-          -sponsors=alice@corp.example \
           -profile=runtime=langgraph \
           -alias=auth/kubernetes/=system:serviceaccount:billing:agent
 

@@ -81,7 +81,6 @@ func TestNativeIdentities_ClaimedThroughTheCLI(t *testing.T) {
 	// Claim both native identities: the JWT's at creation, through a standby.
 	cli(t, standby, "identity", "entity", "create", ent,
 		"-description", "Reads the e2e application config",
-		"-sponsors", "alice@corp.example",
 		"-alias", jwtMount+"="+jwtAlias)
 	cli(t, port, "identity", "alias", "add", "-json", h.JSON(t, map[string]string{
 		"mount": certMount,
@@ -95,15 +94,17 @@ func TestNativeIdentities_ClaimedThroughTheCLI(t *testing.T) {
 		"mount": certMount,
 		"name":  agentCN,
 	}))
-	if byJWT.Entity != ent || byJWT.Kind != "agent" || byJWT.State != "active" || byJWT.GovernedBy != "warden" {
-		t.Fatalf("lookup of the JWT's identity = %+v, want active agent %s governed by warden", byJWT, ent)
+	// Created without a sponsor, the entity is ungoverned: no human has
+	// accepted it (sponsors end to end are scenario 4.4's).
+	if byJWT.Entity != ent || byJWT.Kind != "agent" || byJWT.State != "active" || byJWT.GovernedBy != "" {
+		t.Fatalf("lookup of the JWT's identity = %+v, want active ungoverned agent %s", byJWT, ent)
 	}
 	if byCert.EntityID != byJWT.EntityID {
 		t.Fatalf("the certificate's identity resolves to entity %q, the JWT's to %q: want one entity", byCert.EntityID, byJWT.EntityID)
 	}
 
 	requests("after both were claimed")
-	cli(t, port, "identity", "entity", "update", ent, "-state", "suspended")
+	cli(t, port, "identity", "entity", "state", ent, "suspended")
 	requests("while their entity is suspended")
 
 	// Audit: every gateway request names the native identity it presented,

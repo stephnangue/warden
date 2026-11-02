@@ -48,7 +48,6 @@ func billingAgentBody() map[string]any {
 	return map[string]any{
 		"kind":        "agent",
 		"description": "Reconciles supplier invoices",
-		"sponsors":    []any{"alice@corp.example"},
 		"profile":     map[string]any{"purpose": "billing", "runtime": "langgraph"},
 		"metadata":    map[string]any{"team": "billing"},
 		"aliases": []any{
@@ -75,7 +74,10 @@ func TestEntities_CRUD(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
 	id := resp.Data["id"].(string)
 	assert.NotEmpty(t, id)
-	assert.Equal(t, "warden", resp.Data["governed_by"], "a sponsor and a description")
+	assert.Equal(t, "", resp.Data["governed_by"], "created without a sponsor")
+	assert.Equal(t, "no sponsor", resp.Data["ungoverned_reason"])
+	assert.Nil(t, resp.Data["sponsor"])
+	assert.Nil(t, resp.Data["pending_sponsor"])
 	assert.Equal(t, "active", resp.Data["state"])
 	assert.Equal(t, "agent", resp.Data["kind"])
 	aliases := resp.Data["aliases"].([]map[string]any)
@@ -93,11 +95,11 @@ func TestEntities_CRUD(t *testing.T) {
 
 	// An update replaces what it names; a rename keeps the ID and the aliases.
 	resp = entityRequest(t, c, logical.UpdateOperation, "entity/billing-agent", map[string]any{
-		"sponsors": []any{"bob@corp.example", "alice@corp.example", "bob@corp.example"},
-		"new_name": "invoice-agent",
+		"description": "Reconciles supplier invoices against purchase orders",
+		"new_name":    "invoice-agent",
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
-	assert.Equal(t, []string{"alice@corp.example", "bob@corp.example"}, resp.Data["sponsors"], "sorted, deduplicated")
+	assert.Equal(t, "Reconciles supplier invoices against purchase orders", resp.Data["description"])
 	assert.Equal(t, id, resp.Data["id"])
 	assert.Len(t, resp.Data["aliases"], 2)
 	assert.Equal(t, http.StatusNotFound, entityRequest(t, c, logical.ReadOperation, "entity/billing-agent", nil).StatusCode)
@@ -127,8 +129,9 @@ func TestEntities_Validation(t *testing.T) {
 		{"governed_by written", map[string]any{"governed_by": "warden"}, "governed_by is derived"},
 		{"human kind", map[string]any{"kind": "human"}, `kind "human" is not supported yet`},
 		{"unknown kind", map[string]any{"kind": "robot"}, "unknown entity kind"},
-		{"unknown state", map[string]any{"state": "paused"}, "unknown entity state"},
-		{"bad sponsor", map[string]any{"sponsors": []any{"two words"}}, "invalid sponsor"},
+		{"state", map[string]any{"state": "suspended"}, "state changes through sys/identity/entity/<name>/state"},
+		{"sponsors", map[string]any{"sponsors": []any{"alice@corp.example"}}, "the sponsor is proposed through"},
+		{"sponsor", map[string]any{"sponsor": map[string]any{"group": "billing-leads"}}, "the sponsor is proposed through"},
 		{"unknown profile field", map[string]any{"profile": map[string]any{"team": "x"}}, "unknown profile field"},
 		{"no such mount", map[string]any{"aliases": []any{map[string]any{"mount": "auth/nope/", "name": "x"}}}, "no auth mount"},
 		{"not an auth mount", map[string]any{"aliases": []any{map[string]any{"mount": "sys/", "name": "x"}}}, "no auth mount"},
@@ -158,17 +161,19 @@ func TestEntities_Governance(t *testing.T) {
 	assert.Equal(t, "", resp.Data["governed_by"])
 	assert.Equal(t, "no sponsor and no description", resp.Data["ungoverned_reason"])
 
-	resp = entityRequest(t, c, logical.UpdateOperation, "entity/ci-runner", map[string]any{"sponsors": []any{"bob@corp.example"}})
+	sponsorAccepted(t, c, rootCtx(), "ci-runner", "billing-leads")
+	resp = entityRequest(t, c, logical.ReadOperation, "entity/ci-runner", nil)
 	assert.Equal(t, "no description", resp.Data["ungoverned_reason"])
 	resp = entityRequest(t, c, logical.UpdateOperation, "entity/ci-runner", map[string]any{"description": "Builds billing"})
 	assert.Equal(t, "warden", resp.Data["governed_by"])
 	assert.Equal(t, "", resp.Data["ungoverned_reason"])
+	assert.Equal(t, "billing-leads", resp.Data["sponsor"].(map[string]any)["group"], "an update keeps the sponsor")
 
 	resp = entityRequest(t, c, logical.ListOperation, "entity", map[string]any{"ungoverned": true})
 	assert.Empty(t, resp.Data["keys"])
 	resp = entityRequest(t, c, logical.ListOperation, "entity", map[string]any{"governed_by": "warden"})
 	assert.Equal(t, []string{"ci-runner"}, resp.Data["keys"])
-	resp = entityRequest(t, c, logical.ListOperation, "entity", map[string]any{"sponsor": "bob@corp.example"})
+	resp = entityRequest(t, c, logical.ListOperation, "entity", map[string]any{"sponsor": "billing-leads"})
 	assert.Equal(t, []string{"ci-runner"}, resp.Data["keys"])
 
 	// Kind never changes.
@@ -180,25 +185,36 @@ func TestEntities_StateLifecycle(t *testing.T) {
 	c := setupEntityMounts(t)
 	require.Equal(t, http.StatusCreated, entityRequest(t, c, logical.CreateOperation, "entity/a", billingAgentBody()).StatusCode)
 
+	state := func(st string) *logical.Response {
+		return entityRequest(t, c, logical.UpdateOperation, "entity/a/state", map[string]any{"state": st})
+	}
 	for _, st := range []string{"suspended", "active"} {
-		resp := entityRequest(t, c, logical.UpdateOperation, "entity/a", map[string]any{"state": st})
+		resp := state(st)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 		assert.Equal(t, st, resp.Data["state"])
 	}
 
-	// An empty state never lifts a suspension.
-	require.Equal(t, http.StatusOK, entityRequest(t, c, logical.UpdateOperation, "entity/a", map[string]any{"state": "suspended"}).StatusCode)
-	resp := entityRequest(t, c, logical.UpdateOperation, "entity/a", map[string]any{"state": ""})
+	// An empty or unknown state never lifts a suspension.
+	require.Equal(t, http.StatusOK, state("suspended").StatusCode)
+	assert.Equal(t, http.StatusBadRequest, state("").StatusCode)
+	resp := state("paused")
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), "unknown entity state")
 	e, _, err := c.identityStore.GetEntity(rootCtx(), "a")
 	require.NoError(t, err)
 	assert.Equal(t, logical.EntityStateSuspended, e.State)
-	require.Equal(t, http.StatusOK, entityRequest(t, c, logical.UpdateOperation, "entity/a", map[string]any{"state": "active"}).StatusCode)
+	h := entityRequest(t, c, logical.ReadOperation, "entity/a", nil).Data["hash"].(string)
+	resp = entityRequest(t, c, logical.UpdateOperation, "entity/a/state", map[string]any{"state": "active", "expected_hash": "stale"})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "expected_hash makes it conditional")
+	resp = entityRequest(t, c, logical.UpdateOperation, "entity/a/state", map[string]any{"state": "active", "expected_hash": h})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.NotEqual(t, h, resp.Data["hash"], "the state is hashed")
 	resp = entityRequest(t, c, logical.ListOperation, "entity", map[string]any{"state": "active"})
 	assert.Equal(t, []string{"a"}, resp.Data["keys"])
+	assert.Equal(t, http.StatusOK, state("active").StatusCode, "the state it has is no change")
 
-	require.Equal(t, http.StatusOK, entityRequest(t, c, logical.UpdateOperation, "entity/a", map[string]any{"state": "retired"}).StatusCode)
-	resp = entityRequest(t, c, logical.UpdateOperation, "entity/a", map[string]any{"state": "active"})
+	require.Equal(t, http.StatusOK, state("retired").StatusCode)
+	resp = state("active")
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "retired is final")
 	assert.Contains(t, resp.Err.Error(), "retired")
 
@@ -343,7 +359,8 @@ func TestEntities_PublishBumpsGeneration(t *testing.T) {
 	ns := c.identityStore.namespaceIndex(namespace.RootNamespaceID)
 	assert.NotNil(t, ns.groupsByName["g"])
 	assert.Equal(t, 2, ns.entities.count())
-	require.NoError(t, c.identityStore.DeleteGroup(ctx, "g", "", ""))
+	_, err = c.identityStore.DeleteGroup(ctx, "g", "", "", false)
+	require.NoError(t, err)
 	assert.Equal(t, 2, c.identityStore.namespaceIndex(namespace.RootNamespaceID).entities.count())
 }
 
@@ -441,11 +458,21 @@ func TestEntities_IndexConsistency(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	names := []string{"a", "b", "c", "d"}
 	aliases := []string{"x", "y", "z"}
+	sponsors := []*logical.EntitySponsor{proposeEntry(t, c, ctx, "leads"), proposeEntry(t, c, ctx, "oncall")}
+	states := []logical.EntityState{logical.EntityStateActive, logical.EntityStateSuspended}
 	for i := 0; i < 400; i++ {
 		before := c.identityStore.namespaceIndex(namespace.RootNamespaceID)
 		name := names[rng.Intn(len(names))]
 		var err error
-		switch rng.Intn(6) {
+		switch rng.Intn(10) {
+		case 6:
+			_, err = c.identityStore.ProposeSponsor(ctx, name, sponsors[rng.Intn(2)], rng.Intn(2) == 0, nil, "")
+		case 7:
+			err = c.identityStore.ClearSponsor(ctx, name, "")
+		case 8:
+			err = c.identityStore.CancelPending(ctx, name, nil, "")
+		case 9:
+			err = c.identityStore.SetEntityState(ctx, name, states[rng.Intn(2)], nil, "")
 		case 0:
 			err = c.identityStore.CreateEntity(ctx, &logical.Entity{Name: name})
 		case 1:
@@ -602,7 +629,7 @@ func TestEntities_OrphanedClaims(t *testing.T) {
 func TestEntities_RetiredKeepsClaims(t *testing.T) {
 	c := setupEntityMounts(t)
 	require.Equal(t, http.StatusCreated, entityRequest(t, c, logical.CreateOperation, "entity/a", billingAgentBody()).StatusCode)
-	require.Equal(t, http.StatusOK, entityRequest(t, c, logical.UpdateOperation, "entity/a", map[string]any{"state": "retired"}).StatusCode)
+	require.Equal(t, http.StatusOK, entityRequest(t, c, logical.UpdateOperation, "entity/a/state", map[string]any{"state": "retired"}).StatusCode)
 
 	resp := entityRequest(t, c, logical.UpdateOperation, "entity/a/alias/remove", map[string]any{
 		"mount": "auth/k8s/", "name": "system:serviceaccount:billing:agent",
@@ -823,7 +850,8 @@ func TestEntities_OnlyStatedbPart(t *testing.T) {
 func TestEntities_SudoRequired(t *testing.T) {
 	c := createTestCore(t)
 	for _, p := range []string{"sys/identity/entity", "sys/identity/entity/a", "sys/identity/entity/id/x",
-		"sys/identity/entity/a/alias", "sys/identity/lookup"} {
+		"sys/identity/entity/a/alias", "sys/identity/entity/a/sponsor", "sys/identity/entity/a/sponsor/remove",
+		"sys/identity/entity/a/state", "sys/identity/lookup"} {
 		assert.True(t, c.router.RootPath(rootCtx(), p), "%s must require sudo", p)
 	}
 	assert.False(t, c.router.RootPath(rootCtx(), "sys/identity/usage"))

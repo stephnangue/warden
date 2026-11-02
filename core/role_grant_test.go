@@ -565,7 +565,8 @@ func TestRoleGrant_RevocationTiming(t *testing.T) {
 		{
 			name: "group delete",
 			edit: func(e *grantEnv) {
-				require.NoError(e.t, e.c.identityStore.DeleteGroup(e.ctx, "deployers", "", ""))
+				_, err := e.c.identityStore.DeleteGroup(e.ctx, "deployers", "", "", false)
+				require.NoError(e.t, err)
 			},
 			check: deniedBecause(logical.RoleDeniedNotAssumable),
 		},

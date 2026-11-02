@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
@@ -39,13 +41,21 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 			`e.g. "system:serviceaccount:billing:agent"`,
 		Required: true,
 	}
+	expectedHashField := &framework.FieldSchema{
+		Type:        framework.TypeString,
+		Description: "Apply the write only if the entity still has this hash (from a read)",
+	}
 	return []*framework.Path{
 		{
 			Pattern: "identity/entity/?$",
 			Fields: map[string]*framework.FieldSchema{
-				"kind":        {Type: framework.TypeString, Description: "List only entities of this kind"},
-				"state":       {Type: framework.TypeString, Description: "List only entities in this state"},
-				"sponsor":     {Type: framework.TypeString, Description: "List only entities this sponsor is accountable for"},
+				"kind":    {Type: framework.TypeString, Description: "List only entities of this kind"},
+				"state":   {Type: framework.TypeString, Description: "List only entities in this state"},
+				"sponsor": {Type: framework.TypeString, Description: "List only entities whose sponsor is the group of this name"},
+				"sponsor_state": {
+					Type:        framework.TypeString,
+					Description: "List only entities with a sponsor (accepted) or with a pending handover (pending)",
+				},
 				"ungoverned":  {Type: framework.TypeBool, Description: "List only ungoverned entities (no sponsor or no description)"},
 				"governed_by": {Type: framework.TypeString, Description: `List only entities governed by this authority ("warden")`},
 				"orphaned": {
@@ -112,6 +122,67 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 				"or that entity is retired; it is then taken from it. The mount must admit the entity's kind.",
 		},
 		{
+			Pattern: "identity/entity/" + framework.GenericNameRegex("entity") + "/sponsor/remove$",
+			Fields: map[string]*framework.FieldSchema{
+				"entity": {Type: framework.TypeString, Description: "Name of the entity", Required: true},
+				"pending": {
+					Type:        framework.TypeBool,
+					Description: "Cancel the pending handover instead of removing the sponsor",
+				},
+				"expected_hash": expectedHashField,
+			},
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{Callback: b.handleSponsorRemove, Summary: "Remove a sponsor"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleSponsorRemove, Summary: "Remove a sponsor"},
+			},
+			HelpSynopsis: "Remove the sponsor of an entity, or cancel its pending handover",
+			HelpDescription: "Without pending, the sponsor is removed and the entity is ungoverned; a pending handover stays " +
+				"for a member to accept. With pending, the handover is cancelled.",
+		},
+		{
+			Pattern: "identity/entity/" + framework.GenericNameRegex("entity") + "/sponsor$",
+			Fields: map[string]*framework.FieldSchema{
+				"entity": {Type: framework.TypeString, Description: "Name of the entity", Required: true},
+				"group": {
+					Type:        framework.TypeString,
+					Description: "The virtual group of humans proposed as the sponsor, by name",
+					Required:    true,
+				},
+				"namespace": {
+					Type: framework.TypeString,
+					Description: `The group's namespace, by path: this namespace (the default) or one of its ancestors ` +
+						`("/" for the root namespace)`,
+				},
+				"expected_hash": expectedHashField,
+			},
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{Callback: b.handleSponsorPropose, Summary: "Propose a sponsor"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleSponsorPropose, Summary: "Propose a sponsor"},
+			},
+			HelpSynopsis: "Propose a sponsor for an entity",
+			HelpDescription: "A sponsor is a virtual group of humans accountable for the entity. Proposed by a member of the " +
+				"group, it is the sponsor at once; otherwise it is a pending handover, which a member accepts. Either way " +
+				"the earlier sponsor stays until the new one is accepted.",
+		},
+		{
+			Pattern: "identity/entity/" + framework.GenericNameRegex("entity") + "/state$",
+			Fields: map[string]*framework.FieldSchema{
+				"entity": {Type: framework.TypeString, Description: "Name of the entity", Required: true},
+				"state": {
+					Type:        framework.TypeString,
+					Description: `active, suspended (reversible) or retired (final; the record becomes read-only)`,
+					Required:    true,
+				},
+				"expected_hash": expectedHashField,
+			},
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{Callback: b.handleEntityState, Summary: "Change an entity's state"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleEntityState, Summary: "Change an entity's state"},
+			},
+			HelpSynopsis:    "Change the lifecycle state of an entity",
+			HelpDescription: "Suspend an entity, make it active again, or retire it. Retirement is final.",
+		},
+		{
 			Pattern: "identity/entity/" + framework.GenericNameRegex("name"),
 			Fields: map[string]*framework.FieldSchema{
 				"name": {Type: framework.TypeString, Description: "Name of the entity", Required: true},
@@ -122,14 +193,6 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 				"description": {
 					Type:        framework.TypeString,
 					Description: fmt.Sprintf("What the agent does (at most %d bytes). With a sponsor, it makes the entity governed.", logical.MaxEntityDescriptionBytes),
-				},
-				"sponsors": {
-					Type:        framework.TypeCommaStringSlice,
-					Description: fmt.Sprintf("The humans accountable for the agent, as UPNs or email addresses (at most %d)", logical.MaxEntitySponsors),
-				},
-				"state": {
-					Type:        framework.TypeString,
-					Description: `active (default), suspended (reversible) or retired (final; the record becomes read-only)`,
 				},
 				"profile": {
 					Type:        framework.TypeMap,
@@ -170,8 +233,8 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 			},
 			HelpSynopsis: "Manage namespace entities",
 			HelpDescription: "An entity is an agent of record: the native identities it presents through any auth mount, the " +
-				"humans accountable for it, and its lifecycle state. governed_by is \"warden\" once it has a sponsor and " +
-				"a description, and empty before.",
+				"team accountable for it (its sponsor), and its lifecycle state. governed_by is \"warden\" once it has an " +
+				"accepted sponsor and a description, and empty before.",
 		},
 		{
 			Pattern: "identity/lookup$",
@@ -247,16 +310,24 @@ func (c *Core) aliasMountPath(accessor string) string {
 	return ""
 }
 
-// mountPaths renders accessors as auth mount paths (aliasMountPath) for one
-// response, resolving each accessor once however many entities claim on it.
+// mountPaths renders accessors as auth mount paths (aliasMountPath), and
+// namespace IDs as namespace paths, for one response, resolving each once
+// however many entities name it.
 type mountPaths struct {
-	core  *Core
-	paths map[string]string
+	core       *Core
+	ctx        context.Context
+	paths      map[string]string
+	namespaces map[string]string
 }
 
-func (b *SystemBackend) mountPaths() *mountPaths { return &mountPaths{core: b.core} }
+func (b *SystemBackend) mountPaths(ctx context.Context) *mountPaths {
+	return &mountPaths{core: b.core, ctx: ctx}
+}
 
 func (p *mountPaths) of(accessor string) string {
+	if accessor == "" {
+		return ""
+	}
 	path, ok := p.paths[accessor]
 	if !ok {
 		path = p.core.aliasMountPath(accessor)
@@ -268,14 +339,72 @@ func (p *mountPaths) of(accessor string) string {
 	return path
 }
 
+// namespace renders the namespace with id by its path, "/" for the root
+// namespace, or "" when no namespace has it any more.
+func (p *mountPaths) namespace(id string) string {
+	if id == namespace.RootNamespaceID {
+		return "/"
+	}
+	path, ok := p.namespaces[id]
+	if !ok {
+		if ns, err := p.core.namespaceStore.GetNamespaceByAccessor(p.ctx, id); err == nil && ns != nil {
+			path = ns.Path
+		}
+		if p.namespaces == nil {
+			p.namespaces = make(map[string]string)
+		}
+		p.namespaces[id] = path
+	}
+	return path
+}
+
+// qualifiedName names a group or an entity with its namespace's path:
+// "/billing-leads" in the root namespace, "team-a/billing-leads" in team-a.
+func qualifiedName(nsPath, name string) string {
+	if nsPath == "" || nsPath == "/" {
+		return "/" + name
+	}
+	return nsPath + name
+}
+
+// sponsorToMap renders a sponsor or a pending handover for a response, nil
+// when there is none. status is "accepted" or "pending".
+func (p *mountPaths) sponsorToMap(sp *logical.EntitySponsor, status string) any {
+	if sp == nil {
+		return nil
+	}
+	actor := func(a logical.SponsorActor) any {
+		if a == (logical.SponsorActor{}) {
+			return nil
+		}
+		return map[string]any{
+			"mount":          p.of(a.MountAccessor),
+			"mount_accessor": a.MountAccessor,
+			"alias":          a.Alias,
+			"principal":      a.Principal,
+		}
+	}
+	var acceptedAt any
+	if !sp.AcceptedAt.IsZero() {
+		acceptedAt = sp.AcceptedAt
+	}
+	return map[string]any{
+		"type":        string(sp.Type),
+		"namespace":   p.namespace(sp.Namespace),
+		"group":       sp.Group,
+		"group_id":    sp.GroupID,
+		"added_by":    actor(sp.AddedBy),
+		"added_at":    sp.AddedAt,
+		"accepted_by": actor(sp.AcceptedBy),
+		"accepted_at": acceptedAt,
+		"status":      status,
+	}
+}
+
 // entityToMap renders an entity for a response. Every key is present, so the
 // shape is the same whichever fields the entity sets; a native identity whose
 // mount no longer exists has an empty mount.
 func (b *SystemBackend) entityToMap(e *logical.Entity, hash string, paths *mountPaths) map[string]any {
-	sponsors := e.Sponsors
-	if sponsors == nil {
-		sponsors = []string{}
-	}
 	metadata := e.Metadata
 	if metadata == nil {
 		metadata = map[string]string{}
@@ -302,7 +431,8 @@ func (b *SystemBackend) entityToMap(e *logical.Entity, hash string, paths *mount
 		"name":              e.Name,
 		"kind":              e.Kind,
 		"description":       e.Description,
-		"sponsors":          sponsors,
+		"sponsor":           paths.sponsorToMap(e.Sponsor, "accepted"),
+		"pending_sponsor":   paths.sponsorToMap(e.PendingSponsor, "pending"),
 		"state":             string(e.State),
 		"governed_by":       e.GovernedBy(),
 		"ungoverned_reason": e.UngovernedReason(),
@@ -340,6 +470,16 @@ func (b *SystemBackend) entityErrorResponse(name string, err error) *logical.Res
 				"another entity; a delete needs force", name))
 	case errors.Is(err, ErrAliasNotFound):
 		return logical.ErrorResponse(logical.ErrNotFound("native identity not claimed"))
+	case errors.Is(err, ErrSponsorNotFound):
+		return logical.ErrorResponse(logical.ErrNotFoundf("entity %q has no such sponsor", name))
+	case errors.Is(err, ErrSponsorGroupNotFound):
+		return logical.ErrorResponse(logical.ErrBadRequest(
+			"the sponsor group no longer exists (deleted, or deleted and created again); propose it again"))
+	case errors.Is(err, ErrSponsorGroupNotVirtual):
+		return logical.ErrorResponse(logical.ErrBadRequest(errStaticSponsor))
+	case errors.Is(err, ErrSponsorChanged):
+		return logical.ErrorResponse(logical.ErrConflictf(
+			"the sponsor of entity %q changed since it was read; read it again and retry", name))
 	case errors.Is(err, ErrTooManyEntities):
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error()))
 	case errors.Is(err, ErrIdentityStoreNotLoaded):
@@ -370,32 +510,31 @@ func parseProfile(raw map[string]any) (*logical.AgentProfile, error) {
 	return p, nil
 }
 
-// mergeEntityFields writes onto e every governance field present in the
-// request.
+// errStaticSponsor refuses a sponsor group that is not virtual.
+const errStaticSponsor = "a static group's members are agents; an agent cannot sponsor"
+
+// mergeEntityFields writes onto e every descriptive field present in the
+// request. The sponsor and the state are refused, whatever their value: each
+// changes through a path of its own. They are left out of the schema and read
+// from the raw body, so a value of any type is refused the same way rather
+// than failing field validation first.
 func mergeEntityFields(e *logical.Entity, d *framework.FieldData) error {
 	if _, ok := d.GetOk("governed_by"); ok {
 		return logical.ErrBadRequest("governed_by is derived and cannot be written")
+	}
+	for _, k := range []string{"sponsor", "sponsors"} {
+		if _, ok := d.Raw[k]; ok {
+			return logical.ErrBadRequest("the sponsor is proposed through sys/identity/entity/<name>/sponsor")
+		}
+	}
+	if _, ok := d.Raw["state"]; ok {
+		return logical.ErrBadRequest("state changes through sys/identity/entity/<name>/state")
 	}
 	if v, ok := d.GetOk("kind"); ok {
 		e.Kind = v.(string)
 	}
 	if v, ok := d.GetOk("description"); ok {
 		e.Description = v.(string)
-	}
-	if v, ok := d.GetOk("sponsors"); ok {
-		e.Sponsors = v.([]string)
-	}
-	if v, ok := d.GetOk("state"); ok {
-		// An empty state would read as active and lift a suspension; a write
-		// that sends state names one.
-		if v.(string) == "" {
-			return logical.ErrBadRequest("state must be active, suspended or retired")
-		}
-		st, err := logical.ParseEntityState(v.(string))
-		if err != nil {
-			return logical.ErrBadRequest(err.Error())
-		}
-		e.State = st
 	}
 	if v, ok := d.GetOk("profile"); ok {
 		p, err := parseProfile(v.(map[string]any))
@@ -446,7 +585,7 @@ func (b *SystemBackend) handleEntityCreate(ctx context.Context, req *logical.Req
 	if err := b.core.identityStore.CreateEntity(ctx, e); err != nil {
 		return b.entityErrorResponse(name, err), nil
 	}
-	return b.respondCreated(b.entityToMap(e, e.Hash(), b.mountPaths())), nil
+	return b.respondCreated(b.entityToMap(e, e.Hash(), b.mountPaths(ctx))), nil
 }
 
 // claimableMount resolves the auth mount at path and checks that it admits
@@ -473,7 +612,7 @@ func (b *SystemBackend) handleEntityRead(ctx context.Context, req *logical.Reque
 	if err != nil {
 		return b.entityErrorResponse(name, err), nil
 	}
-	return b.respondSuccess(b.entityToMap(e, hash, b.mountPaths())), nil
+	return b.respondSuccess(b.entityToMap(e, hash, b.mountPaths(ctx))), nil
 }
 
 // handleEntityReadByID handles GET sys/identity/entity/id/<id>.
@@ -483,7 +622,7 @@ func (b *SystemBackend) handleEntityReadByID(ctx context.Context, req *logical.R
 	if err != nil {
 		return b.entityErrorResponse(id, err), nil
 	}
-	return b.respondSuccess(b.entityToMap(e, hash, b.mountPaths())), nil
+	return b.respondSuccess(b.entityToMap(e, hash, b.mountPaths(ctx))), nil
 }
 
 // handleEntityUpdate handles PUT sys/identity/entity/<name>. A field present
@@ -519,7 +658,7 @@ func (b *SystemBackend) handleEntityUpdate(ctx context.Context, req *logical.Req
 		if err != nil {
 			return b.entityErrorResponse(name, err), nil
 		}
-		return b.respondSuccess(b.entityToMap(e, e.Hash(), b.mountPaths())), nil
+		return b.respondSuccess(b.entityToMap(e, e.Hash(), b.mountPaths(ctx))), nil
 	}
 }
 
@@ -544,12 +683,19 @@ func (b *SystemBackend) handleEntityDelete(ctx context.Context, req *logical.Req
 // handleEntityList handles LIST sys/identity/entity. It returns the names
 // under "keys" and the entities themselves under "entities", sorted by name.
 func (b *SystemBackend) handleEntityList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	paths := b.mountPaths()
+	paths := b.mountPaths(ctx)
 	f := EntityFilter{
 		Kind:       d.Get("kind").(string),
 		Sponsor:    d.Get("sponsor").(string),
 		Ungoverned: d.Get("ungoverned").(bool),
 		GovernedBy: d.Get("governed_by").(string),
+	}
+	switch st := SponsorState(d.Get("sponsor_state").(string)); st {
+	case "", SponsorStateAccepted, SponsorStatePending:
+		f.SponsorState = st
+	default:
+		return logical.ErrorResponse(logical.ErrBadRequestf("unknown sponsor_state %q: %q or %q",
+			st, SponsorStateAccepted, SponsorStatePending)), nil
 	}
 	if d.Get("orphaned").(bool) {
 		f.MountGone = func(accessor string) bool { return paths.of(accessor) == "" }
@@ -636,4 +782,177 @@ func (b *SystemBackend) handleIdentityLookup(ctx context.Context, req *logical.R
 		"state":       string(e.State),
 		"governed_by": e.GovernedBy(),
 	}), nil
+}
+
+// sponsorNamespace resolves the namespace a sponsor proposal names by path:
+// the request's own namespace when path is empty, or one of its ancestors
+// ("/" is the root namespace). A sibling or a descendant is refused: a sponsor
+// group is one the entity's namespace inherits.
+func (c *Core) sponsorNamespace(ctx context.Context, path string) (*namespace.Namespace, error) {
+	reqNS, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, ErrNamespaceNotInContext
+	}
+	if path == "" {
+		return reqNS, nil
+	}
+	p := namespace.Canonicalize(path)
+	switch {
+	case p == reqNS.Path:
+		return reqNS, nil
+	case p == "":
+		return namespace.RootNamespace, nil
+	case !strings.HasPrefix(reqNS.Path, p):
+		return nil, logical.ErrBadRequestf("namespace %q is neither this namespace nor one of its ancestors", path)
+	}
+	ns, err := c.namespaceStore.GetNamespaceByPath(namespace.ContextWithNamespace(ctx, namespace.RootNamespace), p)
+	if err != nil {
+		return nil, err
+	}
+	if ns == nil {
+		return nil, logical.ErrBadRequestf("namespace %q not found", path)
+	}
+	return ns, nil
+}
+
+// sponsorGroupWarnings says why the group g of namespace ns may never act for
+// the entities it sponsors: no auth mount of its namespace admits humans, or
+// every rule's "kind" selector excludes them (nobody could ever accept it or
+// act for it), or a rule trusts a mount that admits agents (only humans act
+// for a sponsor). Each is a warning, never a refusal: mounts and rules change
+// after a proposal, and who may act is checked when someone acts.
+func (c *Core) sponsorGroupWarnings(ctx context.Context, ns *namespace.Namespace, g *logical.Group) []string {
+	mounts := c.namespaceAuthMountFacts(namespace.ContextWithNamespace(ctx, ns))
+	var warnings []string
+	if !slices.ContainsFunc(mounts, func(m authMountFacts) bool { return m.kind == logical.EntityKindHuman }) {
+		warnings = append(warnings, fmt.Sprintf(
+			"no auth mount of namespace %s admits humans: nobody can accept or act for this sponsor until one is enabled there",
+			qualifiedName(ns.Path, "")))
+	}
+	if !slices.ContainsFunc(g.Rules, func(r logical.GroupRule) bool { return ruleAdmitsKind(r, logical.EntityKindHuman) }) {
+		warnings = append(warnings, fmt.Sprintf(
+			`group %q: no rule can admit a human (each rule's "kind" selector excludes "human"); nobody can accept or act for this sponsor`,
+			g.Name))
+	}
+	for i, rule := range g.Rules {
+		for _, m := range mounts {
+			if m.kind == logical.EntityKindAgent && ruleTrustsMount(rule, m.path) {
+				warnings = append(warnings, fmt.Sprintf(
+					"group %q: rules[%d] trusts %s, which admits agents; only humans act for a sponsor", g.Name, i, m.path))
+			}
+		}
+	}
+	return warnings
+}
+
+// handleSponsorPropose handles POST sys/identity/entity/<entity>/sponsor. The
+// group must be a virtual group of this namespace or of an ancestor. A writer
+// who is a member of it makes it the sponsor at once; anyone else proposes a
+// handover, which a member accepts. Root, a member of no group, always
+// proposes.
+func (b *SystemBackend) handleSponsorPropose(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	name := d.Get("entity").(string)
+	groupName := d.Get("group").(string)
+	if groupName == "" {
+		return logical.ErrorResponse(logical.ErrBadRequest("group is required")), nil
+	}
+	te := req.TokenEntry()
+	if te == nil {
+		return logical.ErrorResponse(logical.ErrForbidden("a sponsor is proposed by a caller with a token")), nil
+	}
+	ns, err := b.core.sponsorNamespace(ctx, d.Get("namespace").(string))
+	if err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+	qualified := qualifiedName(ns.Path, groupName)
+	g := b.core.grantIndex(ns.ID).groupsByName[groupName]
+	switch {
+	case g == nil:
+		return logical.ErrorResponse(logical.ErrBadRequestf("group %s not found", qualified)), nil
+	case g.Type != logical.GroupTypeVirtual:
+		return logical.ErrorResponse(logical.ErrBadRequest(errStaticSponsor)), nil
+	}
+	sp := &logical.EntitySponsor{
+		Type:      logical.SponsorTypeGroup,
+		Namespace: ns.ID,
+		GroupID:   g.ID,
+		Group:     g.Name,
+		AddedBy:   sponsorActor(te),
+		AddedAt:   time.Now().UTC(),
+	}
+	groups, issuingNS, human := requestMembership(req)
+	accepted := human && b.core.callerMatches(sp, groups, issuingNS)
+	outcome, err := b.core.identityStore.ProposeSponsor(ctx, name, sp, accepted, nil, d.Get("expected_hash").(string))
+	if err != nil {
+		return b.entityErrorResponse(name, err), nil
+	}
+	e, hash, err := b.core.identityStore.GetEntity(ctx, name)
+	if err != nil {
+		return b.entityErrorResponse(name, err), nil
+	}
+	data := b.entityToMap(e, hash, b.mountPaths(ctx))
+	if outcome == ProposePending {
+		appendWarnings(data, fmt.Sprintf("handover to %s is pending: a member must accept it", qualified))
+	}
+	appendWarnings(data, b.core.sponsorGroupWarnings(ctx, ns, g.Group)...)
+	return b.respondSuccess(data), nil
+}
+
+// handleSponsorRemove handles POST sys/identity/entity/<entity>/sponsor/remove:
+// it removes the sponsor, leaving the entity ungoverned, or with pending
+// cancels the pending handover.
+func (b *SystemBackend) handleSponsorRemove(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	name := d.Get("entity").(string)
+	expected := d.Get("expected_hash").(string)
+	pending := d.Get("pending").(bool)
+	e, _, err := b.core.identityStore.GetEntity(ctx, name)
+	if err != nil {
+		return b.entityErrorResponse(name, err), nil
+	}
+	var warning string
+	switch {
+	case pending && e.PendingSponsor == nil:
+		return logical.ErrorResponse(logical.ErrNotFoundf("entity %q has no pending sponsor handover", name)), nil
+	case pending:
+		err = b.core.identityStore.CancelPending(ctx, name, nil, expected)
+	case e.Sponsor == nil:
+		return logical.ErrorResponse(logical.ErrNotFoundf("entity %q has no sponsor", name)), nil
+	default:
+		err = b.core.identityStore.ClearSponsor(ctx, name, expected)
+		warning = "entity is now ungoverned: it has no sponsor"
+	}
+	if err != nil {
+		return b.entityErrorResponse(name, err), nil
+	}
+	e, hash, err := b.core.identityStore.GetEntity(ctx, name)
+	if err != nil {
+		return b.entityErrorResponse(name, err), nil
+	}
+	data := b.entityToMap(e, hash, b.mountPaths(ctx))
+	if warning != "" {
+		appendWarnings(data, warning)
+	}
+	return b.respondSuccess(data), nil
+}
+
+// handleEntityState handles POST sys/identity/entity/<entity>/state.
+func (b *SystemBackend) handleEntityState(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	name := d.Get("entity").(string)
+	v := d.Get("state").(string)
+	// An empty state would read as active and lift a suspension.
+	if v == "" {
+		return logical.ErrorResponse(logical.ErrBadRequest("state must be active, suspended or retired")), nil
+	}
+	st, err := logical.ParseEntityState(v)
+	if err != nil {
+		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
+	}
+	if err := b.core.identityStore.SetEntityState(ctx, name, st, nil, d.Get("expected_hash").(string)); err != nil {
+		return b.entityErrorResponse(name, err), nil
+	}
+	e, hash, err := b.core.identityStore.GetEntity(ctx, name)
+	if err != nil {
+		return b.entityErrorResponse(name, err), nil
+	}
+	return b.respondSuccess(b.entityToMap(e, hash, b.mountPaths(ctx))), nil
 }

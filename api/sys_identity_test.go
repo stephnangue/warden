@@ -84,11 +84,20 @@ func TestSys_ReadUpdateGroup(t *testing.T) {
 
 func TestSys_DeleteGroup(t *testing.T) {
 	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"deployers"}}`)
-	require.NoError(t, client.Sys().DeleteGroup("deployers", "virtual", "h1"))
+	warnings, err := client.Sys().DeleteGroup("deployers", "virtual", "h1", false)
+	require.NoError(t, err)
+	assert.Nil(t, warnings)
 	assert.Equal(t, http.MethodDelete, rec.method)
 	assert.Equal(t, "/v1/sys/identity/group/deployers", rec.path)
 	assert.Equal(t, "virtual", rec.query.Get("type"))
 	assert.Equal(t, "h1", rec.query.Get("expected_hash"))
+	assert.Empty(t, rec.query.Get("force"), "no force unless asked")
+
+	client, rec = newRoleServer(t, http.StatusOK, `{"data":{"name":"leads","warnings":["forced: group \"leads\" sponsored 1 entities"]}}`)
+	warnings, err = client.Sys().DeleteGroup("leads", "virtual", "", true)
+	require.NoError(t, err)
+	assert.Equal(t, "true", rec.query.Get("force"))
+	assert.Equal(t, []string{`forced: group "leads" sponsored 1 entities`}, warnings)
 }
 
 func TestSys_ListGroups(t *testing.T) {
@@ -159,7 +168,19 @@ const billingAgentJSON = `{"data":{
 	"name":"billing-agent",
 	"kind":"agent",
 	"description":"Reconciles supplier invoices",
-	"sponsors":["alice@corp.example"],
+	"sponsor":{
+		"type":"group","namespace":"/","group":"billing-leads","group_id":"g1",
+		"added_by":{"mount":"auth/oidc/","mount_accessor":"auth_oidc_1","alias":"0583-oid","principal":"0583-oid"},
+		"added_at":"2026-10-26T10:30:00Z",
+		"accepted_by":{"mount":"auth/oidc/","mount_accessor":"auth_oidc_1","alias":"0583-oid","principal":"0583-oid"},
+		"accepted_at":"2026-10-26T10:30:00Z",
+		"status":"accepted"
+	},
+	"pending_sponsor":{
+		"type":"group","namespace":"/","group":"finance-oncall","group_id":"g2",
+		"added_by":{"mount":"","mount_accessor":"","alias":"","principal":"root"},
+		"added_at":"2026-10-26T10:45:00Z","accepted_by":null,"accepted_at":null,"status":"pending"
+	},
 	"state":"active",
 	"governed_by":"warden",
 	"ungoverned_reason":"",
@@ -178,7 +199,6 @@ func TestSys_CreateEntity(t *testing.T) {
 
 	e, err := client.Sys().CreateEntity("billing-agent", &EntityInput{
 		Description: strPtr("Reconciles supplier invoices"),
-		Sponsors:    []string{"alice@corp.example"},
 		Profile:     map[string]string{"runtime": "langgraph"},
 		Aliases:     []AliasRef{{Mount: "auth/kubernetes/", Name: "system:serviceaccount:billing:agent"}},
 	})
@@ -188,7 +208,6 @@ func TestSys_CreateEntity(t *testing.T) {
 	assert.Equal(t, "/v1/sys/identity/entity/billing-agent", rec.path)
 	assert.Equal(t, map[string]any{
 		"description": "Reconciles supplier invoices",
-		"sponsors":    []any{"alice@corp.example"},
 		"profile":     map[string]any{"runtime": "langgraph"},
 		"aliases":     []any{map[string]any{"mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent"}},
 	}, rec.body, "only the fields the input sets are sent")
@@ -205,6 +224,46 @@ func TestSys_CreateEntity(t *testing.T) {
 	}, e.Aliases[0])
 	assert.Equal(t, time.Date(2026, 10, 26, 11, 0, 0, 0, time.UTC), e.UpdatedAt)
 	assert.Equal(t, "e1", e.Hash)
+
+	person := SponsorActor{Mount: "auth/oidc/", MountAccessor: "auth_oidc_1", Alias: "0583-oid", Principal: "0583-oid"}
+	at := time.Date(2026, 10, 26, 10, 30, 0, 0, time.UTC)
+	assert.Equal(t, &EntitySponsor{
+		Type: "group", Namespace: "/", Group: "billing-leads", GroupID: "g1",
+		AddedBy: person, AddedAt: at, AcceptedBy: &person, AcceptedAt: at, Status: "accepted",
+	}, e.Sponsor)
+	require.NotNil(t, e.PendingSponsor)
+	assert.Equal(t, "finance-oncall", e.PendingSponsor.Group)
+	assert.Equal(t, SponsorActor{Principal: "root"}, e.PendingSponsor.AddedBy)
+	assert.Nil(t, e.PendingSponsor.AcceptedBy)
+	assert.True(t, e.PendingSponsor.AcceptedAt.IsZero())
+}
+
+func TestSys_EntitySponsorAndState(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"billing-agent","warnings":["handover to /finance-oncall is pending: a member must accept it"]}}`)
+
+	e, err := client.Sys().ProposeSponsor("billing-agent", SponsorRef{Group: "finance-oncall", Namespace: "/"}, "e1")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, rec.method)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent/sponsor", rec.path)
+	assert.Equal(t, map[string]any{"group": "finance-oncall", "namespace": "/", "expected_hash": "e1"}, rec.body)
+	assert.Equal(t, []string{"handover to /finance-oncall is pending: a member must accept it"}, e.Warnings)
+
+	_, err = client.Sys().ProposeSponsor("billing-agent", SponsorRef{Group: "billing-leads"}, "")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"group": "billing-leads"}, rec.body, "the request's namespace unless named")
+
+	_, err = client.Sys().RemoveSponsor("billing-agent", false, "")
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent/sponsor/remove", rec.path)
+	assert.Equal(t, map[string]any{}, rec.body)
+	_, err = client.Sys().RemoveSponsor("billing-agent", true, "e1")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"pending": true, "expected_hash": "e1"}, rec.body)
+
+	_, err = client.Sys().SetEntityState("billing-agent", "suspended", "")
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent/state", rec.path)
+	assert.Equal(t, map[string]any{"state": "suspended"}, rec.body)
 }
 
 func TestSys_ReadUpdateEntity(t *testing.T) {
@@ -221,13 +280,13 @@ func TestSys_ReadUpdateEntity(t *testing.T) {
 	assert.Equal(t, "billing-agent", e.Name)
 
 	_, err = client.Sys().UpdateEntity("billing-agent", &EntityInput{
-		Sponsors: []string{}, State: "suspended", NewName: "invoice-agent", ExpectedHash: "e1",
+		Metadata: map[string]string{}, NewName: "invoice-agent", ExpectedHash: "e1",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPut, rec.method)
 	assert.Equal(t, map[string]any{
-		"sponsors": []any{}, "state": "suspended", "new_name": "invoice-agent", "expected_hash": "e1",
-	}, rec.body, "an empty list clears; unset fields are not sent")
+		"metadata": map[string]any{}, "new_name": "invoice-agent", "expected_hash": "e1",
+	}, rec.body, "an empty map clears; unset fields are not sent")
 }
 
 func TestSys_DeleteEntity(t *testing.T) {
@@ -268,11 +327,12 @@ func TestSys_ListEntities(t *testing.T) {
 	assert.Equal(t, "no sponsor and no description", entities[1].UngovernedReason)
 
 	_, err = client.Sys().ListEntities(&EntityFilter{
-		Kind: "agent", State: "active", Sponsor: "alice@corp.example", GovernedBy: "warden", Ungoverned: true, Orphaned: true,
+		Kind: "agent", State: "active", Sponsor: "billing-leads", SponsorState: "pending", GovernedBy: "warden",
+		Ungoverned: true, Orphaned: true,
 	})
 	require.NoError(t, err)
 	for k, v := range map[string]string{
-		"kind": "agent", "state": "active", "sponsor": "alice@corp.example", "governed_by": "warden",
+		"kind": "agent", "state": "active", "sponsor": "billing-leads", "sponsor_state": "pending", "governed_by": "warden",
 		"ungoverned": "true", "orphaned": "true",
 	} {
 		assert.Equal(t, v, rec.query.Get(k), k)
