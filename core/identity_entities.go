@@ -605,6 +605,36 @@ func (s *IdentityStore) ProposeSponsor(ctx context.Context, name string, sp *log
 	return outcome, nil
 }
 
+// AcceptSponsor makes the pending handover of the entity name the sponsor,
+// accepted by by, in one write: the entity is never without a sponsor in
+// between. expect is the handover the caller matched by on a read; the write
+// is refused with ErrSponsorChanged unless the entity's pending handover is
+// still that group, so a concurrent proposal replacing it is never accepted by
+// a member of the one it replaced. ErrSponsorNotFound when none is pending.
+func (s *IdentityStore) AcceptSponsor(ctx context.Context, name string, expect *logical.EntitySponsor,
+	by logical.SponsorActor, expectedHash string) error {
+	return s.writeEntity(ctx, name, expectedHash, "accepted a sponsor", func(old *entityEntry, next *logical.Entity) (bool, error) {
+		p := old.PendingSponsor
+		switch {
+		case p == nil:
+			return false, ErrSponsorNotFound
+		case !p.Same(expect):
+			return false, ErrSponsorChanged
+		}
+		if err := s.sponsorGroupLocked(p); err != nil {
+			return false, err
+		}
+		sp := *p
+		sp.AcceptedBy, sp.AcceptedAt = by, time.Now().UTC()
+		// Never before the proposal, whichever node's clock recorded it.
+		if sp.AcceptedAt.Before(sp.AddedAt) {
+			sp.AcceptedAt = sp.AddedAt
+		}
+		next.Sponsor, next.PendingSponsor = &sp, nil
+		return true, nil
+	})
+}
+
 // CancelPending withdraws the pending handover of the entity name;
 // ErrSponsorNotFound when none is pending. A non-nil expect refuses the write
 // unless the pending handover is still that group (ErrSponsorChanged).

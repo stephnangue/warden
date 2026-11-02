@@ -30,7 +30,7 @@ import (
 // builtinPolicyNames are the policies a role-less request runs under, by name,
 // as its audit entry lists them; buildCBP attaches them by type. Shared by
 // every such request: read only.
-var builtinPolicyNames = []string{builtinCBPPolicy, builtinMCPPolicy}
+var builtinPolicyNames = []string{builtinCBPPolicy, builtinMCPPolicy, builtinSponsorPolicy}
 
 // rolelessChallenge is the challenge a refused role-less request carries.
 // There is no resource metadata to point at: the discovery endpoints are not

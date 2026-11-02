@@ -17,20 +17,20 @@ import (
 
 // The built-in policies. Every namespace holds one of each, seeded when the
 // namespace is created and, for namespaces that predate them, when the active
-// node unseals. Both are attached to every request that is not a root
-// request, beside whatever policies the request's token or role carries, so a
-// grant in either reaches every caller in the namespace. They are editable,
-// emptying one is how an operator turns off what it grants, and they cannot
-// be deleted.
+// node unseals. All are attached to every request that is not a root request,
+// beside whatever policies the request's token or role carries, so a grant in
+// any reaches every caller in the namespace. They are editable, emptying one
+// is how an operator turns off what it grants, and they cannot be deleted.
 //
-// The seeded bodies name only the discovery endpoints, each by its exact
-// path: an exact path is never matched as a prefix or a wildcard, so
-// attaching them everywhere changes no decision on any other path. Policy
-// types stay disjoint, one name per type, because a token's policy list is a
-// flat list of names.
+// The seeded bodies name only the paths of their feature, each by its exact
+// path or, for the sponsor paths, its exact shape (one "+" per entity name):
+// neither is ever matched as a prefix, so attaching them everywhere changes no
+// decision on any other path. Policy names stay unique across types, because
+// a token's policy list is a flat list of names.
 const (
-	builtinCBPPolicy = "default-cbp"
-	builtinMCPPolicy = "default-mcp"
+	builtinCBPPolicy     = "default-cbp"
+	builtinMCPPolicy     = "default-mcp"
+	builtinSponsorPolicy = "default-sponsor"
 )
 
 // builtinCBPBody grants the discovery endpoints. read and delete on sys/mcp
@@ -77,6 +77,30 @@ path "sys/mcp" {
 }
 `
 
+// builtinSponsorBody lets a sponsor's request reach the sponsor handlers,
+// which decide who sponsors what: the request must be a human's ticket, and
+// the human a member of the entity's sponsor group. It is its own built-in so
+// that emptying it turns sponsors off without touching discovery.
+const builtinSponsorBody = `# Built-in policy, attached to every request in this namespace that is not
+# a root request. Empty it to turn sponsors off here. The handlers decide who
+# sponsors what; these entries only let a sponsor's request reach them.
+path "sys/identity/sponsor/+" {
+  capabilities = ["read"]
+}
+
+path "sys/identity/sponsor/+/suspend" {
+  capabilities = ["create", "update"]
+}
+
+path "sys/identity/sponsor/+/handover" {
+  capabilities = ["create", "update"]
+}
+
+path "sys/identity/sponsor/+/accept" {
+  capabilities = ["create", "update"]
+}
+`
+
 // builtinPolicy is one built-in: its name, its type and its seeded body.
 type builtinPolicy struct {
 	name       string
@@ -88,10 +112,21 @@ type builtinPolicy struct {
 var builtinPolicies = []builtinPolicy{
 	{name: builtinCBPPolicy, policyType: PolicyTypeCBP, body: builtinCBPBody},
 	{name: builtinMCPPolicy, policyType: PolicyTypeMCP, body: builtinMCPBody},
+	{name: builtinSponsorPolicy, policyType: PolicyTypeCBP, body: builtinSponsorBody},
 }
 
 // builtinDiscoveryPaths are the paths the built-ins are meant to govern.
 var builtinDiscoveryPaths = []string{"sys/mcp", "sys/introspect/roles"}
+
+// builtinSponsorPaths are the shapes of the sponsor paths the built-ins
+// govern: an entity name, then at most a verb. They are the only stanzas
+// with a segment wildcard a built-in may hold without a warning.
+var builtinSponsorPaths = []string{
+	"sys/identity/sponsor/+",
+	"sys/identity/sponsor/+/suspend",
+	"sys/identity/sponsor/+/handover",
+	"sys/identity/sponsor/+/accept",
+}
 
 // isReservedPolicyName reports whether name, already canonical, is reserved
 // for built-in policies: "default" and every "default-" name. Names reserved
@@ -284,11 +319,16 @@ func builtinPolicyWarnings(p *Policy) []string {
 	return warnings
 }
 
-// isDiscoveryStanza reports whether pr names exactly one of the discovery
-// paths. Parsed paths carry the policy's namespace path in front.
+// isDiscoveryStanza reports whether pr names exactly one of the paths the
+// built-ins govern: a discovery path, or a sponsor path's exact shape. A
+// prefix never does, nor any other segment wildcard. Parsed paths carry the
+// policy's namespace path in front.
 func isDiscoveryStanza(p *Policy, pr *PathRules) bool {
-	if pr.IsPrefix || pr.HasSegmentWildcards {
+	if pr.IsPrefix {
 		return false
+	}
+	if pr.HasSegmentWildcards {
+		return slices.Contains(builtinSponsorPaths, policyRelativePath(p, pr))
 	}
 	return slices.Contains(builtinDiscoveryPaths, policyRelativePath(p, pr))
 }

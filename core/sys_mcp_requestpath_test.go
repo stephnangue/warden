@@ -71,7 +71,7 @@ func TestSysMCP_AnonymousCallsAdmitNothing(t *testing.T) {
 			assert.Empty(t, entry.Auth.TokenType)
 			assert.Empty(t, entry.Auth.TokenID)
 			assert.Empty(t, entry.Auth.PrincipalID)
-			assert.Equal(t, []string{builtinCBPPolicy, builtinMCPPolicy}, entry.Auth.Policies)
+			assert.Equal(t, []string{builtinCBPPolicy, builtinMCPPolicy, builtinSponsorPolicy}, entry.Auth.Policies)
 			require.NotNil(t, entry.Auth.Discovery)
 			assert.True(t, entry.Auth.Discovery.Anonymous)
 			assert.Equal(t, bearer != "", entry.Auth.Discovery.CredentialUnverified)

@@ -82,6 +82,35 @@ func TestSys_ReadUpdateGroup(t *testing.T) {
 	assert.Equal(t, map[string]any{"type": "virtual", "valid_until": ""}, rec.body, "an empty valid_until is sent, to clear it")
 }
 
+func TestSys_SponsorSurface(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, billingAgentJSON)
+
+	_, err := client.Sys().SponsorRead("billing-agent")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.method)
+	assert.Equal(t, "/v1/sys/identity/sponsor/billing-agent", rec.path)
+
+	for _, tc := range []struct {
+		call func() (*Entity, error)
+		path string
+		body map[string]any
+	}{
+		{func() (*Entity, error) { return client.Sys().SponsorSuspend("billing-agent") }, "suspend", map[string]any{}},
+		{func() (*Entity, error) {
+			return client.Sys().SponsorHandover("billing-agent", SponsorRef{Group: "finance-oncall", Namespace: "/"})
+		}, "handover", map[string]any{"group": "finance-oncall", "namespace": "/"}},
+		{func() (*Entity, error) { return client.Sys().SponsorCancel("billing-agent") }, "handover", map[string]any{"cancel": true}},
+		{func() (*Entity, error) { return client.Sys().SponsorAccept("billing-agent") }, "accept", map[string]any{}},
+	} {
+		e, err := tc.call()
+		require.NoError(t, err)
+		assert.Equal(t, http.MethodPost, rec.method)
+		assert.Equal(t, "/v1/sys/identity/sponsor/billing-agent/"+tc.path, rec.path)
+		assert.Equal(t, tc.body, rec.body)
+		assert.Equal(t, "billing-leads", e.Sponsor.Group)
+	}
+}
+
 func TestSys_DeleteGroup(t *testing.T) {
 	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"deployers"}}`)
 	warnings, err := client.Sys().DeleteGroup("deployers", "virtual", "h1", false)

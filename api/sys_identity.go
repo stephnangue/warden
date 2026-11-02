@@ -649,6 +649,78 @@ func (c *Sys) SetEntityStateWithContext(ctx context.Context, name, state, expect
 	return c.entityWrite(ctx, name, "state", body)
 }
 
+// SponsorRead reads the entity name as a member of its sponsor group, or of
+// its pending handover's, signed in with a ticket and no role. Every refusal
+// is the same 403, whatever its cause.
+func (c *Sys) SponsorRead(name string) (*Entity, error) {
+	return c.SponsorReadWithContext(context.Background(), name)
+}
+
+// SponsorReadWithContext reads a sponsored entity with context.
+func (c *Sys) SponsorReadWithContext(ctx context.Context, name string) (*Entity, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sys/identity/sponsor/%s", name))
+	return c.entityRequest(ctx, r)
+}
+
+// SponsorSuspend suspends the entity name as a member of its sponsor group.
+func (c *Sys) SponsorSuspend(name string) (*Entity, error) {
+	return c.SponsorSuspendWithContext(context.Background(), name)
+}
+
+// SponsorSuspendWithContext suspends a sponsored entity with context.
+func (c *Sys) SponsorSuspendWithContext(ctx context.Context, name string) (*Entity, error) {
+	return c.sponsorWrite(ctx, name, "suspend", map[string]any{})
+}
+
+// SponsorHandover hands the entity name over to the group ref names, as a
+// member of its sponsor group: accepted at once when the caller is a member of
+// that group too, a pending handover otherwise.
+func (c *Sys) SponsorHandover(name string, ref SponsorRef) (*Entity, error) {
+	return c.SponsorHandoverWithContext(context.Background(), name, ref)
+}
+
+// SponsorHandoverWithContext hands a sponsored entity over with context.
+func (c *Sys) SponsorHandoverWithContext(ctx context.Context, name string, ref SponsorRef) (*Entity, error) {
+	return c.sponsorWrite(ctx, name, "handover", ref.Body())
+}
+
+// SponsorCancel cancels the pending handover of the entity name, as a member
+// of its sponsor group.
+func (c *Sys) SponsorCancel(name string) (*Entity, error) {
+	return c.SponsorCancelWithContext(context.Background(), name)
+}
+
+// SponsorCancelWithContext cancels a sponsored entity's handover with context.
+func (c *Sys) SponsorCancelWithContext(ctx context.Context, name string) (*Entity, error) {
+	return c.sponsorWrite(ctx, name, "handover", map[string]any{"cancel": true})
+}
+
+// SponsorAccept accepts the pending handover of the entity name, as a member
+// of the pending group: it becomes the entity's sponsor.
+func (c *Sys) SponsorAccept(name string) (*Entity, error) {
+	return c.SponsorAcceptWithContext(context.Background(), name)
+}
+
+// SponsorAcceptWithContext accepts a sponsor handover with context.
+func (c *Sys) SponsorAcceptWithContext(ctx context.Context, name string) (*Entity, error) {
+	return c.sponsorWrite(ctx, name, "accept", map[string]any{})
+}
+
+// sponsorWrite posts body to the verb of the sponsor path of the entity name.
+func (c *Sys) sponsorWrite(ctx context.Context, name, verb string, body map[string]any) (*Entity, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/identity/sponsor/%s/%s", name, verb))
+	if err := r.SetJSONBody(body); err != nil {
+		return nil, err
+	}
+	return c.entityRequest(ctx, r)
+}
+
 // entityWrite posts body to the sub-path of the entity name and returns the
 // entity the server answers with.
 func (c *Sys) entityWrite(ctx context.Context, name, sub string, body map[string]any) (*Entity, error) {
