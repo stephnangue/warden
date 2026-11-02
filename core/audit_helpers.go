@@ -306,6 +306,7 @@ func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
 	} else {
 		entry.Auth.RoleDeniedReason = rg.DeniedReason
 	}
+	entry.Auth.IdentityStatus = rg.IdentityStatus
 	if len(rg.Groups) > 0 {
 		entry.Auth.Groups = slices.Clone(rg.Groups)
 	}

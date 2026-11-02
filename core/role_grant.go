@@ -141,8 +141,12 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	te.Metadata = m.Metadata
 	te.Entity = m.Entity
 
-	// Who the caller is decides whether it runs at all, before any role.
-	if reason := identityVerdict(gs.config, adm, m); reason != "" {
+	// Who the caller is decides whether it runs at all, before any role. The
+	// reason is recorded whether or not it refuses: under observe it is the
+	// dry run of deny.
+	reason, refused := identityVerdict(gs.config, adm, m)
+	rg.IdentityStatus = reason
+	if refused {
 		rg.DeniedReason = reason
 		return
 	}

@@ -132,6 +132,13 @@ type Auth struct {
 	EntityName string `json:"entity_name,omitempty"`
 	GovernedBy string `json:"governed_by,omitempty"`
 
+	// IdentityStatus is what unknown_aliases=deny refuses the caller for
+	// ("unclaimed", "no native identity", "entity not governed", "entity
+	// suspended", "entity retired"), recorded in every mode; empty when its
+	// identity is accounted for. Under observe nothing is refused for it, so
+	// a status without a RoleDeniedReason is what deny would refuse.
+	IdentityStatus string `json:"identity_status,omitempty"`
+
 	// Policies
 	Policies      []string       `json:"policies,omitempty"`
 	PolicyResults *PolicyResults `json:"policy_results,omitempty"`

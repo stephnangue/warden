@@ -79,6 +79,13 @@ type RoleGrant struct {
 
 	// DeniedReason is one of the RoleDenied constants when GrantedBy is empty.
 	DeniedReason string
+
+	// IdentityStatus is what unknown_aliases=deny refuses the caller for, one
+	// of the identity RoleDenied constants, in every mode; empty when the
+	// caller's identity is accounted for, and for a human. Under observe it
+	// refuses nothing: it is deny's dry run. When it refuses, DeniedReason
+	// holds the same value.
+	IdentityStatus string
 }
 
 // Granted reports whether g grants its role.

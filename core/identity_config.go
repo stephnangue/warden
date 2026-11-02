@@ -35,6 +35,18 @@ type identityConfig struct {
 	// never refused for an unknown or ungoverned native identity, sorted and
 	// without repeats.
 	ExemptMounts []string `json:"exempt_mounts"`
+
+	// unreadable marks the config a namespace runs under because its stored
+	// one could not be read (deny, nothing exempt). Never stored; a write or a
+	// reset replaces it.
+	unreadable bool
+}
+
+// unreadableIdentityConfig is what a namespace whose stored config cannot be
+// read runs under: deny with nothing exempt, the strictest the record could
+// have said.
+func unreadableIdentityConfig() *identityConfig {
+	return &identityConfig{UnknownAliases: unknownAliasesDeny, unreadable: true}
 }
 
 // mode returns the unknown_aliases mode, the default for a nil config.
@@ -66,7 +78,7 @@ func (c *identityConfig) clone() *identityConfig {
 	if c == nil {
 		return &identityConfig{UnknownAliases: unknownAliasesObserve}
 	}
-	return &identityConfig{UnknownAliases: c.mode(), ExemptMounts: slices.Clone(c.ExemptMounts)}
+	return &identityConfig{UnknownAliases: c.mode(), ExemptMounts: slices.Clone(c.ExemptMounts), unreadable: c.unreadable}
 }
 
 // parseUnknownAliases checks a mode.
@@ -117,6 +129,8 @@ func (s *IdentityStore) SetIdentityConfig(ctx context.Context, cfg *identityConf
 	if cfg == nil {
 		cfg = &identityConfig{}
 	}
+	// What is written is read back, whatever the namespace ran under before.
+	cfg.unreadable = false
 	mode, err := parseUnknownAliases(cfg.mode())
 	if err != nil {
 		return err
@@ -181,9 +195,13 @@ func (s *IdentityStore) publishConfigLocked(nsID string, cfg *identityConfig) {
 }
 
 // loadConfigLocked reads the stored identity config of a namespace, nil when it
-// has none. A record that does not decode or validate is logged and read as the
-// defaults: refusing callers on a config nobody can read would be worse than
-// admitting them as an unconfigured namespace does. Caller holds mu.
+// has none. A record that does not decode or validate (one a newer version
+// wrote, say) is logged and loaded as unreadableIdentityConfig: the record
+// may have said deny, so the namespace fails closed rather than admitting
+// callers the operator chose to refuse, and a read of the config warns. A
+// token no mount issued is never judged, so root can always write or reset it.
+// Failing the load instead would keep every namespace sealed over one record.
+// Caller holds mu.
 func (s *IdentityStore) loadConfigLocked(ctx context.Context, ns *namespace.Namespace) (*identityConfig, error) {
 	entry, err := s.storage.Get(ctx, identityConfigKey(ns.UUID))
 	if err != nil {
@@ -204,9 +222,10 @@ func (s *IdentityStore) loadConfigLocked(ctx context.Context, ns *namespace.Name
 		_, err = parseUnknownAliases(stored.Config.mode())
 	}
 	if err != nil {
-		s.logger.Warn("ignoring an identity config that cannot be loaded; the namespace uses the defaults",
+		s.logger.Error("the stored identity config cannot be loaded; the namespace runs under unknown_aliases=deny "+
+			"with no exempt mounts until it is written or reset",
 			logger.String("namespace", ns.Path), logger.Err(err))
-		return nil, nil
+		return unreadableIdentityConfig(), nil
 	}
 	cfg := stored.Config.clone()
 	slices.Sort(cfg.ExemptMounts)

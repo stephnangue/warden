@@ -243,7 +243,7 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 		// The identity verdict a request through this mount would meet: a
 		// refused identity is granted nothing here either, so the menu never
 		// lists a role its next request is refused.
-		if identityVerdict(gs.config, r.adm, m) == "" {
+		if _, refused := identityVerdict(gs.config, r.adm, m); !refused {
 			grants[mount] = m.Roles
 		}
 		admitted = append(admitted, discoveryAdmitted{mount: mount, adm: r.adm, membership: m})

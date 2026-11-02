@@ -6,43 +6,48 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// identityVerdict decides whether an agent admitted as adm, whose membership
-// m resolved its entity of record (m.Entity, nil when unclaimed), may run at
-// all in a namespace configured by cfg, before any role is considered. It
-// returns a logical.RoleDenied* reason, or "" to go on to the role.
+// identityVerdict judges an agent admitted as adm, whose membership m
+// resolved its entity of record (m.Entity, nil when unclaimed), in a namespace
+// configured by cfg, before any role is considered. It returns the
+// logical.RoleDenied* reason unknown_aliases=deny refuses the caller for ("" when
+// it admits it), and whether the caller is refused for it in the mode in force:
 //
 //   - A claimed caller whose entity is suspended or retired is refused in every
 //     mode, whatever its mount: the kill switch.
-//   - Under unknown_aliases=deny, unless the caller's mount is exempt, a caller
-//     that presents no native identity, one no entity claims, and one whose
-//     entity is not governed are refused.
+//   - Unless the caller's mount is exempt, a caller that presents no native
+//     identity, one no entity claims, and one whose entity is not governed get
+//     their reason in every mode, and are refused for it under deny only.
+//     Under observe the reason is what deny would refuse them for: the dry run
+//     audit records.
 //
 // A human admission is never judged: humans are never claimed, and their roles
 // come from their groups alone. It does not allocate.
-func identityVerdict(cfg *identityConfig, adm *logical.Admission, m *logical.Membership) string {
+func identityVerdict(cfg *identityConfig, adm *logical.Admission, m *logical.Membership) (reason string, refused bool) {
 	if adm.Kind == logical.EntityKindHuman || (m.Naming != nil && m.Naming.Kind == logical.EntityKindHuman) {
-		return ""
+		return "", false
 	}
 	if e := m.Entity; e != nil {
 		switch e.State {
 		case logical.EntityStateSuspended:
-			return logical.RoleDeniedEntitySuspended
+			return logical.RoleDeniedEntitySuspended, true
 		case logical.EntityStateRetired:
-			return logical.RoleDeniedEntityRetired
+			return logical.RoleDeniedEntityRetired, true
 		}
 	}
-	if cfg.mode() != unknownAliasesDeny || cfg.exempt(adm.MountAccessor) {
-		return ""
+	if cfg.exempt(adm.MountAccessor) {
+		return "", false
 	}
 	switch {
 	case adm.AliasName == "":
-		return logical.RoleDeniedIdentityNone
+		reason = logical.RoleDeniedIdentityNone
 	case m.Entity == nil:
-		return logical.RoleDeniedIdentityUnclaimed
+		reason = logical.RoleDeniedIdentityUnclaimed
 	case m.Entity.GovernedBy() == "":
-		return logical.RoleDeniedEntityNotGoverned
+		reason = logical.RoleDeniedEntityNotGoverned
+	default:
+		return "", false
 	}
-	return ""
+	return reason, cfg.mode() == unknownAliasesDeny
 }
 
 // identityRefusalMessage words an identity verdict's refusal for the caller,

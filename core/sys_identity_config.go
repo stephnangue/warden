@@ -60,11 +60,16 @@ func (b *SystemBackend) identityConfigToMap(cfg *identityConfig) map[string]any 
 	}
 }
 
-// identityConfigWarnings says what in cfg has no effect: an exempt mount that
-// admits humans (their tickets are never judged by identity), and an exempt
-// accessor no mount carries any more.
+// identityConfigWarnings says that cfg stands in for a stored config that
+// cannot be read, and what in cfg has no effect: an exempt mount that admits
+// humans (their tickets are never judged by identity), and an exempt accessor
+// no mount carries any more.
 func (b *SystemBackend) identityConfigWarnings(ctx context.Context, cfg *identityConfig) []string {
 	var warnings []string
+	if cfg.unreadable {
+		warnings = append(warnings, "the stored identity config cannot be read (see the server log); this namespace "+
+			"runs under unknown_aliases=deny with no exempt mounts until the config is written or reset")
+	}
 	for _, acc := range cfg.ExemptMounts {
 		path := b.core.aliasMountPath(acc)
 		if path == "" {
@@ -160,5 +165,8 @@ func writerVerdict(ctx context.Context, cfg *identityConfig, te *logical.TokenEn
 	if ns, err := namespace.FromContext(ctx); err != nil || ns.ID != te.NamespaceID {
 		return ""
 	}
-	return identityVerdict(cfg, te.Admission, &logical.Membership{Naming: te.Admission.Mount.Load(), Entity: te.Entity})
+	if reason, refused := identityVerdict(cfg, te.Admission, &logical.Membership{Naming: te.Admission.Mount.Load(), Entity: te.Entity}); refused {
+		return reason
+	}
+	return ""
 }

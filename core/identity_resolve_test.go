@@ -6,15 +6,19 @@ import (
 	"testing"
 	"time"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
 
 // Every cell of the identity verdict: rows A–D under observe and deny, with
-// and without an exempt mount, and a human admission, never judged.
+// and without an exempt mount, and a human admission, never judged. Under
+// observe, rows A, B and D carry the reason deny would refuse them for and
+// refuse nothing; C refuses in every mode.
 func TestIdentityVerdict_Rows(t *testing.T) {
 	agent := &logical.MountNaming{Kind: logical.EntityKindAgent}
 	human := &logical.MountNaming{Kind: logical.EntityKindHuman}
@@ -38,25 +42,39 @@ func TestIdentityVerdict_Rows(t *testing.T) {
 		"D claimed, ungoverned": {"repo:x", ungoverned},
 		"governed and active":   {"repo:x", governed},
 	}
-	want := map[string]map[string]string{ // row -> config -> reason
-		"A no native identity":  {"observe": "", "deny": logical.RoleDeniedIdentityNone, "deny+exempt": ""},
-		"B unclaimed":           {"observe": "", "deny": logical.RoleDeniedIdentityUnclaimed, "deny+exempt": ""},
-		"C suspended":           {"observe": logical.RoleDeniedEntitySuspended, "deny": logical.RoleDeniedEntitySuspended, "deny+exempt": logical.RoleDeniedEntitySuspended},
-		"C retired":             {"observe": logical.RoleDeniedEntityRetired, "deny": logical.RoleDeniedEntityRetired, "deny+exempt": logical.RoleDeniedEntityRetired},
-		"D claimed, ungoverned": {"observe": "", "deny": logical.RoleDeniedEntityNotGoverned, "deny+exempt": ""},
-		"governed and active":   {"observe": "", "deny": "", "deny+exempt": ""},
+	type verdict struct {
+		reason  string
+		refused bool
+	}
+	admit := verdict{}
+	none := logical.RoleDeniedIdentityNone
+	unclaimed := logical.RoleDeniedIdentityUnclaimed
+	notGoverned := logical.RoleDeniedEntityNotGoverned
+	kill := func(r string) map[string]verdict {
+		return map[string]verdict{"observe": {r, true}, "deny": {r, true}, "deny+exempt": {r, true}}
+	}
+	want := map[string]map[string]verdict{ // row -> config -> verdict
+		"A no native identity":  {"observe": {none, false}, "deny": {none, true}, "deny+exempt": admit},
+		"B unclaimed":           {"observe": {unclaimed, false}, "deny": {unclaimed, true}, "deny+exempt": admit},
+		"C suspended":           kill(logical.RoleDeniedEntitySuspended),
+		"C retired":             kill(logical.RoleDeniedEntityRetired),
+		"D claimed, ungoverned": {"observe": {notGoverned, false}, "deny": {notGoverned, true}, "deny+exempt": admit},
+		"governed and active":   {"observe": admit, "deny": admit, "deny+exempt": admit},
 	}
 	configs := map[string]*identityConfig{"observe": nil, "deny": deny, "deny+exempt": denyExempt}
+	judge := func(cfg *identityConfig, adm *logical.Admission, m *logical.Membership) verdict {
+		reason, refused := identityVerdict(cfg, adm, m)
+		return verdict{reason, refused}
+	}
 	for name, r := range rows {
 		for cname, cfg := range configs {
 			adm := &logical.Admission{MountAccessor: "acc", AliasName: r.alias}
-			got := identityVerdict(cfg, adm, &logical.Membership{Naming: agent, Entity: r.entity})
-			assert.Equal(t, want[name][cname], got, "%s under %s", name, cname)
+			assert.Equal(t, want[name][cname], judge(cfg, adm, &logical.Membership{Naming: agent, Entity: r.entity}), "%s under %s", name, cname)
 
 			// A human is never judged, in any mode.
-			assert.Empty(t, identityVerdict(cfg, adm, &logical.Membership{Naming: human, Entity: r.entity}), "human, %s under %s", name, cname)
+			assert.Equal(t, admit, judge(cfg, adm, &logical.Membership{Naming: human, Entity: r.entity}), "human, %s under %s", name, cname)
 			humanAdm := &logical.Admission{MountAccessor: "acc", AliasName: r.alias, Kind: logical.EntityKindHuman}
-			assert.Empty(t, identityVerdict(cfg, humanAdm, &logical.Membership{Naming: agent, Entity: r.entity}), "ticket, %s under %s", name, cname)
+			assert.Equal(t, admit, judge(cfg, humanAdm, &logical.Membership{Naming: agent, Entity: r.entity}), "ticket, %s under %s", name, cname)
 		}
 	}
 	assert.Zero(t, testing.AllocsPerRun(100, func() {
@@ -102,6 +120,42 @@ func (e *grantEnv) setConfig(cfg *identityConfig) {
 // Through CheckToken, with the cached admission: the entity resolves on the
 // next request after every identity write, the kill switch refuses in every
 // mode, and deny refuses the unknown and the ungoverned unless exempt.
+// Under observe the identity status is deny's dry run: recorded, refusing
+// nothing; under deny it refuses with the same value; once accounted for it
+// is empty. Audit carries it either way.
+func TestIdentityResolution_StatusDryRun(t *testing.T) {
+	e := newIdentityEnv(t)
+	status := func(want string) {
+		t.Helper()
+		req, _, te, err := e.check("deploy")
+		requireGranted(t, req, te, err, "deploy")
+		assert.Equal(t, want, req.RoleGrant().IdentityStatus)
+		var entry audit.LogEntry
+		stampRoleGrant(&entry, req)
+		assert.Equal(t, want, entry.Auth.IdentityStatus)
+		assert.Empty(t, entry.Auth.RoleDeniedReason)
+	}
+	status(logical.RoleDeniedIdentityUnclaimed)
+	e.claim("infra-agent")
+	status(logical.RoleDeniedEntityNotGoverned)
+
+	e.setConfig(&identityConfig{UnknownAliases: unknownAliasesDeny})
+	req, _, _, err := e.check("deploy")
+	requireDenied(t, req, err, logical.RoleDeniedEntityNotGoverned)
+	assert.Equal(t, logical.RoleDeniedEntityNotGoverned, req.RoleGrant().IdentityStatus)
+
+	e.govern("infra-agent")
+	status("")
+	e.setConfig(nil)
+	status("")
+
+	// An exempt mount's unclaimed caller is not one deny would refuse.
+	_, err = e.c.identityStore.DeleteEntity(e.ctx, "infra-agent", "", false)
+	require.NoError(t, err)
+	e.setConfig(&identityConfig{ExemptMounts: []string{grantAccessor}})
+	status("")
+}
+
 func TestIdentityResolution_RequestPath(t *testing.T) {
 	e := newIdentityEnv(t)
 
@@ -413,6 +467,48 @@ func TestIdentityConfig_SurvivesPublishes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, unknownAliasesDeny, c.identityStore.namespaceIndex(namespace.RootNamespaceID).config.mode(),
 		"the config outlives every group and entity")
+}
+
+// A stored config that cannot be read loads as deny with nothing exempt, and a
+// read says so, until a write or a reset replaces it.
+func TestIdentityConfig_UnreadableFailsClosed(t *testing.T) {
+	for name, record := range map[string]string{
+		"garbage":        `{not json`,
+		"future version": `{"version": 2, "config": {"unknown_aliases": "observe"}}`,
+		"unknown mode":   `{"version": 1, "config": {"unknown_aliases": "allow-all"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := setupEntityMounts(t)
+			ctx := rootCtx()
+			jwt := accessorOf(t, c, "jwt/")
+			require.NoError(t, c.identityStore.SetIdentityConfig(ctx, &identityConfig{ExemptMounts: []string{jwt}}))
+			require.NoError(t, c.identityStore.storage.Put(ctx, &sdklogical.StorageEntry{
+				Key: identityConfigKey(namespace.RootNamespaceUUID), Value: []byte(record),
+			}))
+			c.identityStore.Unload()
+			require.NoError(t, c.identityStore.Load(ctx))
+
+			cfg := c.identityStore.namespaceIndex(namespace.RootNamespaceID).config
+			assert.Equal(t, unknownAliasesDeny, cfg.mode())
+			assert.False(t, cfg.exempt(jwt), "nothing is exempt")
+
+			resp := tokenRequest(t, c, ctx, rootEntry, logical.ReadOperation, "identity/config", nil)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+			assert.Equal(t, "deny", resp.Data["unknown_aliases"])
+			require.NotEmpty(t, respWarnings(resp))
+			assert.Contains(t, respWarnings(resp)[0], "cannot be read")
+
+			// A write replaces it: no more warning, and it loads back as written.
+			resp = tokenRequest(t, c, ctx, rootEntry, logical.UpdateOperation, "identity/config", map[string]any{"unknown_aliases": "observe"})
+			require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+			assert.Empty(t, respWarnings(resp))
+			resp = tokenRequest(t, c, ctx, rootEntry, logical.ReadOperation, "identity/config", nil)
+			assert.Empty(t, respWarnings(resp))
+			c.identityStore.Unload()
+			require.NoError(t, c.identityStore.Load(ctx))
+			assert.Equal(t, unknownAliasesObserve, c.identityStore.namespaceIndex(namespace.RootNamespaceID).config.mode())
+		})
+	}
 }
 
 // The lockout guard: a config that would refuse its writer, and a write on the
