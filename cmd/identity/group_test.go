@@ -132,7 +132,7 @@ func setupFake(t *testing.T, status int, body string) (*fakeWarden, *bytes.Buffe
 		createJSON, updateJSON, updateExpectedHash = "", "", ""
 		createFlags.reset()
 		updateFlags.reset()
-		deleteForce, deleteExpectedHash, deleteType = false, "", ""
+		deleteForce, deleteSponsored, deleteExpectedHash, deleteType = false, false, "", ""
 		listRole, listType, readType = "", "", ""
 	})
 	return f, stdout, stderr
@@ -396,7 +396,34 @@ func TestGroupDelete(t *testing.T) {
 	assert.Equal(t, "/v1/sys/identity/group/g", req.path)
 	assert.Equal(t, "virtual", req.query.Get("type"))
 	assert.Equal(t, "h1", req.query.Get("expected_hash"))
+	assert.Empty(t, req.query.Get("force"), "-force only skips the prompt")
 	assert.Equal(t, true, decodeOut(t, stdout)["deleted"])
+}
+
+// -sponsored asks the server to delete a group that sponsors entities, whose
+// warning goes to stderr and stays in the structured output.
+func TestGroupDelete_Sponsored(t *testing.T) {
+	f, stdout, stderr := setupFake(t, http.StatusOK,
+		`{"data":{"name":"leads","warnings":["forced: group \"leads\" sponsored 1 entities; their sponsor was removed and they are ungoverned: /a"]}}`)
+	deleteForce, deleteSponsored, deleteType = true, true, "virtual"
+	require.NoError(t, runGroupDelete(GroupDeleteCmd, []string{"leads"}))
+	assert.Equal(t, "true", f.last(t).query.Get("force"))
+	assert.Contains(t, stderr.String(), `warning: forced: group "leads" sponsored 1 entities`)
+	assert.Contains(t, stdout.String(), `"warnings": [`)
+}
+
+// A sponsor group refused without -sponsored says which flag sends force.
+func TestGroupDelete_SponsoredHint(t *testing.T) {
+	setupFake(t, http.StatusConflict,
+		`{"errors":["group \"leads\" sponsors 1 entities and is a pending handover for 0; hand them over first, or pass force=true"]}`)
+	deleteForce, deleteType = true, "virtual"
+	err := runGroupDelete(GroupDeleteCmd, []string{"leads"})
+	require.Error(t, err)
+
+	stderr := &bytes.Buffer{}
+	helpers.SetErrorWriter(stderr)
+	assert.Equal(t, helpers.ExitConflict, helpers.RenderError(err))
+	assert.Contains(t, stderr.String(), `"hint": "pass -sponsored to delete it anyway`)
 }
 
 // TestGroupDelete_ReadsType: without -type the command reads the group and

@@ -8,8 +8,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // EntityState is an entity's lifecycle state.
@@ -43,14 +41,13 @@ func ParseEntityState(s string) (EntityState, error) {
 }
 
 // GovernedByWarden is the governed_by value of an entity governed by Warden
-// itself: named, with a sponsor and a description, and linked to no directory.
+// itself: with an accepted sponsor and a description, and linked to no
+// directory.
 const GovernedByWarden = "warden"
 
 // Bounds on an entity.
 const (
 	MaxEntityDescriptionBytes = 1024
-	MaxEntitySponsors         = 16
-	MaxEntitySponsorBytes     = 256
 	MaxEntityAliases          = 32
 	MaxEntityProfileBytes     = 256
 
@@ -77,32 +74,97 @@ type EntityAlias struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+// SponsorType says what a sponsor entry names. One type exists; the tag is
+// there so another can be added later, with a storage version bump.
+type SponsorType string
+
+// SponsorTypeGroup names a virtual group of humans, by namespace and group ID.
+const SponsorTypeGroup SponsorType = "group"
+
+// SponsorActor is who proposed or accepted a sponsor: the native identity of
+// the human (its mount's accessor and its alias), which stays unambiguous when
+// two mounts map the same principal, and the principal beside them for
+// reading. A token no mount issued (root, a service token) has the principal
+// alone.
+type SponsorActor struct {
+	MountAccessor string `json:"mount_accessor,omitempty"`
+	Alias         string `json:"alias,omitempty"`
+	Principal     string `json:"principal"`
+}
+
+// EntitySponsor is a team accountable for an entity: the entity's sponsor once
+// a member of the team accepted it (AcceptedAt set), a proposed handover
+// before.
+type EntitySponsor struct {
+	Type SponsorType `json:"type"`
+
+	// Namespace is the ID of the group's namespace: the entity's, or one of
+	// its ancestors'.
+	Namespace string `json:"namespace"`
+
+	// GroupID is the group's ID, so a group deleted and created again under
+	// the same name is never taken for the one the entry names.
+	GroupID string `json:"group_id"`
+
+	// Group is the group's name.
+	Group string `json:"group"`
+
+	AddedBy    SponsorActor `json:"added_by"`
+	AddedAt    time.Time    `json:"added_at"`
+	AcceptedBy SponsorActor `json:"accepted_by,omitzero"`
+	AcceptedAt time.Time    `json:"accepted_at,omitzero"`
+}
+
+// Same reports whether s and o name the same team: both nil, or the same
+// group of the same namespace.
+func (s *EntitySponsor) Same(o *EntitySponsor) bool {
+	if s == nil || o == nil {
+		return s == o
+	}
+	return s.Namespace == o.Namespace && s.GroupID == o.GroupID
+}
+
+// clone returns a copy of s, or nil.
+func (s *EntitySponsor) clone() *EntitySponsor {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	return &out
+}
+
 // Entity is an identity of record in Warden: one accountable agent, the native
 // identities (aliases) it presents through any number of auth mounts, the
-// humans accountable for it (sponsors) and its lifecycle state.
+// team accountable for it (its sponsor) and its lifecycle state.
 //
 // An *Entity published by the identity store is never written again: a write
 // builds a new value and publishes it, so any number of readers share one
 // without a lock. Code that wants to change an entity works on Clone().
 type Entity struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Kind        string            `json:"kind"` // EntityKindAgent (v1); fixed at creation
-	Description string            `json:"description,omitempty"`
-	Sponsors    []string          `json:"sponsors,omitempty"` // sorted, deduplicated
-	State       EntityState       `json:"state"`
-	Profile     *AgentProfile     `json:"profile,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	Aliases     []EntityAlias     `json:"aliases,omitempty"` // sorted by (MountAccessor, Name)
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"` // EntityKindAgent (v1); fixed at creation
+	Description string `json:"description,omitempty"`
+
+	// Sponsor is the accepted sponsor, which counts toward governance;
+	// PendingSponsor a proposed handover, which never does. They never name
+	// the same group.
+	Sponsor        *EntitySponsor `json:"sponsor,omitempty"`
+	PendingSponsor *EntitySponsor `json:"pending_sponsor,omitempty"`
+
+	State     EntityState       `json:"state"`
+	Profile   *AgentProfile     `json:"profile,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	Aliases   []EntityAlias     `json:"aliases,omitempty"` // sorted by (MountAccessor, Name)
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
 }
 
 // GovernedBy returns what governs the entity, derived from its fields and never
-// written: GovernedByWarden when it has at least one sponsor and a
-// description, "" (ungoverned) otherwise.
+// written: GovernedByWarden when it has an accepted sponsor and a
+// description, "" (ungoverned) otherwise. A pending handover changes nothing.
 func (e *Entity) GovernedBy() string {
-	if e == nil || len(e.Sponsors) == 0 || strings.TrimSpace(e.Description) == "" {
+	if e == nil || e.Sponsor == nil || strings.TrimSpace(e.Description) == "" {
 		return ""
 	}
 	return GovernedByWarden
@@ -111,17 +173,21 @@ func (e *Entity) GovernedBy() string {
 // UngovernedReason says what an ungoverned entity lacks, or "" for a governed
 // one.
 func (e *Entity) UngovernedReason() string {
-	switch {
-	case e == nil:
+	if e == nil {
 		return ""
-	case len(e.Sponsors) == 0 && strings.TrimSpace(e.Description) == "":
-		return "no sponsor and no description"
-	case len(e.Sponsors) == 0:
-		return "no sponsor"
-	case strings.TrimSpace(e.Description) == "":
-		return "no description"
 	}
-	return ""
+	var missing []string
+	if e.Sponsor == nil {
+		reason := "no sponsor"
+		if p := e.PendingSponsor; p != nil {
+			reason += fmt.Sprintf(" (handover to group %q pending)", p.Group)
+		}
+		missing = append(missing, reason)
+	}
+	if strings.TrimSpace(e.Description) == "" {
+		missing = append(missing, "no description")
+	}
+	return strings.Join(missing, " and ")
 }
 
 // Clone returns a deep copy of e, or nil for a nil entity. Its slices have no
@@ -131,7 +197,8 @@ func (e *Entity) Clone() *Entity {
 		return nil
 	}
 	out := *e
-	out.Sponsors = slices.Clip(slices.Clone(e.Sponsors))
+	out.Sponsor = e.Sponsor.clone()
+	out.PendingSponsor = e.PendingSponsor.clone()
 	out.Aliases = slices.Clip(slices.Clone(e.Aliases))
 	out.Metadata = maps.Clone(e.Metadata)
 	if e.Profile != nil {
@@ -141,10 +208,11 @@ func (e *Entity) Clone() *Entity {
 	return &out
 }
 
-// Hash identifies the entity's content: its name, kind, description, sponsors,
-// state, profile, metadata and aliases. A writer that read an entity passes
-// its hash back to make the write conditional on nothing having changed since.
-// The ID and the timestamps are not part of it.
+// Hash identifies the entity's content: its name, kind, description, sponsor
+// and pending handover (who proposed and accepted each, not when), state,
+// profile, metadata and aliases. A writer that read an entity passes its hash
+// back to make the write conditional on nothing having changed since. The ID
+// and the timestamps are not part of it.
 func (e *Entity) Hash() string {
 	h := sha256.New()
 	// Length-prefixed, so no choice of values can make two different entities
@@ -153,9 +221,23 @@ func (e *Entity) Hash() string {
 	field(e.Name)
 	field(e.Kind)
 	field(e.Description)
-	fmt.Fprintf(h, "%d:", len(e.Sponsors))
-	for _, s := range e.Sponsors {
-		field(s)
+	actor := func(a SponsorActor) {
+		field(a.MountAccessor)
+		field(a.Alias)
+		field(a.Principal)
+	}
+	for _, s := range []*EntitySponsor{e.Sponsor, e.PendingSponsor} {
+		if s == nil {
+			field("")
+			continue
+		}
+		field("sponsor")
+		field(string(s.Type))
+		field(s.Namespace)
+		field(s.GroupID)
+		field(s.Group)
+		actor(s.AddedBy)
+		actor(s.AcceptedBy)
 	}
 	field(string(e.State))
 	if e.Profile == nil {
@@ -197,19 +279,4 @@ func SortAliases(aliases []EntityAlias) {
 		}
 		return strings.Compare(a.Name, b.Name)
 	})
-}
-
-// ValidSponsor reports whether s can name a sponsor: non-empty, at most
-// MaxEntitySponsorBytes, valid UTF-8, without spaces or control characters (a
-// UPN or an email address in v1).
-func ValidSponsor(s string) bool {
-	if s == "" || len(s) > MaxEntitySponsorBytes || !utf8.ValidString(s) {
-		return false
-	}
-	for _, r := range s {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
 }

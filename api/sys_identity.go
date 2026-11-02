@@ -194,14 +194,17 @@ func (c *Sys) UpdateGroupWithContext(ctx context.Context, name string, input *Gr
 }
 
 // DeleteGroup deletes the group name, which must be of type groupType (the
-// server requires it). A non-empty expectedHash deletes it only if it still
-// has that hash.
-func (c *Sys) DeleteGroup(name, groupType, expectedHash string) error {
-	return c.DeleteGroupWithContext(context.Background(), name, groupType, expectedHash)
+// server requires it), and returns the server's warnings (nil when there are
+// none). A non-empty expectedHash deletes it only if it still has that hash.
+// A group that sponsors entities, or is a pending handover for some, is
+// deleted only with force: the handovers are cancelled and the entities lose
+// their sponsor, which a warning says.
+func (c *Sys) DeleteGroup(name, groupType, expectedHash string, force bool) ([]string, error) {
+	return c.DeleteGroupWithContext(context.Background(), name, groupType, expectedHash, force)
 }
 
 // DeleteGroupWithContext deletes the group name with context.
-func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, groupType, expectedHash string) error {
+func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, groupType, expectedHash string, force bool) ([]string, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
@@ -210,12 +213,22 @@ func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, groupType, expec
 	if expectedHash != "" {
 		r.Params.Set("expected_hash", expectedHash)
 	}
-	resp, err := c.c.rawRequestWithContext(ctx, r)
-	if err != nil {
-		return err
+	if force {
+		r.Params.Set("force", "true")
 	}
-	defer resp.Body.Close()
-	return nil
+	resp, err := c.c.rawRequestWithContext(ctx, r)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	if err != nil {
+		return nil, err
+	}
+	resource, perr := ParseResource(resp.Body)
+	if perr != nil || resource == nil || resource.Data == nil {
+		// The group is deleted; a body that does not parse only loses warnings.
+		return nil, nil
+	}
+	return parseWarnings(resource.Data["warnings"]), nil
 }
 
 // ListGroups lists the groups of the client's namespace, sorted by name. A
@@ -300,18 +313,19 @@ func (c *Sys) ReadIdentityUsageWithContext(ctx context.Context) (*IdentityUsage,
 }
 
 // Entity is a namespace entity as the server returns it: an agent of record,
-// the humans accountable for it (Sponsors), its lifecycle State (active,
-// suspended or retired) and the native identities it claims (Aliases).
-// GovernedBy is derived by the server: "warden" once the entity has a sponsor
-// and a description, "" before, with UngovernedReason saying what is missing.
-// Hash is what a conditional update or delete passes back as
-// EntityInput.ExpectedHash.
+// the team accountable for it (Sponsor) and a proposed handover to another
+// (PendingSponsor), its lifecycle State (active, suspended or retired) and the
+// native identities it claims (Aliases). GovernedBy is derived by the server:
+// "warden" once the entity has an accepted sponsor and a description, ""
+// before, with UngovernedReason saying what is missing. Hash is what a
+// conditional write passes back as its expected hash.
 type Entity struct {
 	ID               string            `json:"id"`
 	Name             string            `json:"name"`
 	Kind             string            `json:"kind"`
 	Description      string            `json:"description"`
-	Sponsors         []string          `json:"sponsors"`
+	Sponsor          *EntitySponsor    `json:"sponsor"`
+	PendingSponsor   *EntitySponsor    `json:"pending_sponsor"`
 	State            string            `json:"state"`
 	GovernedBy       string            `json:"governed_by"`
 	UngovernedReason string            `json:"ungoverned_reason"`
@@ -321,6 +335,53 @@ type Entity struct {
 	Hash             string            `json:"hash,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
+
+	// Warnings carries the server's notices about a write: a handover left
+	// pending, a group nobody can act for, an entity left ungoverned.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// EntitySponsor is a team accountable for an entity: a virtual group of
+// humans, by name and ID, in Namespace (by path, "/" for the root namespace).
+// Status is "accepted" for the sponsor, "pending" for a handover no member of
+// the group has accepted yet (AcceptedBy nil).
+type EntitySponsor struct {
+	Type       string        `json:"type"`
+	Namespace  string        `json:"namespace"`
+	Group      string        `json:"group"`
+	GroupID    string        `json:"group_id"`
+	AddedBy    SponsorActor  `json:"added_by"`
+	AddedAt    time.Time     `json:"added_at"`
+	AcceptedBy *SponsorActor `json:"accepted_by"`
+	AcceptedAt time.Time     `json:"accepted_at"`
+	Status     string        `json:"status"`
+}
+
+// SponsorActor is who proposed or accepted a sponsor: the person's native
+// identity on an auth mount (Mount by path, MountAccessor, Alias) and their
+// principal. A token no mount issued, root's, has the principal only.
+type SponsorActor struct {
+	Mount         string `json:"mount"`
+	MountAccessor string `json:"mount_accessor"`
+	Alias         string `json:"alias"`
+	Principal     string `json:"principal"`
+}
+
+// SponsorRef names a sponsor group: its name, and the namespace it lives in
+// by path, the entity's (when empty) or one of its ancestors ("/" for the
+// root namespace).
+type SponsorRef struct {
+	Group     string `json:"group"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// Body returns the request body naming r.
+func (r SponsorRef) Body() map[string]any {
+	out := map[string]any{"group": r.Group}
+	if r.Namespace != "" {
+		out["namespace"] = r.Namespace
+	}
+	return out
 }
 
 // EntityAlias is a native identity an entity claims: Name as the auth mount
@@ -355,15 +416,13 @@ func (a AliasRef) Body() map[string]any {
 }
 
 // EntityInput is the body of an entity create or update. On update a nil or
-// empty field keeps the stored value and a set one replaces it (an empty,
-// non-nil Sponsors clears the sponsors). Kind is set on create only; Aliases
-// are claimed on create only (afterwards through ClaimAlias and RemoveAlias);
-// NewName renames on update.
+// empty field keeps the stored value and a set one replaces it. Kind is set
+// on create only; Aliases are claimed on create only (afterwards through
+// ClaimAlias and RemoveAlias); NewName renames on update. The sponsor changes
+// through ProposeSponsor and RemoveSponsor, the state through SetEntityState.
 type EntityInput struct {
 	Kind        string
 	Description *string
-	Sponsors    []string
-	State       string
 	Profile     map[string]string // purpose, runtime, publisher
 	Metadata    map[string]string
 	Aliases     []AliasRef
@@ -384,12 +443,6 @@ func (in *EntityInput) body() map[string]any {
 	}
 	if in.Description != nil {
 		out["description"] = *in.Description
-	}
-	if in.Sponsors != nil {
-		out["sponsors"] = in.Sponsors
-	}
-	if in.State != "" {
-		out["state"] = in.State
 	}
 	if in.Profile != nil {
 		out["profile"] = in.Profile
@@ -416,12 +469,13 @@ func (in *EntityInput) body() map[string]any {
 // EntityFilter selects entities in ListEntities; zero fields select
 // everything.
 type EntityFilter struct {
-	Kind       string
-	State      string
-	Sponsor    string
-	GovernedBy string
-	Ungoverned bool // no sponsor or no description
-	Orphaned   bool // a native identity on an auth mount that no longer exists
+	Kind         string
+	State        string
+	Sponsor      string // the name of the sponsor group
+	SponsorState string // "accepted" (has a sponsor) or "pending" (has a handover)
+	GovernedBy   string
+	Ungoverned   bool // no sponsor or no description
+	Orphaned     bool // a native identity on an auth mount that no longer exists
 }
 
 // AliasClaim is what a claim returns: the native identity now claimed by
@@ -544,6 +598,70 @@ func (c *Sys) UpdateEntityWithContext(ctx context.Context, name string, input *E
 	return c.entityRequest(ctx, r)
 }
 
+// ProposeSponsor proposes the group ref names as the sponsor of the entity
+// name. When the caller is a member of the group it is the sponsor at once;
+// otherwise it is a pending handover, which a member accepts, and the
+// returned entity's Warnings say so. A non-empty expectedHash applies it only
+// if the entity still has that hash.
+func (c *Sys) ProposeSponsor(name string, ref SponsorRef, expectedHash string) (*Entity, error) {
+	return c.ProposeSponsorWithContext(context.Background(), name, ref, expectedHash)
+}
+
+// ProposeSponsorWithContext proposes the sponsor ref with context.
+func (c *Sys) ProposeSponsorWithContext(ctx context.Context, name string, ref SponsorRef, expectedHash string) (*Entity, error) {
+	body := ref.Body()
+	if expectedHash != "" {
+		body["expected_hash"] = expectedHash
+	}
+	return c.entityWrite(ctx, name, "sponsor", body)
+}
+
+// RemoveSponsor removes the sponsor of the entity name, which is ungoverned
+// after it, or with pending cancels its pending handover.
+func (c *Sys) RemoveSponsor(name string, pending bool, expectedHash string) (*Entity, error) {
+	return c.RemoveSponsorWithContext(context.Background(), name, pending, expectedHash)
+}
+
+// RemoveSponsorWithContext removes the sponsor with context.
+func (c *Sys) RemoveSponsorWithContext(ctx context.Context, name string, pending bool, expectedHash string) (*Entity, error) {
+	body := map[string]any{}
+	if pending {
+		body["pending"] = true
+	}
+	if expectedHash != "" {
+		body["expected_hash"] = expectedHash
+	}
+	return c.entityWrite(ctx, name, "sponsor/remove", body)
+}
+
+// SetEntityState moves the entity name to state: "active", "suspended" or
+// "retired", which is final.
+func (c *Sys) SetEntityState(name, state, expectedHash string) (*Entity, error) {
+	return c.SetEntityStateWithContext(context.Background(), name, state, expectedHash)
+}
+
+// SetEntityStateWithContext sets the entity's state with context.
+func (c *Sys) SetEntityStateWithContext(ctx context.Context, name, state, expectedHash string) (*Entity, error) {
+	body := map[string]any{"state": state}
+	if expectedHash != "" {
+		body["expected_hash"] = expectedHash
+	}
+	return c.entityWrite(ctx, name, "state", body)
+}
+
+// entityWrite posts body to the sub-path of the entity name and returns the
+// entity the server answers with.
+func (c *Sys) entityWrite(ctx context.Context, name, sub string, body map[string]any) (*Entity, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(http.MethodPost, fmt.Sprintf("/v1/sys/identity/entity/%s/%s", name, sub))
+	if err := r.SetJSONBody(body); err != nil {
+		return nil, err
+	}
+	return c.entityRequest(ctx, r)
+}
+
 // DeleteEntity deletes the entity name, releasing the native identities it
 // claims, and returns the server's warnings (nil when there are none). A
 // non-empty expectedHash deletes it only if it still has that hash. A retired
@@ -594,7 +712,9 @@ func (c *Sys) ListEntitiesWithContext(ctx context.Context, f *EntityFilter) ([]*
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/identity/entity")
 	r.Params.Set("warden-list", "true")
 	if f != nil {
-		for k, v := range map[string]string{"kind": f.Kind, "state": f.State, "sponsor": f.Sponsor, "governed_by": f.GovernedBy} {
+		for k, v := range map[string]string{
+			"kind": f.Kind, "state": f.State, "sponsor": f.Sponsor, "sponsor_state": f.SponsorState, "governed_by": f.GovernedBy,
+		} {
 			if v != "" {
 				r.Params.Set(k, v)
 			}

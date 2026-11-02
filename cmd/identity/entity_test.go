@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/cmd/helpers"
 	"github.com/stretchr/testify/assert"
@@ -18,7 +19,18 @@ const cannedEntity = `{"data":{
 	"name":"billing-agent",
 	"kind":"agent",
 	"description":"Reconciles supplier invoices",
-	"sponsors":["alice@corp.example"],
+	"sponsor":{
+		"type":"group","namespace":"/","group":"billing-leads","group_id":"g1",
+		"added_by":{"mount":"auth/oidc/","mount_accessor":"auth_oidc_1","alias":"0583-oid","principal":"0583-oid"},
+		"added_at":"2026-10-26T10:30:00Z",
+		"accepted_by":{"mount":"auth/oidc/","mount_accessor":"auth_oidc_1","alias":"0583-oid","principal":"0583-oid"},
+		"accepted_at":"2026-10-26T10:30:00Z","status":"accepted"
+	},
+	"pending_sponsor":{
+		"type":"group","namespace":"team-a/","group":"finance-oncall","group_id":"g2",
+		"added_by":{"mount":"","mount_accessor":"","alias":"","principal":"root"},
+		"added_at":"2026-10-26T10:45:00Z","accepted_by":null,"accepted_at":null,"status":"pending"
+	},
 	"state":"active",
 	"governed_by":"warden",
 	"ungoverned_reason":"",
@@ -44,6 +56,11 @@ func setupEntityFake(t *testing.T, status int, body string) (*fakeWarden, *bytes
 		entityCreateJSON, entityUpdateJSON, entityUpdateExpectedHash, entityReadID = "", "", "", ""
 		entityDeleteForce, entityDeleteRetired, entityDeleteExpectedHash = false, false, ""
 		entityListFilter = api.EntityFilter{}
+		sponsorProposeGroup, sponsorProposeNamespace, sponsorProposeExpectedHash, sponsorProposeJSON = "", "", "", ""
+		sponsorRemovePending, sponsorRemoveExpectedHash, entityStateExpectedHash = false, "", ""
+		for _, cmd := range []*cobra.Command{EntitySponsorProposeCmd, EntitySponsorRemoveCmd, EntityStateCmd} {
+			cmd.Flags().Visit(func(f *pflag.Flag) { f.Changed = false })
+		}
 		aliasAddFlags.reset()
 		aliasMoveFlags.reset()
 		aliasRemoveFlags.reset()
@@ -76,7 +93,6 @@ func TestEntityCreate_JSON(t *testing.T) {
 	cmd := freshEntityCmd(true)
 	entityCreateJSON = `{
 		"description": "Reconciles supplier invoices",
-		"sponsors": ["alice@corp.example"],
 		"aliases": [
 			{ "mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent" }
 		]
@@ -87,7 +103,6 @@ func TestEntityCreate_JSON(t *testing.T) {
 	assert.Equal(t, "/v1/sys/identity/entity/billing-agent", req.path)
 	assert.Equal(t, map[string]any{
 		"description": "Reconciles supplier invoices",
-		"sponsors":    []any{"alice@corp.example"},
 		"aliases": []any{
 			map[string]any{"mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent"},
 		},
@@ -105,7 +120,6 @@ func TestEntityCreate_TypedFlags(t *testing.T) {
 	f, _, _ := setupEntityFake(t, http.StatusCreated, cannedEntity)
 	cmd := freshEntityCmd(true)
 	require.NoError(t, cmd.Flags().Set("description", "Reconciles supplier invoices"))
-	require.NoError(t, cmd.Flags().Set("sponsors", "alice@corp.example,bob@corp.example"))
 	require.NoError(t, cmd.Flags().Set("profile", "runtime=langgraph"))
 	require.NoError(t, cmd.Flags().Set("alias", "auth/kubernetes/=system:serviceaccount:billing:agent"))
 	require.NoError(t, cmd.Flags().Set("alias", "auth/jwt/=repo:corp/x:env=prod"))
@@ -113,7 +127,6 @@ func TestEntityCreate_TypedFlags(t *testing.T) {
 	require.NoError(t, runEntityCreate(cmd, []string{"billing-agent"}))
 	assert.Equal(t, map[string]any{
 		"description": "Reconciles supplier invoices",
-		"sponsors":    []any{"alice@corp.example", "bob@corp.example"},
 		"profile":     map[string]any{"runtime": "langgraph"},
 		"aliases": []any{
 			map[string]any{"mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent"},
@@ -121,6 +134,8 @@ func TestEntityCreate_TypedFlags(t *testing.T) {
 		},
 	}, f.last(t).body)
 	assert.Nil(t, cmd.Flags().Lookup("new-name"), "-new-name is update only")
+	assert.Nil(t, cmd.Flags().Lookup("sponsors"), "the sponsor has commands of its own")
+	assert.Nil(t, cmd.Flags().Lookup("state"), "so has the state")
 }
 
 func TestEntityCreate_BadAliasFlag(t *testing.T) {
@@ -139,15 +154,15 @@ func TestEntityUpdate_Rename(t *testing.T) {
 	f, stdout, _ := setupEntityFake(t, http.StatusOK, cannedEntity)
 	cmd := freshEntityCmd(false)
 	require.NoError(t, cmd.Flags().Set("new-name", "invoice-agent"))
-	require.NoError(t, cmd.Flags().Set("sponsors", ""))
+	require.NoError(t, cmd.Flags().Set("description", ""))
 	require.NoError(t, cmd.Flags().Set("expected-hash", "e0"))
 
 	require.NoError(t, runEntityUpdate(cmd, []string{"billing-agent"}))
 	req := f.last(t)
 	assert.Equal(t, http.MethodPut, req.method)
 	assert.Equal(t, "/v1/sys/identity/entity/billing-agent", req.path)
-	assert.Equal(t, map[string]any{"new_name": "invoice-agent", "sponsors": []any{}, "expected_hash": "e0"}, req.body,
-		"an empty -sponsors is sent, to clear them")
+	assert.Equal(t, map[string]any{"new_name": "invoice-agent", "description": "", "expected_hash": "e0"}, req.body,
+		"an empty -description is sent, to clear it")
 	assert.Equal(t, "invoice-agent", decodeOut(t, stdout)["name"])
 	assert.Nil(t, cmd.Flags().Lookup("alias"), "-alias is create only")
 }
@@ -183,6 +198,8 @@ func TestEntityRead_Table(t *testing.T) {
 	assert.Contains(t, out, "auth/kubernetes/  system:serviceaccount:billing:agent")
 	assert.Contains(t, out, "auth_jwt_gone (mount gone)  repo:corp/x")
 	assert.Contains(t, out, "warden")
+	assert.Contains(t, out, "/billing-leads  accepted by auth/oidc/ 0583-oid")
+	assert.Contains(t, out, "team-a/finance-oncall  proposed by root")
 }
 
 // -retired asks the server to delete a retired entity; -force only skips the
@@ -231,16 +248,90 @@ func TestEntityDelete_RetiredHint(t *testing.T) {
 func TestEntityList_Filters(t *testing.T) {
 	f, stdout, _ := setupEntityFake(t, http.StatusOK, `{"data":{"keys":["billing-agent"],"entities":[`+
 		cannedEntity[len(`{"data":`):len(cannedEntity)-1]+`]}}`)
-	entityListFilter = api.EntityFilter{State: "active", Sponsor: "alice@corp.example", Ungoverned: true, Orphaned: true}
+	entityListFilter = api.EntityFilter{State: "active", Sponsor: "billing-leads", SponsorState: "pending", Ungoverned: true, Orphaned: true}
 	require.NoError(t, runEntityList(EntityListCmd, nil))
 	req := f.last(t)
 	assert.Equal(t, "/v1/sys/identity/entity", req.path)
 	assert.Equal(t, "active", req.query.Get("state"))
-	assert.Equal(t, "alice@corp.example", req.query.Get("sponsor"))
+	assert.Equal(t, "billing-leads", req.query.Get("sponsor"))
+	assert.Equal(t, "pending", req.query.Get("sponsor_state"))
 	assert.Equal(t, "true", req.query.Get("ungoverned"))
 	assert.Equal(t, "true", req.query.Get("orphaned"))
 	assert.Empty(t, req.query.Get("kind"), "unset filters are not sent")
 	assert.Contains(t, stdout.String(), `"billing-agent"`)
+	assert.Contains(t, stdout.String(), `"group": "finance-oncall"`, "the pending handover is listed")
+
+	helpers.SetOutputFormat("table")
+	out := captureStdout(t, func() { require.NoError(t, runEntityList(EntityListCmd, nil)) })
+	assert.Contains(t, out, "/billing-leads (pending: team-a/finance-oncall)")
+}
+
+func TestEntitySponsorPropose(t *testing.T) {
+	f, _, stderr := setupEntityFake(t, http.StatusOK,
+		`{"data":{"name":"billing-agent","warnings":["handover to /billing-leads is pending: a member must accept it"]}}`)
+	sponsorProposeGroup, sponsorProposeNamespace, sponsorProposeExpectedHash = "billing-leads", "/", "e1"
+	require.NoError(t, runSponsorPropose(EntitySponsorProposeCmd, []string{"billing-agent"}))
+	req := f.last(t)
+	assert.Equal(t, http.MethodPost, req.method)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent/sponsor", req.path)
+	assert.Equal(t, map[string]any{"group": "billing-leads", "namespace": "/", "expected_hash": "e1"}, req.body)
+	assert.Contains(t, stderr.String(), "warning: handover to /billing-leads is pending")
+
+	sponsorProposeGroup, sponsorProposeNamespace, sponsorProposeExpectedHash = "", "", ""
+	sponsorProposeJSON = `{"group": "finance-oncall"}`
+	require.NoError(t, runSponsorPropose(EntitySponsorProposeCmd, []string{"billing-agent"}))
+	assert.Equal(t, map[string]any{"group": "finance-oncall"}, f.last(t).body)
+
+	for _, payload := range []string{`{"namespace": "/"}`, `{"group": "x", "pending": true}`, `{"group": 5}`} {
+		sponsorProposeJSON = payload
+		err := runSponsorPropose(EntitySponsorProposeCmd, []string{"billing-agent"})
+		assert.True(t, errors.Is(err, helpers.ErrUsage), payload)
+	}
+	assert.Equal(t, 2, f.count(), "refused locally")
+}
+
+func TestEntitySponsorRemove(t *testing.T) {
+	f, _, _ := setupEntityFake(t, http.StatusOK, cannedEntity)
+	require.NoError(t, runSponsorRemove(EntitySponsorRemoveCmd, []string{"billing-agent"}))
+	req := f.last(t)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent/sponsor/remove", req.path)
+	assert.Empty(t, req.body)
+
+	sponsorRemovePending, sponsorRemoveExpectedHash = true, "e1"
+	require.NoError(t, runSponsorRemove(EntitySponsorRemoveCmd, []string{"billing-agent"}))
+	assert.Equal(t, map[string]any{"pending": true, "expected_hash": "e1"}, f.last(t).body)
+}
+
+// No identity command defines a flag named like the global -n/--namespace,
+// which would take the name and leave -n unknown on that command.
+func TestIdentityCommands_KeepTheGlobalNamespaceFlag(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if f := c.LocalNonPersistentFlags().Lookup("namespace"); f != nil {
+			t.Errorf("%s defines -namespace, which shadows the global -n", c.CommandPath())
+		}
+		if f := c.LocalNonPersistentFlags().ShorthandLookup("n"); f != nil {
+			t.Errorf("%s defines -%s with shorthand n, which shadows the global -n", c.CommandPath(), f.Name)
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(IdentityCmd)
+}
+
+func TestEntityState(t *testing.T) {
+	f, _, _ := setupEntityFake(t, http.StatusOK, cannedEntity)
+	entityStateExpectedHash = "e1"
+	require.NoError(t, runEntityState(EntityStateCmd, []string{"billing-agent", "suspended"}))
+	req := f.last(t)
+	assert.Equal(t, http.MethodPost, req.method)
+	assert.Equal(t, "/v1/sys/identity/entity/billing-agent/state", req.path)
+	assert.Equal(t, map[string]any{"state": "suspended", "expected_hash": "e1"}, req.body)
+
+	err := runEntityState(EntityStateCmd, []string{"billing-agent", "paused"})
+	assert.True(t, errors.Is(err, helpers.ErrUsage))
+	assert.Equal(t, 1, f.count())
 }
 
 func TestAliasAdd_And_Move(t *testing.T) {
@@ -339,8 +430,6 @@ var schemaDocs = map[string]string{
 		"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{
 			"kind":{"type":"string"},
 			"description":{"type":"string"},
-			"sponsors":{"type":"array"},
-			"state":{"type":"string"},
 			"profile":{"type":"object"},
 			"metadata":{"type":"object"},
 			"aliases":{"type":"array"},
@@ -371,11 +460,11 @@ func TestEntity_DryRun(t *testing.T) {
 	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
 
 	cmd = freshEntityCmd(false)
-	require.NoError(t, cmd.Flags().Set("json", `{"sponsor": ["alice@corp.example"]}`))
+	require.NoError(t, cmd.Flags().Set("json", `{"descriptio": "x"}`))
 	err := runEntityUpdate(cmd, []string{"a"})
 	require.Error(t, err)
 	assert.True(t, helpers.IsValidationError(err))
-	assert.Contains(t, err.Error(), `did you mean "sponsors"`)
+	assert.Contains(t, err.Error(), `did you mean "description"`)
 
 	stdout.Reset()
 	cmd = freshAliasCmd(&aliasMoveFlags, claimCommand)
@@ -392,7 +481,7 @@ func TestEntity_JSONAndFlagsRejected(t *testing.T) {
 	f, _, _ := setupEntityFake(t, http.StatusOK, cannedEntity)
 
 	cmd := freshEntityCmd(true)
-	require.NoError(t, cmd.Flags().Set("sponsors", "alice@corp.example"))
+	require.NoError(t, cmd.Flags().Set("profile", "runtime=langgraph"))
 	require.NoError(t, cmd.Flags().Set("json", `{"description": "x"}`))
 	assert.True(t, errors.Is(runEntityCreate(cmd, []string{"a"}), helpers.ErrUsage), "create")
 

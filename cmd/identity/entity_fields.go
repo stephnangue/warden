@@ -11,13 +11,12 @@ import (
 
 // entityFlags are the typed flags create and update share. Only the flags the
 // user set are sent, so on update an omitted flag keeps the stored value and
-// an empty one (e.g. -sponsors="") clears it. -kind and -alias are create
-// only, -new-name update only.
+// an empty one (e.g. -description="") clears it. -kind and -alias are create
+// only, -new-name update only. The sponsor and the state change through
+// commands of their own ('entity sponsor', 'entity state').
 type entityFlags struct {
 	kind        string
 	description string
-	sponsors    []string
-	state       string
 	profile     map[string]string
 	metadata    map[string]string
 	aliases     []string
@@ -28,8 +27,6 @@ type entityFlags struct {
 var entityFlagNames = []struct{ flag, key string }{
 	{"kind", "kind"},
 	{"description", "description"},
-	{"sponsors", "sponsors"},
-	{"state", "state"},
 	{"profile", "profile"},
 	{"metadata", "metadata"},
 	{"alias", "aliases"},
@@ -46,9 +43,6 @@ func (f *entityFlags) bind(cmd *cobra.Command, create bool) {
 		fs.StringVar(&f.newName, "new-name", "", "Rename the entity; its ID does not change")
 	}
 	fs.StringVar(&f.description, "description", "", "What the agent does; with a sponsor, it makes the entity governed")
-	fs.StringSliceVar(&f.sponsors, "sponsors", nil,
-		"The humans accountable for the agent, as UPNs or email addresses (repeat or comma-separated)")
-	fs.StringVar(&f.state, "state", "", "active, suspended (reversible) or retired (final; the record becomes read-only)")
 	fs.StringToStringVar(&f.profile, "profile", nil, "Descriptive data: purpose=…, runtime=…, publisher=… (repeatable)")
 	fs.StringToStringVar(&f.metadata, "metadata", nil, "Free-form label (key=value, repeatable)")
 }
@@ -77,8 +71,6 @@ func (f *entityFlags) payload(cmd *cobra.Command) (map[string]any, error) {
 	}
 	set("kind", "kind", f.kind)
 	set("description", "description", f.description)
-	set("sponsors", "sponsors", stringsToAny(f.sponsors))
-	set("state", "state", f.state)
 	set("new-name", "new_name", f.newName)
 	set("profile", "profile", stringMapToAny(f.profile))
 	set("metadata", "metadata", stringMapToAny(f.metadata))
@@ -138,6 +130,52 @@ func aliasCell(a map[string]any) string {
 	return mount + "  " + cell(a["name"])
 }
 
+// sponsorGroup names a sponsor of an entity's response data by its group,
+// qualified with its namespace ("/billing-leads", "team-a/billing-leads"), or
+// "" when the entity has none.
+func sponsorGroup(v any) string {
+	sp, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	ns := cell(sp["namespace"])
+	if ns == "" || ns == "/" {
+		return "/" + cell(sp["group"])
+	}
+	return ns + cell(sp["group"])
+}
+
+// sponsorActorCell renders who proposed or accepted a sponsor: "<mount>
+// <alias>" for a person, the principal alone for a token no mount issued.
+func sponsorActorCell(v any) string {
+	a, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if alias := cell(a["alias"]); alias != "" {
+		mount := cell(a["mount"])
+		if mount == "" {
+			mount = cell(a["mount_accessor"])
+		}
+		return mount + " " + alias
+	}
+	return cell(a["principal"])
+}
+
+// sponsorCell renders a sponsor ("/billing-leads  accepted by auth/oidc/
+// 0583c1a7-…") or a pending handover ("/finance-oncall  proposed by …").
+func sponsorCell(v any) string {
+	g := sponsorGroup(v)
+	if g == "" {
+		return ""
+	}
+	sp := v.(map[string]any)
+	if by := sponsorActorCell(sp["accepted_by"]); by != "" {
+		return g + "  accepted by " + by
+	}
+	return g + "  proposed by " + sponsorActorCell(sp["added_by"])
+}
+
 // printEntityTable renders one entity's response data as a key/value table,
 // one row per native identity. Empty optional fields are left out; warnings
 // go to stderr through PrintWarnings.
@@ -157,7 +195,8 @@ func printEntityTable(data map[string]any) {
 		rows = append(rows, []any{"Governed By", "(ungoverned: " + cell(data["ungoverned_reason"]) + ")"})
 	}
 	add("Description", data["description"])
-	add("Sponsors", data["sponsors"])
+	add("Sponsor", sponsorCell(data["sponsor"]))
+	add("Pending Sponsor", sponsorCell(data["pending_sponsor"]))
 	add("Profile", data["profile"])
 	add("Metadata", data["metadata"])
 	for i, a := range aliasesOf(data["aliases"]) {

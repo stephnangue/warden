@@ -32,18 +32,18 @@ Usage: warden identity <subcommand> [options]
           ]
         }'
 
-  An entity is an agent of record: the humans accountable for it, its
-  lifecycle state, and the native identities it presents through auth
-  mounts (a service account, a SPIFFE ID, a JWT subject), each claimed by
-  one entity.
+  An entity is an agent of record: the team accountable for it (its
+  sponsor, a virtual group of humans), its lifecycle state, and the native
+  identities it presents through auth mounts (a service account, a SPIFFE
+  ID, a JWT subject), each claimed by one entity.
 
       $ warden identity entity create billing-agent -json '{
           "description": "Reconciles supplier invoices",
-          "sponsors": ["alice@corp.example"],
           "aliases": [
             { "mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent" }
           ]
         }'
+      $ warden identity entity sponsor propose billing-agent -group billing-leads
 
   Please see the individual subcommand help for detailed usage information.
 `,
@@ -56,15 +56,16 @@ var EntityCmd = &cobra.Command{
 Usage: warden identity entity <subcommand> [options]
 
   Manage the entities of the current namespace. An entity is an agent of
-  record: the humans accountable for it (sponsors), what it does
+  record: the team accountable for it (its sponsor), what it does
   (description, profile), its lifecycle state (active, suspended, retired),
   and the native identities it claims. "governed_by" is derived: "warden"
-  once it has a sponsor and a description.
+  once it has an accepted sponsor and a description.
 
       $ warden identity entity create billing-agent -json @billing-agent.json
+      $ warden identity entity sponsor propose billing-agent -group billing-leads
       $ warden identity entity list -ungoverned
       $ warden identity entity read billing-agent
-      $ warden identity entity update billing-agent -state=suspended
+      $ warden identity entity state billing-agent suspended
       $ warden identity entity lookup -mount=auth/kubernetes/ -name=system:serviceaccount:billing:agent
 
   A namespace's entities are capped; 'warden identity usage' shows the
@@ -153,6 +154,8 @@ func init() {
 	EntityCmd.AddCommand(EntityDeleteCmd)
 	EntityCmd.AddCommand(EntityListCmd)
 	EntityCmd.AddCommand(EntityLookupCmd)
+	EntityCmd.AddCommand(EntitySponsorCmd)
+	EntityCmd.AddCommand(EntityStateCmd)
 	AliasCmd.AddCommand(AliasAddCmd)
 	AliasCmd.AddCommand(AliasMoveCmd)
 	AliasCmd.AddCommand(AliasRemoveCmd)

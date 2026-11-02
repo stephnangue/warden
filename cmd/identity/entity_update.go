@@ -20,16 +20,14 @@ var (
 		Long: `
 Usage: warden identity entity update <name> [options]
 
-  Update an entity. A field you pass replaces the stored value, including
-  with an empty one ("sponsors": [] leaves the entity ungoverned); a field
-  you leave out keeps its value. "new_name" renames it; its ID does not
-  change. The kind never changes, and the native identities change only
-  through 'warden identity alias'. Requires a token with sudo on
+  Update an entity's description, profile and metadata. A field you pass
+  replaces the stored value, including with an empty one (an empty
+  description leaves the entity ungoverned); a field you leave out keeps
+  its value. "new_name" renames it; its ID does not change. The kind never
+  changes; the native identities change through 'warden identity alias',
+  the sponsor through 'warden identity entity sponsor', and the state
+  through 'warden identity entity state'. Requires a token with sudo on
   sys/identity/entity.
-
-  "state" is the lifecycle: active, suspended (reversible) or retired
-  (final; the record becomes read-only). The state is recorded on the
-  entity; it does not yet change how its requests are answered.
 
   Pass the hash from 'warden identity entity read' as expected_hash to
   apply the update only if nobody changed the entity since you read it;
@@ -41,17 +39,14 @@ Usage: warden identity entity update <name> [options]
 
       $ warden identity entity update ci-runner -json '{
           "description": "Builds and deploys the billing service",
-          "sponsors": ["bob@corp.example"]
-        }'
-
-      $ warden identity entity update old-batch-agent -json '{
-          "state": "retired"
+          "metadata": {
+            "team": "billing"
+          }
         }'
 
     Typed flags (human-friendly):
 
-      $ warden identity entity update billing-agent -state=suspended
-      $ warden identity entity update billing-agent -sponsors=alice@corp.example,bob@corp.example
+      $ warden identity entity update billing-agent -description="Reconciles supplier invoices"
       $ warden identity entity update billing-agent -new-name=invoice-agent
 
   Combine with -dry-run to validate the payload locally without sending

@@ -67,6 +67,11 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 					Type:        framework.TypeString,
 					Description: "Apply the update or delete only if the group still has this hash (from a read)",
 				},
+				"force": {
+					Type: framework.TypeBool,
+					Description: "On delete: delete a group that sponsors entities or is a pending handover; the handovers " +
+						"are cancelled and the entities lose their sponsor (DELETE sys/identity/group/<name>?force=true)",
+				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.CreateOperation: &framework.PathOperation{
@@ -180,6 +185,8 @@ func groupErrorResponse(name string, err error) *logical.Response {
 	switch {
 	case errors.As(err, new(*GroupTypeMismatchError)):
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error()))
+	case errors.As(err, new(*GroupSponsorsError)):
+		return logical.ErrorResponse(logical.ErrConflict(err.Error()))
 	case errors.Is(err, ErrGroupNotFound):
 		return logical.ErrorResponse(logical.ErrNotFoundf("group %q not found", name))
 	case errors.Is(err, ErrGroupAlreadyExists):
@@ -423,13 +430,16 @@ func (b *SystemBackend) handleGroupDelete(ctx context.Context, req *logical.Requ
 	if t == "" {
 		return logical.ErrorResponse(errGroupTypeRequired("delete")), nil
 	}
-	if err := b.core.identityStore.DeleteGroup(ctx, name, t, d.Get("expected_hash").(string)); err != nil {
+	warnings, err := b.core.identityStore.DeleteGroup(ctx, name, t, d.Get("expected_hash").(string), d.Get("force").(bool))
+	if err != nil {
 		return groupErrorResponse(name, err), nil
 	}
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"name":    name,
 		"message": fmt.Sprintf("Successfully deleted group %s", name),
-	}), nil
+	}
+	appendWarnings(data, warnings...)
+	return b.respondSuccess(data), nil
 }
 
 // handleGroupList handles LIST sys/identity/group. It returns the names under

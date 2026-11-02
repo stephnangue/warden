@@ -33,6 +33,20 @@ var (
 	// identities it claimed, so they stay claimed. They can be moved to
 	// another entity; the record is deleted only with force.
 	ErrEntityRetired = errors.New("entity is retired: its record is read-only")
+
+	// ErrSponsorNotFound refuses a write that acts on a sponsor or a pending
+	// handover the entity does not have.
+	ErrSponsorNotFound = errors.New("no such sponsor")
+
+	// ErrSponsorGroupNotFound and ErrSponsorGroupNotVirtual refuse a sponsor
+	// naming a group that does not exist (or was deleted and created again)
+	// or whose members are not humans' facts.
+	ErrSponsorGroupNotFound   = errors.New("sponsor group not found")
+	ErrSponsorGroupNotVirtual = errors.New("sponsor group is not a virtual group")
+
+	// ErrSponsorChanged refuses a write decided on a sponsor or a pending
+	// handover the entity no longer has.
+	ErrSponsorChanged = errors.New("sponsor changed concurrently")
 )
 
 // entityIDSegment is the path segment that reads an entity by ID
@@ -130,13 +144,28 @@ func (s *IdentityStore) LookupAlias(ctx context.Context, accessor, name string) 
 	return en.Clone(), nil
 }
 
+// SponsorState selects entities in a listing by their sponsor.
+type SponsorState string
+
+const (
+	// SponsorStateAccepted selects the entities with a sponsor.
+	SponsorStateAccepted SponsorState = "accepted"
+
+	// SponsorStatePending selects the entities with a pending handover,
+	// governed or not.
+	SponsorStatePending SponsorState = "pending"
+)
+
 // EntityFilter selects entities in a listing; zero fields select everything.
 type EntityFilter struct {
-	Kind       string
-	State      logical.EntityState
-	Sponsor    string
-	Ungoverned bool
-	GovernedBy string
+	Kind  string
+	State logical.EntityState
+	// Sponsor selects the entities whose sponsor is the group of that name,
+	// in any namespace.
+	Sponsor      string
+	SponsorState SponsorState
+	Ungoverned   bool
+	GovernedBy   string
 	// MountGone, when set, selects only entities claiming a native identity on
 	// a mount it reports gone: orphaned claims, left by a forced disable.
 	MountGone func(accessor string) bool
@@ -146,7 +175,9 @@ func (f EntityFilter) match(e *logical.Entity) bool {
 	switch {
 	case f.Kind != "" && e.Kind != f.Kind,
 		f.State != "" && e.State != f.State,
-		f.Sponsor != "" && !slices.Contains(e.Sponsors, f.Sponsor),
+		f.Sponsor != "" && (e.Sponsor == nil || e.Sponsor.Group != f.Sponsor),
+		f.SponsorState == SponsorStateAccepted && e.Sponsor == nil,
+		f.SponsorState == SponsorStatePending && e.PendingSponsor == nil,
 		f.Ungoverned && e.GovernedBy() != "",
 		f.GovernedBy != "" && e.GovernedBy() != f.GovernedBy,
 		f.MountGone != nil && !slices.ContainsFunc(e.Aliases, func(a logical.EntityAlias) bool {
@@ -178,8 +209,9 @@ func (s *IdentityStore) ListEntities(ctx context.Context, f EntityFilter) ([]*lo
 
 // CreateEntity stores a new entity in the namespace in ctx: e carries its
 // name, kind and governance fields, and the native identities it claims, each
-// naming its mount by accessor. e is normalized in place and receives its ID
-// and timestamps; the store keeps its own copy.
+// naming its mount by accessor. An entity is created without a sponsor: one is
+// proposed afterwards (ProposeSponsor). e is normalized in place and receives
+// its ID and timestamps; the store keeps its own copy.
 func (s *IdentityStore) CreateEntity(ctx context.Context, e *logical.Entity) error {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
@@ -187,6 +219,9 @@ func (s *IdentityStore) CreateEntity(ctx context.Context, e *logical.Entity) err
 	}
 	if err := validateEntity(e); err != nil {
 		return err
+	}
+	if e.Sponsor != nil || e.PendingSponsor != nil {
+		return logical.ErrBadRequest("an entity is created without a sponsor; propose one afterwards")
 	}
 	if e.Kind == "" {
 		e.Kind = logical.EntityKindAgent
@@ -239,13 +274,14 @@ func (s *IdentityStore) CreateEntity(ctx context.Context, e *logical.Entity) err
 	return nil
 }
 
-// UpdateEntity replaces the governance fields of the entity name in the
-// namespace in ctx with next's: its name (a rename), description, sponsors,
-// state, profile and metadata. The kind never changes, the aliases are
-// changed only through ClaimAlias and RemoveAlias, and a retired entity
-// refuses every update. When expectedHash is set the write applies only if the
-// stored entity still has that hash. next is normalized in place and receives
-// the stored ID, aliases and creation time.
+// UpdateEntity replaces the descriptive fields of the entity name in the
+// namespace in ctx with next's: its name (a rename), description, profile and
+// metadata. The kind never changes; the aliases change only through
+// ClaimAlias and RemoveAlias, the sponsor and the pending handover through the
+// sponsor methods, the state through SetEntityState; a retired entity refuses
+// every update. When expectedHash is set the write applies only if the stored
+// entity still has that hash. next is normalized in place and receives the
+// stored ID, aliases, sponsors, state and creation time.
 func (s *IdentityStore) UpdateEntity(ctx context.Context, name string, next *logical.Entity, expectedHash string) error {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
@@ -278,6 +314,7 @@ func (s *IdentityStore) UpdateEntity(ctx context.Context, name string, next *log
 		}
 		next.ID, next.Kind, next.CreatedAt, next.UpdatedAt = old.ID, old.Kind, old.CreatedAt, time.Now().UTC()
 		next.Aliases = slices.Clone(old.Aliases)
+		next.Sponsor, next.PendingSponsor, next.State = old.Sponsor, old.PendingSponsor, old.State
 		stored := newEntityEntry(next.Clone())
 		ents, err := cur.with(entityChange{old: old, next: stored})
 		if err != nil {
@@ -498,6 +535,196 @@ func (s *IdentityStore) RemoveAlias(ctx context.Context, name, accessor, alias s
 	return nil
 }
 
+// ProposeOutcome is what ProposeSponsor did.
+type ProposeOutcome int
+
+const (
+	// ProposeUnchanged: the group already sponsors the entity.
+	ProposeUnchanged ProposeOutcome = iota
+
+	// ProposeAccepted: the group is the sponsor now, accepted by its
+	// proposer, a member of it. It replaced any earlier sponsor in the same
+	// write.
+	ProposeAccepted
+
+	// ProposePending: the group is the pending handover now, replacing any
+	// earlier one; the sponsor, if any, is unchanged.
+	ProposePending
+)
+
+// ProposeSponsor proposes the group sp names as the sponsor of the entity name
+// in the namespace in ctx. accepted says its proposer is a member of the
+// group, decided by the caller: sp becomes the sponsor at once, accepted by
+// its proposer (a pending handover to the same group is consumed, any other
+// stays). Otherwise sp becomes the pending handover. Proposing the sponsor
+// changes nothing.
+//
+// The group is checked again under the lock: it must still exist with sp's ID
+// and be virtual, so a concurrent delete never leaves an entry naming a group
+// that is gone. A non-nil expectSponsor refuses the write, with
+// ErrSponsorChanged, unless the entity's sponsor is still that group: the
+// caller decided it on a read that a concurrent write may have overtaken.
+func (s *IdentityStore) ProposeSponsor(ctx context.Context, name string, sp *logical.EntitySponsor, accepted bool,
+	expectSponsor *logical.EntitySponsor, expectedHash string) (ProposeOutcome, error) {
+	if sp == nil {
+		return 0, logical.ErrBadRequest("sponsor is required")
+	}
+	entry := *sp
+	if accepted {
+		entry.AcceptedBy, entry.AcceptedAt = entry.AddedBy, entry.AddedAt
+	}
+	if err := validateSponsor(&entry, accepted); err != nil {
+		return 0, err
+	}
+	outcome := ProposeUnchanged
+	err := s.writeEntity(ctx, name, expectedHash, "proposed a sponsor", func(old *entityEntry, next *logical.Entity) (bool, error) {
+		if err := s.sponsorGroupLocked(&entry); err != nil {
+			return false, err
+		}
+		if expectSponsor != nil && !old.Sponsor.Same(expectSponsor) {
+			return false, ErrSponsorChanged
+		}
+		if entry.Same(old.Sponsor) {
+			return false, nil
+		}
+		if accepted {
+			next.Sponsor = &entry
+			if entry.Same(next.PendingSponsor) {
+				next.PendingSponsor = nil
+			}
+			outcome = ProposeAccepted
+		} else {
+			next.PendingSponsor = &entry
+			outcome = ProposePending
+		}
+		return true, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return outcome, nil
+}
+
+// CancelPending withdraws the pending handover of the entity name;
+// ErrSponsorNotFound when none is pending. A non-nil expect refuses the write
+// unless the pending handover is still that group (ErrSponsorChanged).
+func (s *IdentityStore) CancelPending(ctx context.Context, name string, expect *logical.EntitySponsor, expectedHash string) error {
+	return s.writeEntity(ctx, name, expectedHash, "cancelled a sponsor handover", func(old *entityEntry, next *logical.Entity) (bool, error) {
+		switch {
+		case old.PendingSponsor == nil:
+			return false, ErrSponsorNotFound
+		case expect != nil && !old.PendingSponsor.Same(expect):
+			return false, ErrSponsorChanged
+		}
+		next.PendingSponsor = nil
+		return true, nil
+	})
+}
+
+// ClearSponsor removes the sponsor of the entity name, which is ungoverned
+// after it; ErrSponsorNotFound when it has none. A pending handover stays.
+func (s *IdentityStore) ClearSponsor(ctx context.Context, name, expectedHash string) error {
+	return s.writeEntity(ctx, name, expectedHash, "removed a sponsor", func(old *entityEntry, next *logical.Entity) (bool, error) {
+		if old.Sponsor == nil {
+			return false, ErrSponsorNotFound
+		}
+		next.Sponsor = nil
+		return true, nil
+	})
+}
+
+// SetEntityState moves the entity name to state st; retired is final, so a
+// retired entity refuses it. A non-nil expectSponsor refuses the write unless
+// the entity's sponsor is still that group (ErrSponsorChanged): the caller was
+// allowed the change as a member of it.
+func (s *IdentityStore) SetEntityState(ctx context.Context, name string, st logical.EntityState,
+	expectSponsor *logical.EntitySponsor, expectedHash string) error {
+	if _, err := logical.ParseEntityState(string(st)); err != nil || st == "" {
+		return logical.ErrBadRequest("state must be active, suspended or retired")
+	}
+	return s.writeEntity(ctx, name, expectedHash, "changed entity state", func(old *entityEntry, next *logical.Entity) (bool, error) {
+		if expectSponsor != nil && !old.Sponsor.Same(expectSponsor) {
+			return false, ErrSponsorChanged
+		}
+		if old.State == st {
+			return false, nil
+		}
+		next.State = st
+		return true, nil
+	})
+}
+
+// sponsorGroupLocked checks that the group sp names exists, with sp's ID, and
+// is virtual. Caller holds mu.
+func (s *IdentityStore) sponsorGroupLocked(sp *logical.EntitySponsor) error {
+	g := s.namespaceIndex(sp.Namespace).groupsByName[sp.Group]
+	switch {
+	case g == nil || g.ID != sp.GroupID:
+		return ErrSponsorGroupNotFound
+	case g.Type != logical.GroupTypeVirtual:
+		return ErrSponsorGroupNotVirtual
+	}
+	return nil
+}
+
+// writeEntity applies change to a copy of the entity name in the namespace in
+// ctx and publishes it, when change reports a change, with one storage write.
+// A missing entity, an expectedHash it no longer has and a retired entity are
+// refused before change runs. change runs under mu; it reads old and writes
+// next.
+func (s *IdentityStore) writeEntity(ctx context.Context, name, expectedHash, what string,
+	change func(old *entityEntry, next *logical.Entity) (bool, error)) error {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return ErrNamespaceNotInContext
+	}
+	changed := false
+	err = func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if err := s.writableLocked(); err != nil {
+			return err
+		}
+		cur := s.namespaceEntities(ns.ID)
+		old := cur.named(name)
+		if old == nil {
+			return ErrEntityNotFound
+		}
+		if expectedHash != "" && old.hash != expectedHash {
+			return ErrEntityChanged
+		}
+		if old.State == logical.EntityStateRetired {
+			return ErrEntityRetired
+		}
+		next := old.Clone()
+		if changed, err = change(old, next); err != nil || !changed {
+			return err
+		}
+		next.UpdatedAt = time.Now().UTC()
+		if err := validateEntity(next); err != nil {
+			return err
+		}
+		stored := newEntityEntry(next)
+		ents, err := cur.with(entityChange{old: old, next: stored})
+		if err != nil {
+			return err
+		}
+		if err := s.persistEntity(ctx, ns.UUID, stored); err != nil {
+			return err
+		}
+		s.publishEntitiesLocked(ns.ID, ents)
+		return nil
+	}()
+	if err != nil || !changed {
+		return err
+	}
+	s.logger.Info(what,
+		logger.String("namespace", ns.Path),
+		logger.String("entity", name))
+	return nil
+}
+
 // publishEntitiesLocked makes ents the namespace's entities under the next
 // generation, keeping its groups as published. Caller holds mu.
 func (s *IdentityStore) publishEntitiesLocked(nsID string, ents *nsEntities) {
@@ -603,9 +830,26 @@ func validAccessor(accessor string) bool {
 	return accessor != "" && len(accessor) <= maxAccessorBytes && !strings.ContainsRune(accessor, 0)
 }
 
-// validateEntity checks what a write may set, normalizing in place: sponsors
-// deduplicated and sorted, aliases sorted. Unset kind and state are left for
-// the caller to default.
+// validateSponsor checks one sponsor entry: accepted says which slot holds it,
+// the sponsor (accepted by a member) or the pending handover (not yet).
+func validateSponsor(sp *logical.EntitySponsor, accepted bool) error {
+	switch {
+	case sp.Type != logical.SponsorTypeGroup:
+		return logical.ErrBadRequestf("unknown sponsor type %q: %q", sp.Type, logical.SponsorTypeGroup)
+	case sp.Namespace == "" || sp.GroupID == "" || !validSysName(sp.Group):
+		return logical.ErrBadRequest("a sponsor names its group by namespace, ID and name")
+	case sp.AddedAt.IsZero() || sp.AddedBy.Principal == "":
+		return logical.ErrBadRequest("a sponsor records who proposed it and when")
+	case accepted && (sp.AcceptedAt.Before(sp.AddedAt) || sp.AcceptedBy.Principal == ""):
+		return logical.ErrBadRequest("a sponsor records who accepted it and when, after it was proposed")
+	case !accepted && (!sp.AcceptedAt.IsZero() || sp.AcceptedBy != logical.SponsorActor{}):
+		return logical.ErrBadRequest("a pending handover is not accepted yet")
+	}
+	return nil
+}
+
+// validateEntity checks what a write may set, normalizing in place: aliases
+// sorted. Unset kind and state are left for the caller to default.
 func validateEntity(e *logical.Entity) error {
 	if e == nil {
 		return logical.ErrBadRequest("entity is required")
@@ -630,15 +874,18 @@ func validateEntity(e *logical.Entity) error {
 	if len(e.Description) > logical.MaxEntityDescriptionBytes {
 		return logical.ErrBadRequestf("description exceeds %d bytes", logical.MaxEntityDescriptionBytes)
 	}
-	for _, sp := range e.Sponsors {
-		if !logical.ValidSponsor(sp) {
-			return logical.ErrBadRequestf("invalid sponsor %.64q: a UPN or an email address of at most %d bytes",
-				sp, logical.MaxEntitySponsorBytes)
+	if e.Sponsor != nil {
+		if err := validateSponsor(e.Sponsor, true); err != nil {
+			return err
 		}
 	}
-	e.Sponsors = slices.Compact(slices.Sorted(slices.Values(e.Sponsors)))
-	if len(e.Sponsors) > logical.MaxEntitySponsors {
-		return logical.ErrBadRequestf("at most %d sponsors", logical.MaxEntitySponsors)
+	if e.PendingSponsor != nil {
+		if err := validateSponsor(e.PendingSponsor, false); err != nil {
+			return err
+		}
+		if e.PendingSponsor.Same(e.Sponsor) {
+			return logical.ErrBadRequest("a pending handover names another group than the sponsor")
+		}
 	}
 	if p := e.Profile; p != nil {
 		for _, v := range []string{p.Purpose, p.Runtime, p.Publisher} {
