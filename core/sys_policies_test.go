@@ -315,8 +315,8 @@ path "secret/*" {
 
 	keys, ok := resp.Data["keys"].([]string)
 	require.True(t, ok)
-	// The three written, plus the seeded built-in.
-	assert.ElementsMatch(t, []string{"default-cbp", "policy1", "policy2", "policy3"}, keys)
+	// The three written, plus the seeded CBP built-ins.
+	assert.ElementsMatch(t, []string{"default-cbp", "default-sponsor", "policy1", "policy2", "policy3"}, keys)
 }
 
 func TestSystemBackend_HandlePolicyList_WithPrefix(t *testing.T) {

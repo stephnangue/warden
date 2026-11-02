@@ -449,6 +449,7 @@ var (
 		"role_granted_by":    func(a *Auth) { a.RoleGrantedBy = "" },
 		"role_denied_reason": func(a *Auth) { a.RoleDeniedReason = "" },
 		"groups":             func(a *Auth) { a.Groups = nil },
+		"sponsored_by":       func(a *Auth) { a.SponsoredBy = "" },
 		"policies":           func(a *Auth) { a.Policies = nil },
 		"token_ttl":          func(a *Auth) { a.TokenTTL = 0 },
 		"expires_at":         func(a *Auth) { a.ExpiresAt = 0 },

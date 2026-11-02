@@ -308,6 +308,18 @@ func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
 	}
 }
 
+// stampSponsored records the sponsor group a request on a sponsor path acted
+// through. A no-op for every other request.
+func stampSponsored(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.SponsoredBy == "" {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	entry.Auth.SponsoredBy = req.SponsoredBy
+}
+
 // stampDiscovery records how a request on an identity path was admitted
 // without a service token: the mounts that admitted its credential, with the
 // principal each admitted, and how many roles were granted there; or that it
@@ -414,6 +426,7 @@ func (c *Core) buildResponseAuditEntry(
 		Response:  buildAuditResponse(resp, req, cred),
 	}
 	stampRoleGrant(entry, req)
+	stampSponsored(entry, req)
 	stampDiscovery(entry, req)
 	stampUserAttribution(entry, req)
 	stampMCPClient(entry, req)

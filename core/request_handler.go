@@ -352,7 +352,7 @@ func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltin
 	// Root is the whole grant on its own and admits no other policy beside it.
 	// The built-ins are gathered into a fixed buffer so the slice need not
 	// reach the heap.
-	var buf [2]*Policy
+	var buf [3]*Policy
 	builtins := buf[:0]
 	if withBuiltins && !isRoot {
 		builtins, err = c.policyStore.appendDefaultPolicies(tokenCtx, builtins)
@@ -1277,6 +1277,13 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// anonymously here, on whichever header it rides.
 	if identityPath && req.TokenEntry() == nil &&
 		(req.HTTPRequest.Header.Get(logical.HeaderWardenToken) == "" || isTicketValue(req.HTTPRequest.Header.Get(logical.HeaderWardenToken))) {
+		// The sponsor paths admit a ticket only, which admitTicket admitted
+		// above: no other credential can ever succeed there, so none is sent
+		// to an auth mount, and every caller without one gets the one refusal
+		// the handlers give.
+		if isSponsorPath(req.Path) {
+			return sponsorRefusal(), nil, nil
+		}
 		if refusal := c.admitRoleless(ctx, req); refusal != nil {
 			return refusal, nil, nil
 		}

@@ -143,6 +143,7 @@ func init() {
 	IdentityCmd.AddCommand(EntityCmd)
 	IdentityCmd.AddCommand(AliasCmd)
 	IdentityCmd.AddCommand(UsageCmd)
+	IdentityCmd.AddCommand(SponsorCmd)
 	GroupCmd.AddCommand(GroupCreateCmd)
 	GroupCmd.AddCommand(GroupReadCmd)
 	GroupCmd.AddCommand(GroupUpdateCmd)

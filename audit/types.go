@@ -120,6 +120,11 @@ type Auth struct {
 	// per request. Operator-chosen names, not salted.
 	Groups []string `json:"groups,omitempty"`
 
+	// SponsoredBy names the sponsor group a request on a sponsor path acted
+	// through ("group:<name>"): the entity's sponsor, or the pending handover
+	// a member accepted. Set on success only.
+	SponsoredBy string `json:"sponsored_by,omitempty"`
+
 	// Policies
 	Policies      []string       `json:"policies,omitempty"`
 	PolicyResults *PolicyResults `json:"policy_results,omitempty"`
