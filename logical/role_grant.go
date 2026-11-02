@@ -26,6 +26,34 @@ const (
 	RoleDeniedNoAdmission = "no admission on token"
 )
 
+// Reasons an identity verdict refuses an agent before any role is considered:
+// the native identity the credential presented, and the entity that claims it.
+// Recorded as the role grant's DeniedReason, so a refused request is refused
+// by construction.
+const (
+	// RoleDeniedIdentityNone: the credential presents no native identity
+	// through its mount (the mount derives none from it), under
+	// unknown_aliases=deny.
+	RoleDeniedIdentityNone = "no native identity"
+
+	// RoleDeniedIdentityUnclaimed: no entity claims the native identity, under
+	// unknown_aliases=deny.
+	RoleDeniedIdentityUnclaimed = "unclaimed"
+
+	// RoleDeniedEntitySuspended: the entity that claims the native identity
+	// is suspended. Refused in every mode.
+	RoleDeniedEntitySuspended = "entity suspended"
+
+	// RoleDeniedEntityRetired: the entity that claims the native identity is
+	// retired. Refused in every mode.
+	RoleDeniedEntityRetired = "entity retired"
+
+	// RoleDeniedEntityNotGoverned: the entity that claims the native identity
+	// is not governed (no accepted sponsor, or no description), under
+	// unknown_aliases=deny.
+	RoleDeniedEntityNotGoverned = "entity not governed"
+)
+
 // RoleGrant is the role a request runs under, resolved once per request from
 // the caller's admission and never stored on a token. Core creates it when it
 // resolves the grant, only for a token that takes its role per request; every

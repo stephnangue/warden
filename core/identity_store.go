@@ -235,7 +235,11 @@ func (s *IdentityStore) loadAllLocked(ctx context.Context) (*identitySnapshot, i
 		if err != nil {
 			return nil, 0, err
 		}
-		if g := buildNSIndex(byName, ents, s.gen.Add(1)); g != nil {
+		cfg, err := s.loadConfigLocked(ctx, ns)
+		if err != nil {
+			return nil, 0, err
+		}
+		if g := buildNSIndex(byName, ents, cfg, s.gen.Add(1)); g != nil {
 			snap.byNS[ns.ID] = g
 			count += len(byName)
 		}
@@ -243,8 +247,8 @@ func (s *IdentityStore) loadAllLocked(ctx context.Context) (*identitySnapshot, i
 	return snap, count, nil
 }
 
-// ClearNamespace deletes every group and entity of the namespace in ctx, from
-// storage and from the snapshot. Called during namespace deletion. It sweeps
+// ClearNamespace deletes every group and entity of the namespace in ctx, and
+// its identity config, from storage and from the snapshot. Called during namespace deletion. It sweeps
 // what storage holds, so a record the snapshot skipped at load is removed too.
 func (s *IdentityStore) ClearNamespace(ctx context.Context) error {
 	ns, err := namespace.FromContext(ctx)
@@ -267,6 +271,9 @@ func (s *IdentityStore) ClearNamespace(ctx context.Context) error {
 	entities, err := s.clearEntitiesLocked(ctx, ns.UUID)
 	if err != nil {
 		return err
+	}
+	if err := s.storage.Delete(ctx, identityConfigKey(ns.UUID)); err != nil {
+		return fmt.Errorf("failed to delete the identity config during namespace cleanup: %w", err)
 	}
 	if snap := s.snapshot.Load(); snap.byNS[ns.ID] != nil {
 		s.snapshot.Store(snap.withNamespace(ns.ID, nil))

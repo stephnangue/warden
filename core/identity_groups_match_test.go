@@ -29,7 +29,7 @@ func testNS(t testing.TB, gen uint64, groups ...*logical.Group) *nsIndex {
 		cg.Group, cg.hash = g, g.Hash()
 		byName[g.Name] = cg
 	}
-	gs := buildNSIndex(byName, nil, gen)
+	gs := buildNSIndex(byName, nil, nil, gen)
 	if gs == nil {
 		return emptyNSIndex
 	}

@@ -20,8 +20,9 @@ import (
 // One entity claims both through the CLI: created on a standby node, which
 // forwards the write, with the JWT's identity, then given the certificate's
 // with alias add. Lookup finds it from either. Claiming changes no gateway
-// outcome, and neither does suspending the entity: its state is recorded,
-// not yet enforced.
+// outcome (its roles still come from the virtual group); suspending the
+// entity refuses both credentials, naming the entity, and the audit records
+// the entity on every request after the claim.
 //
 // While the JWT's identity is claimed, a config write changing how the jwt
 // mount derives identities is refused, and so is disabling the mount. A
@@ -64,15 +65,22 @@ func TestNativeIdentities_ClaimedThroughTheCLI(t *testing.T) {
 	start := time.Now()
 	jwt := h.GetDefaultJWT(t)
 	certPEM, _ := h.GenerateClientCert(t, caPEM, caKey, agentCN)
-	requests := func(when string) {
+	requestsAnswer := func(when string, want int, wantBody string) {
 		t.Helper()
 		status, body := h.DoRequest(t, "GET", gatewayURL(port, jwtVault, role),
 			map[string]string{"Authorization": "Bearer " + jwt}, "")
-		expectStatus(t, "JWT "+when, status, body, 200)
+		expectStatus(t, "JWT "+when, status, body, want)
+		if !strings.Contains(string(body), wantBody) {
+			t.Fatalf("JWT %s: body %s, want it to contain %q", when, body, wantBody)
+		}
 		status, body = h.DoRequest(t, "GET", gatewayURL(port, certVault, role),
 			map[string]string{"X-SSL-Client-Cert": h.URLEncodePEM(certPEM)}, "")
-		expectStatus(t, "certificate "+when, status, body, 200)
+		expectStatus(t, "certificate "+when, status, body, want)
+		if !strings.Contains(string(body), wantBody) {
+			t.Fatalf("certificate %s: body %s, want it to contain %q", when, body, wantBody)
+		}
 	}
+	requests := func(when string) { t.Helper(); requestsAnswer(when, 200, "") }
 	requests("before any claim")
 	status, body := h.DoRequest(t, "GET", h.NodeURL(port)+"/v1/sys/introspect/roles",
 		map[string]string{"Authorization": "Bearer " + jwt}, "")
@@ -105,26 +113,35 @@ func TestNativeIdentities_ClaimedThroughTheCLI(t *testing.T) {
 
 	requests("after both were claimed")
 	cli(t, port, "identity", "entity", "state", ent, "suspended")
-	requests("while their entity is suspended")
+	requestsAnswer("while their entity is suspended", 403, `belongs to entity \"`+ent+`\", which is suspended`)
 
 	// Audit: every gateway request names the native identity it presented,
-	// and discovery names it per admitting mount.
+	// and discovery names it per admitting mount; after the claim, the
+	// entity too, and while it is suspended, why the request was refused.
 	want := map[string]string{jwtAccessor: jwtAlias, certAccessor: agentCN}
 	entries := auditEntries(t, port, "role/"+role+"/gateway", start, 6, nil)
 	seen := map[string]int{}
+	granted, suspended := 0, 0
 	for _, e := range entries {
 		a := e.Auth
 		if alias, ok := want[a.MountAccessor]; !ok || a.AliasName != alias || a.EntityKind != "agent" {
 			t.Errorf("gateway audit: mount_accessor %q, alias_name %q, entity_kind %q; want one of %v with entity_kind agent",
 				a.MountAccessor, a.AliasName, a.EntityKind, want)
 		}
-		if a.RoleDeniedReason != "" || a.RoleGrantedBy != "group:"+group {
-			t.Errorf("gateway audit: role granted by %q, denied for %q; want group:%s", a.RoleGrantedBy, a.RoleDeniedReason, group)
+		switch {
+		case a.RoleDeniedReason == "" && a.RoleGrantedBy == "group:"+group:
+			granted++
+		case a.RoleDeniedReason == "entity suspended" && a.EntityName == ent:
+			suspended++
+		default:
+			t.Errorf("gateway audit: role granted by %q, denied for %q, entity %q; want group:%s, or refused as suspended",
+				a.RoleGrantedBy, a.RoleDeniedReason, a.EntityName, group)
 		}
 		seen[a.MountAccessor]++
 	}
-	if seen[jwtAccessor] != 3 || seen[certAccessor] != 3 {
-		t.Errorf("gateway audit: %v entries per mount accessor, want 3 for each of %s and %s", seen, jwtAccessor, certAccessor)
+	if seen[jwtAccessor] != 3 || seen[certAccessor] != 3 || granted != 4 || suspended != 2 {
+		t.Errorf("gateway audit: %v entries per mount accessor, %d granted, %d refused as suspended; "+
+			"want 3 for each of %s and %s, 4 granted, 2 refused", seen, granted, suspended, jwtAccessor, certAccessor)
 	}
 	auditEntries(t, port, "introspect/roles", start, 1, func(e audit.LogEntry) bool {
 		if e.Auth.Discovery == nil {

@@ -20,7 +20,7 @@ import (
 // the cached entry, and a role grant projects the role's policies and the
 // cached membership's metadata into them. Reassigning one on a copy is safe;
 // writing into one is a data race and leaks into every other request.
-var sharedTokenFields = []string{"Data", "Metadata", "Policies", "Actors", "Admission"}
+var sharedTokenFields = []string{"Data", "Metadata", "Policies", "Actors", "Admission", "Entity"}
 
 // freshEntryWriter is a function allowed to write into a shared field in
 // place, because the entry it writes is one it is still building: no copy of

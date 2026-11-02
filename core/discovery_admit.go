@@ -240,7 +240,12 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 			continue
 		}
 		m := compute(r.adm, n, gs, now)
-		grants[mount] = m.Roles
+		// The identity verdict a request through this mount would meet: a
+		// refused identity is granted nothing here either, so the menu never
+		// lists a role its next request is refused.
+		if identityVerdict(gs.config, r.adm, m) == "" {
+			grants[mount] = m.Roles
+		}
 		admitted = append(admitted, discoveryAdmitted{mount: mount, adm: r.adm, membership: m})
 	}
 	slices.SortFunc(admitted, func(a, b discoveryAdmitted) int { return strings.Compare(a.mount, b.mount) })

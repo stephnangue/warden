@@ -75,8 +75,8 @@ func (s *IdentityStore) GroupsListingRole(nsID, role string) []string {
 // keeping its entities as published. Caller holds mu and hands over byName.
 func (s *IdentityStore) publishGroupsLocked(nsID string, byName map[string]*groupEntry) {
 	snap := s.snapshot.Load()
-	ents := snap.namespace(nsID).entities
-	s.snapshot.Store(snap.withNamespace(nsID, buildNSIndex(byName, ents, s.gen.Add(1))))
+	cur := snap.namespace(nsID)
+	s.snapshot.Store(snap.withNamespace(nsID, buildNSIndex(byName, cur.entities, cur.config, s.gen.Add(1))))
 }
 
 // GetGroup returns a copy of the group name in the namespace in ctx, and the

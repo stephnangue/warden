@@ -30,6 +30,7 @@ func TestTokenEntryCopy_EveryField(t *testing.T) {
 		CredentialSpec: "spec",
 		Actors:         []ActorRef{{Subject: "orchestrator"}},
 		Admission:      adm,
+		Entity:         &Entity{ID: "e1", Name: "billing-agent"},
 	}
 	te.MarkUsed()
 

@@ -85,8 +85,8 @@ func BenchmarkGroupCompute(b *testing.B) {
 		// caps allow (each bench rule has three selectors).
 		capped := min(logical.MaxVirtualGroupsPerNamespace, logical.MaxSelectorsPerNamespace/(3*rules))
 		for _, n := range []int{100, 1000, capped, 10000} {
-			spread := buildNSIndex(benchGroups(b, n, rules, 10), nil, 1)
-			worst := buildNSIndex(benchGroups(b, n, rules, 1), nil, 1)
+			spread := buildNSIndex(benchGroups(b, n, rules, 10), nil, nil, 1)
+			worst := buildNSIndex(benchGroups(b, n, rules, 1), nil, nil, 1)
 			b.Run(fmt.Sprintf("rules=%d/groups=%d/index", rules, n), func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
@@ -164,7 +164,7 @@ func wideGroups(tb testing.TB, n int, match bool) *nsIndex {
 		cg.Group, cg.hash = g, g.Hash()
 		byName[g.Name] = cg
 	}
-	return buildNSIndex(byName, nil, 1)
+	return buildNSIndex(byName, nil, nil, 1)
 }
 
 // BenchmarkGroupComputeWide measures the worst case per selector: every group
@@ -226,7 +226,7 @@ func BenchmarkGroupComputeAllMatch(b *testing.B) {
 			cg.Group, cg.hash = g, g.Hash()
 			byName[g.Name] = cg
 		}
-		gs := buildNSIndex(byName, nil, 1)
+		gs := buildNSIndex(byName, nil, nil, 1)
 		b.Run(fmt.Sprintf("selectors=%d/groups=%d", tc.selectors, n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
@@ -252,7 +252,7 @@ func BenchmarkGroupPublish(b *testing.B) {
 					next[k] = v
 				}
 				next[cg.Name] = cg
-				buildNSIndex(next, nil, 2)
+				buildNSIndex(next, nil, nil, 2)
 			}
 		})
 	}
@@ -299,7 +299,7 @@ func BenchmarkGroupWrite(b *testing.B) {
 // admitted credential takes once its membership is computed.
 func BenchmarkMembershipSteadyState(b *testing.B) {
 	adm := benchAdmission(b)
-	gs := buildNSIndex(benchGroups(b, 1000, 1, 10), nil, 1)
+	gs := buildNSIndex(benchGroups(b, 1000, 1, 10), nil, nil, 1)
 	now := time.Now()
 	membership(adm, gs, now)
 	b.ReportAllocs()

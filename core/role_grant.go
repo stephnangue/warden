@@ -83,9 +83,14 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 // it clears the request's grant and leaves te untouched.
 //
 // te must be this request's own copy of the token entry: the role, its
-// policies and spec, and the membership's metadata are written onto it, and
-// every consumer downstream (the CBP, CEL, audit, the mint, assertions) reads
-// them there. Every path that hands over a token entry hands over a copy.
+// policies and spec, the membership's metadata and the caller's entity of
+// record are written onto it, and every consumer downstream (the CBP, CEL,
+// audit, the mint, assertions) reads them there. Every path that hands over a
+// token entry hands over a copy.
+//
+// The identity verdict (identityVerdict) is decided first, from the
+// namespace's identity config and the entity the membership resolved: a
+// refused caller is refused with its reason before any role is looked up.
 //
 // The grant is computed from the namespace's published groups and roles, read
 // once each, and the admission's cached membership under them at now. On a
@@ -105,10 +110,12 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	}
 
 	// Whatever happens below, an admission token runs with the granted role,
-	// its policies and spec, or with none.
+	// its policies and spec, or with none, and with the entity resolved on
+	// this request, or none.
 	te.RoleName = ""
 	te.Policies = nil
 	te.CredentialSpec = ""
+	te.Entity = nil
 
 	if !req.Transparent && !req.TicketAdmitted {
 		// Only core, admitting this request's own credential (implicit auth,
@@ -128,9 +135,17 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	// The membership's metadata map is shared by every request of this
 	// credential. TokenEntry.Metadata is read only on every copy, so it is
 	// projected as is, not copied.
-	m := membership(adm, c.grantIndex(te.NamespaceID), now)
+	gs := c.grantIndex(te.NamespaceID)
+	m := membership(adm, gs, now)
 	rg.Groups = m.Groups
 	te.Metadata = m.Metadata
+	te.Entity = m.Entity
+
+	// Who the caller is decides whether it runs at all, before any role.
+	if reason := identityVerdict(gs.config, adm, m); reason != "" {
+		rg.DeniedReason = reason
+		return
+	}
 
 	if rg.RoleName == "" {
 		rg.DeniedReason = logical.RoleDeniedNoRole
@@ -163,6 +178,7 @@ func withholdRoleGrant(req *logical.Request, te *logical.TokenEntry) {
 		te.RoleName = ""
 		te.Policies = nil
 		te.CredentialSpec = ""
+		te.Entity = nil
 	}
 }
 
@@ -212,6 +228,9 @@ func (e *ErrRoleNotGranted) Unwrap() error { return sdklogical.ErrPermissionDeni
 // requested role and the admitting mount, both of which the caller chose or
 // presented, and never a group, a fact or a selector value.
 func roleRefusal(rg *logical.RoleGrant, te *logical.TokenEntry) *ErrRoleNotGranted {
+	if msg, ok := identityRefusalMessage(rg.DeniedReason, te); ok {
+		return &ErrRoleNotGranted{DeniedReason: rg.DeniedReason, Message: msg}
+	}
 	var msg string
 	switch rg.DeniedReason {
 	case logical.RoleDeniedNoRole:
