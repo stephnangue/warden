@@ -126,6 +126,9 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 				auditAuth.MountAccessor = adm.MountAccessor
 			}
 		}
+		if e := te.Entity; e != nil {
+			auditAuth.EntityID, auditAuth.EntityName, auditAuth.GovernedBy = e.ID, e.Name, e.GovernedBy()
+		}
 
 		if !te.ExpireAt.IsZero() {
 			auditAuth.ExpiresAt = te.ExpireAt.Unix()
@@ -303,6 +306,7 @@ func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
 	} else {
 		entry.Auth.RoleDeniedReason = rg.DeniedReason
 	}
+	entry.Auth.IdentityStatus = rg.IdentityStatus
 	if len(rg.Groups) > 0 {
 		entry.Auth.Groups = slices.Clone(rg.Groups)
 	}
@@ -341,7 +345,7 @@ func stampDiscovery(entry *audit.LogEntry, req *logical.Request) {
 	if len(d.AdmittedBy) > 0 {
 		da.AdmittedBy = make([]audit.AdmittedMount, len(d.AdmittedBy))
 		for i, m := range d.AdmittedBy {
-			da.AdmittedBy[i] = audit.AdmittedMount{Mount: m.Mount, PrincipalID: m.PrincipalID, AliasName: m.AliasName}
+			da.AdmittedBy[i] = audit.AdmittedMount{Mount: m.Mount, PrincipalID: m.PrincipalID, AliasName: m.AliasName, EntityID: m.EntityID}
 		}
 	}
 	entry.Auth.Discovery = da

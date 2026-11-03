@@ -163,6 +163,12 @@ type Membership struct {
 	// Metadata are the mount's mapped facts rendered as strings, under Naming.
 	// Nil when nothing is rendered.
 	Metadata map[string]string
+
+	// Entity is the entity of record that claims the admission's native
+	// identity in the namespace, at Gen; nil when none does, and always nil
+	// for a human admission (humans are never claimed). Shared with the
+	// published entity: read only.
+	Entity *Entity
 }
 
 // GroupGrant names the group a role is granted through.

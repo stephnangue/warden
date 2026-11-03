@@ -756,12 +756,12 @@ func (s *IdentityStore) writeEntity(ctx context.Context, name, expectedHash, wha
 }
 
 // publishEntitiesLocked makes ents the namespace's entities under the next
-// generation, keeping its groups as published. Caller holds mu.
+// generation, keeping its groups and config as published. Caller holds mu.
 func (s *IdentityStore) publishEntitiesLocked(nsID string, ents *nsEntities) {
 	snap := s.snapshot.Load()
 	cur := snap.namespace(nsID)
 	var next *nsIndex
-	if len(cur.groupsByName) > 0 || ents.count() > 0 {
+	if len(cur.groupsByName) > 0 || ents.count() > 0 || cur.config != nil {
 		n := *cur
 		n.gen = s.gen.Add(1)
 		n.entities = ents

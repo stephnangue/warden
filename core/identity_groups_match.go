@@ -74,6 +74,14 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsIndex, no
 		Groups:   noGroups,
 		Metadata: adm.RenderMetadata(n),
 	}
+	// The entity of record that claims the native identity, if any, at this
+	// generation: an entity write publishes a new one, so the next request
+	// computes again. Humans are never claimed, so they are never looked up.
+	if adm.AliasName != "" && n != nil && n.Kind != logical.EntityKindHuman {
+		if en := gs.entities.byAlias(adm.MountAccessor, adm.AliasName); en != nil {
+			m.Entity = en.Entity
+		}
+	}
 	count := len(cands)
 	if all {
 		count = len(gs.virtualGroups)

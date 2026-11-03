@@ -70,6 +70,7 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 				"identity/entity",
 				"identity/entity/*",
 				"identity/lookup",
+				"identity/config",
 				"step-down",
 			},
 		},
@@ -124,6 +125,9 @@ func (b *SystemBackend) paths() []*framework.Path {
 
 	// The sponsors' own paths on the entities they sponsor
 	paths = append(paths, b.pathIdentitySponsor()...)
+
+	// The namespace's identity verdict settings
+	paths = append(paths, b.pathIdentityConfig()...)
 
 	// Audit paths
 	paths = append(paths, b.pathAudit()...)

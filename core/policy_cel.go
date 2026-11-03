@@ -155,6 +155,13 @@ type celPrincipalInput struct {
 	// Groups are the agent's groups, sorted, from the request's role grant.
 	// Shared with the cached membership: read only. Nil reads as no groups.
 	Groups []string
+
+	// Alias is the native identity the agent's credential presented (its
+	// mount's alias_name_source, which need not be the principal), and Entity
+	// the entity of record that claims it (nil when none does). The entity is
+	// a published one: read only.
+	Alias  string
+	Entity *logical.Entity
 }
 
 // principalLeg distinguishes the two principals that share buildPrincipalNS. It
@@ -672,6 +679,16 @@ func buildPrincipalNS(p celPrincipalInput, f fieldSet, leg principalLeg) map[str
 			m["groups"] = noGroups
 		}
 	}
+	// The agent's native identity and its entity of record, the agent's alone
+	// like its groups. Each is absent when there is none, so a condition
+	// reading it unguarded fails closed (no_such_key); has(agent.entity)
+	// tests for one.
+	if f.has("alias") && leg != legUser && p.Alias != "" {
+		m["alias"] = p.Alias
+	}
+	if f.has("entity") && leg != legUser && p.Entity != nil {
+		m["entity"] = celEntity(p.Entity)
+	}
 	if f.has("token_ttl_seconds") {
 		m["token_ttl_seconds"] = p.TTLSeconds
 	}
@@ -679,6 +696,38 @@ func buildPrincipalNS(p celPrincipalInput, f fieldSet, leg principalLeg) map[str
 		m["token_expires_at"] = p.ExpiresAtUnix
 	}
 	return m
+}
+
+// celEntity renders an entity of record for a condition: agent.entity.{id,
+// name, kind, state, governed_by, metadata, profile}. The metadata map is
+// bound by reference (a published entity is never written); profile lists
+// only the fields the entity sets.
+func celEntity(e *logical.Entity) map[string]any {
+	metadata := e.Metadata
+	if metadata == nil {
+		metadata = emptyStringMap
+	}
+	profile := map[string]string{}
+	if p := e.Profile; p != nil {
+		if p.Purpose != "" {
+			profile["purpose"] = p.Purpose
+		}
+		if p.Runtime != "" {
+			profile["runtime"] = p.Runtime
+		}
+		if p.Publisher != "" {
+			profile["publisher"] = p.Publisher
+		}
+	}
+	return map[string]any{
+		"id":          e.ID,
+		"name":        e.Name,
+		"kind":        e.Kind,
+		"state":       string(e.State),
+		"governed_by": e.GovernedBy(),
+		"metadata":    metadata,
+		"profile":     profile,
+	}
 }
 
 // buildBaseActivation eagerly builds the full activation map. Retained for unit
@@ -908,6 +957,12 @@ func celAgentInput(req *logical.Request, te *logical.TokenEntry, now time.Time) 
 	in := celPrincipalInputFromEntry(te, now)
 	if rg := req.RoleGrant(); rg != nil {
 		in.Groups = rg.Groups
+	}
+	if te != nil {
+		if te.Admission != nil {
+			in.Alias = te.Admission.AliasName
+		}
+		in.Entity = te.Entity
 	}
 	return in
 }

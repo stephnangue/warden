@@ -101,11 +101,18 @@ type TokenEntry struct {
 	// serialized, so a token reloaded from storage has none (transparent
 	// tokens are cache-only and never reloaded).
 	Admission *Admission `json:"-"`
+
+	// Entity is the entity of record that claims the caller's native identity,
+	// projected by core onto a request's own copy when it resolves the role
+	// grant; nil on the cached entry and whenever no entity claims it. The
+	// entity is a published one, shared and read only.
+	Entity *Entity `json:"-"`
 }
 
 // Copy returns a copy of t for one request, or nil for a nil t. The copy's own
-// fields may be reassigned freely; the maps, slices and the *Admission it holds
-// (Data, Metadata, Policies, Actors, Admission) are shared with t and are read
+// fields may be reassigned freely; the maps, slices and the *Admission and
+// *Entity it holds (Data, Metadata, Policies, Actors, Admission, Entity) are
+// shared with t and are read
 // only: never index-assign, delete from, append onto, clear, sort or otherwise
 // write into them, on any entry. TestTokenEntrySharedFieldsNotMutatedInPlace
 // enforces this over the module, allowing only the creation sites it lists.
@@ -134,6 +141,7 @@ func (t *TokenEntry) Copy() *TokenEntry {
 		CredentialSpec: t.CredentialSpec,
 		Actors:         t.Actors,
 		Admission:      t.Admission,
+		Entity:         t.Entity,
 	}
 }
 

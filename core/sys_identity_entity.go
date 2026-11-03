@@ -45,6 +45,10 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 		Type:        framework.TypeString,
 		Description: "Apply the write only if the entity still has this hash (from a read)",
 	}
+	ownForceField := &framework.FieldSchema{
+		Type:        framework.TypeBool,
+		Description: "Apply the write even though it changes the writer's own entity, which may lock the writer out",
+	}
 	return []*framework.Path{
 		{
 			Pattern: "identity/entity/?$",
@@ -93,10 +97,11 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 				"mount":          boundMountField,
 				"mount_accessor": accessorField,
 				"name":           aliasField,
+				"force":          ownForceField,
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
-				logical.CreateOperation: &framework.PathOperation{Callback: b.handleAliasRemove, Summary: "Release a native identity"},
-				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleAliasRemove, Summary: "Release a native identity"},
+				logical.CreateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleAliasRemove), Summary: "Release a native identity"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleAliasRemove), Summary: "Release a native identity"},
 			},
 			HelpSynopsis: "Release a native identity from an entity",
 			HelpDescription: "The native identity is no longer claimed: it is unclaimed again. A retired entity keeps its " +
@@ -112,10 +117,11 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 					Type:        framework.TypeBool,
 					Description: "Take the native identity from the entity that claims it",
 				},
+				"force": ownForceField,
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
-				logical.CreateOperation: &framework.PathOperation{Callback: b.handleAliasClaim, Summary: "Claim a native identity"},
-				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleAliasClaim, Summary: "Claim a native identity"},
+				logical.CreateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleAliasClaim), Summary: "Claim a native identity"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleAliasClaim), Summary: "Claim a native identity"},
 			},
 			HelpSynopsis: "Claim a native identity for an entity",
 			HelpDescription: "Add a native identity to the entity. One another entity claims is refused unless move is set, " +
@@ -130,10 +136,11 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 					Description: "Cancel the pending handover instead of removing the sponsor",
 				},
 				"expected_hash": expectedHashField,
+				"force":         ownForceField,
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
-				logical.CreateOperation: &framework.PathOperation{Callback: b.handleSponsorRemove, Summary: "Remove a sponsor"},
-				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleSponsorRemove, Summary: "Remove a sponsor"},
+				logical.CreateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleSponsorRemove), Summary: "Remove a sponsor"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleSponsorRemove), Summary: "Remove a sponsor"},
 			},
 			HelpSynopsis: "Remove the sponsor of an entity, or cancel its pending handover",
 			HelpDescription: "Without pending, the sponsor is removed and the entity is ungoverned; a pending handover stays " +
@@ -154,10 +161,11 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 						`("/" for the root namespace)`,
 				},
 				"expected_hash": expectedHashField,
+				"force":         ownForceField,
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
-				logical.CreateOperation: &framework.PathOperation{Callback: b.handleSponsorPropose, Summary: "Propose a sponsor"},
-				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleSponsorPropose, Summary: "Propose a sponsor"},
+				logical.CreateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleSponsorPropose), Summary: "Propose a sponsor"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleSponsorPropose), Summary: "Propose a sponsor"},
 			},
 			HelpSynopsis: "Propose a sponsor for an entity",
 			HelpDescription: "A sponsor is a virtual group of humans accountable for the entity. Proposed by a member of the " +
@@ -174,10 +182,11 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 					Required:    true,
 				},
 				"expected_hash": expectedHashField,
+				"force":         ownForceField,
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
-				logical.CreateOperation: &framework.PathOperation{Callback: b.handleEntityState, Summary: "Change an entity's state"},
-				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleEntityState, Summary: "Change an entity's state"},
+				logical.CreateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleEntityState), Summary: "Change an entity's state"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("entity", b.handleEntityState), Summary: "Change an entity's state"},
 			},
 			HelpSynopsis:    "Change the lifecycle state of an entity",
 			HelpDescription: "Suspend an entity, make it active again, or retire it. Retirement is final.",
@@ -222,14 +231,15 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 				"force": {
 					Type: framework.TypeBool,
 					Description: "On delete: delete a retired entity, whose native identities are then unclaimed again " +
-						"(DELETE sys/identity/entity/<name>?force=true)",
+						"(DELETE sys/identity/entity/<name>?force=true). On update: apply it even though it changes " +
+						"the writer's own entity, which may lock the writer out",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.CreateOperation: &framework.PathOperation{Callback: b.handleEntityCreate, Summary: "Create an entity"},
 				logical.ReadOperation:   &framework.PathOperation{Callback: b.handleEntityRead, Summary: "Read an entity"},
-				logical.UpdateOperation: &framework.PathOperation{Callback: b.handleEntityUpdate, Summary: "Update an entity; fields left out keep their value"},
-				logical.DeleteOperation: &framework.PathOperation{Callback: b.handleEntityDelete, Summary: "Delete an entity"},
+				logical.UpdateOperation: &framework.PathOperation{Callback: b.guardOwnEntity("name", b.handleEntityUpdate), Summary: "Update an entity; fields left out keep their value"},
+				logical.DeleteOperation: &framework.PathOperation{Callback: b.guardOwnEntity("name", b.handleEntityDelete), Summary: "Delete an entity"},
 			},
 			HelpSynopsis: "Manage namespace entities",
 			HelpDescription: "An entity is an agent of record: the native identities it presents through any auth mount, the " +
@@ -733,6 +743,20 @@ func (b *SystemBackend) handleAliasClaim(ctx context.Context, req *logical.Reque
 		return logical.ErrorResponse(err), nil
 	}
 	alias := d.Get("name").(string)
+	// Moving the writer's own native identity to another entity changes the
+	// entity the writer's next request resolves to: the lockout guard,
+	// which guardOwnEntity cannot see from the target's name alone.
+	var ownWarning string
+	if te := req.TokenEntry(); te != nil && te.Admission != nil &&
+		te.Admission.MountAccessor == accessor && te.Admission.AliasName == alias &&
+		(te.Entity == nil || te.Entity.ID != e.ID) {
+		if !d.Get("force").(bool) {
+			return logical.ErrorResponse(logical.ErrConflictf(
+				"native identity (%s, %s) is the writer's own: claiming it for entity %q may lock the writer out; "+
+					"pass force=true to apply it anyway", mount, alias, name)), nil
+		}
+		ownWarning = fmt.Sprintf("forced: native identity (%s, %s) is the writer's own", mount, alias)
+	}
 	from, err := b.core.identityStore.ClaimAlias(ctx, name, accessor, alias, d.Get("move").(bool))
 	if err != nil {
 		return b.entityErrorResponse(name, err), nil
@@ -745,6 +769,9 @@ func (b *SystemBackend) handleAliasClaim(ctx context.Context, req *logical.Reque
 	}
 	if from != "" {
 		data["moved_from"] = from
+	}
+	if ownWarning != "" {
+		appendWarnings(data, ownWarning)
 	}
 	return b.respondSuccess(data), nil
 }
@@ -782,6 +809,36 @@ func (b *SystemBackend) handleIdentityLookup(ctx context.Context, req *logical.R
 		"state":       string(e.State),
 		"governed_by": e.GovernedBy(),
 	}), nil
+}
+
+// guardOwnEntity wraps h, a write on the entity the field key names, so that a
+// writer whose own native identity that entity claims is refused unless the
+// write passes force. An agent that suspends or retires itself, removes its
+// sponsor, empties its description or releases its native identities may be
+// refused on its next request, with no way back but another writer. A forced
+// write succeeds with a warning saying so. Writers no entity claims (root, a
+// human's ticket, an unclaimed agent) are never guarded.
+func (b *SystemBackend) guardOwnEntity(key string, h framework.OperationFunc) framework.OperationFunc {
+	return func(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+		name := d.Get(key).(string)
+		te := req.TokenEntry()
+		if te == nil || te.Entity == nil {
+			return h(ctx, req, d)
+		}
+		e, _, err := b.core.identityStore.GetEntity(ctx, name)
+		if err != nil || e.ID != te.Entity.ID {
+			return h(ctx, req, d)
+		}
+		if !d.Get("force").(bool) {
+			return logical.ErrorResponse(logical.ErrConflictf(
+				"entity %q is the writer's own: this write may lock the writer out; pass force=true to apply it anyway", name)), nil
+		}
+		resp, err := h(ctx, req, d)
+		if err == nil && resp != nil && resp.Data != nil && !resp.IsError() {
+			appendWarnings(resp.Data, fmt.Sprintf("forced: entity %q is the writer's own", name))
+		}
+		return resp, err
+	}
 }
 
 // sponsorNamespace resolves the namespace a sponsor proposal names by path:

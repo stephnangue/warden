@@ -43,6 +43,11 @@ type nsIndex struct {
 	// recomputed on its next request. Never nil once published (emptyEntities
 	// when there are none).
 	entities *nsEntities
+
+	// config is the namespace's identity verdict settings (sys/identity/config),
+	// nil for the defaults. Published under the same generation as the rest, so
+	// a config write makes every cached membership compute again.
+	config *identityConfig
 }
 
 // identitySnapshot is one published state of every namespace's identity
@@ -87,17 +92,21 @@ func (s *identitySnapshot) withNamespace(nsID string, g *nsIndex) *identitySnaps
 }
 
 // buildNSIndex builds a namespace's index at generation gen from its groups
-// byName, taking ownership of the map, and its entities ents (nil is none).
-// It returns nil for a namespace with neither groups nor entities, which the
-// snapshot then serves as emptyNSIndex.
-func buildNSIndex(byName map[string]*groupEntry, ents *nsEntities, gen uint64) *nsIndex {
+// byName, taking ownership of the map, its entities ents (nil is none) and its
+// config cfg (nil is the defaults). It returns nil for a namespace with no
+// groups, no entities and the default config, which the snapshot then serves
+// as emptyNSIndex.
+func buildNSIndex(byName map[string]*groupEntry, ents *nsEntities, cfg *identityConfig, gen uint64) *nsIndex {
 	if ents == nil {
 		ents = emptyEntities
 	}
-	if len(byName) == 0 && ents.count() == 0 {
+	if len(byName) == 0 && ents.count() == 0 && cfg == nil {
 		return nil
 	}
-	g := &nsIndex{gen: gen, groupsByName: byName, entities: ents}
+	if byName == nil {
+		byName = map[string]*groupEntry{}
+	}
+	g := &nsIndex{gen: gen, groupsByName: byName, entities: ents, config: cfg}
 	g.indexGroups()
 	return g
 }

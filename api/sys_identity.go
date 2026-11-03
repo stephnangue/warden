@@ -649,6 +649,98 @@ func (c *Sys) SetEntityStateWithContext(ctx context.Context, name, state, expect
 	return c.entityWrite(ctx, name, "state", body)
 }
 
+// IdentityConfig is a namespace's identity verdict settings: how callers whose
+// native identity no entity claims are treated ("observe" or "deny"), and the
+// auth mounts deny never applies to.
+type IdentityConfig struct {
+	UnknownAliases string        `json:"unknown_aliases"`
+	ExemptMounts   []ExemptMount `json:"exempt_mounts"`
+	Warnings       []string      `json:"warnings,omitempty"`
+}
+
+// ExemptMount is an exempt auth mount: by its current path (Mount; empty when
+// the mount was disabled since) and by accessor.
+type ExemptMount struct {
+	Mount         string `json:"mount"`
+	MountAccessor string `json:"mount_accessor"`
+}
+
+// IdentityConfigInput is the body of an identity config write. An empty
+// UnknownAliases and a nil ExemptMounts keep the stored value; an empty,
+// non-nil ExemptMounts clears it. ExemptMounts names mounts by path. Force
+// writes a config that would refuse the writer's own requests.
+type IdentityConfigInput struct {
+	UnknownAliases string
+	ExemptMounts   []string
+	Force          bool
+}
+
+func (in *IdentityConfigInput) body() map[string]any {
+	out := map[string]any{}
+	if in == nil {
+		return out
+	}
+	if in.UnknownAliases != "" {
+		out["unknown_aliases"] = in.UnknownAliases
+	}
+	if in.ExemptMounts != nil {
+		out["exempt_mounts"] = in.ExemptMounts
+	}
+	if in.Force {
+		out["force"] = true
+	}
+	return out
+}
+
+// ReadIdentityConfig reads the identity config of the client's namespace.
+func (c *Sys) ReadIdentityConfig() (*IdentityConfig, error) {
+	return c.ReadIdentityConfigWithContext(context.Background())
+}
+
+// ReadIdentityConfigWithContext reads the identity config with context.
+func (c *Sys) ReadIdentityConfigWithContext(ctx context.Context) (*IdentityConfig, error) {
+	return c.identityConfigRequest(ctx, http.MethodGet, nil)
+}
+
+// WriteIdentityConfig writes the fields input sets to the identity config of
+// the client's namespace and returns the config as stored.
+func (c *Sys) WriteIdentityConfig(input *IdentityConfigInput) (*IdentityConfig, error) {
+	return c.WriteIdentityConfigWithContext(context.Background(), input)
+}
+
+// WriteIdentityConfigWithContext writes the identity config with context.
+func (c *Sys) WriteIdentityConfigWithContext(ctx context.Context, input *IdentityConfigInput) (*IdentityConfig, error) {
+	return c.identityConfigRequest(ctx, http.MethodPost, input.body())
+}
+
+// ResetIdentityConfig restores the defaults of the identity config of the
+// client's namespace.
+func (c *Sys) ResetIdentityConfig() (*IdentityConfig, error) {
+	return c.ResetIdentityConfigWithContext(context.Background())
+}
+
+// ResetIdentityConfigWithContext resets the identity config with context.
+func (c *Sys) ResetIdentityConfigWithContext(ctx context.Context) (*IdentityConfig, error) {
+	return c.identityConfigRequest(ctx, http.MethodDelete, nil)
+}
+
+func (c *Sys) identityConfigRequest(ctx context.Context, method string, body map[string]any) (*IdentityConfig, error) {
+	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
+	defer cancelFunc()
+
+	r := c.c.NewRequest(method, "/v1/sys/identity/config")
+	if body != nil {
+		if err := r.SetJSONBody(body); err != nil {
+			return nil, err
+		}
+	}
+	var cfg IdentityConfig
+	if err := c.dataRequest(ctx, r, &cfg, "identity config"); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 // SponsorRead reads the entity name as a member of its sponsor group, or of
 // its pending handover's, signed in with a ticket and no role. Every refusal
 // is the same 403, whatever its cause.
