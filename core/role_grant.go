@@ -163,10 +163,17 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 	g, ok := m.Roles[role.Name]
 	if !ok {
 		rg.DeniedReason = logical.RoleDeniedNotAssumable
+		// A claimed caller whose entity is not governed holds no role at all
+		// (the claim rule), in every mode and on an exempt mount too, where
+		// the identity verdict gives no reason: say why, not just that no
+		// group grants this one. Suspended and retired were refused above.
+		if e := m.Entity; e != nil && e.GovernedBy() == "" {
+			rg.DeniedReason = logical.RoleDeniedEntityNotGoverned
+		}
 		return
 	}
 
-	rg.Role, rg.GrantedBy = role, g.Label
+	rg.Role, rg.GrantedBy, rg.GroupType = role, g.Label, g.Type
 	te.RoleName = role.Name
 	te.Policies = role.Policies
 	te.CredentialSpec = role.CredSpecName
@@ -246,7 +253,10 @@ func roleRefusal(rg *logical.RoleGrant, te *logical.TokenEntry) *ErrRoleNotGrant
 		if te != nil && te.Admission != nil {
 			mount = te.Admission.MountPath
 		}
-		if mount != "" {
+		if te != nil && te.Entity != nil {
+			// Claimed: virtual groups never apply to it, whatever they match.
+			msg = fmt.Sprintf("role %q is not assumable: the caller's entity holds no static group granting it", rg.RoleName)
+		} else if mount != "" {
 			msg = fmt.Sprintf("role %q is not assumable through %s: no group grants it to this caller", rg.RoleName, mount)
 		} else {
 			msg = fmt.Sprintf("role %q is not assumable: no group grants it to this caller", rg.RoleName)

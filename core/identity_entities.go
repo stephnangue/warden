@@ -169,6 +169,9 @@ type EntityFilter struct {
 	// MountGone, when set, selects only entities claiming a native identity on
 	// a mount it reports gone: orphaned claims, left by a forced disable.
 	MountGone func(accessor string) bool
+	// Members, when set, selects only the entities with these IDs: a static
+	// group's members.
+	Members map[string]bool
 }
 
 func (f EntityFilter) match(e *logical.Entity) bool {
@@ -180,6 +183,7 @@ func (f EntityFilter) match(e *logical.Entity) bool {
 		f.SponsorState == SponsorStatePending && e.PendingSponsor == nil,
 		f.Ungoverned && e.GovernedBy() != "",
 		f.GovernedBy != "" && e.GovernedBy() != f.GovernedBy,
+		f.Members != nil && !f.Members[e.ID],
 		f.MountGone != nil && !slices.ContainsFunc(e.Aliases, func(a logical.EntityAlias) bool {
 			return f.MountGone(a.MountAccessor)
 		}):
@@ -762,6 +766,8 @@ func (s *IdentityStore) publishEntitiesLocked(nsID string, ents *nsEntities) {
 	cur := snap.namespace(nsID)
 	var next *nsIndex
 	if len(cur.groupsByName) > 0 || ents.count() > 0 || cur.config != nil {
+		// The groups and their indexes, the member index included, are
+		// shared with cur: none is ever written after it is published.
 		n := *cur
 		n.gen = s.gen.Add(1)
 		n.entities = ents

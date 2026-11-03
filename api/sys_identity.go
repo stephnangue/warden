@@ -14,6 +14,7 @@ import (
 // take); RuleCount and SelectorCount are what the group adds to the
 // namespace's usage. ValidUntil is an RFC 3339 instant in UTC after which the
 // group grants nothing, empty for no end.
+// Members are a static group's entities, by their current name.
 // Hash is what a conditional update or delete passes back as
 // GroupInput.ExpectedHash; Warnings carries non-fatal notices about a write (a
 // role that does not exist yet, a fact no listed auth mount produces).
@@ -24,6 +25,7 @@ type Group struct {
 	Description   string                `json:"description"`
 	Roles         []string              `json:"roles"`
 	Rules         []map[string][]string `json:"rules"`
+	Members       []GroupMember         `json:"members"`
 	RuleCount     int                   `json:"rule_count"`
 	SelectorCount int                   `json:"selector_count"`
 	ValidUntil    string                `json:"valid_until"`
@@ -32,6 +34,27 @@ type Group struct {
 	CreatedAt     time.Time             `json:"created_at"`
 	UpdatedAt     time.Time             `json:"updated_at"`
 	Warnings      []string              `json:"warnings,omitempty"`
+}
+
+// GroupMember is a member of a static group: an entity of the group's
+// namespace. Until is the RFC 3339 instant its membership ends (inclusive),
+// empty for no end; Expired says it has, until a write drops it.
+type GroupMember struct {
+	Name    string `json:"name"`
+	ID      string `json:"id"`
+	Until   string `json:"until"`
+	Expired bool   `json:"expired"`
+}
+
+// GroupMemberInput is a member in a static group write: an entity by ID (as
+// GroupMember.ID from a read) or by name, and, optionally, the RFC 3339
+// instant its membership ends. ID wins over Name. A read-modify-write should
+// send back what it read by ID: an entity deleted and created again under
+// the same name since the read is then not taken for the one read.
+type GroupMemberInput struct {
+	ID    string
+	Name  string
+	Until string
 }
 
 // IdentityUsage is a namespace's identity objects counted by kind, against
@@ -50,10 +73,22 @@ type IdentitiesUsage struct {
 }
 
 // GroupsUsage counts a namespace's groups: Total counts every group, Virtual
-// the virtual ones with their caps.
+// and Static each type with its caps.
 type GroupsUsage struct {
 	Total   int                `json:"total"`
 	Virtual VirtualGroupsUsage `json:"virtual"`
+	Static  StaticGroupsUsage  `json:"static"`
+}
+
+// StaticGroupsUsage counts static groups (Count, against Max) and the
+// memberships across them, expired ones included (Members, against
+// MaxMembers); MaxGroupMembers is the cap on one group's members.
+type StaticGroupsUsage struct {
+	Count           int `json:"count"`
+	Max             int `json:"max"`
+	Members         int `json:"members"`
+	MaxMembers      int `json:"max_members"`
+	MaxGroupMembers int `json:"max_group_members"`
 }
 
 // VirtualGroupsUsage counts virtual groups (Count, against Max) and the
@@ -75,7 +110,8 @@ type GroupInput struct {
 	Description *string
 	Roles       []string
 	Rules       []map[string][]string
-	ValidUntil  *string // RFC 3339; "" clears it on update
+	Members     []GroupMemberInput // static groups; replaces the list
+	ValidUntil  *string            // RFC 3339; "" clears it on update
 	Metadata    map[string]string
 
 	// ExpectedHash, on update, applies the write only if the group still has
@@ -99,6 +135,24 @@ func (in *GroupInput) body() map[string]any {
 	}
 	if in.Rules != nil {
 		out["rules"] = in.Rules
+	}
+	if in.Members != nil {
+		members := make([]any, len(in.Members))
+		for i, m := range in.Members {
+			switch {
+			case m.ID != "":
+				item := map[string]any{"id": m.ID}
+				if m.Until != "" {
+					item["until"] = m.Until
+				}
+				members[i] = item
+			case m.Until == "":
+				members[i] = m.Name
+			default:
+				members[i] = map[string]any{"name": m.Name, "until": m.Until}
+			}
+		}
+		out["members"] = members
 	}
 	if in.ValidUntil != nil {
 		out["valid_until"] = *in.ValidUntil
@@ -231,25 +285,46 @@ func (c *Sys) DeleteGroupWithContext(ctx context.Context, name, groupType, expec
 	return parseWarnings(resource.Data["warnings"]), nil
 }
 
+// GroupFilter narrows a group listing. Zero fields match every group.
+type GroupFilter struct {
+	Role   string // groups that grant this role
+	Type   string // groups of this type
+	Member string // static groups that list this entity, by name
+}
+
 // ListGroups lists the groups of the client's namespace, sorted by name. A
 // non-empty role lists only the groups that grant it, a non-empty groupType
 // only the groups of that type.
 func (c *Sys) ListGroups(role, groupType string) ([]*Group, error) {
-	return c.ListGroupsWithContext(context.Background(), role, groupType)
+	return c.ListGroupsFiltered(GroupFilter{Role: role, Type: groupType})
 }
 
 // ListGroupsWithContext lists the groups with context.
 func (c *Sys) ListGroupsWithContext(ctx context.Context, role, groupType string) ([]*Group, error) {
+	return c.ListGroupsFilteredWithContext(ctx, GroupFilter{Role: role, Type: groupType})
+}
+
+// ListGroupsFiltered lists the groups of the client's namespace that f
+// selects, sorted by name.
+func (c *Sys) ListGroupsFiltered(f GroupFilter) ([]*Group, error) {
+	return c.ListGroupsFilteredWithContext(context.Background(), f)
+}
+
+// ListGroupsFilteredWithContext lists the groups f selects with context.
+func (c *Sys) ListGroupsFilteredWithContext(ctx context.Context, f GroupFilter) ([]*Group, error) {
 	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
 	defer cancelFunc()
 
 	r := c.c.NewRequest(http.MethodGet, "/v1/sys/identity/group")
 	r.Params.Set("warden-list", "true")
-	if role != "" {
-		r.Params.Set("role", role)
+	if f.Role != "" {
+		r.Params.Set("role", f.Role)
 	}
-	if groupType != "" {
-		r.Params.Set("type", groupType)
+	if f.Type != "" {
+		r.Params.Set("type", f.Type)
+	}
+	if f.Member != "" {
+		r.Params.Set("member", f.Member)
 	}
 
 	resp, err := c.c.rawRequestWithContext(ctx, r)
@@ -336,8 +411,15 @@ type Entity struct {
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 
+	// Groups are the static groups that list the entity, in force now, and
+	// Roles the roles they grant. They count only while the entity is
+	// governed and active.
+	Groups []string `json:"groups"`
+	Roles  []string `json:"roles"`
+
 	// Warnings carries the server's notices about a write: a handover left
-	// pending, a group nobody can act for, an entity left ungoverned.
+	// pending, a group nobody can act for, an entity left ungoverned, a
+	// native identity newly claimed.
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -474,8 +556,9 @@ type EntityFilter struct {
 	Sponsor      string // the name of the sponsor group
 	SponsorState string // "accepted" (has a sponsor) or "pending" (has a handover)
 	GovernedBy   string
-	Ungoverned   bool // no sponsor or no description
-	Orphaned     bool // a native identity on an auth mount that no longer exists
+	Ungoverned   bool   // no sponsor or no description
+	Orphaned     bool   // a native identity on an auth mount that no longer exists
+	Group        string // the members of this static group
 }
 
 // AliasClaim is what a claim returns: the native identity now claimed by
@@ -878,6 +961,7 @@ func (c *Sys) ListEntitiesWithContext(ctx context.Context, f *EntityFilter) ([]*
 	if f != nil {
 		for k, v := range map[string]string{
 			"kind": f.Kind, "state": f.State, "sponsor": f.Sponsor, "sponsor_state": f.SponsorState, "governed_by": f.GovernedBy,
+			"group": f.Group,
 		} {
 			if v != "" {
 				r.Params.Set(k, v)

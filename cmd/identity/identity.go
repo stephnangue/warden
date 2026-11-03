@@ -102,8 +102,14 @@ Usage: warden identity group <subcommand> [options]
 
   Manage the groups of the current namespace. A group lists the roles its
   membership grants. Its "type" says where membership comes from and never
-  changes; "virtual" is the one type today: a caller is a member when its
-  verified facts match any one of the group's rules.
+  changes:
+
+    virtual  an unclaimed caller is a member when its verified facts match
+             any one of the group's rules.
+    static   the group lists its members, entities of this namespace. A
+             caller whose native identity an entity claims holds only its
+             entity's static grants, and only while the entity is
+             governed and active: virtual groups never apply to it.
 
   A rule is a set of selectors, each a fact name with the values it may
   take; a caller must match one value of every selector. Every rule
@@ -127,12 +133,23 @@ Usage: warden identity group <subcommand> [options]
           ]
         }'
 
+      $ warden identity group create local-ops -json '{
+          "type": "static",
+          "description": "Operations agents governed by Warden",
+          "members": ["billing-agent"],
+          "roles": ["ops", "deploy"]
+        }'
+
+      $ warden identity group member add local-ops release-bot -for 72h
+      $ warden identity group prune local-ops
       $ warden identity group list -role deploy
+      $ warden identity group list -member billing-agent
       $ warden identity group read ci-deployers
       $ warden identity group delete ci-deployers
 
   A namespace's virtual groups, and the selectors across all their rules,
-  are capped; 'warden identity usage' shows the usage and the caps.
+  are capped, as are its static groups and their members; 'warden identity
+  usage' shows the usage and the caps.
 
   Please see the individual subcommand help for detailed usage information.
 `,
@@ -150,6 +167,8 @@ func init() {
 	GroupCmd.AddCommand(GroupUpdateCmd)
 	GroupCmd.AddCommand(GroupDeleteCmd)
 	GroupCmd.AddCommand(GroupListCmd)
+	GroupCmd.AddCommand(GroupMemberCmd)
+	GroupCmd.AddCommand(GroupPruneCmd)
 	EntityCmd.AddCommand(EntityCreateCmd)
 	EntityCmd.AddCommand(EntityReadCmd)
 	EntityCmd.AddCommand(EntityUpdateCmd)

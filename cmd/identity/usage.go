@@ -21,17 +21,20 @@ var UsageCmd = &cobra.Command{
 Usage: warden identity usage
 
   Count the current namespace's identity objects by kind, against their
-  caps. Groups: every group, and the virtual groups with the selectors of
-  their rules ("mount" included). Identities: the entities, and the native
-  identities they claim. Needs read on sys/identity/usage; no sudo.
+  caps. Groups: every group, the virtual groups with the selectors of
+  their rules ("mount" included), and the static groups with the members
+  they list (expired ones included until a write drops them).
+  Identities: the entities, and the native identities they claim. Needs
+  read on sys/identity/usage; no sudo.
 
   Output honors the global -output flag:
     table    one section per kind (default for TTY), each count shown
              against its cap as used/max:
 
                GROUPS
-                 TYPE      COUNT          SELECTORS
-                 virtual   <count>/<max>  <selectors>/<max>
+                 TYPE      COUNT          SELECTORS          MEMBERS
+                 virtual   <count>/<max>  <selectors>/<max>  -
+                 static    <count>/<max>  -                  <members>/<max> (at most <max> a group)
                  total     <count>
 
                IDENTITIES
@@ -40,7 +43,8 @@ Usage: warden identity usage
 
     json     the server's data as is:
              {"groups": {"total", "virtual": {"count", "max",
-             "selectors", "max_selectors"}},
+             "selectors", "max_selectors"}, "static": {"count", "max",
+             "members", "max_members", "max_group_members"}},
              "identities": {"entities", "max_entities", "aliases"}}
 
   Examples:
@@ -90,8 +94,10 @@ func printUsage(w io.Writer, u *api.IdentityUsage) {
 	g := u.Groups
 	fmt.Fprintln(w, "GROUPS")
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "  TYPE\tCOUNT\tSELECTORS")
-	fmt.Fprintf(tw, "  virtual\t%d/%d\t%d/%d\n", g.Virtual.Count, g.Virtual.Max, g.Virtual.Selectors, g.Virtual.MaxSelectors)
+	fmt.Fprintln(tw, "  TYPE\tCOUNT\tSELECTORS\tMEMBERS")
+	fmt.Fprintf(tw, "  virtual\t%d/%d\t%d/%d\t-\n", g.Virtual.Count, g.Virtual.Max, g.Virtual.Selectors, g.Virtual.MaxSelectors)
+	fmt.Fprintf(tw, "  static\t%d/%d\t-\t%d/%d (at most %d a group)\n",
+		g.Static.Count, g.Static.Max, g.Static.Members, g.Static.MaxMembers, g.Static.MaxGroupMembers)
 	fmt.Fprintf(tw, "  total\t%d\n", g.Total)
 	_ = tw.Flush()
 

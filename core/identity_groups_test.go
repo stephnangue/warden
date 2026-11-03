@@ -266,13 +266,16 @@ func TestGroups_Type(t *testing.T) {
 	resp = groupRequest(t, c, logical.CreateOperation, "group/g", body)
 	assert.Contains(t, resp.Err.Error(), "type is required", "an empty type is no type on create")
 
-	for _, typ := range []string{"static", "directory"} {
-		body = deployersBody()
-		body["type"] = typ
-		resp = groupRequest(t, c, logical.CreateOperation, "group/g", body)
-		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, typ)
-		assert.Contains(t, resp.Err.Error(), "not supported yet", typ)
-	}
+	body = deployersBody()
+	body["type"] = "directory"
+	resp = groupRequest(t, c, logical.CreateOperation, "group/g", body)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), "not supported yet")
+	body = deployersBody()
+	body["type"] = "static"
+	resp = groupRequest(t, c, logical.CreateOperation, "group/g", body)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), `"rules" is not valid on a static group`)
 	body = deployersBody()
 	body["type"] = "selector"
 	resp = groupRequest(t, c, logical.CreateOperation, "group/g", body)
@@ -719,7 +722,8 @@ func TestIdentityUsage(t *testing.T) {
 			Max:          logical.MaxVirtualGroupsPerNamespace,
 			Selectors:    selectors,
 			MaxSelectors: logical.MaxSelectorsPerNamespace,
-		}}
+		}, Static: StaticGroupsUsage{Max: logical.MaxStaticGroupsPerNamespace, MaxMembers: logical.MaxStaticMembersPerNamespace,
+			MaxGroupMembers: logical.MaxStaticGroupMembers}}
 	}
 
 	assert.Equal(t, want(0, 0), readUsage(t, c), "an empty namespace")
@@ -799,7 +803,8 @@ func TestIdentityUsage_HTTP(t *testing.T) {
 	assert.JSONEq(t, `{
 		"groups": {
 			"total": 1,
-			"virtual": {"count": 1, "max": 8000, "selectors": 2, "max_selectors": 16000}
+			"virtual": {"count": 1, "max": 8000, "selectors": 2, "max_selectors": 16000},
+			"static": {"count": 0, "max": 8000, "members": 0, "max_members": 250000, "max_group_members": 1000}
 		},
 		"identities": {"entities": 0, "max_entities": 50000, "aliases": 0}
 	}`, string(raw))

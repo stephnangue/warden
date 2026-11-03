@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	listRole string
-	listType string
+	listRole   string
+	listType   string
+	listMember string
 
 	GroupListCmd = &cobra.Command{
 		Use:           "list",
@@ -22,14 +23,14 @@ Usage: warden identity group list [options]
 
   List every group of the current namespace, or with -role only the
   groups that grant one role, with -type only the groups of one type
-  (needed when your policy only lets you see groups of one type).
-  Requires a token with sudo on
-  sys/identity/group. 'warden identity usage' shows how much of the
-  namespace's caps the groups use.
+  (needed when your policy only lets you see groups of one type), with
+  -member only the static groups that list one entity. Requires a token
+  with sudo on sys/identity/group. 'warden identity usage' shows how much
+  of the namespace's caps the groups use.
 
   Output honors the global -output flag:
     table    one row per group (default for TTY)
-    json     [{"name", "type", "description", "roles", "rules",
+    json     [{"name", "type", "description", "roles", "rules", "members",
              "rule_count", "selector_count", "valid_until", "metadata",
              "hash"}, ...]
     ndjson   one group per line
@@ -39,6 +40,7 @@ Usage: warden identity group list [options]
       $ warden identity group list
       $ warden identity group list -role deploy
       $ warden identity group list -type virtual
+      $ warden identity group list -member billing-agent
       $ warden identity group list -o ndjson | jq -r .name
 `,
 		Args: cobra.NoArgs,
@@ -49,6 +51,7 @@ Usage: warden identity group list [options]
 func init() {
 	GroupListCmd.Flags().StringVar(&listRole, "role", "", "List only the groups that grant this role")
 	GroupListCmd.Flags().StringVar(&listType, "type", "", "List only the groups of this type")
+	GroupListCmd.Flags().StringVar(&listMember, "member", "", "List only the static groups that list this entity")
 }
 
 func runGroupList(cmd *cobra.Command, args []string) error {
@@ -61,7 +64,7 @@ func runGroupList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	groups, err := c.Sys().ListGroups(listRole, listType)
+	groups, err := c.Sys().ListGroupsFiltered(api.GroupFilter{Role: listRole, Type: listType, Member: listMember})
 	if err != nil {
 		return fmt.Errorf("failed to list groups: %w", err)
 	}
@@ -90,12 +93,17 @@ func projectGroups(groups []*api.Group) []map[string]any {
 		for k, v := range g.Metadata {
 			metadata[k] = v
 		}
+		members := make([]any, 0, len(g.Members))
+		for _, m := range g.Members {
+			members = append(members, map[string]any{"name": m.Name, "id": m.ID, "until": m.Until, "expired": m.Expired})
+		}
 		items = append(items, map[string]any{
 			"name":           g.Name,
 			"type":           g.Type,
 			"description":    g.Description,
 			"roles":          roles,
 			"rules":          rules,
+			"members":        members,
 			"rule_count":     g.RuleCount,
 			"selector_count": g.SelectorCount,
 			"valid_until":    g.ValidUntil,
@@ -119,9 +127,10 @@ func printGroupsTable(items []map[string]any) {
 			cell(it["roles"]),
 			cell(it["rule_count"]),
 			cell(it["selector_count"]),
+			len(membersOf(it["members"])),
 			cell(it["valid_until"]),
 			cell(it["description"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Type", "Roles", "Rules", "Selectors", "Valid Until", "Description"}, rows)
+	helpers.PrintTable([]string{"Name", "Type", "Roles", "Rules", "Selectors", "Members", "Valid Until", "Description"}, rows)
 }

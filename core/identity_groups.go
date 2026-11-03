@@ -22,6 +22,8 @@ var (
 	ErrGroupNotFound        = errors.New("group not found")
 	ErrGroupAlreadyExists   = errors.New("group already exists")
 	ErrTooManyVirtualGroups = errors.New("too many virtual groups in the namespace")
+	ErrTooManyStaticGroups  = errors.New("too many static groups in the namespace")
+	ErrTooManyStaticMembers = errors.New("too many static group memberships in the namespace")
 	ErrTooManySelectors     = errors.New("too many selectors in the namespace")
 
 	// ErrGroupChanged is returned by UpdateGroup and DeleteGroup when the
@@ -71,12 +73,16 @@ func (s *IdentityStore) GroupsListingRole(nsID, role string) []string {
 	return s.namespaceIndex(nsID).listing(role)
 }
 
-// publishGroupsLocked makes byName the namespace's groups under the next generation,
-// keeping its entities as published. Caller holds mu and hands over byName.
-func (s *IdentityStore) publishGroupsLocked(nsID string, byName map[string]*groupEntry) {
+// publishGroupsLocked makes byName the namespace's groups under the next
+// generation, keeping its entities as published. The write replaced group old
+// with next (a create has no old, a delete no next): the member index is
+// updated for those two alone, and shared as it is when neither is static.
+// Caller holds mu and hands over byName.
+func (s *IdentityStore) publishGroupsLocked(nsID string, byName map[string]*groupEntry, old, next *groupEntry) {
 	snap := s.snapshot.Load()
 	cur := snap.namespace(nsID)
-	s.snapshot.Store(snap.withNamespace(nsID, buildNSIndex(byName, cur.entities, cur.config, s.gen.Add(1))))
+	members := cur.members.with(old, next)
+	s.snapshot.Store(snap.withNamespace(nsID, buildNSIndex(byName, members, cur.entities, cur.config, s.gen.Add(1))))
 }
 
 // GetGroup returns a copy of the group name in the namespace in ctx, and the
@@ -150,7 +156,13 @@ func (s *IdentityStore) CreateGroup(ctx context.Context, g *logical.Group) ([]st
 		if max := int(s.maxVirtualGroups.Load()); g.Type == logical.GroupTypeVirtual && len(cur.virtualGroups) >= max {
 			return fmt.Errorf("%w: the namespace has %d/%d virtual groups", ErrTooManyVirtualGroups, len(cur.virtualGroups), max)
 		}
+		if max := logical.MaxStaticGroupsPerNamespace; g.Type == logical.GroupTypeStatic && cur.members.groups >= max {
+			return fmt.Errorf("%w: the namespace has %d/%d static groups", ErrTooManyStaticGroups, cur.members.groups, max)
+		}
 		if err := s.checkSelectorsLocked(cur, nil, cg); err != nil {
+			return err
+		}
+		if err := s.checkStaticMembersLocked(cur, nil, g); err != nil {
 			return err
 		}
 
@@ -209,6 +221,9 @@ func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expec
 		if err := s.checkSelectorsLocked(cur, old, cg); err != nil {
 			return err
 		}
+		if err := s.checkStaticMembersLocked(cur, old.Group, g); err != nil {
+			return err
+		}
 		g.ID, g.CreatedAt, g.UpdatedAt = old.ID, old.CreatedAt, time.Now().UTC()
 		return s.commitLocked(ctx, ns, cur, g, cg)
 	}()
@@ -236,6 +251,22 @@ func (s *IdentityStore) checkSelectorsLocked(cur *nsIndex, old, next *groupEntry
 	return nil
 }
 
+// checkStaticMembersLocked refuses a write that would take the namespace past
+// its cap on static group memberships: cur's, less old's (the group replaced,
+// if any), plus next's. A write that adds none is never refused. Caller holds
+// mu.
+func (s *IdentityStore) checkStaticMembersLocked(cur *nsIndex, old, next *logical.Group) error {
+	total := cur.members.members + len(next.Members)
+	if old != nil {
+		total -= len(old.Members)
+	}
+	if max := int(s.maxStaticMembers.Load()); total > max && total > cur.members.members {
+		return fmt.Errorf("%w: this write would make %d/%d memberships across the namespace's static groups (currently %d)",
+			ErrTooManyStaticMembers, total, max, cur.members.members)
+	}
+	return nil
+}
+
 // commitLocked stores g and publishes it with its compiled form cg in place of
 // any group of the same name. Caller holds mu; cur is the namespace as
 // published.
@@ -249,8 +280,9 @@ func (s *IdentityStore) commitLocked(ctx context.Context, ns *namespace.Namespac
 	for k, v := range cur.groupsByName {
 		byName[k] = v
 	}
+	old := byName[g.Name]
 	byName[g.Name] = cg
-	s.publishGroupsLocked(ns.ID, byName)
+	s.publishGroupsLocked(ns.ID, byName, old, cg)
 	return nil
 }
 
@@ -318,7 +350,7 @@ func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.
 				byName[k] = v
 			}
 		}
-		s.publishGroupsLocked(ns.ID, byName)
+		s.publishGroupsLocked(ns.ID, byName, old, nil)
 		return nil
 	}()
 	if err != nil {
@@ -518,7 +550,9 @@ func (s *IdentityStore) readGroup(ctx context.Context, nsUUID, id string) (*grou
 	if stored.Group == nil || stored.Group.ID != id || !validSysName(stored.Group.Name) {
 		return nil, fmt.Errorf("record does not hold group %q", id)
 	}
-	if stored.Group.Type != logical.GroupTypeVirtual {
+	switch stored.Group.Type {
+	case logical.GroupTypeVirtual, logical.GroupTypeStatic:
+	default:
 		return nil, fmt.Errorf("group type %q is not supported", stored.Group.Type)
 	}
 	// Published like a written group: as a clone, with no spare capacity left
@@ -548,14 +582,14 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 	}
 	switch g.Type {
 	case "":
-		return nil, nil, logical.ErrBadRequestf("type is required: %q", logical.GroupTypeVirtual)
-	case logical.GroupTypeVirtual:
+		return nil, nil, logical.ErrBadRequestf("type is required: %q or %q", logical.GroupTypeVirtual, logical.GroupTypeStatic)
+	case logical.GroupTypeVirtual, logical.GroupTypeStatic:
 	default:
 		if _, err := logical.ParseGroupType(string(g.Type)); err != nil {
 			return nil, nil, logical.ErrBadRequest(err.Error())
 		}
-		return nil, nil, logical.ErrBadRequestf("group type %q is not supported yet; only %q groups can be created",
-			g.Type, logical.GroupTypeVirtual)
+		return nil, nil, logical.ErrBadRequestf("group type %q is not supported yet; only %q and %q groups can be created",
+			g.Type, logical.GroupTypeVirtual, logical.GroupTypeStatic)
 	}
 	if len(g.Description) > logical.MaxGroupDescriptionBytes {
 		return nil, nil, logical.ErrBadRequestf("description exceeds %d bytes", logical.MaxGroupDescriptionBytes)
@@ -577,19 +611,34 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 	}
 	g.Roles = roles
 
-	if len(g.Rules) == 0 {
-		return nil, nil, logical.ErrBadRequest("a virtual group needs at least one rule")
-	}
-	if len(g.Rules) > logical.MaxGroupRules {
-		return nil, nil, logical.ErrBadRequestf("a group has at most %d rules, got %d",
-			logical.MaxGroupRules, len(g.Rules))
+	var warnings []string
+	switch g.Type {
+	case logical.GroupTypeVirtual:
+		if len(g.Members) > 0 {
+			return nil, nil, logical.ErrBadRequest("a virtual group lists no members: its rules decide membership")
+		}
+		if len(g.Rules) == 0 {
+			return nil, nil, logical.ErrBadRequest("a virtual group needs at least one rule")
+		}
+		if len(g.Rules) > logical.MaxGroupRules {
+			return nil, nil, logical.ErrBadRequestf("a group has at most %d rules, got %d",
+				logical.MaxGroupRules, len(g.Rules))
+		}
+	case logical.GroupTypeStatic:
+		if len(g.Rules) > 0 {
+			return nil, nil, logical.ErrBadRequest("a static group has no rules: it lists its members")
+		}
+		w, err := s.normalizeMembers(ns, g)
+		if err != nil {
+			return nil, nil, err
+		}
+		warnings = append(warnings, w...)
 	}
 	cg, err := compileGroup(g)
 	if err != nil {
 		return nil, nil, logical.ErrBadRequest(err.Error())
 	}
 
-	var warnings []string
 	if !g.ValidUntil.IsZero() && time.Now().After(g.ValidUntil) {
 		warnings = append(warnings, "valid_until is in the past; the group grants nothing")
 	}
@@ -601,8 +650,65 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 			}
 		}
 	}
-	warnings = append(warnings, ruleWarnings(g, s.core.namespaceAuthMountFacts(ctx))...)
+	if g.Type == logical.GroupTypeVirtual {
+		warnings = append(warnings, ruleWarnings(g, s.core.namespaceAuthMountFacts(ctx))...)
+	}
 	return cg, warnings, nil
+}
+
+// normalizeMembers sorts a static group's members by ID and checks them
+// against the namespace's entities as published. A member listed twice keeps
+// its latest until (none beats any). A member past its until is dropped with a
+// warning, so a read-modify-write of a group holding expired entries prunes
+// them; so is a member no entity holds any more, silently, since it can never
+// grant again. Members are resolved by name before this: an ID here comes
+// from a read or from the resolution of a name. At most MaxStaticGroupMembers
+// remain.
+func (s *IdentityStore) normalizeMembers(ns *namespace.Namespace, g *logical.Group) ([]string, error) {
+	ents := s.namespaceIndex(ns.ID).entities
+	now := time.Now()
+	byID := make(map[string]logical.GroupMember, len(g.Members))
+	var expired []string
+	for _, m := range g.Members {
+		en := ents.get(m.ID)
+		if en == nil {
+			continue
+		}
+		if !m.Until.IsZero() {
+			m.Until = m.Until.Round(0).UTC()
+			if m.Until.After(maxEnd) {
+				return nil, logical.ErrBadRequestf("member %q: until must be no later than %s",
+					en.Name, maxEnd.Format(time.RFC3339Nano))
+			}
+			if now.After(m.Until) {
+				expired = append(expired, en.Name)
+				continue
+			}
+		}
+		if prev, ok := byID[m.ID]; ok && (prev.Until.IsZero() || (!m.Until.IsZero() && prev.Until.After(m.Until))) {
+			continue
+		}
+		byID[m.ID] = m
+	}
+	if len(byID) > logical.MaxStaticGroupMembers {
+		return nil, logical.ErrBadRequestf("a static group lists at most %d members, got %d",
+			logical.MaxStaticGroupMembers, len(byID))
+	}
+	members := make([]logical.GroupMember, 0, len(byID))
+	for _, id := range slices.Sorted(maps.Keys(byID)) {
+		members = append(members, byID[id])
+	}
+	g.Members = slices.Clip(members)
+	if len(g.Members) == 0 {
+		g.Members = nil
+	}
+	var warnings []string
+	if len(expired) > 0 {
+		slices.Sort(expired)
+		warnings = append(warnings, fmt.Sprintf("dropped %d members past their until: %s",
+			len(expired), strings.Join(slices.Compact(expired), ", ")))
+	}
+	return warnings, nil
 }
 
 // normalizeGroupRoles returns roles sorted and deduplicated, refusing a name

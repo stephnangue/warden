@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -26,7 +29,8 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 				},
 				"type": {
 					Type: framework.TypeString,
-					Description: `Where membership comes from: "virtual" (computed from the facts an auth mount verified). ` +
+					Description: `Where membership comes from: "virtual" (computed from the facts an auth mount verified ` +
+						`about an unclaimed caller) or "static" (the entities it lists). ` +
 						"Required on every write (create, update, and delete, where it is a query parameter) and never changes: " +
 						"a write naming another type than the stored one is refused. Optional on read, where it must match too.",
 				},
@@ -56,12 +60,17 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 					Description: fmt.Sprintf("Free-form string labels (at most %d keys)", logical.MaxRoleMetadataKeys),
 				},
 				"members": {
-					Type:        framework.TypeSlice,
-					Description: "Not valid on a virtual group",
+					Type: framework.TypeSlice,
+					Description: fmt.Sprintf("The entities of this namespace a static group lists (at most %d), each an "+
+						`entity name, or {"name": ..., "until": RFC 3339} for a membership that ends (inclusive), or `+
+						`{"id": ...} as a read returns it, which a read-modify-write should send back so that an entity `+
+						"deleted and created again under the same name is not taken for the one read. Replaces the list; "+
+						"a member past its until is dropped with a warning. Membership counts only for a governed, active "+
+						"entity. Not valid on a virtual group.", logical.MaxStaticGroupMembers),
 				},
 				"link": {
 					Type:        framework.TypeMap,
-					Description: "Not valid on a virtual group",
+					Description: "Reserved for directory groups; not valid on any group yet",
 				},
 				"expected_hash": {
 					Type:        framework.TypeString,
@@ -92,10 +101,12 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 				},
 			},
 			HelpSynopsis: "Manage namespace groups",
-			HelpDescription: "A group grants roles to its members. A virtual group's members are the callers whose verified " +
-				"facts match one of its rules, through one of the auth mounts the rule's \"mount\" selector lists. A role " +
-				"that does not exist yet, or a fact no listed mount produces, is accepted with a warning. Responses carry " +
-				"rule_count and selector_count, what the group adds to the namespace's usage.",
+			HelpDescription: "A group grants roles to its members. A virtual group's members are the unclaimed callers " +
+				"whose verified facts match one of its rules, through one of the auth mounts the rule's \"mount\" selector " +
+				"lists. A static group's members are the entities it lists; a caller whose native identity an entity claims " +
+				"holds only its entity's static grants, and none until the entity is governed. A role that does not exist " +
+				"yet, or a fact no listed mount produces, is accepted with a warning. Responses carry rule_count and " +
+				"selector_count, what the group adds to the namespace's usage.",
 		},
 		{
 			Pattern: "identity/group/?$",
@@ -107,6 +118,10 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 				"type": {
 					Type:        framework.TypeString,
 					Description: "List only the groups of this type",
+				},
+				"member": {
+					Type:        framework.TypeString,
+					Description: "List only the static groups that list this entity, by name",
 				},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
@@ -137,10 +152,30 @@ func (b *SystemBackend) pathIdentityGroups() []*framework.Path {
 }
 
 // groupToMap renders a group for a response. Every key is present, so the
-// shape is the same whichever fields the group sets; rules render as written.
-// rule_count and selector_count are what the group adds to the namespace's
-// usage.
-func groupToMap(g *logical.Group) map[string]any {
+// shape is the same whichever fields the group sets; rules render as written,
+// members by the current name of their entity in ents, the group's namespace
+// (a member no entity holds any more is left out). rule_count and
+// selector_count are what the group adds to the namespace's usage.
+func groupToMap(g *logical.Group, ents *nsEntities) map[string]any {
+	now := time.Now()
+	members := make([]map[string]any, 0, len(g.Members))
+	for _, m := range g.Members {
+		en := ents.get(m.ID)
+		if en == nil {
+			continue
+		}
+		until := ""
+		if !m.Until.IsZero() {
+			until = m.Until.UTC().Format(time.RFC3339Nano)
+		}
+		members = append(members, map[string]any{
+			"name":    en.Name,
+			"id":      m.ID,
+			"until":   until,
+			"expired": !m.Until.IsZero() && now.After(m.Until),
+		})
+	}
+	slices.SortFunc(members, func(a, b map[string]any) int { return strings.Compare(a["name"].(string), b["name"].(string)) })
 	roles := g.Roles
 	if roles == nil {
 		roles = []string{}
@@ -164,6 +199,7 @@ func groupToMap(g *logical.Group) map[string]any {
 		"description":    g.Description,
 		"roles":          roles,
 		"rules":          rules,
+		"members":        members,
 		"rule_count":     len(g.Rules),
 		"selector_count": g.SelectorCount(),
 		"valid_until":    validUntil,
@@ -173,11 +209,81 @@ func groupToMap(g *logical.Group) map[string]any {
 	}
 }
 
-func groupResponseData(g *logical.Group, hash string, warnings []string) map[string]any {
-	data := groupToMap(g)
+func (b *SystemBackend) groupResponseData(ctx context.Context, g *logical.Group, hash string, warnings []string) map[string]any {
+	data := groupToMap(g, b.requestEntities(ctx))
 	data["hash"] = hash
 	appendWarnings(data, warnings...)
 	return data
+}
+
+// requestEntities returns the published entities of the namespace in ctx.
+func (b *SystemBackend) requestEntities(ctx context.Context) *nsEntities {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return emptyEntities
+	}
+	return b.core.identityStore.namespaceIndex(ns.ID).entities
+}
+
+// parseMembers converts the members field of a write: each item an entity
+// name, or an object {"name": ..., "until": RFC 3339} or {"id": ..., "until":
+// ...}, so a member as a read renders it ("expired" included, and ignored) is
+// written back as is. A member given by id stays that entity whatever its
+// name now is, and a name another entity has taken since the read never
+// stands in for it: what a read-modify-write echoes back should carry the id.
+// Every name must be an entity of the request's namespace, as published; an
+// id no entity of it holds is dropped with the other members gone since
+// (normalizeMembers).
+func parseMembers(raw []any, ents *nsEntities) ([]logical.GroupMember, error) {
+	out := make([]logical.GroupMember, 0, len(raw))
+	for i, item := range raw {
+		var name, id, until string
+		switch t := item.(type) {
+		case string:
+			name = t
+		case map[string]any:
+			for k, v := range t {
+				switch k {
+				case "name", "id", "until":
+					s, ok := v.(string)
+					if !ok {
+						return nil, logical.ErrBadRequestf("members[%d]: %s must be a string, got %T", i, k, v)
+					}
+					switch k {
+					case "name":
+						name = s
+					case "id":
+						id = s
+					default:
+						until = s
+					}
+				case "expired":
+					// Read-only: what a read says; ignored on write.
+				default:
+					return nil, logical.ErrBadRequestf(`members[%d]: unknown field %q: "name", "id" or "until"`, i, k)
+				}
+			}
+		default:
+			return nil, logical.ErrBadRequestf(`members[%d]: must be an entity name or {"name" or "id": ..., "until": ...}, got %T`, i, item)
+		}
+		m := logical.GroupMember{ID: id}
+		if id == "" {
+			en := ents.named(name)
+			if en == nil {
+				return nil, logical.ErrBadRequestf("members[%d]: no entity %q in this namespace", i, name)
+			}
+			m.ID = en.ID
+		}
+		if until != "" {
+			t, err := time.Parse(time.RFC3339Nano, until)
+			if err != nil {
+				return nil, logical.ErrBadRequestf("members[%d]: until must be an RFC 3339 timestamp (e.g. 2026-12-31T23:59:59Z), got %q", i, until)
+			}
+			m.Until = t.UTC()
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 // groupErrorResponse maps an identity store error to its response.
@@ -194,7 +300,8 @@ func groupErrorResponse(name string, err error) *logical.Response {
 	case errors.Is(err, ErrGroupChanged):
 		return logical.ErrorResponse(logical.ErrConflictf(
 			"group %q changed since it was read (expected_hash no longer matches); read it again and retry", name))
-	case errors.Is(err, ErrTooManyVirtualGroups), errors.Is(err, ErrTooManySelectors):
+	case errors.Is(err, ErrTooManyVirtualGroups), errors.Is(err, ErrTooManyStaticGroups), errors.Is(err, ErrTooManyStaticMembers),
+		errors.Is(err, ErrTooManySelectors):
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error()))
 	case errors.Is(err, ErrIdentityStoreNotLoaded):
 		return logical.ErrorResponse(logical.ErrServiceUnavailable(err.Error()))
@@ -203,9 +310,17 @@ func groupErrorResponse(name string, err error) *logical.Response {
 }
 
 // refuseOtherTypeFields refuses a write carrying a field that belongs to
-// another group type.
+// another group type: members on a virtual group, rules on a static one, and
+// link (directory groups, reserved) on both.
 func refuseOtherTypeFields(d *framework.FieldData, t logical.GroupType) error {
-	for _, f := range []string{"members", "link"} {
+	other := []string{"link"}
+	switch t {
+	case logical.GroupTypeVirtual:
+		other = append(other, "members")
+	case logical.GroupTypeStatic:
+		other = append(other, "rules")
+	}
+	for _, f := range other {
 		if _, ok := d.GetOk(f); ok {
 			return logical.ErrBadRequestf("%q is not valid on a %s group", f, t)
 		}
@@ -331,20 +446,35 @@ func (b *SystemBackend) handleGroupCreate(ctx context.Context, req *logical.Requ
 			"expected_hash applies to an update or a delete; a create has no earlier version")), nil
 	}
 	g := &logical.Group{Name: name}
-	if err := mergeGroupFields(g, d); err != nil {
+	if err := b.mergeGroupWrite(ctx, g, d); err != nil {
 		return logical.ErrorResponse(err), nil
-	}
-	if g.Type == logical.GroupTypeVirtual {
-		if err := refuseOtherTypeFields(d, g.Type); err != nil {
-			return logical.ErrorResponse(err), nil
-		}
 	}
 
 	warnings, err := b.core.identityStore.CreateGroup(ctx, g)
 	if err != nil {
 		return groupErrorResponse(name, err), nil
 	}
-	return b.respondCreated(groupResponseData(g, g.Hash(), warnings)), nil
+	return b.respondCreated(b.groupResponseData(ctx, g, g.Hash(), warnings)), nil
+}
+
+// mergeGroupWrite is mergeGroupFields plus the members, resolved by name in
+// the request's namespace, after refusing the fields of another type than
+// g's (on an update, the stored type, which the request matched).
+func (b *SystemBackend) mergeGroupWrite(ctx context.Context, g *logical.Group, d *framework.FieldData) error {
+	if err := mergeGroupFields(g, d); err != nil {
+		return err
+	}
+	if err := refuseOtherTypeFields(d, g.Type); err != nil {
+		return err
+	}
+	if v, ok := d.GetOk("members"); ok {
+		members, err := parseMembers(v.([]any), b.requestEntities(ctx))
+		if err != nil {
+			return err
+		}
+		g.Members = members
+	}
+	return nil
 }
 
 // handleGroupRead handles GET sys/identity/group/<name>.
@@ -361,7 +491,7 @@ func (b *SystemBackend) handleGroupRead(ctx context.Context, req *logical.Reques
 	if t != "" && t != g.Type {
 		return groupErrorResponse(name, &GroupTypeMismatchError{Name: name, Stored: g.Type}), nil
 	}
-	return b.respondSuccess(groupResponseData(g, hash, nil)), nil
+	return b.respondSuccess(b.groupResponseData(ctx, g, hash, nil)), nil
 }
 
 // handleGroupUpdate handles PUT sys/identity/group/<name>. A field present in
@@ -396,10 +526,7 @@ func (b *SystemBackend) handleGroupUpdate(ctx context.Context, req *logical.Requ
 		if t != stored {
 			return groupErrorResponse(name, &GroupTypeMismatchError{Name: name, Stored: stored}), nil
 		}
-		if err := mergeGroupFields(g, d); err != nil {
-			return logical.ErrorResponse(err), nil
-		}
-		if err := refuseOtherTypeFields(d, stored); err != nil {
+		if err := b.mergeGroupWrite(ctx, g, d); err != nil {
 			return logical.ErrorResponse(err), nil
 		}
 
@@ -414,7 +541,7 @@ func (b *SystemBackend) handleGroupUpdate(ctx context.Context, req *logical.Requ
 		if err != nil {
 			return groupErrorResponse(name, err), nil
 		}
-		return b.respondSuccess(groupResponseData(g, g.Hash(), warnings)), nil
+		return b.respondSuccess(b.groupResponseData(ctx, g, g.Hash(), warnings)), nil
 	}
 }
 
@@ -445,11 +572,21 @@ func (b *SystemBackend) handleGroupDelete(ctx context.Context, req *logical.Requ
 // handleGroupList handles LIST sys/identity/group. It returns the names under
 // "keys" and the groups themselves (with their hashes) under "groups", both
 // sorted by name; ?role= keeps only the groups granting that role, ?type= only
-// the groups of that type.
+// the groups of that type, ?member= only the static groups listing that
+// entity.
 func (b *SystemBackend) handleGroupList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	t, err := requestType(d)
 	if err != nil {
 		return logical.ErrorResponse(err), nil
+	}
+	ents := b.requestEntities(ctx)
+	var member string
+	if name := d.Get("member").(string); name != "" {
+		en := ents.named(name)
+		if en == nil {
+			return logical.ErrorResponse(logical.ErrNotFoundf("entity %q not found", name)), nil
+		}
+		member = en.ID
 	}
 	groups, hashes, err := b.core.identityStore.ListGroups(ctx, d.Get("role").(string))
 	if err != nil {
@@ -461,7 +598,10 @@ func (b *SystemBackend) handleGroupList(ctx context.Context, req *logical.Reques
 		if t != "" && g.Type != t {
 			continue
 		}
-		item := groupToMap(g)
+		if member != "" && !slices.ContainsFunc(g.Members, func(m logical.GroupMember) bool { return m.ID == member }) {
+			continue
+		}
+		item := groupToMap(g, ents)
 		item["hash"] = hashes[i]
 		keys = append(keys, g.Name)
 		items = append(items, item)

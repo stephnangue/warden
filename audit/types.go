@@ -112,6 +112,11 @@ type Auth struct {
 	// carries its role itself.
 	RoleGrantedBy string `json:"role_granted_by,omitempty"`
 
+	// RoleGroupType is the type of the group RoleGrantedBy names: "virtual"
+	// for an unclaimed caller, "static" for a claimed one, never "virtual"
+	// when the caller is claimed. Set with RoleGrantedBy.
+	RoleGroupType string `json:"role_group_type,omitempty"`
+
 	// RoleDeniedReason says why no role was granted (e.g. "not assumable");
 	// set only on a refused grant, so at most one of it and RoleGrantedBy is.
 	RoleDeniedReason string `json:"role_denied_reason,omitempty"`

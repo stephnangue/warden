@@ -199,6 +199,8 @@ func printEntityTable(data map[string]any) {
 	add("Pending Sponsor", sponsorCell(data["pending_sponsor"]))
 	add("Profile", data["profile"])
 	add("Metadata", data["metadata"])
+	add("Groups", data["groups"])
+	add("Roles", data["roles"])
 	for i, a := range aliasesOf(data["aliases"]) {
 		label := ""
 		if i == 0 {

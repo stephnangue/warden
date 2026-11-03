@@ -74,6 +74,10 @@ type IdentityStore struct {
 	// reads them without taking mu.
 	maxVirtualGroups, maxSelectors atomic.Int64
 
+	// maxStaticMembers is logical.MaxStaticMembersPerNamespace, lowered by
+	// tests only, the same way.
+	maxStaticMembers atomic.Int64
+
 	// beforeGroupUpdate, when set, runs in UpdateGroup after validation and
 	// before the commit. Nil outside tests.
 	beforeGroupUpdate func()
@@ -88,6 +92,7 @@ func NewIdentityStore(c *Core) *IdentityStore {
 	}
 	s.maxVirtualGroups.Store(logical.MaxVirtualGroupsPerNamespace)
 	s.maxSelectors.Store(logical.MaxSelectorsPerNamespace)
+	s.maxStaticMembers.Store(logical.MaxStaticMembersPerNamespace)
 	s.snapshot.Store(emptyIdentitySnapshot)
 	return s
 }
@@ -119,6 +124,18 @@ type IdentitiesUsage struct {
 type GroupsUsage struct {
 	Total   int                `json:"total"`
 	Virtual VirtualGroupsUsage `json:"virtual"`
+	Static  StaticGroupsUsage  `json:"static"`
+}
+
+// StaticGroupsUsage counts a namespace's static groups, against
+// MaxStaticGroupsPerNamespace, and the memberships across them, against
+// MaxStaticMembersPerNamespace; MaxGroupMembers is the cap on one group's.
+type StaticGroupsUsage struct {
+	Count           int `json:"count"`
+	Max             int `json:"max"`
+	Members         int `json:"members"`
+	MaxMembers      int `json:"max_members"`
+	MaxGroupMembers int `json:"max_group_members"`
 }
 
 // VirtualGroupsUsage counts a namespace's virtual groups and the selectors of
@@ -147,6 +164,13 @@ func (s *IdentityStore) Usage(ctx context.Context) (IdentityUsage, error) {
 				Max:          int(s.maxVirtualGroups.Load()),
 				Selectors:    gs.selectors,
 				MaxSelectors: int(s.maxSelectors.Load()),
+			},
+			Static: StaticGroupsUsage{
+				Count:           gs.members.groups,
+				Max:             logical.MaxStaticGroupsPerNamespace,
+				Members:         gs.members.members,
+				MaxMembers:      int(s.maxStaticMembers.Load()),
+				MaxGroupMembers: logical.MaxStaticGroupMembers,
 			},
 		},
 		Identities: IdentitiesUsage{
@@ -239,7 +263,7 @@ func (s *IdentityStore) loadAllLocked(ctx context.Context) (*identitySnapshot, i
 		if err != nil {
 			return nil, 0, err
 		}
-		if g := buildNSIndex(byName, ents, cfg, s.gen.Add(1)); g != nil {
+		if g := buildNSIndex(byName, nil, ents, cfg, s.gen.Add(1)); g != nil {
 			snap.byNS[ns.ID] = g
 			count += len(byName)
 		}

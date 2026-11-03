@@ -515,7 +515,8 @@ func TestGroupList_Table(t *testing.T) {
 const usageJSON = `{"data":{
 	"groups":{
 		"total":42,
-		"virtual":{"count":42,"max":8000,"selectors":310,"max_selectors":16000}
+		"virtual":{"count":42,"max":8000,"selectors":310,"max_selectors":16000},
+		"static":{"count":3,"max":8000,"members":17,"max_members":250000,"max_group_members":1000}
 	},
 	"identities":{"entities":7,"max_entities":50000,"aliases":12}
 }}`
@@ -529,8 +530,9 @@ func TestUsage_Table(t *testing.T) {
 	assert.Equal(t, http.MethodGet, f.last(t).method)
 	assert.Equal(t, strings.Join([]string{
 		"GROUPS",
-		"  TYPE      COUNT     SELECTORS",
-		"  virtual   42/8000   310/16000",
+		"  TYPE      COUNT     SELECTORS   MEMBERS",
+		"  virtual   42/8000   310/16000   -",
+		"  static    3/8000    -           17/250000 (at most 1000 a group)",
 		"  total     42",
 		"",
 		"IDENTITIES",
@@ -547,7 +549,8 @@ func TestUsage_JSON(t *testing.T) {
 	assert.JSONEq(t, `{
 		"groups": {
 			"total": 42,
-			"virtual": {"count": 42, "max": 8000, "selectors": 310, "max_selectors": 16000}
+			"virtual": {"count": 42, "max": 8000, "selectors": 310, "max_selectors": 16000},
+			"static": {"count": 3, "max": 8000, "members": 17, "max_members": 250000, "max_group_members": 1000}
 		},
 		"identities": {"entities": 7, "max_entities": 50000, "aliases": 12}
 	}`, stdout.String())

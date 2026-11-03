@@ -77,9 +77,17 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsIndex, no
 	// The entity of record that claims the native identity, if any, at this
 	// generation: an entity write publishes a new one, so the next request
 	// computes again. Humans are never claimed, so they are never looked up.
+	//
+	// The claim rule: virtual groups never apply to a claimed caller, in any
+	// state. Its groups are its entity's static groups, and only while the
+	// entity is governed and active; otherwise it has none.
 	if adm.AliasName != "" && n != nil && n.Kind != logical.EntityKindHuman {
 		if en := gs.entities.byAlias(adm.MountAccessor, adm.AliasName); en != nil {
 			m.Entity = en.Entity
+			if en.State == logical.EntityStateActive && en.GovernedBy() != "" {
+				staticMembership(m, gs.members.byEntity[en.ID], now)
+			}
+			return m
 		}
 	}
 	count := len(cands)
@@ -133,6 +141,47 @@ func computeOver(adm *logical.Admission, n *logical.MountNaming, gs *nsIndex, no
 		}
 	}
 	return m
+}
+
+// staticMembership fills m from refs, a claimed entity's static memberships
+// sorted by group name: the groups in force at now, the roles they grant
+// (the first group in name order labels a role two grant), and ValidUntil,
+// the earliest instant one of them ends, the group's valid_until or the
+// member's until. Both are inclusive.
+func staticMembership(m *logical.Membership, refs []memberRef, now time.Time) {
+	at := endNanos(now)
+	inForce := func(r memberRef) bool { return at <= r.group.validUntil && at <= r.until }
+	earliest := int64(endNever)
+	count, grants := 0, 0
+	for _, r := range refs {
+		if inForce(r) {
+			count++
+			grants += len(r.group.grants)
+		}
+	}
+	if count == 0 {
+		return
+	}
+	// Sized once the memberships in force are known, so neither grows.
+	m.Groups = make([]string, 0, count)
+	if grants > 0 {
+		m.Roles = make(map[string]logical.GroupGrant, grants)
+	}
+	for _, r := range refs {
+		if !inForce(r) {
+			continue
+		}
+		m.Groups = append(m.Groups, r.group.Name)
+		for _, gr := range r.group.grants {
+			if _, ok := m.Roles[gr.role]; !ok {
+				m.Roles[gr.role] = gr.grant
+			}
+		}
+		earliest = min(earliest, r.group.validUntil, r.until)
+	}
+	if earliest != endNever {
+		m.ValidUntil = time.Unix(0, earliest).UTC()
+	}
 }
 
 // matchesAny reports whether any of g's rules matches mc. g is a virtual

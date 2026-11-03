@@ -66,6 +66,7 @@ func (b *SystemBackend) pathIdentityEntities() []*framework.Path {
 					Type:        framework.TypeBool,
 					Description: "List only entities claiming a native identity on an auth mount that no longer exists (disabled with force)",
 				},
+				"group": {Type: framework.TypeString, Description: "List only the members of this static group, expired ones included"},
 			},
 			Operations: map[logical.Operation]framework.OperationHandler{
 				logical.ListOperation: &framework.PathOperation{
@@ -349,6 +350,26 @@ func (p *mountPaths) of(accessor string) string {
 	return path
 }
 
+// memberships returns the static groups of the request's namespace that list
+// the entity id and whose membership is in force now, sorted, and the roles
+// they grant, sorted. They count only while the entity is governed and
+// active, which the entity's own fields say.
+func (p *mountPaths) memberships(id string) (groups, roles []string) {
+	groups, roles = []string{}, []string{}
+	ns, err := namespace.FromContext(p.ctx)
+	if err != nil {
+		return groups, roles
+	}
+	m := &logical.Membership{Groups: noGroups}
+	staticMembership(m, p.core.identityStore.namespaceIndex(ns.ID).members.byEntity[id], time.Now())
+	groups = append(groups, m.Groups...)
+	for role := range m.Roles {
+		roles = append(roles, role)
+	}
+	slices.Sort(roles)
+	return groups, roles
+}
+
 // namespace renders the namespace with id by its path, "/" for the root
 // namespace, or "" when no namespace has it any more.
 func (p *mountPaths) namespace(id string) string {
@@ -436,7 +457,10 @@ func (b *SystemBackend) entityToMap(e *logical.Entity, hash string, paths *mount
 			"created_at":     a.CreatedAt,
 		}
 	}
+	groups, roles := paths.memberships(e.ID)
 	return map[string]any{
+		"groups":            groups,
+		"roles":             roles,
 		"id":                e.ID,
 		"name":              e.Name,
 		"kind":              e.Kind,
@@ -576,6 +600,7 @@ func (b *SystemBackend) handleEntityCreate(ctx context.Context, req *logical.Req
 	if e.Kind == "" {
 		e.Kind = logical.EntityKindAgent
 	}
+	var warnings []string
 	if raw, ok := d.GetOk("aliases"); ok {
 		for i, item := range raw.([]any) {
 			m, ok := item.(map[string]any)
@@ -590,12 +615,15 @@ func (b *SystemBackend) handleEntityCreate(ctx context.Context, req *logical.Req
 				return logical.ErrorResponse(fmt.Errorf("aliases[%d]: %w", i, err)), nil
 			}
 			e.Aliases = append(e.Aliases, logical.EntityAlias{MountAccessor: accessor, Name: alias})
+			warnings = append(warnings, claimWarning(mount, alias, name))
 		}
 	}
 	if err := b.core.identityStore.CreateEntity(ctx, e); err != nil {
 		return b.entityErrorResponse(name, err), nil
 	}
-	return b.respondCreated(b.entityToMap(e, e.Hash(), b.mountPaths(ctx))), nil
+	data := b.entityToMap(e, e.Hash(), b.mountPaths(ctx))
+	appendWarnings(data, warnings...)
+	return b.respondCreated(data), nil
 }
 
 // claimableMount resolves the auth mount at path and checks that it admits
@@ -710,6 +738,20 @@ func (b *SystemBackend) handleEntityList(ctx context.Context, req *logical.Reque
 	if d.Get("orphaned").(bool) {
 		f.MountGone = func(accessor string) bool { return paths.of(accessor) == "" }
 	}
+	if name := d.Get("group").(string); name != "" {
+		g, _, err := b.core.identityStore.GetGroup(ctx, name)
+		if err != nil {
+			return groupErrorResponse(name, err), nil
+		}
+		if g.Type != logical.GroupTypeStatic {
+			return logical.ErrorResponse(logical.ErrBadRequestf(
+				"group %q is %s: only a static group lists its members", name, g.Type)), nil
+		}
+		f.Members = make(map[string]bool, len(g.Members))
+		for _, m := range g.Members {
+			f.Members[m.ID] = true
+		}
+	}
 	if v := d.Get("state").(string); v != "" {
 		st, err := logical.ParseEntityState(v)
 		if err != nil {
@@ -769,11 +811,21 @@ func (b *SystemBackend) handleAliasClaim(ctx context.Context, req *logical.Reque
 	}
 	if from != "" {
 		data["moved_from"] = from
+	} else {
+		appendWarnings(data, claimWarning(mount, alias, name))
 	}
 	if ownWarning != "" {
 		appendWarnings(data, ownWarning)
 	}
 	return b.respondSuccess(data), nil
+}
+
+// claimWarning says what claiming a native identity changes for its callers:
+// the claim rule. It warns on every new claim, since what virtual groups grant
+// the identity cannot be known from the write.
+func claimWarning(mount, alias, entity string) string {
+	return fmt.Sprintf("native identity (%s, %s) is now claimed by entity %q: virtual groups no longer grant it roles; "+
+		"it holds only the roles its entity's static groups grant, and none until the entity is governed", mount, alias, entity)
 }
 
 // handleAliasRemove handles POST sys/identity/entity/<entity>/alias/remove.
