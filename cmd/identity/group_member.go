@@ -194,7 +194,7 @@ func editMembers(c *api.Client, name string, edit func([]api.GroupMemberInput) [
 		// The members read are written back by ID: an entity deleted and
 		// created again under the same name in between is not taken for the
 		// one read. Name is kept for edit to match on.
-		members := make([]api.GroupMemberInput, 0, len(g.Members)+1)
+		members := make([]api.GroupMemberInput, 0, len(g.Members))
 		for _, m := range g.Members {
 			members = append(members, api.GroupMemberInput{ID: m.ID, Name: m.Name, Until: m.Until})
 		}
