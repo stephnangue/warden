@@ -348,8 +348,8 @@ func TestIdentityResolution_DoesNotAllocate(t *testing.T) {
 			req := mustTransparent(e, e.token, "deploy")
 			te := req.TokenEntry()
 			now := time.Now()
-			e.c.resolveRoleGrant(req, te, now)
-			assert.Zero(t, testing.AllocsPerRun(1000, func() { e.c.resolveRoleGrant(req, te, now) }))
+			e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now)
+			assert.Zero(t, testing.AllocsPerRun(1000, func() { e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now) }))
 		})
 	}
 }
@@ -699,7 +699,7 @@ func TestIdentityResolution_NoStorageWrite(t *testing.T) {
 		adm.MountAccessor, adm.AliasName = grantAccessor, "unknown-"+strconv.Itoa(i)
 		te := &logical.TokenEntry{ID: "t", MountAccessor: grantAccessor, NamespaceID: namespace.RootNamespaceID, Admission: adm}
 		req := &logical.Request{Transparent: true, RequestedRole: "deploy"}
-		e.c.resolveRoleGrant(req, te, now)
+		e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now)
 		require.Equal(t, logical.RoleDeniedIdentityUnclaimed, req.RoleGrant().DeniedReason)
 	}
 	assert.Empty(t, spy.puts)

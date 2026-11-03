@@ -20,6 +20,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/helper/selector"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -414,11 +415,11 @@ func TestRoleGrant_ResolveDoesNotAllocate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req, te := tc.req, tc.req.TokenEntry()
 			role := te.RoleName
-			e.c.resolveRoleGrant(req, te, now) // computes and caches the membership
+			e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now) // computes and caches the membership
 
 			allocs := testing.AllocsPerRun(1000, func() {
 				te.RoleName = role
-				e.c.resolveRoleGrant(req, te, now)
+				e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now)
 			})
 			assert.Zero(t, allocs)
 

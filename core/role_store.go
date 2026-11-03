@@ -420,6 +420,9 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 	if !validSysName(role.Name) {
 		return nil, logical.ErrBadRequestf("invalid role name %q: %s", role.Name, sysNameRule)
 	}
+	if isReservedRoleName(role.Name) {
+		return nil, errReservedRoleName(role.Name)
+	}
 	if role.CredSpecName != "" && !validSysName(role.CredSpecName) {
 		return nil, logical.ErrBadRequestf("invalid cred_spec_name %q: %s", role.CredSpecName, sysNameRule)
 	}

@@ -123,7 +123,7 @@ func TestHandleTransparentAuth_Spiffe_LoginOnMiss_X509(t *testing.T) {
 
 	// The role is granted per request, by the group.
 	te := req.TokenEntry()
-	core.resolveRoleGrant(req, te, time.Now())
+	core.resolveRoleGrant(req, te, namespace.RootNamespace, time.Now())
 	require.True(t, req.RoleGrant().Granted(), "denied: %s", req.RoleGrant().DeniedReason)
 	assert.Equal(t, "group:"+group, req.RoleGrant().GrantedBy)
 	assert.Equal(t, []string{"svid"}, te.Policies)

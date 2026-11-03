@@ -3,6 +3,7 @@ package core
 import (
 	"strings"
 
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -170,6 +171,22 @@ func isBuiltinRoleName(name string) bool {
 // role can look like a built-in.
 func isReservedRoleName(name string) bool {
 	return len(name) >= len(builtinRolePrefix) && strings.EqualFold(name[:len(builtinRolePrefix)], builtinRolePrefix)
+}
+
+// errReservedRoleName refuses a write to a name in the reserved space: the
+// built-in itself is read only, and any other name there is reserved.
+func errReservedRoleName(name string) error {
+	if isBuiltinRoleName(name) {
+		return logical.ErrBadRequestf("role %q is built-in and read-only; copy policy_document to a policy and a role of your own", name)
+	}
+	return logical.ErrBadRequestf("role names starting %q are reserved for built-in roles; choose another name", builtinRolePrefix)
+}
+
+// builtinRolesEnabled reports whether the built-in roles resolve in the
+// namespace nsID, whose record is ns: always in root, elsewhere when the
+// record enables them.
+func builtinRolesEnabled(nsID string, ns *namespace.Namespace) bool {
+	return nsID == namespace.RootNamespaceID || (ns != nil && ns.ID == nsID && ns.EnableBuiltinRoles)
 }
 
 // builtinRoleValue returns the shared value of the built-in named name, or nil.

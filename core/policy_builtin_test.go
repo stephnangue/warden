@@ -208,7 +208,7 @@ func TestBuildCBP_AttachesBuiltins(t *testing.T) {
 	putRawPolicy(t, c, namespace.RootNamespace, "default", PolicyTypeCBP, `path "kv/*" { capabilities = ["read"] }`)
 
 	te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{"reader"}}
-	cbp, err := c.buildCBP(ctx, te, true)
+	cbp, err := c.buildCBPFor(ctx, te, true)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"create", "read", "delete"}, cbp.Capabilities(ctx, "sys/mcp"))
 	assert.Equal(t, []string{"read"}, cbp.Capabilities(ctx, "sys/introspect/roles"))
@@ -220,7 +220,7 @@ func TestBuildCBP_AttachesBuiltins(t *testing.T) {
 	t.Run("reserved names on the token", func(t *testing.T) {
 		shared := []string{"reader", "default", builtinCBPPolicy, builtinMCPPolicy}
 		te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: shared}
-		cbp, err := c.buildCBP(ctx, te, true)
+		cbp, err := c.buildCBPFor(ctx, te, true)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"deny"}, cbp.Capabilities(ctx, "kv/x"), "legacy default is given to no request")
 		assert.Len(t, cbp.mcpRulesForPath("sys/mcp"), 1, "a built-in is attached once")
@@ -230,7 +230,7 @@ func TestBuildCBP_AttachesBuiltins(t *testing.T) {
 	t.Run("root", func(t *testing.T) {
 		for _, name := range []string{"root", "Root", " root "} {
 			te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{name}}
-			cbp, err := c.buildCBP(ctx, te, true)
+			cbp, err := c.buildCBPFor(ctx, te, true)
 			require.NoError(t, err, "%q is root by its canonical name", name)
 			assert.Equal(t, []string{"root"}, cbp.Capabilities(ctx, "sys/mcp"))
 		}
@@ -307,13 +307,13 @@ func BenchmarkBuildCBP_Builtins(b *testing.B) {
 				}
 			}
 			te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{"reader"}}
-			if _, err := c.buildCBP(ctx, te, true); err != nil {
+			if _, err := c.buildCBPFor(ctx, te, true); err != nil {
 				b.Fatal(err)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := c.buildCBP(ctx, te, true); err != nil {
+				if _, err := c.buildCBPFor(ctx, te, true); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -389,13 +389,13 @@ path "mcp/jira" {
 	run := func(name string, policies []string) {
 		b.Run(name, func(b *testing.B) {
 			te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: policies}
-			if _, err := c.buildCBP(ctx, te, true); err != nil {
+			if _, err := c.buildCBPFor(ctx, te, true); err != nil {
 				b.Fatal(err)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := c.buildCBP(ctx, te, true); err != nil {
+				if _, err := c.buildCBPFor(ctx, te, true); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -423,7 +423,7 @@ func TestCBP_AllocationBudget(t *testing.T) {
 	te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID, Policies: []string{"reader"}}
 
 	build := func() {
-		if _, err := c.buildCBP(ctx, te, true); err != nil {
+		if _, err := c.buildCBPFor(ctx, te, true); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -497,4 +497,14 @@ func TestBuiltinPolicyWarnings(t *testing.T) {
 	elsewhere := mustParseMCP(t, ns, testMCPBody("mcp/gateway", "x"))
 	elsewhere.Name, elsewhere.Type = "ops-mcp", PolicyTypeMCP
 	assert.Empty(t, builtinPolicyWarnings(elsewhere))
+}
+
+// buildCBPFor fetches te's namespace and compiles its CBP, as
+// fetchCBPAndTokenEntry does for a request granted no built-in role.
+func (c *Core) buildCBPFor(ctx context.Context, te *logical.TokenEntry, withBuiltins bool) (*CBP, error) {
+	tokenNS, err := c.tokenNamespace(ctx, te)
+	if err != nil {
+		return nil, err
+	}
+	return c.buildCBP(ctx, te, tokenNS, withBuiltins, -1)
 }

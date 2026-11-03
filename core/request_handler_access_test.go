@@ -194,6 +194,21 @@ func newAccessEnv(t *testing.T, autoAuthPath string) *accessEnv {
 	c.auditManager = rec
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
+	p := testParsePolicy(t, `path "db/access/*" { capabilities = ["read"] }`)
+	p.Name = "access-reader"
+	p.Type = PolicyTypeCBP
+	require.NoError(t, c.policyStore.SetPolicy(ctx, p, nil))
+
+	return &accessEnv{c: c, audit: rec, backend: mountAccessTestBackend(t, c, autoAuthPath)}
+}
+
+// mountAccessTestBackend mounts an access backend at db/ in the root
+// namespace, whose grants "ro" and "rw" each mint their own local credential
+// spec.
+func mountAccessTestBackend(t *testing.T, c *Core, autoAuthPath string) *framework.AccessBackend {
+	t.Helper()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
 	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{Name: "access-src", Type: "local"}))
 	grants := map[string]string{"ro": "access-ro", "rw": "access-rw"}
 	for grant, spec := range grants {
@@ -204,11 +219,6 @@ func newAccessEnv(t *testing.T, autoAuthPath string) *accessEnv {
 			Config: credential.NewConfig(map[string]string{"api_key": "secret-for-" + grant}),
 		}))
 	}
-
-	p := testParsePolicy(t, `path "db/access/*" { capabilities = ["read"] }`)
-	p.Name = "access-reader"
-	p.Type = PolicyTypeCBP
-	require.NoError(t, c.policyStore.SetPolicy(ctx, p, nil))
 
 	b := &framework.AccessBackend{
 		Backend: &framework.Backend{
@@ -255,8 +265,7 @@ func newAccessEnv(t *testing.T, autoAuthPath string) *accessEnv {
 		NamespaceID: namespace.RootNamespaceID,
 		namespace:   namespace.RootNamespace,
 	}, view))
-
-	return &accessEnv{c: c, audit: rec, backend: b}
+	return b
 }
 
 // get issues GET /v1/<path> with the given headers through the full request
