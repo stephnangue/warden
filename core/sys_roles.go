@@ -48,6 +48,12 @@ func (b *SystemBackend) pathRoles() []*framework.Path {
 					Type:        framework.TypeKVPairs,
 					Description: fmt.Sprintf("Free-form string labels (at most %d keys)", logical.MaxRoleMetadataKeys),
 				},
+				"governed_only": {
+					Type: framework.TypeBool,
+					Description: "Grant the role through governed membership only: a static group listing a governed, " +
+						"active entity. No virtual group grants it, so neither an unclaimed agent nor a human holds it, " +
+						"and a virtual group listing it is refused at write. Defaults to false.",
+				},
 				"expected_hash": {
 					Type:        framework.TypeString,
 					Description: "Apply the update or delete only if the role still has this hash (from a read)",
@@ -74,7 +80,9 @@ func (b *SystemBackend) pathRoles() []*framework.Path {
 			HelpSynopsis: "Manage namespace roles",
 			HelpDescription: "A role names what a caller running under it may do (policies, cred_spec_name) " +
 				"and how discovery describes it (description, skill, provider_path). " +
-				"A policy or credential spec that does not exist yet is accepted with a warning.",
+				"A policy or credential spec that does not exist yet is accepted with a warning. " +
+				"governed_only restricts it to static groups of governed entities; the write warns, naming the " +
+				"virtual groups that list it and no longer grant it.",
 		},
 		{
 			Pattern: "roles/?$",
@@ -115,6 +123,7 @@ func roleToMap(r *logical.Role) map[string]any {
 		"skill":          r.Skill,
 		"provider_path":  r.ProviderPath,
 		"metadata":       metadata,
+		"governed_only":  r.GovernedOnly,
 		"created_at":     r.CreatedAt,
 		"updated_at":     r.UpdatedAt,
 	}
@@ -159,13 +168,59 @@ func (b *SystemBackend) handleRoleCreate(ctx context.Context, req *logical.Reque
 		Skill:        d.Get("skill").(string),
 		ProviderPath: d.Get("provider_path").(string),
 		Metadata:     d.Get("metadata").(map[string]string),
+		GovernedOnly: d.Get("governed_only").(bool),
 	}
 
 	warnings, err := b.core.roleStore.Create(ctx, role)
 	if err != nil {
 		return roleErrorResponse(name, err), nil
 	}
+	warnings = append(warnings, b.governedOnlyWarnings(ctx, req, role, false)...)
 	return b.respondCreated(roleResponseData(role, role.Hash(), warnings)), nil
+}
+
+// governedOnlyWarnings says what a governed_only role just written takes
+// away: the virtual groups of its namespace that list it and no longer grant
+// it, and the writer's own request when it holds the role through one. A
+// role write is never refused for it; a write of one of those groups is,
+// until the role leaves its list.
+//
+// It warns only when the write sets the flag (wasGovernedOnly is the stored
+// value before it, false on a create): an edit of a role already flagged
+// takes nothing more away. On a create the writer cannot hold the role yet.
+func (b *SystemBackend) governedOnlyWarnings(ctx context.Context, req *logical.Request, role *logical.Role, wasGovernedOnly bool) []string {
+	if !role.GovernedOnly || wasGovernedOnly {
+		return nil
+	}
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil
+	}
+	idx := b.core.identityStore.namespaceIndex(ns.ID)
+	var virtual []string
+	for _, name := range idx.listing(role.Name) {
+		if idx.groupsByName[name].Type == logical.GroupTypeVirtual {
+			virtual = append(virtual, name)
+		}
+	}
+	var warnings []string
+	if len(virtual) > 0 {
+		listed := virtual[:min(len(virtual), maxNamedInWarning)]
+		groups := "virtual groups list it and no longer grant it"
+		if len(virtual) == 1 {
+			groups = "virtual group lists it and no longer grants it"
+		}
+		msg := fmt.Sprintf("role %q is governed_only; %d %s: %s", role.Name, len(virtual), groups, strings.Join(listed, ", "))
+		if more := len(virtual) - len(listed); more > 0 {
+			msg += fmt.Sprintf(" and %d more", more)
+		}
+		warnings = append(warnings, msg)
+	}
+	if rg := req.RoleGrant(); rg != nil && rg.Granted() && rg.RoleName == role.Name && rg.GroupType == logical.GroupTypeVirtual {
+		warnings = append(warnings, fmt.Sprintf(
+			"the writer's own request holds role %q through a virtual group; its next request under the role is refused", role.Name))
+	}
+	return warnings
 }
 
 // handleRoleRead handles GET sys/roles/<name>.
@@ -198,6 +253,7 @@ func (b *SystemBackend) handleRoleUpdate(ctx context.Context, req *logical.Reque
 		if expected != "" && expected != hash {
 			return roleErrorResponse(name, ErrRoleChanged), nil
 		}
+		wasGovernedOnly := role.GovernedOnly
 		mergeRoleFields(role, d)
 
 		warnings, err := b.core.roleStore.Update(ctx, role, hash)
@@ -211,6 +267,7 @@ func (b *SystemBackend) handleRoleUpdate(ctx context.Context, req *logical.Reque
 		if err != nil {
 			return roleErrorResponse(name, err), nil
 		}
+		warnings = append(warnings, b.governedOnlyWarnings(ctx, req, role, wasGovernedOnly)...)
 		return b.respondSuccess(roleResponseData(role, role.Hash(), warnings)), nil
 	}
 }
@@ -234,6 +291,9 @@ func mergeRoleFields(role *logical.Role, d *framework.FieldData) {
 	}
 	if v, ok := d.GetOk("metadata"); ok {
 		role.Metadata = v.(map[string]string)
+	}
+	if v, ok := d.GetOk("governed_only"); ok {
+		role.GovernedOnly = v.(bool)
 	}
 }
 

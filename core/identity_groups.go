@@ -645,8 +645,14 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 	if s.core.roleStore != nil {
 		roleSnap := s.core.roleStore.snapshot.Load()
 		for _, r := range g.Roles {
-			if roleSnap.lookup(ns.ID, r) == nil {
+			e := roleSnap.lookup(ns.ID, r)
+			switch {
+			case e == nil:
 				warnings = append(warnings, fmt.Sprintf("role %q does not exist yet; the group grants it once it does", r))
+			case e.role.GovernedOnly && g.Type == logical.GroupTypeVirtual:
+				// A role flagged after this check is still refused per
+				// request (resolveRoleGrant).
+				return nil, nil, logical.ErrBadRequestf("role %q is governed_only; a virtual group cannot grant it", r)
 			}
 		}
 	}

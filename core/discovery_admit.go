@@ -250,10 +250,12 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	}
 	slices.SortFunc(admitted, func(a, b discoveryAdmitted) int { return strings.Compare(a.mount, b.mount) })
 
+	// A governed_only role a virtual group grants is not listed: the next
+	// request would refuse it.
 	var granted []*logical.Role
 	for i, r := range roles {
 		if t := targetOf[i]; t != "" {
-			if _, ok := grants[t][r.Name]; ok {
+			if g, ok := grants[t][r.Name]; ok && r.GrantedThrough(g.Type) {
 				granted = append(granted, r)
 			}
 		}

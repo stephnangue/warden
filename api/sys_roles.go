@@ -21,6 +21,7 @@ type Role struct {
 	Skill        string            `json:"skill"`
 	ProviderPath string            `json:"provider_path"`
 	Metadata     map[string]string `json:"metadata"`
+	GovernedOnly bool              `json:"governed_only"`
 	Hash         string            `json:"hash,omitempty"`
 	CreatedAt    time.Time         `json:"created_at"`
 	UpdatedAt    time.Time         `json:"updated_at"`
@@ -37,6 +38,10 @@ type RoleInput struct {
 	Skill        *string
 	ProviderPath *string
 	Metadata     map[string]string
+
+	// GovernedOnly makes the role grantable through governed membership only
+	// (a static group listing a governed, active entity); nil keeps it.
+	GovernedOnly *bool
 
 	// ExpectedHash, on update, applies the write only if the role still has
 	// this hash (Role.Hash from an earlier read).
@@ -66,6 +71,9 @@ func (in *RoleInput) body() map[string]any {
 	}
 	if in.Metadata != nil {
 		out["metadata"] = in.Metadata
+	}
+	if in.GovernedOnly != nil {
+		out["governed_only"] = *in.GovernedOnly
 	}
 	if in.ExpectedHash != "" {
 		out["expected_hash"] = in.ExpectedHash

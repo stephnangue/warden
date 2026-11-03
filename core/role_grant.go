@@ -172,6 +172,13 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 		}
 		return
 	}
+	// Checked here, against the role as published, not when the membership is
+	// computed: the role store has no generation, so a flag change applies to
+	// the next request of every cached admission.
+	if !role.GrantedThrough(g.Type) {
+		rg.DeniedReason = logical.RoleDeniedGovernedOnly
+		return
+	}
 
 	rg.Role, rg.GrantedBy, rg.GroupType = role, g.Label, g.Type
 	te.RoleName = role.Name
@@ -261,6 +268,8 @@ func roleRefusal(rg *logical.RoleGrant, te *logical.TokenEntry) *ErrRoleNotGrant
 		} else {
 			msg = fmt.Sprintf("role %q is not assumable: no group grants it to this caller", rg.RoleName)
 		}
+	case logical.RoleDeniedGovernedOnly:
+		msg = fmt.Sprintf("role %q requires governed membership: only a static group listing a governed entity grants it", rg.RoleName)
 	case logical.RoleDeniedExplicitAdmission:
 		msg = "admission token presented explicitly; present the credential instead"
 	case logical.RoleDeniedNoAdmission:
