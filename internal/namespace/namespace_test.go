@@ -62,6 +62,41 @@ func TestNamespace_HasParent(t *testing.T) {
 	}
 }
 
+func TestWithin(t *testing.T) {
+	root := RootNamespace
+	org := &Namespace{UUID: "u-org1", Path: "org1/"}
+	team := &Namespace{UUID: "u-team1", Path: "org1/team1/"}
+	deep := &Namespace{UUID: "u-deep", Path: "org1/team1/dev/"}
+	other := &Namespace{UUID: "u-org2", Path: "org2/"}
+	lookalike := &Namespace{UUID: "u-org10", Path: "org10/"}
+
+	tests := []struct {
+		name    string
+		ns      *Namespace
+		tokenNs *Namespace
+		want    bool
+	}{
+		{"own namespace", org, org, true},
+		{"root token in root", root, root, true},
+		{"root token in a child", org, root, true},
+		{"root token two levels down", deep, root, true},
+		{"parent token in its child", team, org, true},
+		{"parent token two levels down", deep, org, true},
+		{"child token in its parent", org, team, false},
+		{"child token in root", root, org, false},
+		{"sibling", other, org, false},
+		{"path that only shares a prefix string", lookalike, org, false},
+		{"lookalike token in org1", org, lookalike, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Within(tt.ns, tt.tokenNs); got != tt.want {
+				t.Fatalf("Within(%q, %q) = %v, want %v", tt.ns.Path, tt.tokenNs.Path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNamespace_ParentPath(t *testing.T) {
 	tests := []struct {
 		name     string

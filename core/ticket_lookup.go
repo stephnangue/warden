@@ -169,7 +169,7 @@ func (c *Core) checkTicket(entry *TokenEntry, value string, ns *namespace.Namesp
 		return fmt.Errorf("issuing mount %q no longer admits %q", entry.MountAccessor, entry.Admission.Kind)
 	}
 	tokenNs := me.Namespace()
-	if ns.UUID != tokenNs.UUID && !ns.HasParent(tokenNs) {
+	if !namespace.Within(ns, tokenNs) {
 		return ErrTokenNamespaceMismatch
 	}
 	return nil
