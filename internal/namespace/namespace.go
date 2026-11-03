@@ -33,6 +33,12 @@ type Namespace struct {
 	Locked         bool              `json:"locked"`
 	UnlockKey      string            `json:"unlock_key,omitempty"`
 	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
+
+	// EnableBuiltinRoles makes the built-in operator roles resolvable in this
+	// namespace. Written by the parent through sys/namespaces, never
+	// inherited by children. The root namespace has them always and does not
+	// read this field.
+	EnableBuiltinRoles bool `json:"enable_builtin_roles,omitempty"`
 }
 
 // RootNamespace is the root namespace singleton.
@@ -57,11 +63,12 @@ func (n *Namespace) String() string {
 // If withUnlock is true, the UnlockKey is included in the clone.
 func (n *Namespace) Clone(withUnlock bool) *Namespace {
 	clone := &Namespace{
-		ID:      n.ID,
-		UUID:    n.UUID,
-		Path:    n.Path,
-		Tainted: n.Tainted,
-		Locked:  n.Locked,
+		ID:                 n.ID,
+		UUID:               n.UUID,
+		Path:               n.Path,
+		Tainted:            n.Tainted,
+		Locked:             n.Locked,
+		EnableBuiltinRoles: n.EnableBuiltinRoles,
 	}
 
 	if withUnlock {

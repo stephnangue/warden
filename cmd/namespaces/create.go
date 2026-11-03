@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	createMetadata map[string]string
-	createJSON     string
+	createMetadata           map[string]string
+	createJSON               string
+	createEnableBuiltinRoles bool
 
 	CreateCmd = &cobra.Command{
 		Use:           "create <path>",
@@ -28,13 +29,18 @@ Usage: warden namespace create <path> [options]
       $ warden namespace create my-team
       $ warden namespace create org/engineering
       $ warden namespace create my-team -metadata=environment=prod -metadata=team=platform
+      $ warden namespace create acme -enable-builtin-roles
 
     Full JSON payload (agent-friendly):
 
       $ warden namespace create my-team -json @ns.json
       $ cat ns.json | warden namespace create my-team -json -
 
-  -json is mutually exclusive with -metadata. Combine with -dry-run to
+  -enable-builtin-roles makes the built-in operator roles (warden-admin,
+  warden-provider-admin, warden-security-admin, warden-viewer) resolvable in
+  the new namespace. Its children do not inherit it.
+
+  -json is mutually exclusive with the typed flags. Combine with -dry-run to
   validate the payload locally without creating the namespace.
 
   For more information about namespaces, please see the documentation.
@@ -46,7 +52,8 @@ Usage: warden namespace create <path> [options]
 
 func init() {
 	CreateCmd.Flags().StringToStringVar(&createMetadata, "metadata", nil, "Custom metadata for the namespace (can be specified multiple times)")
-	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -metadata)")
+	CreateCmd.Flags().StringVarP(&createJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with the typed flags)")
+	CreateCmd.Flags().BoolVar(&createEnableBuiltinRoles, "enable-builtin-roles", false, "Make the built-in operator roles resolvable in the namespace (not inherited by its children)")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -67,7 +74,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"-metadata": len(createMetadata) > 0,
+			"-metadata":             len(createMetadata) > 0,
+			"-enable-builtin-roles": cmd.Flags().Changed("enable-builtin-roles"),
 		}); err != nil {
 			return err
 		}
@@ -96,6 +104,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	input := &api.CreateNamespaceInput{
 		CustomMetadata: createMetadata,
 	}
+	if cmd.Flags().Changed("enable-builtin-roles") {
+		input.EnableBuiltinRoles = &createEnableBuiltinRoles
+	}
 
 	if helpers.ResolveDryRun() {
 		payload := map[string]any{}
@@ -105,6 +116,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 				md[k] = v
 			}
 			payload["custom_metadata"] = md
+		}
+		if input.EnableBuiltinRoles != nil {
+			payload["enable_builtin_roles"] = *input.EnableBuiltinRoles
 		}
 		return helpers.DryRun(c, "POST", "sys/namespaces/{path}", payload)
 	}
@@ -116,9 +130,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	data := map[string]any{
-		"path":    output.Path,
-		"id":      output.ID,
-		"created": true,
+		"path":                 output.Path,
+		"id":                   output.ID,
+		"enable_builtin_roles": output.EnableBuiltinRoles,
+		"created":              true,
 	}
 	if len(output.CustomMetadata) > 0 {
 		md := make(map[string]any, len(output.CustomMetadata))
@@ -131,6 +146,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Created namespace: %s\n", output.Path)
 		fmt.Printf("Namespace ID: %s\n", output.ID)
+		if output.EnableBuiltinRoles {
+			fmt.Println("Built-in roles: enabled")
+		}
 		if len(output.CustomMetadata) > 0 {
 			fmt.Println("\nMetadata:")
 			for key, value := range output.CustomMetadata {
