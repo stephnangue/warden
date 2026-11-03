@@ -1034,6 +1034,7 @@ func (ns *NamespaceStore) clearNamespaceResources(nsCtx context.Context, namespa
 			return fmt.Errorf("failed to clear roles: %w", err)
 		}
 	}
+	ns.core.builtinRolePolicies.drop(namespaceToDelete.UUID)
 
 	// Release the driver instances those sources left behind. Nothing did this
 	// before, so every driver in a deleted namespace — its HTTP clients, pooled
