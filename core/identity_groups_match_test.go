@@ -29,7 +29,7 @@ func testNS(t testing.TB, gen uint64, groups ...*logical.Group) *nsIndex {
 		cg.Group, cg.hash = g, g.Hash()
 		byName[g.Name] = cg
 	}
-	gs := buildNSIndex(byName, nil, nil, gen)
+	gs := buildNSIndex(byName, nil, nil, nil, gen)
 	if gs == nil {
 		return emptyNSIndex
 	}
@@ -185,7 +185,7 @@ func TestCompute_GrantsAndValidUntil(t *testing.T) {
 		"the earliest valid_until among matched groups; an unmatched group's does not count")
 	assert.NotContains(t, m.Roles, "old")
 	require.Len(t, m.Roles, 3)
-	assert.Equal(t, logical.GroupGrant{Group: "a-five", Label: "group:a-five"}, m.Roles["read"],
+	assert.Equal(t, logical.GroupGrant{Group: "a-five", Label: "group:a-five", Type: logical.GroupTypeVirtual}, m.Roles["read"],
 		"a role two groups grant is credited to the first by name")
 	assert.Equal(t, "group:b-ten", m.Roles["deploy"].Label)
 	assert.Equal(t, "group:c-none", m.Roles["write"].Label)

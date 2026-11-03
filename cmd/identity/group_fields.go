@@ -19,6 +19,7 @@ type groupFlags struct {
 	description string
 	roles       []string
 	rules       []string
+	members     []string
 	validUntil  string
 	metadata    map[string]string
 }
@@ -29,6 +30,7 @@ var groupFlagNames = []struct{ flag, key string }{
 	{"description", "description"},
 	{"roles", "roles"},
 	{"rule", "rules"},
+	{"member", "members"},
 	{"valid-until", "valid_until"},
 	{"metadata", "metadata"},
 }
@@ -36,12 +38,15 @@ var groupFlagNames = []struct{ flag, key string }{
 func (f *groupFlags) bind(cmd *cobra.Command) {
 	fs := cmd.Flags()
 	fs.StringVar(&f.typ, "type", "",
-		`Where membership comes from: "virtual" (required on create; never changes; on update, read from the server when omitted)`)
+		`Where membership comes from: "virtual" or "static" (required on create; never changes; on update, read from the server when omitted)`)
 	fs.StringVar(&f.description, "description", "", "What the group is for")
 	fs.StringSliceVar(&f.roles, "roles", nil, "Roles membership grants (repeat or comma-separated)")
 	fs.StringArrayVar(&f.rules, "rule", nil,
 		`One rule as a JSON object of selectors, each a fact name with its values (a list, or one string), `+
-			`including "mount", e.g. '{"mount": "auth/kubernetes/", "workload": ["ci", "cd"]}' (repeatable; any one rule matching makes a member)`)
+			`including "mount", e.g. '{"mount": "auth/kubernetes/", "workload": ["ci", "cd"]}' (repeatable; any one rule matching makes a member; virtual groups)`)
+	fs.StringArrayVar(&f.members, "member", nil,
+		`An entity a static group lists, by name, or '{"name": "release-bot", "until": "2026-12-31T23:59:59Z"}' `+
+			`for a membership that ends (repeatable; replaces the list; static groups)`)
 	fs.StringVar(&f.validUntil, "valid-until", "",
 		`RFC 3339 instant after which the group grants nothing, e.g. 2026-12-31T23:59:59Z (on update, "" clears it)`)
 	fs.StringToStringVar(&f.metadata, "metadata", nil, "Free-form label (key=value, repeatable)")
@@ -88,6 +93,21 @@ func (f *groupFlags) payload(cmd *cobra.Command) (map[string]any, error) {
 			rules = append(rules, r)
 		}
 		out["rules"] = rules
+	}
+	if cmd.Flags().Changed("member") {
+		members := make([]any, 0, len(f.members))
+		for i, raw := range f.members {
+			if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
+				members = append(members, raw)
+				continue
+			}
+			var m map[string]any
+			if err := json.Unmarshal([]byte(raw), &m); err != nil {
+				return nil, fmt.Errorf("-member #%d is not an entity name or a JSON object: %v: %w", i+1, err, helpers.ErrUsage)
+			}
+			members = append(members, m)
+		}
+		out["members"] = members
 	}
 	return out, nil
 }
@@ -181,6 +201,36 @@ func rulesOf(v any) []map[string]any {
 	return nil
 }
 
+// membersOf returns the members of a group's response data as maps.
+func membersOf(v any) []map[string]any {
+	switch t := v.(type) {
+	case []any:
+		out := make([]map[string]any, 0, len(t))
+		for _, it := range t {
+			if m, ok := it.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	case []map[string]any:
+		return t
+	}
+	return nil
+}
+
+// formatMember renders one member on one line: "release-bot  until
+// 2026-12-31T23:59:59Z", with "(expired)" once its until has passed.
+func formatMember(m map[string]any) string {
+	s := cell(m["name"])
+	if until := cell(m["until"]); until != "" {
+		s += "  until " + until
+	}
+	if expired, _ := m["expired"].(bool); expired {
+		s += "  (expired; the next write drops it)"
+	}
+	return s
+}
+
 // printGroupTable renders one group's response data as a key/value table,
 // one row per rule ("#i  mount=…  name=v1|v2"), then the group's rule and
 // selector counts. Empty optional fields are left out; warnings go to stderr
@@ -202,6 +252,13 @@ func printGroupTable(data map[string]any) {
 			label = "Rules"
 		}
 		rows = append(rows, []any{label, fmt.Sprintf("#%d  %s", i, formatRule(r))})
+	}
+	for i, m := range membersOf(data["members"]) {
+		label := ""
+		if i == 0 {
+			label = "Members"
+		}
+		rows = append(rows, []any{label, formatMember(m)})
 	}
 	add("Rule Count", data["rule_count"])
 	add("Selector Count", data["selector_count"])

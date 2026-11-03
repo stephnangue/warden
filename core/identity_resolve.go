@@ -77,8 +77,10 @@ func identityRefusalMessage(reason string, te *logical.TokenEntry) (msg string, 
 		return fmt.Sprintf("%s belongs to entity %q, which is retired", identity, entity), true
 	case logical.RoleDeniedEntityNotGoverned:
 		// What the entity lacks is an admin's business (entity read says it);
-		// the agent learns only that it is not governed.
-		return fmt.Sprintf("%s belongs to entity %q, which is not governed; unknown_aliases=deny", identity, entity), true
+		// the agent learns only that it is not governed. True in every mode:
+		// under deny it is refused for it, and in any mode a claimed caller
+		// holds no role until its entity is governed.
+		return fmt.Sprintf("%s belongs to entity %q, which is not governed; it holds no role until it is", identity, entity), true
 	}
 	return "", false
 }

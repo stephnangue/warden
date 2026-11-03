@@ -19,10 +19,10 @@ import (
 //
 // One entity claims both through the CLI: created on a standby node, which
 // forwards the write, with the JWT's identity, then given the certificate's
-// with alias add. Lookup finds it from either. Claiming changes no gateway
-// outcome (its roles still come from the virtual group); suspending the
-// entity refuses both credentials, naming the entity, and the audit records
-// the entity on every request after the claim.
+// with alias add. Lookup finds it from either. Claiming takes the virtual
+// group's role away (the claim rule): the entity is ungoverned, so both
+// credentials are refused, naming it; suspending the entity refuses them as
+// suspended. The audit records the entity on every request after the claim.
 //
 // While the JWT's identity is claimed, a config write changing how the jwt
 // mount derives identities is refused, and so is disabling the mount. A
@@ -111,17 +111,18 @@ func TestNativeIdentities_ClaimedThroughTheCLI(t *testing.T) {
 		t.Fatalf("the certificate's identity resolves to entity %q, the JWT's to %q: want one entity", byCert.EntityID, byJWT.EntityID)
 	}
 
-	requests("after both were claimed")
+	requestsAnswer("after both were claimed", 403, `belongs to entity \"`+ent+`\", which is not governed`)
 	cli(t, port, "identity", "entity", "state", ent, "suspended")
 	requestsAnswer("while their entity is suspended", 403, `belongs to entity \"`+ent+`\", which is suspended`)
 
 	// Audit: every gateway request names the native identity it presented,
 	// and discovery names it per admitting mount; after the claim, the
-	// entity too, and while it is suspended, why the request was refused.
+	// entity too, and why the request was refused. Before the claim the
+	// identity is one deny would refuse (identity_status unclaimed).
 	want := map[string]string{jwtAccessor: jwtAlias, certAccessor: agentCN}
 	entries := auditEntries(t, port, "role/"+role+"/gateway", start, 6, nil)
 	seen := map[string]int{}
-	granted, suspended := 0, 0
+	granted, ungoverned, suspended := 0, 0, 0
 	for _, e := range entries {
 		a := e.Auth
 		if alias, ok := want[a.MountAccessor]; !ok || a.AliasName != alias || a.EntityKind != "agent" {
@@ -129,19 +130,23 @@ func TestNativeIdentities_ClaimedThroughTheCLI(t *testing.T) {
 				a.MountAccessor, a.AliasName, a.EntityKind, want)
 		}
 		switch {
-		case a.RoleDeniedReason == "" && a.RoleGrantedBy == "group:"+group:
+		case a.RoleDeniedReason == "" && a.RoleGrantedBy == "group:"+group && a.RoleGroupType == "virtual" &&
+			a.IdentityStatus == "unclaimed":
 			granted++
+		case a.RoleDeniedReason == "entity not governed" && a.EntityName == ent && a.IdentityStatus == "entity not governed":
+			ungoverned++
 		case a.RoleDeniedReason == "entity suspended" && a.EntityName == ent:
 			suspended++
 		default:
-			t.Errorf("gateway audit: role granted by %q, denied for %q, entity %q; want group:%s, or refused as suspended",
-				a.RoleGrantedBy, a.RoleDeniedReason, a.EntityName, group)
+			t.Errorf("gateway audit: role granted by %q (%s), denied for %q, identity status %q, entity %q; "+
+				"want group:%s while unclaimed, then refused as not governed, then as suspended",
+				a.RoleGrantedBy, a.RoleGroupType, a.RoleDeniedReason, a.IdentityStatus, a.EntityName, group)
 		}
 		seen[a.MountAccessor]++
 	}
-	if seen[jwtAccessor] != 3 || seen[certAccessor] != 3 || granted != 4 || suspended != 2 {
-		t.Errorf("gateway audit: %v entries per mount accessor, %d granted, %d refused as suspended; "+
-			"want 3 for each of %s and %s, 4 granted, 2 refused", seen, granted, suspended, jwtAccessor, certAccessor)
+	if seen[jwtAccessor] != 3 || seen[certAccessor] != 3 || granted != 2 || ungoverned != 2 || suspended != 2 {
+		t.Errorf("gateway audit: %v entries per mount accessor, %d granted, %d refused as not governed, %d as suspended; "+
+			"want 3 for each of %s and %s, and 2 of each outcome", seen, granted, ungoverned, suspended, jwtAccessor, certAccessor)
 	}
 	auditEntries(t, port, "introspect/roles", start, 1, func(e audit.LogEntry) bool {
 		if e.Auth.Discovery == nil {

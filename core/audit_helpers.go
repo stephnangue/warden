@@ -303,6 +303,7 @@ func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
 	}
 	if rg.Granted() {
 		entry.Auth.RoleGrantedBy = rg.GrantedBy
+		entry.Auth.RoleGroupType = string(rg.GroupType)
 	} else {
 		entry.Auth.RoleDeniedReason = rg.DeniedReason
 	}

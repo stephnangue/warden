@@ -19,8 +19,9 @@ const (
 	// group's selectors, so members cannot be listed.
 	GroupTypeVirtual GroupType = "virtual"
 
-	// GroupTypeStatic groups list their members explicitly, managed in Warden.
-	// Reserved: not accepted yet.
+	// GroupTypeStatic groups list their members, entities of the group's
+	// namespace, explicitly, managed in Warden. Membership counts only for a
+	// governed, active entity.
 	GroupTypeStatic GroupType = "static"
 
 	// GroupTypeDirectory groups take their membership from a directory.
@@ -66,7 +67,38 @@ const (
 	// a selector whose every one of up to selector.MaxRuleValues globs must be
 	// tried costs more.
 	MaxSelectorsPerNamespace = 16000
+
+	// MaxStaticGroupMembers bounds the members a static group lists, expired
+	// ones included until a write drops them: the size of one group as a
+	// document, and of the part of the member index one write rebuilds. A
+	// member change rewrites the group's whole list.
+	MaxStaticGroupMembers = 1000
+
+	// MaxStaticGroupsPerNamespace bounds the static groups of one namespace,
+	// which an empty one does not count against MaxStaticMembersPerNamespace:
+	// every group write copies the namespace's map of group names.
+	MaxStaticGroupsPerNamespace = 8000
+
+	// MaxStaticMembersPerNamespace bounds the memberships across every static
+	// group of one namespace, expired ones and members deleted since
+	// included until a write drops them: the size of the namespace's member
+	// index, about 38 bytes a membership retained, and what Load rebuilds.
+	// Measured (core/identity_static_groups_bench_test.go, Apple M4 Pro): at
+	// 250000 the index retains about 9 MB and builds in 8 to 10 ms; a static
+	// group write updates only the written group's members, in 1.3 to 1.5 ms
+	// with MaxEntitiesPerNamespace entities listed, and a virtual group write
+	// shares the index; neither grows with the namespace's memberships.
+	MaxStaticMembersPerNamespace = 250_000
 )
+
+// GroupMember is one member of a static group: an entity of the group's
+// namespace, by ID, so a rename keeps it a member and an entity deleted and
+// created again under the same name is not. Until, when set, ends the
+// membership: it grants while now <= Until, and nothing after.
+type GroupMember struct {
+	ID    string    `json:"id"`
+	Until time.Time `json:"until,omitzero"`
+}
 
 // GroupRule is one rule of a virtual group: a set of selectors, each a fact
 // name mapped to the values it may take. Every selector must find a value
@@ -100,8 +132,9 @@ func (g *Group) SelectorCount() int {
 // Group grants namespace roles to its members. Roles lists the roles membership
 // grants, by bare name; a name with no role behind it grants nothing until the
 // role exists. How a caller becomes a member depends on Type: a virtual group
-// matches the caller's verified facts against its Rules. A group with a
-// ValidUntil grants while now <= ValidUntil, and nothing after.
+// matches an unclaimed caller's verified facts against its Rules; a static
+// group lists its Members, entities. A group with a ValidUntil grants while
+// now <= ValidUntil, and nothing after.
 //
 // A *Group published by the group store is never written again: a write builds
 // a new value and publishes it, so any number of readers share one without a
@@ -113,6 +146,7 @@ type Group struct {
 	Description string            `json:"description,omitempty"`
 	Roles       []string          `json:"roles"` // sorted, deduplicated
 	Rules       []GroupRule       `json:"rules,omitempty"`
+	Members     []GroupMember     `json:"members,omitempty"`    // static groups; sorted by ID, deduplicated
 	ValidUntil  time.Time         `json:"valid_until,omitzero"` // zero: no end
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
@@ -134,12 +168,15 @@ func (g *Group) Clone() *Group {
 			out.Rules[i] = r.Clone()
 		}
 	}
+	if g.Members != nil {
+		out.Members = slices.Clip(slices.Clone(g.Members))
+	}
 	out.Metadata = maps.Clone(g.Metadata)
 	return &out
 }
 
 // Hash identifies the group's content: two groups with the same name, type,
-// roles, rules, valid_until and metadata hash alike, whenever they were
+// roles, rules, members, valid_until and metadata hash alike, whenever they were
 // written. A writer that read a group passes its hash back to make the write
 // conditional on nothing having changed since. The ID and the timestamps are
 // not part of it.
@@ -168,11 +205,25 @@ func (g *Group) Hash() string {
 		}
 	}
 	// The instant only, whatever the zone it was written in.
-	if g.ValidUntil.IsZero() {
-		field("")
-	} else {
-		field(g.ValidUntil.UTC().Format(time.RFC3339Nano))
+	instant := func(t time.Time) {
+		if t.IsZero() {
+			field("")
+		} else {
+			field(t.UTC().Format(time.RFC3339Nano))
+		}
 	}
+	// Members, stored sorted by ID, only when there are some: a group without
+	// members (every virtual group) hashes as it did before they existed. The
+	// marker cannot collide with the instant that follows, which is
+	// length-prefixed.
+	if len(g.Members) > 0 {
+		fmt.Fprintf(h, "members%d:", len(g.Members))
+		for _, m := range g.Members {
+			field(m.ID)
+			instant(m.Until)
+		}
+	}
+	instant(g.ValidUntil)
 	keys := slices.Sorted(maps.Keys(g.Metadata))
 	fmt.Fprintf(h, "%d:", len(keys))
 	for _, k := range keys {

@@ -73,6 +73,10 @@ type RoleGrant struct {
 	// when nothing grants it, in which case DeniedReason says why.
 	GrantedBy string
 
+	// GroupType is the type of the group GrantedBy names: virtual for an
+	// unclaimed caller, static for a claimed one, never virtual when claimed.
+	GroupType GroupType
+
 	// Groups are the caller's groups, sorted. Shared with the cached
 	// membership: read only.
 	Groups []string

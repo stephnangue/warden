@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
@@ -107,6 +108,37 @@ func (e *grantEnv) govern(name string) {
 	proposeSponsor(e.t, e.c, e.ctx, e.ctx, name, "infra-leads", true)
 }
 
+// staticDeploy lists entity name in the static group local-ops, which grants
+// deploy, creating the group the first time.
+func (e *grantEnv) staticDeploy(name string) {
+	e.t.Helper()
+	en, _, err := e.c.identityStore.GetEntity(e.ctx, name)
+	require.NoError(e.t, err)
+	g, _, err := e.c.identityStore.GetGroup(e.ctx, "local-ops")
+	if errors.Is(err, ErrGroupNotFound) {
+		_, err = e.c.identityStore.CreateGroup(e.ctx, &logical.Group{Name: "local-ops", Type: logical.GroupTypeStatic,
+			Roles: []string{"deploy"}, Members: []logical.GroupMember{{ID: en.ID}}})
+		require.NoError(e.t, err)
+		return
+	}
+	require.NoError(e.t, err)
+	g.Members = append(g.Members, logical.GroupMember{ID: en.ID})
+	_, err = e.c.identityStore.UpdateGroup(e.ctx, g, "")
+	require.NoError(e.t, err)
+}
+
+// requireGrantedBy asserts a request for role was granted it through the
+// group labelled label, of type typ.
+func requireGrantedBy(t *testing.T, req *logical.Request, te *logical.TokenEntry, err error, role, label string, typ logical.GroupType) {
+	t.Helper()
+	require.NoError(t, err)
+	require.NotNil(t, req.RoleGrant())
+	assert.Equal(t, label, req.RoleGrant().GrantedBy)
+	assert.Equal(t, typ, req.RoleGrant().GroupType)
+	assert.Empty(t, req.RoleGrant().DeniedReason)
+	assert.Equal(t, role, te.RoleName)
+}
+
 func (e *grantEnv) setState(name string, st logical.EntityState) {
 	e.t.Helper()
 	require.NoError(e.t, e.c.identityStore.SetEntityState(e.ctx, name, st, nil, ""))
@@ -125,35 +157,49 @@ func (e *grantEnv) setConfig(cfg *identityConfig) {
 // is empty. Audit carries it either way.
 func TestIdentityResolution_StatusDryRun(t *testing.T) {
 	e := newIdentityEnv(t)
-	status := func(want string) {
+	status := func(want, label string, typ logical.GroupType) {
 		t.Helper()
 		req, _, te, err := e.check("deploy")
-		requireGranted(t, req, te, err, "deploy")
+		requireGrantedBy(t, req, te, err, "deploy", label, typ)
 		assert.Equal(t, want, req.RoleGrant().IdentityStatus)
 		var entry audit.LogEntry
 		stampRoleGrant(&entry, req)
 		assert.Equal(t, want, entry.Auth.IdentityStatus)
+		assert.Equal(t, string(typ), entry.Auth.RoleGroupType)
 		assert.Empty(t, entry.Auth.RoleDeniedReason)
 	}
-	status(logical.RoleDeniedIdentityUnclaimed)
-	e.claim("infra-agent")
-	status(logical.RoleDeniedEntityNotGoverned)
+	status(logical.RoleDeniedIdentityUnclaimed, "group:deployers", logical.GroupTypeVirtual)
 
-	e.setConfig(&identityConfig{UnknownAliases: unknownAliasesDeny})
-	req, _, _, err := e.check("deploy")
-	requireDenied(t, req, err, logical.RoleDeniedEntityNotGoverned)
-	assert.Equal(t, logical.RoleDeniedEntityNotGoverned, req.RoleGrant().IdentityStatus)
+	// Claimed and ungoverned: no role in any mode (the claim rule), with the
+	// same status.
+	e.claim("infra-agent")
+	for _, cfg := range []*identityConfig{nil, {UnknownAliases: unknownAliasesDeny}} {
+		e.setConfig(cfg)
+		req, _, _, err := e.check("deploy")
+		requireDenied(t, req, err, logical.RoleDeniedEntityNotGoverned)
+		assert.Equal(t, logical.RoleDeniedEntityNotGoverned, req.RoleGrant().IdentityStatus)
+	}
 
 	e.govern("infra-agent")
-	status("")
+	e.staticDeploy("infra-agent")
+	status("", "group:local-ops", logical.GroupTypeStatic)
 	e.setConfig(nil)
-	status("")
+	status("", "group:local-ops", logical.GroupTypeStatic)
+
+	// On an exempt mount, a claimed entity that is not governed still holds no
+	// role, and is told why, though deny would not refuse it (no status).
+	e.setConfig(&identityConfig{UnknownAliases: unknownAliasesDeny, ExemptMounts: []string{grantAccessor}})
+	require.NoError(t, e.c.identityStore.ClearSponsor(e.ctx, "infra-agent", ""))
+	req, _, _, err := e.check("deploy")
+	rerr := requireDenied(t, req, err, logical.RoleDeniedEntityNotGoverned)
+	assert.Contains(t, rerr.Message, "which is not governed; it holds no role until it is")
+	assert.Empty(t, req.RoleGrant().IdentityStatus)
 
 	// An exempt mount's unclaimed caller is not one deny would refuse.
 	_, err = e.c.identityStore.DeleteEntity(e.ctx, "infra-agent", "", false)
 	require.NoError(t, err)
 	e.setConfig(&identityConfig{ExemptMounts: []string{grantAccessor}})
-	status("")
+	status("", "group:deployers", logical.GroupTypeVirtual)
 }
 
 func TestIdentityResolution_RequestPath(t *testing.T) {
@@ -164,35 +210,44 @@ func TestIdentityResolution_RequestPath(t *testing.T) {
 	requireGranted(t, req, te, err, "deploy")
 	assert.Nil(t, te.Entity)
 
-	// Claimed: the entity resolves on the next request. It keeps its virtual
-	// grant (the claim rule comes with static groups).
+	// Claimed: the entity resolves on the next request, and the virtual group
+	// that granted deploy no longer applies to it (the claim rule): an
+	// ungoverned entity holds no role, in the default mode too.
 	e.claim("infra-agent")
 	req, _, te, err = e.check("deploy")
-	requireGranted(t, req, te, err, "deploy")
+	rerr := requireDenied(t, req, err, logical.RoleDeniedEntityNotGoverned)
+	assert.Equal(t, `native identity (auth/jwt/, agent-1) belongs to entity "infra-agent", which is not governed; it holds no role until it is`,
+		rerr.Message, "the agent is not told what its entity lacks")
 	require.NotNil(t, te.Entity)
 	assert.Equal(t, "infra-agent", te.Entity.Name)
+	assert.Empty(t, req.RoleGrant().Groups, "no virtual group, whatever its rules match")
+
+	// Governed, but in no static group: still no role, and the message says
+	// what a claimed caller needs.
+	e.govern("infra-agent")
+	req, _, _, err = e.check("deploy")
+	rerr = requireDenied(t, req, err, logical.RoleDeniedNotAssumable)
+	assert.Equal(t, `role "deploy" is not assumable: the caller's entity holds no static group granting it`, rerr.Message)
+
+	// A static group listing it grants deploy.
+	e.staticDeploy("infra-agent")
+	req, _, te, err = e.check("deploy")
+	requireGrantedBy(t, req, te, err, "deploy", "group:local-ops", logical.GroupTypeStatic)
+	assert.Equal(t, "warden", te.Entity.GovernedBy())
 
 	// The kill switch, in the default mode.
 	e.setState("infra-agent", logical.EntityStateSuspended)
 	req, _, _, err = e.check("deploy")
-	rerr := requireDenied(t, req, err, logical.RoleDeniedEntitySuspended)
+	rerr = requireDenied(t, req, err, logical.RoleDeniedEntitySuspended)
 	assert.Equal(t, `native identity (auth/jwt/, agent-1) belongs to entity "infra-agent", which is suspended`, rerr.Message)
 	e.setState("infra-agent", logical.EntityStateActive)
 	req, _, te, err = e.check("deploy")
-	requireGranted(t, req, te, err, "deploy")
+	requireGrantedBy(t, req, te, err, "deploy", "group:local-ops", logical.GroupTypeStatic)
 
-	// deny: a claimed, ungoverned caller is refused, naming why.
+	// deny changes nothing for a governed, active entity.
 	e.setConfig(&identityConfig{UnknownAliases: unknownAliasesDeny})
-	req, _, _, err = e.check("deploy")
-	rerr = requireDenied(t, req, err, logical.RoleDeniedEntityNotGoverned)
-	assert.Equal(t, `native identity (auth/jwt/, agent-1) belongs to entity "infra-agent", which is not governed; unknown_aliases=deny`,
-		rerr.Message, "the agent is not told what its entity lacks")
-
-	// Governed: granted.
-	e.govern("infra-agent")
 	req, _, te, err = e.check("deploy")
-	requireGranted(t, req, te, err, "deploy")
-	assert.Equal(t, "warden", te.Entity.GovernedBy())
+	requireGrantedBy(t, req, te, err, "deploy", "group:local-ops", logical.GroupTypeStatic)
 
 	// The suspension beats every exemption.
 	e.setConfig(&identityConfig{UnknownAliases: unknownAliasesDeny, ExemptMounts: []string{grantAccessor}})
@@ -274,6 +329,11 @@ func TestIdentityResolution_DoesNotAllocate(t *testing.T) {
 			e.govern("a")
 			e.setConfig(&identityConfig{UnknownAliases: unknownAliasesDeny})
 		},
+		"claimed, granted by a static group": func(e *grantEnv) {
+			e.claim("a")
+			e.govern("a")
+			e.staticDeploy("a")
+		},
 		"suspended": func(e *grantEnv) {
 			e.claim("a")
 			e.setState("a", logical.EntityStateSuspended)
@@ -306,6 +366,8 @@ func TestIdentityResolution_CEL(t *testing.T) {
 	require.Error(t, err, "no entity: the condition fails closed")
 
 	e.claim("infra-agent")
+	e.govern("infra-agent")
+	e.staticDeploy("infra-agent")
 	_, _, _, err = e.check("deploy")
 	require.NoError(t, err)
 
@@ -356,23 +418,37 @@ func TestIdentityResolution_Discovery(t *testing.T) {
 	require.NotEmpty(t, ent.ID)
 	rec := &auditCapture{}
 	e.c.auditManager = rec
-	assert.Equal(t, []string{"deploy"}, roleNames(e.introspectRoles()), "claimed keeps its virtual grants for now")
+	assert.Empty(t, e.introspectRoles(), "claimed and ungoverned: the virtual group no longer applies")
+	claimedNoGroups := e.introspectJSON()
 	entry := introspectEntry(t, rec)
 	require.NotNil(t, entry.Auth.Discovery)
 	require.Len(t, entry.Auth.Discovery.AdmittedBy, 1)
 	assert.Equal(t, ent.ID, entry.Auth.Discovery.AdmittedBy[0].EntityID, "admitted_by names the claiming entity")
 
+	// Governed and listed by a static group: exactly its static grants.
+	ent.Description = "Deploys acme/infra"
+	require.NoError(t, e.c.identityStore.UpdateEntity(e.ctx, "infra-agent", ent, ""))
+	sponsorAccepted(t, e.c, e.ctx, "infra-agent", "infra-leads")
+	_, err := e.c.identityStore.CreateGroup(e.ctx, &logical.Group{Name: "local-ops", Type: logical.GroupTypeStatic,
+		Roles: []string{"deploy"}, Members: []logical.GroupMember{{ID: ent.ID}}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"deploy"}, roleNames(e.introspectRoles()), "a claimed member sees its static grants")
+
 	require.NoError(t, e.c.identityStore.SetEntityState(e.ctx, "infra-agent", logical.EntityStateSuspended, nil, ""))
 	assert.Empty(t, e.introspectRoles(), "a suspended entity's menu is empty")
 
+	// Governed, active, in no static group: empty, under deny too.
 	require.NoError(t, e.c.identityStore.SetEntityState(e.ctx, "infra-agent", logical.EntityStateActive, nil, ""))
+	_, err = e.c.identityStore.DeleteGroup(e.ctx, "local-ops", "", "", false)
+	require.NoError(t, err)
 	require.NoError(t, e.c.identityStore.SetIdentityConfig(e.ctx, &identityConfig{UnknownAliases: unknownAliasesDeny}))
-	assert.Empty(t, e.introspectRoles(), "claimed and ungoverned, under deny")
+	assert.Empty(t, e.introspectRoles(), "claimed, in no static group")
 
-	_, err := e.c.identityStore.DeleteEntity(e.ctx, "infra-agent", "", false)
+	_, err = e.c.identityStore.DeleteEntity(e.ctx, "infra-agent", "", false)
 	require.NoError(t, err)
 	refused := e.introspectJSON()
 	assert.Empty(t, e.introspectRoles(), "unclaimed, under deny")
+	assert.Equal(t, claimedNoGroups, refused, "claimed with no groups reads as unclaimed and refused")
 
 	require.NoError(t, e.c.identityStore.SetIdentityConfig(e.ctx, &identityConfig{UnknownAliases: unknownAliasesDeny, ExemptMounts: []string{accessor}}))
 	assert.Equal(t, unclaimed, e.introspectJSON(), "an exempt mount lists as before")

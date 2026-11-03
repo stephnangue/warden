@@ -173,8 +173,9 @@ type Membership struct {
 
 // GroupGrant names the group a role is granted through.
 type GroupGrant struct {
-	Group string // the group's name
-	Label string // GroupLabel(Group), built once when the group is compiled
+	Group string    // the group's name
+	Label string    // GroupLabel(Group), built once when the group is compiled
+	Type  GroupType // the group's type: virtual for an unclaimed caller, static for a claimed one
 }
 
 // ErrAdmissionNotSerializable is MarshalJSON's refusal: an admission carries

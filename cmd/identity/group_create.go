@@ -19,10 +19,16 @@ var (
 		Long: `
 Usage: warden identity group create <name> [options]
 
-  Create a group. "type" is required and never changes; "virtual" is the
-  one type today. A virtual group's members are the callers whose verified
-  facts match any one of its rules; membership grants the group's roles.
-  Requires a token with sudo on sys/identity/group.
+  Create a group. "type" is required and never changes: "virtual" or
+  "static". Membership grants the group's roles. Requires a token with
+  sudo on sys/identity/group.
+
+  A virtual group's members are the unclaimed callers whose verified facts
+  match any one of its rules. A static group lists its members: entities
+  of this namespace, by name, each optionally with an "until" (RFC 3339)
+  after which its membership ends. A caller whose native identity an
+  entity claims holds only its entity's static grants, and only while the
+  entity is governed and active; virtual groups never apply to it.
 
   A rule is a set of selectors, each a fact name with the values it may
   take; a caller must match one value of every selector. Every rule must
@@ -72,16 +78,32 @@ Usage: warden identity group create <name> [options]
           }
         }'
 
+      $ warden identity group create local-ops -json '{
+          "type": "static",
+          "description": "Operations agents governed by Warden",
+          "members": [
+            "billing-agent",
+            { "name": "release-bot", "until": "2026-10-26T18:00:00Z" }
+          ],
+          "roles": ["ops", "deploy"]
+        }'
+
       $ warden identity group create ci-deployers -json @ci-deployers.json
       $ cat ci-deployers.json | warden identity group create ci-deployers -json -
 
-    Typed flags (human-friendly), one -rule per rule:
+    Typed flags (human-friendly), one -rule per rule, one -member per
+    member:
 
       $ warden identity group create ci-deployers \
           -type=virtual \
           -roles=deploy \
           -rule='{"mount": ["auth/kubernetes/"], "service_account_namespace": ["ci"]}' \
           -valid-until=2026-12-31T23:59:59Z
+      $ warden identity group create local-ops \
+          -type=static \
+          -roles=ops,deploy \
+          -member=billing-agent \
+          -member='{"name": "release-bot", "until": "2026-10-26T18:00:00Z"}'
 
   Combine with -dry-run to validate the payload locally without creating
   the group.

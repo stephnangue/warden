@@ -36,6 +36,12 @@ type nsIndex struct {
 	// virtualGroups of the group that names it, in ascending group order.
 	mountGlobs []mountGlob
 
+	// members maps an entity ID to the static groups that list it: what a
+	// claimed caller's membership is computed from. Shared by pointer with
+	// the namespace's earlier values while no static group changes. Never nil
+	// once published (emptyMemberIndex when there are none).
+	members *memberIndex
+
 	// entities are every entity of the namespace, in any state, and the
 	// native identities they claim. They share the namespace value, and so its
 	// generation, with the groups: an entity write publishes a new value under
@@ -65,7 +71,7 @@ var emptyIdentitySnapshot = &identitySnapshot{}
 // counter starts above 0, so a membership computed against it is told apart
 // from one computed against a published namespace, and stays valid exactly
 // while the namespace has nothing.
-var emptyNSIndex = &nsIndex{groupsByName: map[string]*groupEntry{}, entities: emptyEntities}
+var emptyNSIndex = &nsIndex{groupsByName: map[string]*groupEntry{}, entities: emptyEntities, members: emptyMemberIndex}
 
 // namespace returns the index of namespace nsID, or emptyNSIndex when it has
 // nothing. It takes no lock and does not allocate.
@@ -92,11 +98,12 @@ func (s *identitySnapshot) withNamespace(nsID string, g *nsIndex) *identitySnaps
 }
 
 // buildNSIndex builds a namespace's index at generation gen from its groups
-// byName, taking ownership of the map, its entities ents (nil is none) and its
-// config cfg (nil is the defaults). It returns nil for a namespace with no
-// groups, no entities and the default config, which the snapshot then serves
-// as emptyNSIndex.
-func buildNSIndex(byName map[string]*groupEntry, ents *nsEntities, cfg *identityConfig, gen uint64) *nsIndex {
+// byName, taking ownership of the map, the member index of their static
+// groups members (nil builds it from byName in full), its entities ents (nil
+// is none) and its config cfg (nil is the defaults). It returns nil for a
+// namespace with no groups, no entities and the default config, which the
+// snapshot then serves as emptyNSIndex.
+func buildNSIndex(byName map[string]*groupEntry, members *memberIndex, ents *nsEntities, cfg *identityConfig, gen uint64) *nsIndex {
 	if ents == nil {
 		ents = emptyEntities
 	}
@@ -106,7 +113,10 @@ func buildNSIndex(byName map[string]*groupEntry, ents *nsEntities, cfg *identity
 	if byName == nil {
 		byName = map[string]*groupEntry{}
 	}
-	g := &nsIndex{gen: gen, groupsByName: byName, entities: ents, config: cfg}
+	if members == nil {
+		members = buildMemberIndex(byName)
+	}
+	g := &nsIndex{gen: gen, groupsByName: byName, members: members, entities: ents, config: cfg}
 	g.indexGroups()
 	return g
 }
