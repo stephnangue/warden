@@ -46,8 +46,8 @@ import (
 //
 //	request.path, request.operation, request.client_ip,
 //	  request.mount_point, request.mount_type, request.mount_class,
-//	  request.mount_accessor, request.transparent, request.namespace,
-//	  request.data.<k>
+//	  request.mount_accessor, request.transparent, request.data_plane,
+//	  request.namespace, request.data.<k>
 //	agent.present, agent.principal, agent.role, agent.namespace,
 //	  agent.policies (list), agent.groups (list, sorted; empty when the
 //	  caller is in no group), agent.metadata.<k>, agent.actors (list of
@@ -118,6 +118,7 @@ type celRequestInput struct {
 	MountClass    string
 	MountAccessor string
 	Transparent   bool
+	DataPlane     bool
 	Namespace     string
 	Data          map[string]any
 }
@@ -580,6 +581,9 @@ func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
 	if f.has("transparent") {
 		m["transparent"] = req.Transparent
 	}
+	if f.has("data_plane") {
+		m["data_plane"] = req.DataPlane
+	}
 	if f.has("namespace") {
 		m["namespace"] = req.Namespace
 	}
@@ -915,6 +919,7 @@ func celRequestInputFromRequest(req *logical.Request, nsPath string) celRequestI
 		MountClass:    req.MountClass,
 		MountAccessor: req.MountAccessor,
 		Transparent:   req.Transparent,
+		DataPlane:     req.DataPlane,
 		Namespace:     nsPath,
 		Data:          req.Data,
 	}

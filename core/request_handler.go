@@ -1001,6 +1001,11 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 	// Help requests are never streaming - they should return help text, not proxy upstream.
 	isStreaming := c.isStreamingRequest(ctx, req.Path) && req.Operation != logical.HelpOperation
 
+	// Resolved once, for policy (request.data_plane) and for the non-streaming
+	// branch's implicit auth and ticket admission below.
+	surface, dataPlane := c.dataPlane(ctx, req, entry, isStreaming)
+	req.DataPlane = dataPlane
+
 	// Whether this mount is a protected resource — i.e. whether a user
 	// credential can be presented at all. Resolved inside the streaming branch
 	// below, but declared here so the policy-denial path can read it: a deny
@@ -1018,7 +1023,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// the provider authenticates this path implicitly, the agent credential
 		// is extracted and logged in exactly as on a gateway path, the provider's
 		// own auto_auth_path taking precedence over the namespace's below.
-		provider, authRole, providerAuth := c.providerTransparentSurface(ctx, req, entry)
+		provider, authRole, providerAuth := c.providerTransparentSurface(req, surface)
 		if providerAuth {
 			req.ClientToken, _ = provider.ExtractTokens(req.HTTPRequest, false)
 		} else {
@@ -1030,8 +1035,8 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// its provider's surface for a ticket on either header: X-Warden-Token
 		// opts out of implicit auth, not out of the surface.
 		if refusal := c.admitTicket(ctx, req, identityPath, func() (string, func(error) *logical.Response) {
-			if b := c.providerSurfaceBackend(ctx, req, entry); b != nil {
-				return providerTicketSurface(req, b, noRoleSelectedAccess)()
+			if surface != nil {
+				return providerTicketSurface(req, surface, noRoleSelectedAccess)()
 			}
 			return operationsTicketSurface(req)()
 		}); refusal != nil {
@@ -2631,22 +2636,35 @@ func (c *Core) authenticateImplicitly(ctx context.Context, req *logical.Request,
 // It returns the routed provider and the auth role isTransparentRequest
 // resolved, under the same rules as a gateway path: the provider must have an
 // auto_auth_path, the path must be on its transparent surface, and an explicit
-// X-Warden-Token opts out. Only provider mounts are consulted, so system and
-// auth paths cost no extra lookup; help requests are answered from the path
-// schema and never authenticate implicitly, as on the streaming branch.
-func (c *Core) providerTransparentSurface(ctx context.Context, req *logical.Request, entry *MountEntry) (logical.Backend, string, bool) {
-	if entry == nil || entry.Class != mountClassProvider || req.Operation == logical.HelpOperation {
+// X-Warden-Token opts out. surface is providerSurfaceBackend's answer for the
+// request, nil off a provider's surface (system and auth paths, help
+// requests, which are answered from the path schema and never authenticate
+// implicitly, as on the streaming branch).
+func (c *Core) providerTransparentSurface(req *logical.Request, surface logical.Backend) (logical.Backend, string, bool) {
+	if surface == nil {
 		return nil, "", false
 	}
-	backend := c.router.MatchingBackend(ctx, req.Path)
-	if backend == nil {
-		return nil, "", false
-	}
+	backend := surface
 	isTransparent, authRole := c.isTransparentRequest(req, backend)
 	if !isTransparent {
 		return nil, "", false
 	}
 	return backend, authRole, true
+}
+
+// dataPlane reports whether req is on a provider's data plane: a streaming
+// gateway path of a provider mount, or an ordinary path the provider
+// authenticates implicitly (an access backend's access/ paths), whether or not
+// it has an auto_auth_path. Help requests, control paths and every
+// non-provider mount (sys/mcp streams too) are not. For a non-streaming
+// request it also returns that surface's backend (providerSurfaceBackend), so
+// the caller resolves it once.
+func (c *Core) dataPlane(ctx context.Context, req *logical.Request, entry *MountEntry, isStreaming bool) (logical.Backend, bool) {
+	if isStreaming {
+		return nil, entry != nil && entry.Class == mountClassProvider
+	}
+	surface := c.providerSurfaceBackend(ctx, req, entry)
+	return surface, surface != nil
 }
 
 // providerSurfaceBackend returns the routed provider when a request that takes

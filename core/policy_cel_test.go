@@ -471,6 +471,30 @@ func TestCEL_RequestMountFields(t *testing.T) {
 	}
 }
 
+func TestCEL_RequestDataPlane(t *testing.T) {
+	prg := mustCompile(t, mustEnv(t, false), `request.mount_class == "provider" && !request.data_plane`)
+	now := time.Unix(0, 0).UTC()
+
+	for _, tc := range []struct {
+		in   celRequestInput
+		want bool
+	}{
+		{celRequestInput{MountClass: "provider"}, true},
+		{celRequestInput{MountClass: "provider", DataPlane: true}, false},
+		{celRequestInput{MountClass: "auth"}, false},
+	} {
+		got, err := evalCELCondition(prg, baseAct(tc.in, celPrincipalInput{}, now))
+		if err != nil || got != tc.want {
+			t.Fatalf("%+v: got=%v err=%v, want %v", tc.in, got, err, tc.want)
+		}
+	}
+
+	in := celRequestInputFromRequest(&logical.Request{DataPlane: true}, "")
+	if !in.DataPlane {
+		t.Fatal("celRequestInputFromRequest dropped DataPlane")
+	}
+}
+
 // TestCEL_TokenNamespaceRemoved pins the hard cut. `token` is no longer a
 // declared namespace, so every stored condition using it fails to compile —
 // which, because policies are re-parsed on load, is what makes the upgrade
