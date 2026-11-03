@@ -206,10 +206,12 @@ func (c *Core) discoveryFromTicket(ctx context.Context, te *logical.TokenEntry, 
 	}
 	m := compute(adm, n, c.grantIndex(issuing.ID), now)
 
+	// A human's grants are all virtual (humans are never claimed), so a
+	// governed_only role is never listed: the next request would refuse it.
 	var granted []*logical.Role
 	if c.roleStore != nil {
 		for _, r := range c.roleStore.snapshot.Load().roles(issuing.ID) {
-			if _, ok := m.Roles[r.Name]; ok {
+			if g, ok := m.Roles[r.Name]; ok && r.GrantedThrough(g.Type) {
 				granted = append(granted, r)
 			}
 		}

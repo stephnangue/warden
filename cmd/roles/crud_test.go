@@ -214,6 +214,26 @@ func TestCreate_TypedFlags(t *testing.T) {
 	}, f.last(t).body, "only the flags that were set are sent")
 }
 
+// -governed-only sends the flag only when set, false included, so an update
+// can clear it.
+func TestCreateUpdate_GovernedOnly(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusOK, cannedRole)
+	cmd := freshCreateCmd()
+	require.NoError(t, cmd.Flags().Set("governed-only", "true"))
+	require.NoError(t, runCreate(cmd, []string{"prod-deploy"}))
+	assert.Equal(t, map[string]any{"governed_only": true}, f.last(t).body)
+
+	cmd = freshUpdateCmd()
+	require.NoError(t, cmd.Flags().Set("governed-only", "false"))
+	require.NoError(t, runUpdate(cmd, []string{"prod-deploy"}))
+	assert.Equal(t, map[string]any{"governed_only": false}, f.last(t).body)
+
+	cmd = freshUpdateCmd()
+	require.NoError(t, cmd.Flags().Set("description", "x"))
+	require.NoError(t, runUpdate(cmd, []string{"prod-deploy"}))
+	assert.NotContains(t, f.last(t).body, "governed_only", "left out unless set")
+}
+
 func TestCreate_JSONAndFlagsRejected(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusCreated, cannedRole)
 	cmd := freshCreateCmd()

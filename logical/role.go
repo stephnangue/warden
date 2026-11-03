@@ -33,8 +33,20 @@ type Role struct {
 	Skill        string            `json:"skill,omitempty"`
 	ProviderPath string            `json:"provider_path,omitempty"` // with a trailing slash
 	Metadata     map[string]string `json:"metadata,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
+
+	// GovernedOnly makes the role grantable through governed membership
+	// only: a static group, listing a governed, active entity. No virtual
+	// group grants it, so neither an unclaimed agent nor a human holds it.
+	GovernedOnly bool `json:"governed_only,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// GrantedThrough reports whether a membership grant of the given group type
+// holds r: every grant does, except a virtual one of a GovernedOnly role.
+func (r *Role) GrantedThrough(t GroupType) bool {
+	return !r.GovernedOnly || t != GroupTypeVirtual
 }
 
 // Clone returns a deep copy of r, or nil for a nil role. Its Policies has no
@@ -73,6 +85,11 @@ func (r *Role) Hash() string {
 	for _, k := range keys {
 		field(k)
 		field(r.Metadata[k])
+	}
+	// Only when set, so a role without it hashes as it did before it
+	// existed; the marker cannot be taken for a length-prefixed field.
+	if r.GovernedOnly {
+		fmt.Fprint(h, "governed_only")
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

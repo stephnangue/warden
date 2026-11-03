@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"math/rand/v2"
 	"net/http"
@@ -489,4 +490,160 @@ func TestStaticGroups_ClaimWarnings(t *testing.T) {
 	resp = entityRequest(t, c, logical.UpdateOperation, "entity/b-agent/alias", map[string]any{"mount": "auth/jwt/", "name": "repo:x", "move": true})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	assert.Empty(t, respWarnings(resp), "already claimed: nothing changes for virtual groups")
+}
+
+// setGovernedOnly writes the role name's governed_only flag through the store.
+func setGovernedOnly(t *testing.T, c *Core, ctx context.Context, name string, v bool) {
+	t.Helper()
+	r, hash, err := c.roleStore.Get(ctx, name)
+	require.NoError(t, err)
+	r.GovernedOnly = v
+	_, err = c.roleStore.Update(ctx, r, hash)
+	require.NoError(t, err)
+}
+
+// Through CheckToken: flagging a role refuses an unclaimed caller whose
+// virtual group grants it on its next request, with no write to the group; a
+// governed member of a static group keeps it; clearing the flag restores the
+// virtual grant.
+func TestGovernedOnly_RequestPath(t *testing.T) {
+	e := newIdentityEnv(t)
+	req, _, te, err := e.check("deploy")
+	requireGranted(t, req, te, err, "deploy")
+
+	setGovernedOnly(t, e.c, e.ctx, "deploy", true)
+	req, _, te, err = e.check("deploy")
+	rerr := requireDenied(t, req, err, logical.RoleDeniedGovernedOnly)
+	assert.Equal(t, `role "deploy" requires governed membership: only a static group listing a governed entity grants it`, rerr.Message)
+	assert.NotContains(t, rerr.Message, "deployers", "no group is named")
+	assert.Empty(t, te.Policies)
+
+	e.claim("infra-agent")
+	e.govern("infra-agent")
+	e.staticDeploy("infra-agent")
+	req, _, te, err = e.check("deploy")
+	requireGrantedBy(t, req, te, err, "deploy", "group:local-ops", logical.GroupTypeStatic)
+
+	_, err = e.c.identityStore.DeleteEntity(e.ctx, "infra-agent", "", false)
+	require.NoError(t, err)
+	req, _, _, err = e.check("deploy")
+	requireDenied(t, req, err, logical.RoleDeniedGovernedOnly)
+	setGovernedOnly(t, e.c, e.ctx, "deploy", false)
+	req, _, te, err = e.check("deploy")
+	requireGranted(t, req, te, err, "deploy")
+}
+
+// The refusal allocates nothing on a cached membership, like every other.
+func TestGovernedOnly_DoesNotAllocate(t *testing.T) {
+	e := newIdentityEnv(t)
+	setGovernedOnly(t, e.c, e.ctx, "deploy", true)
+	req := mustTransparent(e, e.token, "deploy")
+	te := req.TokenEntry()
+	now := time.Now()
+	e.c.resolveRoleGrant(req, te, now)
+	require.Equal(t, logical.RoleDeniedGovernedOnly, req.RoleGrant().DeniedReason)
+	assert.Zero(t, testing.AllocsPerRun(1000, func() { e.c.resolveRoleGrant(req, te, now) }))
+}
+
+// A virtual group naming a governed_only role is refused at write; a static
+// one is not. A role write is never refused: it warns, naming the virtual
+// groups that list it and no longer grant it. Reads show the flag, false
+// included, and a role without it hashes as before.
+func TestGovernedOnly_Writes(t *testing.T) {
+	c := setupEntityMounts(t)
+	ctx := rootCtx()
+	_, err := c.roleStore.Create(ctx, &logical.Role{Name: "prod-deploy", Policies: []string{"deploy"}})
+	require.NoError(t, err)
+	resp := roleRequest(t, c, ctx, logical.ReadOperation, "roles/prod-deploy", nil)
+	assert.Equal(t, false, resp.Data["governed_only"])
+	h1 := resp.Data["hash"]
+
+	ci := map[string]any{"type": "virtual", "roles": []any{"prod-deploy"}, "rules": []any{map[string]any{"mount": "auth/jwt/"}}}
+	require.Equal(t, http.StatusCreated, groupRequest(t, c, logical.CreateOperation, "group/ci-deployers", ci).StatusCode)
+
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/prod-deploy", map[string]any{"governed_only": true})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, true, resp.Data["governed_only"])
+	assert.NotEqual(t, h1, resp.Data["hash"], "the flag is part of the hash")
+	assert.Contains(t, respWarnings(resp),
+		`role "prod-deploy" is governed_only; 1 virtual group lists it and no longer grants it: ci-deployers`)
+
+	// An edit that leaves the flag out keeps it, and warns no more: it takes
+	// nothing more away.
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/prod-deploy", map[string]any{"description": ""})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, true, resp.Data["governed_only"])
+	for _, w := range respWarnings(resp) {
+		assert.NotContains(t, w, "governed_only")
+	}
+
+	// The writer whose own request holds the role through a virtual group is
+	// told its next request under it is refused.
+	r, _, err := c.roleStore.Get(ctx, "prod-deploy")
+	require.NoError(t, err)
+	writer := &logical.Request{}
+	writer.SetRoleGrant(logical.RoleGrant{RoleName: "prod-deploy", GrantedBy: "group:ci-deployers", GroupType: logical.GroupTypeVirtual})
+	assert.Contains(t, c.systemBackend.governedOnlyWarnings(ctx, writer, r, false),
+		`the writer's own request holds role "prod-deploy" through a virtual group; its next request under the role is refused`)
+	writer.SetRoleGrant(logical.RoleGrant{RoleName: "prod-deploy", GrantedBy: "group:local-ops", GroupType: logical.GroupTypeStatic})
+	assert.Len(t, c.systemBackend.governedOnlyWarnings(ctx, writer, r, false), 1, "a static grant keeps the role: only the group warning")
+
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/ci-deployers", map[string]any{"type": "virtual", "description": "x"})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.Err.Error(), `role "prod-deploy" is governed_only; a virtual group cannot grant it`)
+	resp = groupRequest(t, c, logical.CreateOperation, "group/more", ci)
+	assert.Contains(t, resp.Err.Error(), "a virtual group cannot grant it")
+
+	resp = groupRequest(t, c, logical.CreateOperation, "group/local-ops", staticBody([]any{"prod-deploy"}))
+	assert.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
+
+	// Cleared, the virtual group grants it again and can be written.
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/prod-deploy", map[string]any{"governed_only": false})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, h1, resp.Data["hash"], "a role without the flag hashes as before")
+	resp = groupRequest(t, c, logical.UpdateOperation, "group/ci-deployers", map[string]any{"type": "virtual", "description": "x"})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+}
+
+// Discovery never lists a governed_only role a virtual group grants, and a
+// claimed governed member sees it through its static group.
+func TestGovernedOnly_Discovery(t *testing.T) {
+	e := newDiscEnv(t, "", "")
+	m := e.mountAuth("jwt/")
+	n := testNaming(t, "", map[string]string{"repository": "repo"})
+	n.AliasSource = "sub"
+	m.mf.Publish(n)
+	e.provider("vault", "vault/", "auth/jwt/")
+	e.role("deploy", "vault/", "")
+	e.group("deployers", []string{"deploy"}, time.Time{}, discRule([]string{"auth/jwt/"}, "acme/*"))
+	assert.Equal(t, []string{"deploy"}, roleNames(e.introspectRoles()))
+
+	setGovernedOnly(t, e.c, e.ctx, "deploy", true)
+	assert.Empty(t, e.introspectRoles(), "a virtual grant of a governed_only role is not listed")
+
+	accessor := accessorOf(t, e.c, "jwt/")
+	ent := &logical.Entity{Name: "infra-agent", Description: "Deploys acme/infra",
+		Aliases: []logical.EntityAlias{{MountAccessor: accessor, Name: "agent-1"}}}
+	require.NoError(t, e.c.identityStore.CreateEntity(e.ctx, ent))
+	sponsorAccepted(t, e.c, e.ctx, "infra-agent", "infra-leads")
+	_, err := e.c.identityStore.CreateGroup(e.ctx, &logical.Group{Name: "local-ops", Type: logical.GroupTypeStatic,
+		Roles: []string{"deploy"}, Members: []logical.GroupMember{{ID: ent.ID}}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"deploy"}, roleNames(e.introspectRoles()), "a governed member's static grant is listed")
+}
+
+// A human's grants are all virtual: a ticket's menu never lists a
+// governed_only role, and its request under one is refused.
+func TestGovernedOnly_Tickets(t *testing.T) {
+	e := newTicketRequestEnv(t)
+	setGovernedOnly(t, e.c, e.ctx, "operator", true)
+
+	resp, _, err := e.do("sys/introspect/roles", wardenToken(e.value))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err)
+	assert.Empty(t, resp.Data["roles"])
+
+	_, req, err := e.do("sys/providers?role=operator", wardenToken(e.value))
+	require.Error(t, err)
+	assert.Equal(t, logical.RoleDeniedGovernedOnly, req.RoleGrant().DeniedReason)
 }

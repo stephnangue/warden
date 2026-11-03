@@ -52,6 +52,10 @@ const (
 	// is not governed (no accepted sponsor, or no description), under
 	// unknown_aliases=deny.
 	RoleDeniedEntityNotGoverned = "entity not governed"
+
+	// RoleDeniedGovernedOnly: the role is governed_only and the caller's grant
+	// of it comes from a virtual group.
+	RoleDeniedGovernedOnly = "requires governed membership"
 )
 
 // RoleGrant is the role a request runs under, resolved once per request from

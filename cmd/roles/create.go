@@ -28,6 +28,13 @@ Usage: warden role create <name> [options]
   A policy or credential spec that does not exist yet is accepted; the
   server answers with a warning on stderr. The "root" policy is refused.
 
+  "governed_only" (false by default) grants the role through governed
+  membership only: a static group listing a governed, active entity. No
+  virtual group grants it, so neither an unclaimed agent nor a human holds
+  it; a virtual group listing it is refused at write, and one that already
+  lists it stops granting it on its callers' next request (the write warns,
+  naming them).
+
   Two input modes (mutually exclusive):
 
     Full JSON payload (agent-friendly):
@@ -41,6 +48,15 @@ Usage: warden role create <name> [options]
           "metadata": {
             "team": "platform"
           }
+        }'
+
+      $ warden role create prod-deploy -json '{
+          "description": "Deploys to production",
+          "policies": ["prod-deploy"],
+          "cred_spec_name": "prod-deploy-role",
+          "provider_path": "aws/",
+          "skill": "aws",
+          "governed_only": true
         }'
 
       $ warden role create deploy -json @deploy-role.json
