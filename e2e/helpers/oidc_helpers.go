@@ -238,11 +238,24 @@ type TicketRole struct {
 // port, presenting ticket on X-Warden-Token.
 func TicketListRoles(t *testing.T, port int, ticket string) []TicketRole {
 	t.Helper()
+	roles, _ := TicketListRolesInNS(t, port, "", ticket)
+	return roles
+}
+
+// TicketListRolesInNS calls list_roles on the MCP discovery server of
+// namespace (root when empty) of the node at port, presenting ticket on
+// X-Warden-Token, and returns the roles and the warnings.
+func TicketListRolesInNS(t *testing.T, port int, namespace, ticket string) ([]TicketRole, []string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
+	endpoint := NodeURL(port) + "/v1/sys/mcp"
+	if namespace != "" {
+		endpoint = NodeURL(port) + "/v1/" + strings.Trim(namespace, "/") + "/sys/mcp"
+	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-human", Version: "1.0.0"}, nil)
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: NodeURL(port) + "/v1/sys/mcp",
+		Endpoint: endpoint,
 		HTTPClient: &http.Client{Transport: headerTransport{
 			base:   &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // self-signed e2e cert
 			header: "X-Warden-Token",
@@ -259,10 +272,11 @@ func TicketListRoles(t *testing.T, port int, ticket string) []TicketRole {
 	raw, err := json.Marshal(res.StructuredContent)
 	require.NoError(t, err)
 	var out struct {
-		Roles []TicketRole `json:"roles"`
+		Roles    []TicketRole `json:"roles"`
+		Warnings []string     `json:"warnings"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &out))
-	return out.Roles
+	return out.Roles, out.Warnings
 }
 
 // headerTransport sets one header on every request.
