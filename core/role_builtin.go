@@ -1,6 +1,8 @@
 package core
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/stephnangue/warden/internal/namespace"
@@ -195,4 +197,51 @@ func builtinRoleValue(name string) *logical.Role {
 		return builtinRoles[i].role
 	}
 	return nil
+}
+
+// namespaceRoles returns the roles a grant in namespace ns resolves, sorted by
+// name: its stored roles, less any stored under a reserved name (they grant
+// nothing), and the built-ins when ns has them. The roles are shared: read
+// only.
+func (c *Core) namespaceRoles(ns *namespace.Namespace) []*logical.Role {
+	var out []*logical.Role
+	if c.roleStore != nil {
+		out = slices.DeleteFunc(c.roleStore.snapshot.Load().roles(ns.ID), func(r *logical.Role) bool {
+			return isReservedRoleName(r.Name)
+		})
+	}
+	if builtinRolesEnabled(ns.ID, ns) {
+		for i := range builtinRoles {
+			out = append(out, builtinRoles[i].role)
+		}
+		slices.SortFunc(out, func(a, b *logical.Role) int { return strings.Compare(a.Name, b.Name) })
+	}
+	return out
+}
+
+// builtinRoleGroupWarnings are the warnings of a write of group g, in
+// namespace ns, listing role, a name in the reserved space. mounts are the
+// namespace's auth mounts, for a virtual group.
+func builtinRoleGroupWarnings(ns *namespace.Namespace, g *logical.Group, role string, mounts []authMountFacts) []string {
+	if !isBuiltinRoleName(role) {
+		return []string{fmt.Sprintf("role name %q is reserved for built-in roles and names none; the group grants nothing through it", role)}
+	}
+	if !builtinRolesEnabled(ns.ID, ns) {
+		return []string{fmt.Sprintf("role %q is a built-in role and built-in roles are not enabled in this namespace (enable_builtin_roles=false); the group grants it once they are", role)}
+	}
+	// A static group lists governed entities: the accountable way to give an
+	// agent an operator role, so it warns of nothing.
+	if g.Type != logical.GroupTypeVirtual {
+		return nil
+	}
+	var out []string
+	for i, rule := range g.Rules {
+		for _, m := range mounts {
+			if m.kind == string(logical.EntityKindAgent) && ruleTrustsMount(rule, m.path) && ruleAdmitsKind(rule, m.kind) {
+				out = append(out, fmt.Sprintf("rules[%d]: mount %q admits agents; an unclaimed agent would hold the operator role %q through this rule — list a governed entity in a static group instead", i, m.path, role))
+				break
+			}
+		}
+	}
+	return out
 }

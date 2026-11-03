@@ -22,10 +22,14 @@ type Role struct {
 	ProviderPath string            `json:"provider_path"`
 	Metadata     map[string]string `json:"metadata"`
 	GovernedOnly bool              `json:"governed_only"`
-	Hash         string            `json:"hash,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
-	Warnings     []string          `json:"warnings,omitempty"`
+	// Builtin marks a built-in operator role: defined by Warden, read only.
+	// A read of one carries the body it grants in PolicyDocument.
+	Builtin        bool      `json:"builtin,omitempty"`
+	PolicyDocument string    `json:"policy_document,omitempty"`
+	Hash           string    `json:"hash,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	Warnings       []string  `json:"warnings,omitempty"`
 }
 
 // RoleInput is the body of a role create or update. On update a nil field

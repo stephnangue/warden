@@ -160,10 +160,7 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 		return nil, err
 	}
 
-	var roles []*logical.Role
-	if c.roleStore != nil {
-		roles = c.roleStore.snapshot.Load().roles(ns.ID)
-	}
+	roles := c.namespaceRoles(ns)
 
 	providerPaths := make([]string, len(roles))
 	for i, r := range roles {

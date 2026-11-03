@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/stephnangue/warden/framework"
@@ -226,11 +227,40 @@ func (b *SystemBackend) governedOnlyWarnings(ctx context.Context, req *logical.R
 // handleRoleRead handles GET sys/roles/<name>.
 func (b *SystemBackend) handleRoleRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
+	// A built-in, where the namespace has them, wins over a role stored under
+	// its name by an earlier release, as it does at grant time.
+	if i := builtinRoleIndex(name); i >= 0 {
+		if ns, err := namespace.FromContext(ctx); err == nil && builtinRolesEnabled(ns.ID, ns) {
+			return b.respondSuccess(builtinRoleData(i)), nil
+		}
+	}
 	role, hash, err := b.core.roleStore.Get(ctx, name)
 	if err != nil {
 		return roleErrorResponse(name, err), nil
 	}
-	return b.respondSuccess(roleResponseData(role, hash, nil)), nil
+	var warnings []string
+	if isReservedRoleName(name) {
+		warnings = append(warnings, legacyReservedRolesWarning(name))
+	}
+	return b.respondSuccess(roleResponseData(role, hash, warnings)), nil
+}
+
+// legacyReservedRolesWarning says why roles stored under reserved names, by a
+// release before the names were reserved, still read and list: they grant
+// nothing, and are kept only to be deleted.
+func legacyReservedRolesWarning(names ...string) string {
+	return fmt.Sprintf("stored under a name reserved for built-in roles, so it grants nothing; delete it: %s", strings.Join(names, ", "))
+}
+
+// builtinRoleData is the read of the built-in at index i: roleToMap, marked
+// built-in, with the body it grants and its hash.
+func builtinRoleData(i int) map[string]any {
+	r := builtinRoles[i]
+	data := roleToMap(r.role)
+	data["builtin"] = true
+	data["policy_document"] = strings.TrimLeft(r.body, "\n")
+	data["hash"] = r.role.Hash()
+	return data
 }
 
 // handleRoleUpdate handles PUT sys/roles/<name>. A field present in the request
@@ -346,17 +376,54 @@ func (b *SystemBackend) handleRoleList(ctx context.Context, req *logical.Request
 		providerPath += "/"
 	}
 
-	keys := make([]string, 0, len(roles))
-	items := make([]map[string]any, 0, len(roles))
+	// The built-ins, where the namespace has them, listed among the stored
+	// roles and in their place when a role was stored under a built-in's name.
+	// None has a provider_path, so a provider_path filter leaves them out.
+	builtins := false
+	if ns, err := namespace.FromContext(ctx); err == nil {
+		builtins = builtinRolesEnabled(ns.ID, ns) && providerPath == ""
+	}
+	type listed struct {
+		name string
+		item map[string]any
+	}
+	all := make([]listed, 0, len(roles)+len(builtinRoles))
+	var legacy []string
 	for _, r := range roles {
 		if providerPath != "" && r.ProviderPath != providerPath {
 			continue
 		}
-		keys = append(keys, r.Name)
-		items = append(items, roleToMap(r))
+		// A stored record under a reserved name is named in the warning even
+		// where the built-in it shadows is listed in its place: the warning
+		// is the operator's only trace of it.
+		if isReservedRoleName(r.Name) {
+			legacy = append(legacy, r.Name)
+		}
+		if builtins && isBuiltinRoleName(r.Name) {
+			continue
+		}
+		all = append(all, listed{r.Name, roleToMap(r)})
 	}
-	return b.respondSuccess(map[string]any{
+	if builtins {
+		for i := range builtinRoles {
+			item := roleToMap(builtinRoles[i].role)
+			item["builtin"] = true
+			all = append(all, listed{builtinRoles[i].role.Name, item})
+		}
+		slices.SortFunc(all, func(a, b listed) int { return strings.Compare(a.name, b.name) })
+	}
+	keys := make([]string, 0, len(all))
+	items := make([]map[string]any, 0, len(all))
+	for _, l := range all {
+		keys = append(keys, l.name)
+		items = append(items, l.item)
+	}
+	data := map[string]any{
 		"keys":  keys,
 		"roles": items,
-	}), nil
+	}
+	if len(legacy) > 0 {
+		appendWarnings(data, legacyReservedRolesWarning(legacy...))
+	}
+	return b.respondSuccess(data), nil
 }

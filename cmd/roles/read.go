@@ -46,6 +46,12 @@ Usage: warden role read <name>
       $ warden role read deploy
       $ warden role read deploy -o json
       $ warden role read deploy -fields hash
+      $ warden role read warden-viewer -fields policy_document
+
+  A built-in operator role (warden-admin, warden-provider-admin,
+  warden-security-admin, warden-viewer) reads as built-in, with the
+  policy_document it grants. It is read only: copy the document to a
+  policy and a role of your own to change it.
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runRead,

@@ -117,10 +117,11 @@ func TestRoles_CRUD(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
 
+	// The root namespace lists the built-in roles beside the stored ones.
 	resp = roleRequest(t, c, ctx, logical.ListOperation, "roles", nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, []string{"deploy", "read-secrets"}, resp.Data["keys"])
-	require.Len(t, resp.Data["roles"], 2)
+	assert.Equal(t, []string{"deploy", "read-secrets", "warden-admin", "warden-provider-admin", "warden-security-admin", "warden-viewer"}, resp.Data["keys"])
+	require.Len(t, resp.Data["roles"], 6)
 
 	resp = roleRequest(t, c, ctx, logical.ListOperation, "roles/", map[string]any{"provider_path": "vault"})
 	assert.Equal(t, []string{"read-secrets"}, resp.Data["keys"], "provider_path filters the list")
@@ -847,7 +848,7 @@ func TestRoles_HTTP_QueryParameters(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
 	assert.Equal(t, []string{"read-secrets"}, resp.Data["keys"])
 	resp = roleHTTP(t, c, root, http.MethodGet, "/v1/sys/roles?warden-list=true", nil)
-	assert.Equal(t, []string{"deploy", "read-secrets"}, resp.Data["keys"])
+	assert.Equal(t, []string{"deploy", "read-secrets", "warden-admin", "warden-provider-admin", "warden-security-admin", "warden-viewer"}, resp.Data["keys"])
 
 	resp = roleHTTP(t, c, root, http.MethodDelete, "/v1/sys/roles/deploy?expected_hash=stale", nil)
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a stale expected_hash in the query refuses the delete")

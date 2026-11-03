@@ -106,6 +106,10 @@ func validateRoleName(name string) error {
 // optional fields are left out; warnings go to stderr through PrintWarnings.
 func printRoleTable(data map[string]any) {
 	rows := [][]any{{"Name", cell(data["name"])}}
+	builtin, _ := data["builtin"].(bool)
+	if builtin {
+		rows = append(rows, []any{"Built-in", "yes (read only)"})
+	}
 	add := func(label string, v any) {
 		if s := cell(v); s != "" {
 			rows = append(rows, []any{label, s})
@@ -127,6 +131,9 @@ func printRoleTable(data map[string]any) {
 	add("Created At", data["created_at"])
 	add("Updated At", data["updated_at"])
 	helpers.PrintTable([]string{"Key", "Value"}, rows)
+	if doc, _ := data["policy_document"].(string); builtin && doc != "" {
+		fmt.Printf("\nPolicy document:\n\n%s", doc)
+	}
 }
 
 // cell renders a response value for a table cell: lists comma-joined, maps as
