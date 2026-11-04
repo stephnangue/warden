@@ -61,6 +61,94 @@ func TestEntryCost_NoAllocations(t *testing.T) {
 	assert.Zero(t, testing.AllocsPerRun(1000, func() { _ = entryCost(e) }))
 }
 
+// A service token and an identity token act in their own namespace and its
+// descendants only: refused in the parent and in a sibling, with the mismatch
+// counted. A service token is checked on a cold cache too (it reloads from
+// storage); an identity token lives in the cache only. A root token acts
+// everywhere.
+func TestTokenStore_NamespaceReach(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	root := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	team := &namespace.Namespace{Path: "team-a/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(root, team))
+	child := &namespace.Namespace{Path: "team-a/dev/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(root, child))
+	sibling := &namespace.Namespace{Path: "team-b/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(root, sibling))
+	in := func(ns *namespace.Namespace) context.Context {
+		return namespace.ContextWithNamespace(context.Background(), ns)
+	}
+	flush := func() {
+		core.tokenStore.byID.Clear()
+		core.tokenStore.byID.Wait()
+	}
+
+	service, err := core.tokenStore.GenerateToken(in(team), TypeServiceToken, &AuthData{
+		PrincipalID: "operator",
+		ExpireAt:    time.Now().Add(time.Hour),
+	})
+	require.NoError(t, err)
+	serviceValue := service.Data["token"]
+
+	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZ2VudC1yZWFjaCJ9.reach-signature"
+	_, err = core.tokenStore.GenerateToken(in(team), TypeIdentityToken, &AuthData{
+		TokenValue:    jwt,
+		MountAccessor: "auth_jwt_reach",
+		PrincipalID:   "agent-reach",
+		ExpireAt:      time.Now().Add(time.Hour),
+		Admission:     testAdmission(),
+	})
+	require.NoError(t, err)
+
+	lookups := []struct {
+		kind   string
+		lookup func(ctx context.Context) error
+		colds  []bool
+	}{
+		// First: the service rows' cache flushes evict it.
+		{"identity", func(ctx context.Context) error {
+			_, err := core.LookupTransparentToken(ctx, jwt, "auth_jwt_reach")
+			return err
+		}, []bool{false}},
+		{"service", func(ctx context.Context) error {
+			_, err := core.LookupToken(ctx, serviceValue)
+			return err
+		}, []bool{false, true}},
+		{"service (resolve)", func(ctx context.Context) error {
+			_, err := core.tokenStore.ResolveToken(ctx, serviceValue)
+			return err
+		}, []bool{false, true}},
+	}
+	for _, l := range lookups {
+		kind, lookup := l.kind, l.lookup
+		for _, cold := range l.colds {
+			for _, ns := range []*namespace.Namespace{team, child} {
+				if cold {
+					flush()
+				}
+				assert.NoError(t, lookup(in(ns)), "%s token in %q, cold cache %v", kind, ns.Path, cold)
+			}
+			for _, ns := range []*namespace.Namespace{namespace.RootNamespace, sibling} {
+				if cold {
+					flush()
+				}
+				before := core.tokenStore.GetMetrics()["namespace_mismatches"]
+				assert.ErrorIs(t, lookup(in(ns)), ErrTokenNamespaceMismatch, "%s token in %q, cold cache %v", kind, ns.Path, cold)
+				assert.Equal(t, before+1, core.tokenStore.GetMetrics()["namespace_mismatches"], "%s token in %q", kind, ns.Path)
+			}
+		}
+	}
+
+	rootToken, err := core.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+	for _, ns := range []*namespace.Namespace{namespace.RootNamespace, team, child, sibling} {
+		_, err := core.LookupToken(in(ns), rootToken)
+		assert.NoError(t, err, "root token in %q", ns.Path)
+	}
+}
+
 // Every copy the token store hands out shares the one *Admission of the cached
 // entry, so state an admission carries is seen by every request on the token.
 func TestTokenStore_AdmissionSharedAcrossTransparentCopies(t *testing.T) {

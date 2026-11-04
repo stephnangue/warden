@@ -598,11 +598,8 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		return "", ErrTokenNamespaceMismatch
 	}
 
-	// Check if token's namespace is a parent of (or same as) the request namespace
-	// This allows hierarchical access: parent tokens work in all child namespaces
-	// ns.HasParent(tokenNs) returns true if tokenNs is a parent of ns
-	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
-	if !isValidNamespace {
+	// A token acts in its own namespace and every descendant.
+	if !namespace.Within(ns, tokenNs) {
 		if s.config.EnableMetrics {
 			s.metrics.IncrementNamespaceMismatches()
 		}
@@ -1501,9 +1498,8 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 		return nil, ErrTokenNamespaceMismatch
 	}
 
-	// Check if token's namespace is a parent of (or same as) the request namespace
-	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
-	if !isValidNamespace {
+	// A token acts in its own namespace and every descendant.
+	if !namespace.Within(ns, tokenNs) {
 		if s.config.EnableMetrics {
 			s.metrics.IncrementNamespaceMismatches()
 		}
@@ -1611,8 +1607,7 @@ func (c *Core) LookupTransparentToken(ctx context.Context, credential, mountAcce
 		return nil, ErrTokenNamespaceMismatch
 	}
 
-	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
-	if !isValidNamespace {
+	if !namespace.Within(ns, tokenNs) {
 		if s.config.EnableMetrics {
 			s.metrics.IncrementNamespaceMismatches()
 		}

@@ -96,6 +96,13 @@ func (n *Namespace) HasParent(parent *Namespace) bool {
 	}
 }
 
+// Within reports whether ns is tokenNs or one of its descendants: the
+// namespaces a token issued in tokenNs may act in. Every token kind is checked
+// against this one rule.
+func Within(ns, tokenNs *Namespace) bool {
+	return ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
+}
+
 // ParentPath returns the path of the parent namespace and whether a parent exists.
 func (n *Namespace) ParentPath() (string, bool) {
 	return ParentOf(n.Path)
