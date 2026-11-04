@@ -642,9 +642,18 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 	if !g.ValidUntil.IsZero() && time.Now().After(g.ValidUntil) {
 		warnings = append(warnings, "valid_until is in the past; the group grants nothing")
 	}
+	var mounts []authMountFacts
+	if g.Type == logical.GroupTypeVirtual {
+		mounts = s.core.namespaceAuthMountFacts(ctx)
+	}
 	if s.core.roleStore != nil {
 		roleSnap := s.core.roleStore.snapshot.Load()
 		for _, r := range g.Roles {
+			// A built-in is resolved from code, never from a stored role.
+			if isReservedRoleName(r) {
+				warnings = append(warnings, builtinRoleGroupWarnings(ns, g, r, mounts)...)
+				continue
+			}
 			e := roleSnap.lookup(ns.ID, r)
 			switch {
 			case e == nil:
@@ -657,7 +666,7 @@ func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespa
 		}
 	}
 	if g.Type == logical.GroupTypeVirtual {
-		warnings = append(warnings, ruleWarnings(g, s.core.namespaceAuthMountFacts(ctx))...)
+		warnings = append(warnings, ruleWarnings(g, mounts)...)
 	}
 	return cg, warnings, nil
 }

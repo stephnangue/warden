@@ -83,6 +83,11 @@ func discoveryEntry(ns *namespace.Namespace, r *logical.Role, providers map[stri
 	name := r.Name
 	role := mcpRole{Name: name, Description: r.Description}
 	label := fmt.Sprintf("role %q", name)
+	if isBuiltinRoleName(name) {
+		// No provider, so no url and no skill: say why, as for every role
+		// listed without them.
+		return role, append(warnings, fmt.Sprintf("%s: built-in operator role; it is used on Warden's own API with ?role= or X-Warden-Role, not through a provider", label))
+	}
 
 	resolved := r.Skill
 	if r.ProviderPath != "" {

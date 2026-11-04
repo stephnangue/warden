@@ -171,6 +171,7 @@ func projectInventory(roles []*api.Role, grants map[string][]string) []map[strin
 			"skill":          r.Skill,
 			"metadata":       metadata,
 			"governed_only":  r.GovernedOnly,
+			"builtin":        r.Builtin,
 		}
 		if grants != nil {
 			item["granted_by"] = stringsToAny(grants[r.Name])
@@ -187,8 +188,13 @@ func printInventoryTable(items []map[string]any) {
 	}
 	rows := make([][]any, len(items))
 	for i, it := range items {
+		builtin := ""
+		if b, _ := it["builtin"].(bool); b {
+			builtin = "yes"
+		}
 		rows[i] = []any{
 			cell(it["name"]),
+			builtin,
 			cell(it["description"]),
 			cell(it["granted_by"]),
 			cell(it["policies"]),
@@ -199,7 +205,7 @@ func printInventoryTable(items []map[string]any) {
 			cell(it["metadata"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Description", "Granted By", "Policies", "Cred Spec", "Provider Path", "Skill", "Governed Only", "Metadata"}, rows)
+	helpers.PrintTable([]string{"Name", "Built-in", "Description", "Granted By", "Policies", "Cred Spec", "Provider Path", "Skill", "Governed Only", "Metadata"}, rows)
 }
 
 // projectRoles shapes the discovered roles for output. The discovery fields
