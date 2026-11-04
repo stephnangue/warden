@@ -7,7 +7,7 @@ Warden's purpose is to keep secrets out of workloads. Instead of handing an agen
 static API key, Warden **brokers access**: at request time it obtains a scoped, usually
 short-lived credential for the upstream the caller is reaching, then injects it into the
 request rather than handing it over. The workload presents only its
-[identity](/concepts/authentication/); it never holds a credential of its own.
+[identity](/identity/authentication/); it never holds a credential of its own.
 
 How Warden obtains that credential is a spectrum, best to worst by *what Warden stores*:
 
@@ -50,12 +50,12 @@ role.cred_spec_name ─▶ credential spec ─▶ credential source ─▶ drive
   workload's upstream request — an STS session, a Vault token, an installation token —
   with a lease and a TTL when the upstream supports it.
 
-A [role](/concepts/roles/) ties this to identity. Its `cred_spec_name` field names the
+A [role](/identity/roles/) ties this to identity. Its `cred_spec_name` field names the
 spec a caller of that role will draw from — but naming the spec is all authentication
 does. Issuance is lazy: the credential is minted only when the workload actually makes a
 request to the upstream through a [provider](/concepts/providers/), at which point Warden
 resolves the role's spec and mints (or reuses) the credential. Because
-[roles are per-request](/concepts/roles/#roles-are-per-request), the same workload can
+[roles are per-request](/identity/roles/), the same workload can
 draw from different specs — different upstream access — by naming a different role on each
 request.
 
@@ -137,7 +137,7 @@ to manage and audit it:
 | `Data` | The secret fields themselves (e.g. `access_key_id`, `secret_access_key`, `session_token`; or `token`). HMAC-salted in audit logs. |
 | `Type` / `Category` | The credential type and a routing category. |
 | `LeaseTTL` / `LeaseID` | Lease lifetime, and the upstream revocation handle. `LeaseTTL` is `0` for static credentials; `LeaseID` is empty when there is nothing to revoke — which includes dynamic-but-not-revocable credentials. |
-| `TokenID` | The [token](/concepts/tokens/) — session or transparent — the credential is bound to and expires with. |
+| `TokenID` | The [token](/identity/tokens/) — session or transparent — the credential is bound to and expires with. |
 | `SourceName` / `SourceType` / `SpecName` | Provenance, for revocation and audit. |
 | `Revocable` | Whether the credential can be revoked upstream. |
 | `Metadata` | Non-secret attributes (e.g. `subject`), logged in clear. |
@@ -316,6 +316,6 @@ its own credential configuration, with no inheritance across boundaries.
 - [Keyless credential sources](/federation/keyless-credentials/) — the recommended `oidc_federation` mode.
 - [Credential chaining](/federation/credential-chaining/) — sourcing a secret keylessly per request.
 - [Delegation](/concepts/delegation/) — acting on behalf of a user.
-- [Roles](/concepts/roles/) — how `cred_spec_name` binds a spec to an identity.
+- [Roles](/identity/roles/) — how `cred_spec_name` binds a spec to an identity.
 - [Providers](/concepts/providers/) — the mounts that inject or return credentials.
-- [Tokens](/concepts/tokens/) — the token a credential is bound to and expires with.
+- [Tokens](/identity/tokens/) — the token a credential is bound to and expires with.

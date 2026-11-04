@@ -35,10 +35,10 @@ short-lived and rotates automatically; no key or certificate is written to disk.
 The presented SVID — X.509-SVID via the TLS handshake, or JWT-SVID on
 `Authorization: Bearer` — is validated by the `spiffe` auth method against the
 trust-domain bundles (static or federated). With no `X-Warden-Token`, Warden
-uses [transparent authentication](/concepts/authentication/#transparent-authentication)
+uses [transparent authentication](/identity/authentication/)
 and resolves the SPIFFE ID to a role per request. SPIFFE relies on short-lived
 SVIDs and bundle rotation rather than revocation lists. See
-[Authentication](/concepts/authentication/#auth-methods).
+[Authentication](/identity/authentication/).
 
 ## In practice
 
@@ -73,5 +73,5 @@ named Kubernetes deployment and nothing else.
   sidecar originates the mTLS leg so the agent stays identity-unaware.
 - [Platform Token Relay](/agent-identity/platform-issued-token/) — the agent presents identity
   itself here too, but relays a platform token instead of minting an SVID.
-- [Authentication](/concepts/authentication/) — transparent auth and the
+- [Authentication](/identity/authentication/) — transparent auth and the
   `spiffe` method.

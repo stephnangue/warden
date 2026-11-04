@@ -295,7 +295,7 @@ resource id may itself contain `:`, and Vault values carry no prefix at all).
 ## Login metadata — `assertion_metadata_claims`
 
 Set **`assertion_metadata_claims`** (comma-separated) to project selected
-login-derived [token-metadata](/concepts/tokens/) keys into the assertion, so an
+login-derived [token-metadata](/identity/tokens/) keys into the assertion, so an
 upstream trust policy can gate on attributes such as `team` or `env` without minting a
 distinct upstream role per value.
 

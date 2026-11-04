@@ -102,7 +102,7 @@ namespace:
   `$WARDEN_ADDR`.
 
 Warden derives `provider`, `skill` and `url` from the role's
-[`provider_path` and `skill` fields](/concepts/roles/#common-fields). A role the
+[`provider_path` and `skill` fields](/identity/roles/). A role the
 operator has not pointed at a provider is listed with its description only, and
 `warnings` says why a field is missing. The agent does not build a URL for such a
 role.

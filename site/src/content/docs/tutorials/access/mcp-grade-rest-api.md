@@ -49,7 +49,7 @@ roles its identity is admitted to, reads the one that fits, and fetches a
 **[skill](/concepts/discovery-and-skills/)** — a small markdown recipe scoped to that role's
 endpoints. Then it calls the API with `gh api`, asserting the role in the URL. Authority rides on
 the call, never on the connection; the recipe is a few endpoints, never the whole spec. See
-[Roles](/concepts/roles/) and [Runtime authorization](/use-cases/runtime-authorization/) for the
+[Roles](/identity/roles/) and [Runtime authorization](/use-cases/runtime-authorization/) for the
 full picture.
 
 This is the discovery loop from the [MCP role-assertion tutorial](/tutorials/access/mcp-role-assertion/) —

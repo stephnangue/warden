@@ -11,7 +11,7 @@ may do. Warden has **two policy types**, and every subcommand selects one with
 | `cbp` *(default)* | Paths and operations. Grants `capabilities` (`create`, `read`, `update`, …) on path globs. | `sys/policies/cbp/<name>` |
 | `mcp` | Individual [MCP](/concepts/mcp/) calls — methods, tool/resource/prompt names, and arguments. | `sys/policies/mcp/<name>` |
 
-[Roles](/concepts/roles/) bind capability policies to authenticated identities.
+[Roles](/identity/roles/) bind capability policies to authenticated identities.
 MCP policies are purely restrictive: access is the **intersection** of both types,
 so an MCP policy can only narrow what a capability policy already grants.
 
@@ -161,5 +161,5 @@ For the full variable namespaces, functions, and the worked recipes, see
 
 - [Policies](/concepts/policies/) — the capability model and policy syntax.
 - [CEL Condition Cookbook](/concepts/cel-conditions/) — condition recipes, simple to complex.
-- [Roles](/concepts/roles/) — how policies attach to an identity.
+- [Roles](/identity/roles/) — how policies attach to an identity.
 - [CLI overview](/cli/) — global flags, output formats, exit codes.

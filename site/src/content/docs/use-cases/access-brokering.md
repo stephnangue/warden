@@ -45,7 +45,7 @@ The identity is something the agent already has — a JWT, an mTLS client
 certificate, or a SPIFFE SVID. The agent points an ordinary client at a Warden
 [provider](/concepts/providers/) mount as if Warden were the upstream;
 Warden validates that identity through
-[transparent authentication](/concepts/authentication/#transparent-authentication),
+[transparent authentication](/identity/authentication/),
 resolves what it may draw, mints the credential, injects it, and streams the
 response back. The credential lives only inside that one hop, and whatever minted it — a
 federated trust, a secret fetched from your store, or one Warden holds — never reaches the
@@ -88,7 +88,7 @@ itself, and Warden brokered the rest.
   identity may actually do, on every call.
 - [Credentials](/concepts/credentials/) — sources, specs, drivers, lifetime,
   and rotation.
-- [Authentication](/concepts/authentication/) — transparent auth and the
+- [Authentication](/identity/authentication/) — transparent auth and the
   credential forms an agent presents.
 - [Agent Identity](/agent-identity/) — how an agent presents the
   identity Warden brokers from.

@@ -31,9 +31,9 @@ arguments*.
 Warden authorizes the **request**, not the session. Authority does not sit on the
 connection; it rides on each call and is evaluated the moment the call arrives,
 against the [policy](/concepts/policies/) attached to the agent's
-[role](/concepts/roles/). Authorization is **default-deny** — a call succeeds
+[role](/identity/roles/). Authorization is **default-deny** — a call succeeds
 only if a rule grants exactly the capability it needs — and because [roles are
-per-request](/concepts/roles/#roles-are-per-request), the agent can run under
+per-request](/identity/roles/), the agent can run under
 a read-only role for routine work and name a higher-privilege role only for the
 one call that genuinely needs it. Nothing accumulates; each call is judged on its
 own terms.
@@ -121,7 +121,7 @@ with the exact tool that was blocked.
 
 - [Policies](/concepts/policies/) — capabilities, conditions, parameter
   constraints, and the MCP policy grammar.
-- [Roles](/concepts/roles/#roles-are-per-request) — per-request role binding
+- [Roles](/identity/roles/) — per-request role binding
   and changing role mid-session.
 - [Model Context Protocol](/concepts/mcp/) — authorizing individual tool calls
   by name and argument.

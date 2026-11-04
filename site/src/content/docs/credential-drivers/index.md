@@ -8,7 +8,7 @@ injects into the outbound request. A [credential source](/concepts/credentials/)
 names a driver through its `type`; when a workload's request reaches a
 [provider](/concepts/providers/) mount, the driver produces the scoped credential
 for that upstream and Warden injects it into the proxied call. The workload
-presents only its [identity](/concepts/authentication/) — it never holds the
+presents only its [identity](/identity/authentication/) — it never holds the
 credential itself.
 
 See [Credentials](/concepts/credentials/) for the source / spec / credential model

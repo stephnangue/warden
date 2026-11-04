@@ -32,7 +32,7 @@ EOF
 | `timeout` | duration | per provider | How long a **single** proxied call may take; when it passes before the upstream answers, the client gets `504`. The `mcp` and `mcp_aws` providers default to `60s`; others carry their own default. |
 | `listen_timeout` | duration | `10m` | **`mcp` / `mcp_aws` only.** Bounds a long-lived stream — `subscriptions/listen` and the legacy SSE GET — instead of `timeout`. |
 | `auto_auth_path` | string | Required | Path to the auth mount used for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`). See [JWT auth](/auth-methods/jwt/) and [Certificate auth](/auth-methods/cert/). |
-| `default_role` | string | — | Auth role used when the request names none. It is the **lowest**-precedence source, not the highest — see [Selecting a role](/concepts/roles/#selecting-a-role). |
+| `default_role` | string | — | Auth role used when the request names none. It is the **lowest**-precedence source, not the highest — see [Selecting a role](/identity/roles/). |
 
 ## Request bodies and policy
 
@@ -101,7 +101,7 @@ private CA in production, supply the CA with `ca_data` instead.
 Which role a request runs under is resolved per request, and the order differs between
 gateway traffic and transparent operations — the `X-Warden-Role` header wins on the
 former, the `role=` query parameter on the latter. Both chains are documented once in
-[Roles → Selecting a role](/concepts/roles/#selecting-a-role).
+[Roles → Selecting a role](/identity/roles/).
 
 ## See Also
 

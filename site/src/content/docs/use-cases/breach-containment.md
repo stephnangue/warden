@@ -51,7 +51,7 @@ bounded event rather than a catastrophic one:
   [lease](/concepts/credentials/#lifetime-and-revocation), so even an allowed
   call buys only a brief window; where the upstream supports it, Warden also
   revokes early. And because [roles are
-  per-request](/concepts/roles/#roles-are-per-request), an agent that needs
+  per-request](/identity/roles/), an agent that needs
   elevated access for one step names a higher-privilege role only for that call,
   rather than carrying the elevation through everything else it does.
 
@@ -89,7 +89,7 @@ outage to recover from.
   refuses an out-of-scope request.
 - [Credentials](/concepts/credentials/#lifetime-and-revocation) — lease,
   expiry, and revocation that cap even an allowed call.
-- [Roles](/concepts/roles/#roles-are-per-request) — per-request role binding
+- [Roles](/identity/roles/) — per-request role binding
   that narrows each step.
 - [Audit & attribution](/use-cases/audit-attribution/) — where the contained attempt is
   recorded.

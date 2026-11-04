@@ -32,7 +32,7 @@ rather than read off the record.
 Warden sits in the path of every request, so it records every request — a
 [forensic log](/concepts/audit/) of who asked for what, which policy decision
 was made, and which credential was issued. Each operation produces paired request
-and response entries carrying the principal and [role](/concepts/roles/), the
+and response entries carrying the principal and [role](/identity/roles/), the
 policies in force, the [namespace](/concepts/namespaces/), the upstream called,
 and — for a brokered call — a description of the credential Warden minted. Because
 the agent authenticated [as itself](/use-cases/access-brokering/), the identity on the entry

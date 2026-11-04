@@ -6,7 +6,7 @@ Manage [auth methods](/auth-methods/) — the backends that validate a
 caller's credential and resolve it to an identity. Use these subcommands to
 enable a method, inspect it, and tear it down. The credential validation itself
 (roles, claim mapping, transparent auth) is configured by writing to the mount's
-paths; see [Authentication](/concepts/authentication/) and the per-method
+paths; see [Authentication](/identity/authentication/) and the per-method
 guides.
 
 ## Usage
@@ -97,6 +97,6 @@ warden auth disable --path=jwt/
 ## See Also
 
 - [Auth Methods](/auth-methods/) — setup guides for cert, JWT, Kubernetes, and SPIFFE.
-- [Authentication](/concepts/authentication/) — credential forms and transparent auth.
-- [Roles](/concepts/roles/) — how a validated identity maps to policies.
+- [Authentication](/identity/authentication/) — credential forms and transparent auth.
+- [Roles](/identity/roles/) — how a validated identity maps to policies.
 - [CLI overview](/cli/) — global flags, output formats, exit codes.

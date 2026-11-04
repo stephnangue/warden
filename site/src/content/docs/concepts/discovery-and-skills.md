@@ -5,7 +5,7 @@ title: "Discovery and Skills"
 For an AI agent, the hard part of using Warden is not making the request — it is
 knowing *what it is allowed to do* and *how to do it*. Warden makes both
 answerable at runtime, **over MCP**. An authenticated agent points its MCP client
-at Warden's own discovery server and asks which [roles](/concepts/roles/) it can assume
+at Warden's own discovery server and asks which [roles](/identity/roles/) it can assume
 and how to drive each one — with **no pre-distributed configuration**. Nothing is
 hard-coded into the agent; every fact comes from a live call.
 
@@ -68,7 +68,7 @@ MCP discovery server; each chains into the next:
      `url`, prepends `$WARDEN_ADDR`, presents its identity, and — to use another
      role — targets that other role's `url` from `list_roles`.
 
-The role is the unit of discovery. Because a [role](/concepts/roles/) is a view over a
+The role is the unit of discovery. Because a [role](/identity/roles/) is a view over a
 provider — it decides what the caller may do and which credential is minted — the
 agent never enumerates raw providers or keys. It discovers *roles*, and each
 role's entry carries what it needs: a skill to read, and where to call.
@@ -305,8 +305,8 @@ or keys.
 ## See Also
 
 - [MCP](/concepts/mcp/) — the discovery interface, and how a role's gateway is driven.
-- [Roles](/concepts/roles/) — the view a `list_roles` entry stands for, one per step.
+- [Roles](/identity/roles/) — the view a `list_roles` entry stands for, one per step.
 - [Agent end-to-end flow](/agent-flow/) — the loop traced call by call.
 - [`warden skill`](/cli/skill/) — authoring and managing skills.
-- [Authentication](/concepts/authentication/) — the identity discovery is scoped to.
+- [Authentication](/identity/authentication/) — the identity discovery is scoped to.
 - [Namespaces](/concepts/namespaces/) — the boundary every discovery call respects.

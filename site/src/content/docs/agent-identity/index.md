@@ -16,7 +16,7 @@ credentialling mechanism, not a source of the agent's own identity.)
 This section is about the **shape of that presentation**: who attaches the
 credential, and how it reaches Warden. The validation mechanics — the auth
 methods, transparent vs. explicit authentication, roles — live in
-[Authentication](/concepts/authentication/); this section sits on top of
+[Authentication](/identity/authentication/); this section sits on top of
 them and helps you choose an approach.
 
 ## Two questions
@@ -46,7 +46,7 @@ the *variant* says how it lands.
 All four are **transparent authentication** — the agent points an ordinary
 client at Warden, sends no Warden session token, and re-presents its credential
 on each request. Warden validates it in line and caches the result. See
-[transparent authentication](/concepts/authentication/#transparent-authentication).
+[transparent authentication](/identity/authentication/).
 
 ## Choosing
 
@@ -72,9 +72,9 @@ Is the agent identity-aware?
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — the credential forms, auth
+- [Authentication](/identity/authentication/) — the credential forms, auth
   methods, and transparent auth these approaches build on.
-- [Tokens](/concepts/tokens/) — what authentication produces.
+- [Tokens](/identity/tokens/) — what authentication produces.
 - [Agent Flow](/agent-flow/) — the end-to-end path once identity is
   established.
 - [Workstation quickstart 03 — SPIFFE](/quickstarts/workstation/03-spiffe-llm-mcp/)
