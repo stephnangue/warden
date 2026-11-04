@@ -282,7 +282,7 @@ func (c *Core) buildRequestAuditEntry(
 	stampMCPClient(entry, req)
 
 	if outerErr != nil {
-		entry.Error = outerErr.Error()
+		entry.Error = auditErrorText(outerErr)
 	}
 
 	return entry
@@ -440,10 +440,17 @@ func (c *Core) buildResponseAuditEntry(
 	// 1. outerErr - errors from request processing (e.g., routing errors)
 	// 2. resp.Err - errors from backend handlers (e.g., validation errors)
 	if outerErr != nil {
-		entry.Error = outerErr.Error()
+		entry.Error = auditErrorText(outerErr)
 	} else if resp != nil && resp.Err != nil {
-		entry.Error = resp.Err.Error()
+		entry.Error = auditErrorText(resp.Err)
 	}
 
 	return entry
+}
+
+// auditErrorText is err as an audit entry records it: one message per error
+// a multierror gathers, joined with "; ", never its bulleted text. A single
+// error reads as itself, as the client's response does.
+func auditErrorText(err error) string {
+	return strings.Join(logical.ErrorMessages(err), "; ")
 }

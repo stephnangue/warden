@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/credential"
@@ -1451,6 +1452,26 @@ func TestBuildResponseAuditEntry_WithOuterErr(t *testing.T) {
 
 	entry := core.buildResponseAuditEntry(ctx, req, resp, nil, nil, assert.AnError)
 	assert.Equal(t, assert.AnError.Error(), entry.Error)
+}
+
+// A multierror is recorded as its messages, never its bulleted text: one
+// reads as itself, several are joined.
+func TestBuildAuditEntries_MultierrorText(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	req := &logical.Request{Path: "secret/data/foo"}
+	resp := &logical.Response{StatusCode: http.StatusForbidden}
+
+	one := multierror.Append(nil, errors.New("native identity (auth/jwt/, x) is unclaimed; unknown_aliases=deny"))
+	entry := core.buildResponseAuditEntry(ctx, req, resp, nil, nil, one)
+	assert.Equal(t, "native identity (auth/jwt/, x) is unclaimed; unknown_aliases=deny", entry.Error)
+
+	two := multierror.Append(nil, errors.New("first"), errors.New("second"))
+	entry = core.buildResponseAuditEntry(ctx, req, resp, nil, nil, two)
+	assert.Equal(t, "first; second", entry.Error)
+
+	entry = core.buildResponseAuditEntry(ctx, req, &logical.Response{Err: one}, nil, nil, nil)
+	assert.Equal(t, "native identity (auth/jwt/, x) is unclaimed; unknown_aliases=deny", entry.Error)
 }
 
 func TestBuildResponseAuditEntry_WithRespErr(t *testing.T) {
