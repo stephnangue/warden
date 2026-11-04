@@ -212,6 +212,10 @@ type Core struct {
 	// node only; reads are lock-free against its snapshot.
 	roleStore *RoleStore
 
+	// builtinRolePolicies holds the built-in roles' bodies, compiled per
+	// namespace on first use (role_builtin.go).
+	builtinRolePolicies builtinRolePolicies
+
 	// identityStore holds the namespace groups and entities (sys/identity/*).
 	// Loaded on the active node only; reads and membership computations are
 	// lock-free against its snapshot.
