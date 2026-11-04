@@ -6,6 +6,7 @@ import (
 	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -103,7 +104,10 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 // It is the only writer of the request's grant, which lives inside req by
 // value. Lock-free; on a steady membership it allocates nothing, whether it
 // grants, refuses, or leaves a token no mount issued alone.
-func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, now time.Time) {
+//
+// tokenNS is the record of te's namespace, fetched once per request by the
+// caller: it says whether the built-in roles resolve there.
+func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, tokenNS *namespace.Namespace, now time.Time) {
 	if !takesRoleGrant(te) {
 		req.ClearRoleGrant()
 		return
@@ -155,7 +159,7 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, no
 		rg.DeniedReason = logical.RoleDeniedNoRole
 		return
 	}
-	role := c.grantRole(te.NamespaceID, rg.RoleName)
+	role := c.grantRole(tokenNS, te.NamespaceID, rg.RoleName)
 	if role == nil {
 		rg.DeniedReason = logical.RoleDeniedNotFound
 		return
@@ -212,7 +216,17 @@ func (c *Core) grantIndex(nsID string) *nsIndex {
 
 // grantRole returns the published role name of namespace nsID, or nil when
 // there is none or the store is not loaded. The role is shared: read only.
-func (c *Core) grantRole(nsID, name string) *logical.Role {
+//
+// A name in the reserved space is a built-in or nothing: the built-in when
+// the namespace (whose record is tokenNS) has built-in roles, never a role
+// stored under that name before the space was reserved.
+func (c *Core) grantRole(tokenNS *namespace.Namespace, nsID, name string) *logical.Role {
+	if isReservedRoleName(name) {
+		if !builtinRolesEnabled(nsID, tokenNS) {
+			return nil
+		}
+		return builtinRoleValue(name)
+	}
 	if c.roleStore == nil {
 		return nil
 	}

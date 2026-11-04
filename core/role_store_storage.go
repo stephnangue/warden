@@ -86,7 +86,11 @@ func (s *RoleStore) loadAllLocked(ctx context.Context) (*roleSnapshot, int, erro
 			return nil, 0, fmt.Errorf("failed to list roles of namespace %q: %w", ns.Path, err)
 		}
 		byName := make(map[string]*roleEntry, len(names))
+		var reserved []string
 		for _, name := range names {
+			if isReservedRoleName(name) {
+				reserved = append(reserved, name)
+			}
 			e, err := s.readRole(ctx, nsUUID, name)
 			if err != nil {
 				s.logger.Warn("skipping a stored role that cannot be read",
@@ -97,6 +101,11 @@ func (s *RoleStore) loadAllLocked(ctx context.Context) (*roleSnapshot, int, erro
 			}
 			warnInvalidRolePolicies(s.logger, ns.Path, e.role)
 			byName[name] = e
+		}
+		if len(reserved) > 0 {
+			s.logger.Warn("stored roles in the space reserved for built-in roles grant nothing; delete them, and copy any you need to another name",
+				logger.String("namespace", ns.Path),
+				logger.String("roles", strings.Join(reserved, ", ")))
 		}
 		if len(byName) > 0 {
 			snap.byNS[ns.ID] = &nsRoles{byName: byName}

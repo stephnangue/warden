@@ -540,9 +540,9 @@ func TestGovernedOnly_DoesNotAllocate(t *testing.T) {
 	req := mustTransparent(e, e.token, "deploy")
 	te := req.TokenEntry()
 	now := time.Now()
-	e.c.resolveRoleGrant(req, te, now)
+	e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now)
 	require.Equal(t, logical.RoleDeniedGovernedOnly, req.RoleGrant().DeniedReason)
-	assert.Zero(t, testing.AllocsPerRun(1000, func() { e.c.resolveRoleGrant(req, te, now) }))
+	assert.Zero(t, testing.AllocsPerRun(1000, func() { e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now) }))
 }
 
 // A virtual group naming a governed_only role is refused at write; a static

@@ -245,6 +245,12 @@ func (b *SystemBackend) handleRoleUpdate(ctx context.Context, req *logical.Reque
 	name := d.Get("name").(string)
 	expected := d.Get("expected_hash").(string)
 
+	// Before the read: a built-in is not stored, and a legacy role stored under
+	// a reserved name is no longer writable, only deletable.
+	if isReservedRoleName(name) {
+		return logical.ErrorResponse(errReservedRoleName(name)), nil
+	}
+
 	for attempt := 1; ; attempt++ {
 		role, hash, err := b.core.roleStore.Get(ctx, name)
 		if err != nil {
@@ -304,6 +310,14 @@ func mergeRoleFields(role *logical.Role, d *framework.FieldData) {
 func (b *SystemBackend) handleRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 	if err := b.core.roleStore.Delete(ctx, name, d.Get("expected_hash").(string)); err != nil {
+		// A role stored under a built-in's name before the space was reserved
+		// is deleted above; the built-in itself cannot be. Where the
+		// namespace has no built-ins, there is nothing by that name.
+		if errors.Is(err, ErrRoleNotFound) && isBuiltinRoleName(name) {
+			if ns, nsErr := namespace.FromContext(ctx); nsErr == nil && builtinRolesEnabled(ns.ID, ns) {
+				return logical.ErrorResponse(errReservedRoleName(name)), nil
+			}
+		}
 		return roleErrorResponse(name, err), nil
 	}
 	data := map[string]any{

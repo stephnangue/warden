@@ -1198,7 +1198,7 @@ func TestCBP_EmptyPolicyParsedOnce(t *testing.T) {
 	te := &logical.TokenEntry{NamespaceID: namespace.RootNamespaceID}
 	compileAllocs := func() float64 {
 		return testing.AllocsPerRun(50, func() {
-			if _, err := c.buildCBP(ctx, te, true); err != nil {
+			if _, err := c.buildCBPFor(ctx, te, true); err != nil {
 				t.Fatal(err)
 			}
 		})

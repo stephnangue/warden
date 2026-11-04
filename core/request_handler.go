@@ -250,10 +250,17 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request, 
 		return nil, nil, err
 	}
 
+	// Fetched once: the grant reads whether built-in roles resolve there, and
+	// the CBP is compiled there.
+	tokenNS, err := c.tokenNamespace(ctx, te)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if unauth {
 		withholdRoleGrant(req, te)
 	} else {
-		c.resolveRoleGrant(req, te, time.Now())
+		c.resolveRoleGrant(req, te, tokenNS, time.Now())
 	}
 
 	// A refused role grant keeps no policies so that the CBP refuses it, and
@@ -262,11 +269,32 @@ func (c *Core) fetchCBPAndTokenEntry(ctx context.Context, req *logical.Request, 
 	rg := req.RoleGrant()
 	withBuiltins := rg == nil || rg.Granted()
 
-	cbp, err := c.buildCBP(ctx, te, withBuiltins)
+	// A built-in role's body is attached only to a grant this request made,
+	// never to a name a token carries from elsewhere.
+	builtinRole := -1
+	if rg.Granted() && rg.Role != nil {
+		builtinRole = builtinRoleIndex(rg.Role.Name)
+	}
+
+	cbp, err := c.buildCBP(ctx, te, tokenNS, withBuiltins, builtinRole)
 	if err != nil {
 		return nil, nil, err
 	}
 	return cbp, te, nil
+}
+
+// tokenNamespace returns the record of te's namespace.
+func (c *Core) tokenNamespace(ctx context.Context, te *logical.TokenEntry) (*namespace.Namespace, error) {
+	tokenNS, err := c.NamespaceByID(ctx, te.NamespaceID)
+	if err != nil {
+		c.logger.Error("failed to fetch token namespace", logger.Err(err))
+		return nil, ErrInternalError
+	}
+	if tokenNS == nil {
+		c.logger.Error("failed to fetch token namespace", logger.Err(namespace.ErrNoNamespace))
+		return nil, ErrInternalError
+	}
+	return tokenNS, nil
 }
 
 // lookupTokenEntry returns the request's token entry: the one already set on
@@ -303,9 +331,11 @@ func (c *Core) lookupTokenEntry(ctx context.Context, req *logical.Request) (*log
 	return te, nil
 }
 
-// buildCBP compiles the CBP of te's policies, in te's namespace, together with
-// that namespace's built-in policies when withBuiltins is set, unless te is a
-// root token.
+// buildCBP compiles the CBP of te's policies, in te's namespace tokenNS,
+// together with that namespace's built-in policies when withBuiltins is set,
+// unless te is a root token. builtinRole is the index in builtinRoles of the
+// built-in role this request was granted, or -1: its body, compiled in
+// tokenNS like every other policy, is attached last.
 //
 // This is the one place the built-ins are attached. A reserved name on the
 // token is dropped first: a built-in it names is attached anyway, by type, and
@@ -313,7 +343,7 @@ func (c *Core) lookupTokenEntry(ctx context.Context, req *logical.Request) (*log
 // are gathered into a slice of their own, since te.Policies may be a role's
 // shared slice. Root is recognised by its canonical name, as the policy store
 // resolves it.
-func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltins bool) (*CBP, error) {
+func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, tokenNS *namespace.Namespace, withBuiltins bool, builtinRole int) (*CBP, error) {
 	// A fixed buffer: the names reach the heap only past eight.
 	var nbuf [8]string
 	names := nbuf[:0]
@@ -329,17 +359,6 @@ func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltin
 		names = append(names, name)
 	}
 
-	tokenNS, err := c.NamespaceByID(ctx, te.NamespaceID)
-	if err != nil {
-		c.logger.Error("failed to fetch token namespace", logger.Err(err))
-		return nil, ErrInternalError
-	}
-
-	if tokenNS == nil {
-		c.logger.Error("failed to fetch token namespace", logger.Err(namespace.ErrNoNamespace))
-		return nil, ErrInternalError
-	}
-
 	tokenCtx := namespace.ContextWithNamespace(ctx, tokenNS)
 
 	// Construct the corresponding CBP object. CBP construction should be
@@ -351,14 +370,23 @@ func (c *Core) buildCBP(ctx context.Context, te *logical.TokenEntry, withBuiltin
 
 	// Root is the whole grant on its own and admits no other policy beside it.
 	// The built-ins are gathered into a fixed buffer so the slice need not
-	// reach the heap.
-	var buf [3]*Policy
+	// reach the heap: the three built-in policies and a built-in role's body.
+	var buf [4]*Policy
 	builtins := buf[:0]
+	var err error
 	if withBuiltins && !isRoot {
 		builtins, err = c.policyStore.appendDefaultPolicies(tokenCtx, builtins)
 		if err != nil {
 			c.logger.Error("failed to fetch built-in policies", logger.Err(err))
 			return nil, ErrInternalError
+		}
+		if builtinRole >= 0 {
+			body, err := c.builtinRolePolicies.policy(tokenNS, builtinRole)
+			if err != nil {
+				c.logger.Error("failed to compile a built-in role", logger.Err(err))
+				return nil, ErrInternalError
+			}
+			builtins = append(builtins, body)
 		}
 	}
 	cbp, err := c.policyStore.cbpForNamespace(tokenCtx, names, builtins)
@@ -1403,6 +1431,16 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 			retErr = multierror.Append(retErr, ErrInternalError)
 			return nil, auth, retErr
 		}
+	}
+
+	// A built-in operator role has no data plane: it manages providers, it does
+	// not call their upstreams. Refused here, after the request is audited and
+	// before anything is minted or routed, on every data-plane surface: an
+	// access backend mints its grant's spec, not the role's, so carrying no
+	// spec is not enough.
+	if req.DataPlane && te != nil && isBuiltinRoleName(te.RoleName) {
+		return logical.ErrorResponse(logical.ErrBadRequestf(
+			"role %q is a built-in operator role and has no data plane", te.RoleName)), auth, nil
 	}
 
 	// For streaming requests, mint credentials (unless StreamUnauthenticated).
