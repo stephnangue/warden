@@ -393,6 +393,21 @@ func TestAliasAdd_And_Move(t *testing.T) {
 	assert.Equal(t, true, out["claimed"])
 }
 
+// A new claim's warning (virtual groups no longer grant the caller roles)
+// reaches stderr and the JSON output.
+func TestAliasAdd_Warnings(t *testing.T) {
+	const warning = "native identity (auth/jwt/, repo:corp/x) is now claimed by entity billing-agent: virtual groups no longer grant it roles"
+	_, stdout, stderr := setupEntityFake(t, http.StatusOK, `{"data":{
+		"entity":"billing-agent","mount":"auth/jwt/","mount_accessor":"auth_jwt_1","name":"repo:corp/x",
+		"warnings":["`+warning+`"]
+	}}`)
+	cmd := freshAliasCmd(&aliasAddFlags, claimCommand)
+	require.NoError(t, cmd.Flags().Set("json", `{"mount": "auth/jwt/", "name": "repo:corp/x", "to": "billing-agent"}`))
+	require.NoError(t, runAliasClaim(cmd, &aliasAddFlags, false))
+	assert.Contains(t, stderr.String(), warning)
+	assert.Equal(t, []any{warning}, decodeOut(t, stdout)["warnings"])
+}
+
 // remove names the entity it releases from; the mount may be named by
 // accessor, which still names a mount disabled since.
 func TestAliasRemove(t *testing.T) {

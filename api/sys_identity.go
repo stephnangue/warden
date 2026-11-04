@@ -569,6 +569,9 @@ type AliasClaim struct {
 	MountAccessor string `json:"mount_accessor"`
 	Name          string `json:"name"`
 	MovedFrom     string `json:"moved_from,omitempty"`
+	// Warnings carries the server's notices about the claim: a new claim
+	// means virtual groups no longer grant the caller roles.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // AliasLookup is the entity that claims a native identity.
