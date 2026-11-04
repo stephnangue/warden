@@ -184,14 +184,18 @@ func (b *SystemBackend) handleNamespaceRead(ctx context.Context, req *logical.Re
 // handleNamespaceUpdate handles PUT /sys/namespaces/{path}
 func (b *SystemBackend) handleNamespaceUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	path := d.Get("path").(string)
-	customMetadata, _ := d.Get("custom_metadata").(map[string]any)
+	// An absent custom_metadata reads as an empty map, which would wipe the
+	// namespace's metadata (auto_auth_path included); only a sent one replaces
+	// it, an empty one or null clearing it.
+	rawMetadata, setMetadata := d.GetOk("custom_metadata")
+	customMetadata, _ := rawMetadata.(map[string]any)
 	enableBuiltinRoles, setBuiltinRoles := d.GetOk("enable_builtin_roles")
 
 	b.logger.Info("updating namespace", logger.String("path", path))
 
 	// Update namespace via ModifyNamespaceByPath
 	updatedNs, err := b.core.namespaceStore.ModifyNamespaceByPath(ctx, path, func(ctx context.Context, ns *namespace.Namespace) (*namespace.Namespace, error) {
-		if customMetadata != nil {
+		if setMetadata {
 			ns.CustomMetadata = convertMetadataToStringMap(customMetadata)
 		}
 		if setBuiltinRoles {

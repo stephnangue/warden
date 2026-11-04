@@ -264,6 +264,29 @@ func TestSystemBackend_NamespaceEnableBuiltinRoles(t *testing.T) {
 	assert.True(t, acme.EnableBuiltinRoles, "after a reload from storage")
 }
 
+// An update that does not send custom_metadata keeps it, auto_auth_path
+// included; only a sent one replaces it, and an empty one clears it.
+func TestSystemBackend_NamespaceUpdate_KeepsMetadataUnlessSent(t *testing.T) {
+	b, ctx, c := setupTestSystemBackend(t)
+
+	metadata := map[string]string{"auto_auth_path": "auth/jwt/", "env": "prod"}
+	nsWrite(t, b, ctx, logical.CreateOperation, "acme", map[string]any{
+		"custom_metadata": map[string]any{"auto_auth_path": "auth/jwt/", "env": "prod"},
+	})
+
+	nsWrite(t, b, ctx, logical.UpdateOperation, "acme", map[string]any{"enable_builtin_roles": true})
+	acme, err := c.namespaceStore.GetNamespaceByPath(ctx, "acme")
+	require.NoError(t, err)
+	assert.True(t, acme.EnableBuiltinRoles)
+	assert.Equal(t, metadata, acme.CustomMetadata, "an update naming only enable_builtin_roles")
+
+	nsWrite(t, b, ctx, logical.UpdateOperation, "acme", map[string]any{"custom_metadata": map[string]any{}})
+	acme, err = c.namespaceStore.GetNamespaceByPath(ctx, "acme")
+	require.NoError(t, err)
+	assert.Empty(t, acme.CustomMetadata, "an empty custom_metadata clears it")
+	assert.True(t, acme.EnableBuiltinRoles, "and leaves the flag")
+}
+
 // Turning the flag off is refused while a group of the namespace, virtual or
 // static, grants a built-in: the refusal names each group, its type and the
 // role, and the write goes through once they are gone.

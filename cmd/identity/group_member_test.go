@@ -131,6 +131,25 @@ func TestGroupMemberRemove(t *testing.T) {
 	assert.ErrorContains(t, err, `entity "ghost" is not a member of group "local-ops"`)
 }
 
+// -dry-run validates the static group write against the path's schema and
+// sends nothing: no read of the members, no write.
+func TestGroupMember_DryRun(t *testing.T) {
+	resetMemberFlags(t)
+	f, stdout, _ := setupFake(t, http.StatusOK, cannedStaticGroup)
+	helpers.SetDryRun(true)
+
+	memberUntil = "2099-12-31T23:59:59Z"
+	require.NoError(t, runGroupMemberAdd(GroupMemberAddCmd, []string{"local-ops", "invoice-agent"}))
+	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
+	stdout.Reset()
+	require.NoError(t, runGroupMemberRemove(GroupMemberRemoveCmd, []string{"local-ops", "billing-agent"}))
+	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
+	stdout.Reset()
+	require.NoError(t, runGroupPrune(GroupPruneCmd, []string{"local-ops"}))
+	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
+	assert.Zero(t, f.count())
+}
+
 // prune is a write with no change, of a static group.
 func TestGroupPrune(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusOK, cannedStaticGroup)

@@ -91,15 +91,17 @@ services:
         echo 'Creating OAuth2 clients...'
         echo ''
 
-        wget -q -O- --post-data='{"client_id":"my-agent","client_name":"My Agent","client_secret":"agent-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+        # Every client may ask for the "warden" audience: Warden's agent jwt
+        # mounts admit only tokens issued for an audience they bind.
+        wget -q -O- --post-data='{"client_id":"my-agent","client_name":"My Agent","client_secret":"agent-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden"],"token_endpoint_auth_method":"client_secret_post"}' \
           --header='Content-Type: application/json' \
           http://hydra:4445/admin/clients > /dev/null 2>&1 && echo '  [OK] my-agent' || echo '  [SKIP] my-agent (already exists?)'
 
-        wget -q -O- --post-data='{"client_id":"my-pipeline","client_name":"My Pipeline","client_secret":"pipeline-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+        wget -q -O- --post-data='{"client_id":"my-pipeline","client_name":"My Pipeline","client_secret":"pipeline-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden"],"token_endpoint_auth_method":"client_secret_post"}' \
           --header='Content-Type: application/json' \
           http://hydra:4445/admin/clients > /dev/null 2>&1 && echo '  [OK] my-pipeline' || echo '  [SKIP] my-pipeline (already exists?)'
 
-        wget -q -O- --post-data='{"client_id":"my-admin","client_name":"My Admin","client_secret":"admin-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+        wget -q -O- --post-data='{"client_id":"my-admin","client_name":"My Admin","client_secret":"admin-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden"],"token_endpoint_auth_method":"client_secret_post"}' \
           --header='Content-Type: application/json' \
           http://hydra:4445/admin/clients > /dev/null 2>&1 && echo '  [OK] my-admin' || echo '  [SKIP] my-admin (already exists?)'
 
@@ -117,7 +119,7 @@ services:
         echo ''
         echo '  curl -s -X POST http://localhost:4444/oauth2/token \'
         echo '    -H "Content-Type: application/x-www-form-urlencoded" \'
-        echo '    -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write"'
+        echo '    -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden"'
         echo ''
         echo 'Start Warden in dev mode:'
         echo ''

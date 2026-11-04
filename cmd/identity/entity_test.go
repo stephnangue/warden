@@ -472,6 +472,13 @@ var schemaDocs = map[string]string{
 			"force":{"type":"boolean"}
 		}}}}}}
 	}}}}}`,
+	"sys/identity/config": `{"data":{"openapi":{"paths":{"/sys/identity/config":{
+		"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{
+			"unknown_aliases":{"type":"string"},
+			"exempt_mounts":{"type":"array"},
+			"force":{"type":"boolean"}
+		}}}}}}
+	}}}}}`,
 	"sys/identity/entity/{entity}/alias": `{"data":{"openapi":{"paths":{"/sys/identity/entity/{entity}/alias":{
 		"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{
 			"mount":{"type":"string"},
@@ -479,6 +486,26 @@ var schemaDocs = map[string]string{
 			"move":{"type":"boolean"}
 		}}}}}}
 	}}}}}`,
+}
+
+// identity config write and reset honour -dry-run: the write is validated
+// against the path's schema, and nothing is sent.
+func TestIdentityConfig_DryRun(t *testing.T) {
+	f, stdout, _ := setupFake(t, http.StatusOK, `{"data":{}}`)
+	helpers.SetDryRun(true)
+	t.Cleanup(func() {
+		configUnknownAliases, configExemptMounts = "", nil
+		ConfigWriteCmd.Flags().Lookup("exempt-mount").Changed = false
+	})
+
+	configUnknownAliases = "deny"
+	require.NoError(t, ConfigWriteCmd.Flags().Set("exempt-mount", "auth/break-glass/"))
+	require.NoError(t, runConfigWrite(ConfigWriteCmd, nil))
+	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
+	stdout.Reset()
+	require.NoError(t, runConfigReset(ConfigResetCmd, nil))
+	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
+	assert.Zero(t, f.count())
 }
 
 // -dry-run validates the payload against the server's schema of the path
