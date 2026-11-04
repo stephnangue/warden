@@ -822,6 +822,13 @@ func (ns *NamespaceStore) ModifyNamespaceByPath(ctx context.Context, path string
 	if path == "" {
 		return nil, logical.CodedError(http.StatusBadRequest, "refusing to modify root namespace")
 	}
+	// A namespace's record is written from its parent only, never from inside
+	// it: what the record holds (enable_builtin_roles, auto_auth_path in its
+	// metadata) is the parent's to decide. An empty path from inside a
+	// namespace would otherwise name the namespace itself.
+	if path == parent.Path {
+		return nil, logical.CodedError(http.StatusBadRequest, "refusing to modify a namespace from inside it; write it from its parent")
+	}
 
 	unlock, err := ns.lockWithInvalidation(ctx, true)
 	if err != nil {

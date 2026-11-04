@@ -221,6 +221,33 @@ func TestNamespaceStore_ModifyNamespaceByPath_RootRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "refusing to modify root namespace")
 }
 
+// A namespace's own record is out of reach from inside it: an empty path there
+// names the namespace itself, and is refused like root's.
+func TestNamespaceStore_ModifyNamespaceByPath_SelfRefused(t *testing.T) {
+	core := createTestCore(t)
+	rootCtx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	_, err := core.namespaceStore.ModifyNamespaceByPath(rootCtx, "team", nil)
+	require.NoError(t, err)
+	team, err := core.namespaceStore.GetNamespaceByPath(rootCtx, "team")
+	require.NoError(t, err)
+	teamCtx := namespace.ContextWithNamespace(context.Background(), team)
+
+	called := false
+	_, err = core.namespaceStore.ModifyNamespaceByPath(teamCtx, "", func(ctx context.Context, ns *namespace.Namespace) (*namespace.Namespace, error) {
+		called = true
+		ns.EnableBuiltinRoles = true
+		return ns, nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to modify a namespace from inside it")
+	assert.False(t, called, "the callback never runs")
+
+	// Its children are still its to write.
+	child, err := core.namespaceStore.ModifyNamespaceByPath(teamCtx, "dev", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "team/dev/", child.Path)
+}
+
 // TestNamespaceStore_ListAllNamespaces tests listing all namespaces
 func TestNamespaceStore_ListAllNamespaces(t *testing.T) {
 	core := createTestCore(t)

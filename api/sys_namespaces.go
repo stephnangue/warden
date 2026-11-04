@@ -10,14 +10,18 @@ import (
 // CreateNamespaceInput represents the input for creating a namespace
 type CreateNamespaceInput struct {
 	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
+	// EnableBuiltinRoles, when set, makes the built-in operator roles
+	// resolvable in the new namespace. Nil leaves them off.
+	EnableBuiltinRoles *bool `json:"enable_builtin_roles,omitempty"`
 }
 
 // CreateNamespaceOutput represents the output after creating a namespace
 type CreateNamespaceOutput struct {
-	ID             string            `json:"id"`
-	Path           string            `json:"path"`
-	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
-	Message        string            `json:"message"`
+	ID                 string            `json:"id"`
+	Path               string            `json:"path"`
+	CustomMetadata     map[string]string `json:"custom_metadata,omitempty"`
+	EnableBuiltinRoles bool              `json:"enable_builtin_roles"`
+	Message            string            `json:"message"`
 }
 
 // GetNamespaceOutput represents namespace information
@@ -28,26 +32,34 @@ type GetNamespaceOutput struct {
 	Tainted        bool              `json:"tainted"`
 	Uuid           string            `json:"uuid"`
 	Locked         bool              `json:"locked"`
+	// EnableBuiltinRoles reports whether the built-in operator roles resolve
+	// in the namespace.
+	EnableBuiltinRoles bool `json:"enable_builtin_roles"`
 }
 
 // NamespaceInfo represents namespace metadata
 type NamespaceInfo struct {
-	Path           string            `json:"path"`
-	ID             string            `json:"id"`
-	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
+	Path               string            `json:"path"`
+	ID                 string            `json:"id"`
+	CustomMetadata     map[string]string `json:"custom_metadata,omitempty"`
+	EnableBuiltinRoles bool              `json:"enable_builtin_roles"`
 }
 
 // UpdateNamespaceInput represents the input for updating a namespace
 type UpdateNamespaceInput struct {
 	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
+	// EnableBuiltinRoles, when set, turns the built-in operator roles on or
+	// off in the namespace. Nil leaves the setting as it is.
+	EnableBuiltinRoles *bool `json:"enable_builtin_roles,omitempty"`
 }
 
 // UpdateNamespaceOutput represents the output after updating a namespace
 type UpdateNamespaceOutput struct {
-	ID             string            `json:"id"`
-	Path           string            `json:"path"`
-	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
-	Message        string            `json:"message"`
+	ID                 string            `json:"id"`
+	Path               string            `json:"path"`
+	CustomMetadata     map[string]string `json:"custom_metadata,omitempty"`
+	EnableBuiltinRoles bool              `json:"enable_builtin_roles"`
+	Message            string            `json:"message"`
 }
 
 // CreateNamespace creates a new namespace at the specified path
@@ -97,6 +109,9 @@ func (c *Sys) CreateNamespaceWithContext(ctx context.Context, path string, input
 	if cm := parseConfigMap(resource.Data["custom_metadata"]); cm != nil {
 		output.CustomMetadata = cm
 	}
+	if e, ok := resource.Data["enable_builtin_roles"].(bool); ok {
+		output.EnableBuiltinRoles = e
+	}
 
 	return output, nil
 }
@@ -145,6 +160,9 @@ func (c *Sys) GetNamespaceWithContext(ctx context.Context, path string) (*GetNam
 	}
 	if cm := parseConfigMap(resource.Data["custom_metadata"]); cm != nil {
 		output.CustomMetadata = cm
+	}
+	if e, ok := resource.Data["enable_builtin_roles"].(bool); ok {
+		output.EnableBuiltinRoles = e
 	}
 
 	return output, nil
@@ -206,6 +224,9 @@ func (c *Sys) ListNamespacesWithContext(ctx context.Context, recursive bool, inc
 		if cm := parseConfigMap(nsMap["custom_metadata"]); cm != nil {
 			ns.CustomMetadata = cm
 		}
+		if e, ok := nsMap["enable_builtin_roles"].(bool); ok {
+			ns.EnableBuiltinRoles = e
+		}
 
 		namespaces = append(namespaces, ns)
 	}
@@ -259,6 +280,9 @@ func (c *Sys) UpdateNamespaceWithContext(ctx context.Context, path string, input
 	}
 	if cm := parseConfigMap(resource.Data["custom_metadata"]); cm != nil {
 		output.CustomMetadata = cm
+	}
+	if e, ok := resource.Data["enable_builtin_roles"].(bool); ok {
+		output.EnableBuiltinRoles = e
 	}
 
 	return output, nil
