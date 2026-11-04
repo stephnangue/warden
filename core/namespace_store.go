@@ -410,6 +410,13 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 	}
 
 	if !exists {
+		// A parent being created or deleted must not gain a child: a failed
+		// creation clears the parent's view, child record included, and a
+		// deletion stalls on the child.
+		if parent.Tainted || ns.creationDeletionMap[parent.UUID] {
+			return wlogical.ErrBadRequestf("parent namespace %q is being created or deleted", parent.Path)
+		}
+
 		// Before attempting to create it, ensure we don't have a mount table
 		// entry that conflicts with this new namespace. We assume we only
 		// need to look at our parent's namespace's mount table for the last

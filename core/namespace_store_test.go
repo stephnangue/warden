@@ -1035,6 +1035,14 @@ func nsRecordIn(t *testing.T, c *Core, holder *namespace.Namespace, uuid string)
 	return entry != nil
 }
 
+// nsListView lists the namespace records holder's view stores.
+func nsListView(t *testing.T, c *Core, holder *namespace.Namespace) []string {
+	t.Helper()
+	keys, err := NamespaceView(c.barrier, holder).SubView(namespaceStoreSubPath).List(context.Background(), "")
+	require.NoError(t, err)
+	return keys
+}
+
 // nsReload builds a second store over the same storage, as an unseal does.
 func nsReload(t *testing.T, c *Core) *NamespaceStore {
 	t.Helper()
@@ -1191,4 +1199,30 @@ func TestNamespaceStore_CreateOutsideRequestNamespace_Refused(t *testing.T) {
 	err := core.namespaceStore.SetNamespace(namespace.ContextWithNamespace(context.Background(), acme), &namespace.Namespace{Path: "other/x/"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "lacks parent")
+}
+
+// TestNamespaceStore_CreateUnderBusyParent_Refused refuses a child under a
+// parent that is being created or deleted, and writes nothing.
+func TestNamespaceStore_CreateUnderBusyParent_Refused(t *testing.T) {
+	for name, busy := range map[string]func(s *NamespaceStore, parent *namespace.Namespace){
+		"in progress": func(s *NamespaceStore, parent *namespace.Namespace) { s.creationDeletionMap[parent.UUID] = true },
+		"tainted":     func(s *NamespaceStore, parent *namespace.Namespace) { parent.Tainted = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			core := createTestCore(t)
+			ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+			acme := nsModify(t, core, ctx, "acme", nil)
+
+			store := core.namespaceStore
+			store.lock.Lock()
+			busy(store, store.namespacesByPath.Get(acme.Path))
+			store.lock.Unlock()
+
+			_, err := store.ModifyNamespaceByPath(ctx, "acme/dev", nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "being created or deleted")
+			assert.Equal(t, http.StatusBadRequest, wlogical.GetErrorCode(err))
+			assert.Empty(t, nsListView(t, core, acme), "nothing is written under the parent")
+		})
+	}
 }
