@@ -55,6 +55,14 @@ type Request struct {
 
 	MountClass string `json:"mount_class" structs:"mount_class" mapstructure:"mount_class"`
 
+	// DataPlane is true when the request is on a provider's data plane: a
+	// streaming gateway path, or a path the provider authenticates implicitly
+	// (IsTransparentPath, an access backend's access/ paths among them),
+	// whether or not the provider has an auto_auth_path. False on every
+	// control path, on help requests and on every non-provider mount. Set
+	// before CheckToken, so policy conditions read it as request.data_plane.
+	DataPlane bool `json:"data_plane" structs:"data_plane" mapstructure:"data_plane"`
+
 	// MountAccessor is provided so that identities returned by the authentication
 	// backends can be tied to the mount it belongs to.
 	MountAccessor string `json:"mount_accessor" structs:"mount_accessor" mapstructure:"mount_accessor"`
