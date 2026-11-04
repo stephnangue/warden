@@ -160,8 +160,9 @@ it and only applies the role `-role` names. Use `-force` to sign in again.
 Sessions live in `~/.warden/sessions/` (mode `0700`), one `0600` file per
 Warden address and namespace.
 
-- **Precedence.** For the role and the namespace: the flag, then the
-  environment, then the session. For the credential: when `WARDEN_TOKEN` or
+- **Precedence.** For the role: the flag, then the environment, then the
+  session. The namespace comes only from `-namespace` or `WARDEN_NAMESPACE`,
+  and it picks which session is used. For the credential: when `WARDEN_TOKEN` or
   `WARDEN_CLIENT_CERT` is set, no session is sent at all, and a session's role
   is never sent with another credential.
 - **Namespaces.** In a namespace with no session of its own, commands use the
