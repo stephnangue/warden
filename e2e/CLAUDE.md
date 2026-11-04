@@ -85,7 +85,7 @@ You can also use raw `curl` commands for more control.
 |--------|------|----------------|
 | GET | `/v1/sys/health` | 200=active, 429=standby, 503=sealed, 501=uninitialized |
 | GET | `/v1/sys/leader` | `{ha_enabled, is_leader, leader_address, active_time}` |
-| PUT | `/v1/sys/step-down` | Forces leadership step-down |
+| PUT | `/v1/sys/step-down` | Forces leadership step-down (root token or a sudo grant) |
 | GET | `/v1/sys/seal-status` | Seal status |
 
 ### Forwarded Endpoints (standby proxies these to active via mTLS)

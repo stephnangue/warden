@@ -13,10 +13,11 @@ Warden runs its own **MCP discovery server** at `/v1/sys/mcp`. Point your
 MCP client at it (for Claude Code, `claude mcp add`), presenting your
 identity — a bearer JWT (`Authorization: Bearer <jwt>`) or an mTLS client
 certificate — and, for a sub-namespace, the `X-Warden-Namespace` header.
-It needs no role: it authorizes on the identity you present. It exposes
-two tools:
+It needs no role: it authorizes on the identity you present, under the
+namespace's built-in policies, and audits every call. It exposes two tools:
 
-- **`list_roles`** — the roles your identity can assume. This is your menu.
+- **`list_roles`** — the roles the namespace's groups grant your identity.
+  This is your menu.
   Each role carries:
   - `description` — operator-written prose: what the role is for;
   - `provider` — the type of provider it is used with (`vault`, `aws`, `mcp`, …);
@@ -45,7 +46,12 @@ For example:
 
 A role listed without a `url` or a `skill` is not wired to a provider yet;
 the `warnings` in the same response say why. Don't build a URL for it — pick
-another role or ask the operator.
+another role or ask the operator. A role whose warning calls it a *built-in
+operator role* administers Warden itself; it is not for doing the work.
+
+If the namespace requires agents to be registered, a refusal naming your
+*native identity* (unclaimed, not governed, suspended, retired) means no role
+will work until the operator fixes your registration — stop and ask.
 
 ## The agent loop
 

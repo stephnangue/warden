@@ -90,10 +90,11 @@ check "MCP policy: no nested \`mcp {\` block" \
 
 # get_skill was replaced by read_skill(uri), and the "(skill: …, url: …)"
 # description convention by the role fields skill and provider_path (v0.21.0).
-# The seeded skills ship inside the binary, so they are scanned too.
+# The seeded skills ship inside the binary, so they are scanned too, and so is
+# AGENTS.md, which agents read before any skill.
 check "Discovery: no \`get_skill\` or \`(skill: …)\` description convention" \
   'get_skill|\(skill: [a-z0-9_-]+' \
-  "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}" core/seed/skills
+  "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}" core/seed/skills AGENTS.md
 
 # Provider intros said only a stored static key works, contradicting each page's
 # own chaining advice. Lead with keyless or chaining instead (v0.21.0).
