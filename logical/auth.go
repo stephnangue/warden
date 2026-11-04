@@ -251,19 +251,20 @@ func (c *ConditionResult) Sanitize() {
 	if c == nil {
 		return
 	}
-	c.Decision = stripControlChars(c.Decision)
-	c.Expression = stripControlChars(c.Expression)
-	c.ErrorKind = stripControlChars(c.ErrorKind)
+	c.Decision = StripControlChars(c.Decision)
+	c.Expression = StripControlChars(c.Expression)
+	c.ErrorKind = StripControlChars(c.ErrorKind)
 	// Inputs keys are operator-authored CEL paths (identifiers — no control
 	// chars possible), so only values need stripping; strip them in place to
 	// avoid reallocating the map on the eval hot path.
 	for k, v := range c.Inputs {
-		c.Inputs[k] = stripControlChars(v)
+		c.Inputs[k] = StripControlChars(v)
 	}
 }
 
-// stripControlChars removes C0 control characters and DEL.
-func stripControlChars(s string) string {
+// StripControlChars removes C0 control characters and DEL. A string with
+// none is returned as is, without allocating.
+func StripControlChars(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7F {
 			return -1

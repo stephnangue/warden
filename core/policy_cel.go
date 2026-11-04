@@ -310,7 +310,7 @@ func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound 
 	}
 	paths, segs, reqF, agtF, usrF, callF := celAnalyzeRefs(ast)
 	return &compiledCondition{
-		Source:     src,
+		Source:     logical.StripControlChars(src),
 		Program:    prg,
 		RefPaths:   paths,
 		RefSegs:    segs,
@@ -554,29 +554,31 @@ func evalCELCondition(prg cel.Program, activation any) (bool, error) {
 
 // buildRequestNS builds the `request` namespace, including only the fields f
 // marks as referenced (all fields when f.all). data is always non-nil so
-// has(request.data.x) is false rather than a nil-deref.
+// has(request.data.x) is false rather than a nil-deref. Strings are stored as
+// CEL values: boxed once here, where a Go string would be converted again at
+// each reference.
 func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
 	m := make(map[string]any, len(f.fields))
 	if f.has("path") {
-		m["path"] = req.Path
+		m["path"] = types.String(req.Path)
 	}
 	if f.has("operation") {
-		m["operation"] = req.Operation
+		m["operation"] = types.String(req.Operation)
 	}
 	if f.has("client_ip") {
-		m["client_ip"] = req.ClientIP
+		m["client_ip"] = types.String(req.ClientIP)
 	}
 	if f.has("mount_point") {
-		m["mount_point"] = req.MountPoint
+		m["mount_point"] = types.String(req.MountPoint)
 	}
 	if f.has("mount_type") {
-		m["mount_type"] = req.MountType
+		m["mount_type"] = types.String(req.MountType)
 	}
 	if f.has("mount_class") {
-		m["mount_class"] = req.MountClass
+		m["mount_class"] = types.String(req.MountClass)
 	}
 	if f.has("mount_accessor") {
-		m["mount_accessor"] = req.MountAccessor
+		m["mount_accessor"] = types.String(req.MountAccessor)
 	}
 	if f.has("transparent") {
 		m["transparent"] = req.Transparent
@@ -585,7 +587,7 @@ func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
 		m["data_plane"] = req.DataPlane
 	}
 	if f.has("namespace") {
-		m["namespace"] = req.Namespace
+		m["namespace"] = types.String(req.Namespace)
 	}
 	if f.has("data") {
 		data := req.Data
@@ -863,6 +865,9 @@ func paramValueToCEL(pv logical.ParamValue) (any, bool) {
 // evaluate. Program is immutable and safe for concurrent Eval, so it is shared
 // (not deep-copied) when merged into a CBP.
 type compiledCondition struct {
+	// Source is the expression as audited: its control characters, a
+	// multi-line condition's newlines among them, are stripped once here so
+	// that ConditionResult.Sanitize finds none to strip on every evaluation.
 	Source  string
 	Program cel.Program
 	// RefPaths are the dotted request/agent/user/call variable paths the expression
@@ -1131,6 +1136,8 @@ func formatCELValue(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
+	case types.String:
+		return string(t)
 	case bool:
 		return strconv.FormatBool(t)
 	case float64:

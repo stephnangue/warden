@@ -303,6 +303,35 @@ func TestCBP_RequestNamespace(t *testing.T) {
 	assert.Equal(t, "team-a/team-b/", res.Inputs["request.namespace"])
 }
 
+// A request string is boxed once per evaluation, and a condition's source is
+// stripped for audit once, at compile: a multi-line condition reading
+// request.path on every clause allocates what a one-line condition reading it
+// once does, and audits the same input.
+func TestCBP_RequestFieldBoxedOnce(t *testing.T) {
+	env, err := baseCELEnv()
+	require.NoError(t, err)
+	once, err := compileCELCondition(env, `request.path.startsWith("sys/x/")`)
+	require.NoError(t, err)
+	many, err := compileCELCondition(env, `request.path == "sys/a" || request.path == "sys/b" ||
+request.path.startsWith("sys/c/") || request.path.startsWith("sys/d/") ||
+request.path.startsWith("sys/x/")`)
+	require.NoError(t, err)
+
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "sys/x/y"}
+	now := time.Now()
+	for _, cond := range []*compiledCondition{once, many} {
+		ok, res := evaluatePathConditions([]*compiledCondition{cond}, req, nil, now, "")
+		require.True(t, ok)
+		assert.Equal(t, "sys/x/y", res.Inputs["request.path"])
+	}
+	allocs := func(cond *compiledCondition) float64 {
+		return testing.AllocsPerRun(200, func() {
+			evaluatePathConditions([]*compiledCondition{cond}, req, nil, now, "")
+		})
+	}
+	assert.Equal(t, allocs(once), allocs(many))
+}
+
 func BenchmarkAllowOperation_NoCondition(b *testing.B) {
 	ctx := testContext()
 	policy, _ := ParseCBPPolicy(namespace.RootNamespace, `
