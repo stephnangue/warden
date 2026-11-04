@@ -109,8 +109,13 @@ func (n *Namespace) Validate() error {
 	if !strings.HasSuffix(n.Path, "/") {
 		return fmt.Errorf("namespace path %q must end with /", n.Path)
 	}
-	if strings.Contains(n.Path, "..") {
-		return fmt.Errorf("namespace path %q must not contain '..'", n.Path)
+	for _, segment := range strings.Split(strings.TrimSuffix(n.Path, "/"), "/") {
+		switch segment {
+		case "":
+			return fmt.Errorf("namespace path %q must not contain an empty segment", n.Path)
+		case ".", "..":
+			return fmt.Errorf("namespace path %q must not contain a %q segment", n.Path, segment)
+		}
 	}
 	return nil
 }
