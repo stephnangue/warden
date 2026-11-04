@@ -366,10 +366,19 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 		return wlogical.ErrBadRequest(err.Error())
 	}
 
-	// Validate that we have a parent namespace.
-	parent, err := namespace.FromContext(ctx)
+	// The request namespace says who is asking: it may write any namespace
+	// below it. Where the record lives is the parent path's namespace, which
+	// is the request namespace only when the parent itself asks.
+	reqNs, err := namespace.FromContext(ctx)
 	if err != nil {
-		return fmt.Errorf("error loading parent namespace from context: %w", err)
+		return fmt.Errorf("error loading request namespace from context: %w", err)
+	}
+	if !entry.HasParent(reqNs) {
+		return errors.New("namespace path lacks parent as a prefix")
+	}
+	parent, err := ns.parentOfLocked(entry)
+	if err != nil {
+		return wlogical.ErrBadRequest(err.Error())
 	}
 
 	var exists bool
@@ -401,23 +410,24 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 	}
 
 	if !exists {
+		// A parent being created or deleted must not gain a child: a failed
+		// creation clears the parent's view, child record included, and a
+		// deletion stalls on the child.
+		if parent.Tainted || ns.creationDeletionMap[parent.UUID] {
+			return wlogical.ErrBadRequestf("parent namespace %q is being created or deleted", parent.Path)
+		}
+
 		// Before attempting to create it, ensure we don't have a mount table
 		// entry that conflicts with this new namespace. We assume we only
 		// need to look at our parent's namespace's mount table for the last
 		// path component of this new namespace; while mount paths can have
 		// any number of components, our namespace only has one and is relative
 		// to some parent path.
-		path := entry.Path
-		if parent.ID != namespace.RootNamespaceID {
-			if !entry.HasParent(parent) {
-				return errors.New("namespace path lacks parent as a prefix")
-			}
-
-			path = namespace.Canonicalize(parent.TrimmedPath(entry.Path))
-		}
+		path := namespace.Canonicalize(parent.TrimmedPath(entry.Path))
+		parentCtx := namespace.ContextWithNamespace(ctx, parent)
 
 		ns.core.router.mu.RLock()
-		conflict := ns.core.router.matchingPrefixInternal(ctx, path)
+		conflict := ns.core.router.matchingPrefixInternal(parentCtx, path)
 		ns.core.router.mu.RUnlock()
 		if conflict != "" {
 			return fmt.Errorf("new namespace conflicts with existing mount: %v", conflict)
@@ -467,7 +477,7 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 		// This initial write sets up the namespace as tainted, preventing
 		// a lot of subsystems from using it if it is reloaded from storage.
 		entry.Tainted = true
-		if err := ns.writeNamespace(ctx, ns.storage, entry); err != nil {
+		if err := ns.writeNamespace(ctx, ns.storage, parent, entry); err != nil {
 			return fmt.Errorf("failed to persist initial tainted namespace: %w", err)
 		}
 
@@ -503,7 +513,7 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 
 	// Finally, write the non-tainted namespace or perform our only write if
 	// we are modifying an existing entry.
-	if err := ns.writeNamespace(ctx, ns.storage, entry); err != nil {
+	if err := ns.writeNamespace(ctx, ns.storage, parent, entry); err != nil {
 		return fmt.Errorf("failed to persist namespace: %w", err)
 	}
 
@@ -518,12 +528,24 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 	return ns.pushToMounts(ctx, entry)
 }
 
-func (ns *NamespaceStore) writeNamespace(ctx context.Context, storage logical.Storage, entry *namespace.Namespace) error {
-	parent, err := namespace.FromContext(ctx)
-	if err != nil {
-		return err
+// parentOfLocked returns the namespace whose storage view holds entry's
+// record: the one at entry's parent path, whichever namespace the request came
+// from. The caller holds ns.lock.
+func (ns *NamespaceStore) parentOfLocked(entry *namespace.Namespace) (*namespace.Namespace, error) {
+	parentPath, ok := entry.ParentPath()
+	if !ok {
+		return nil, errors.New("root namespace has no parent")
 	}
+	parent := ns.namespacesByPath.Get(parentPath)
+	if parent == nil {
+		return nil, fmt.Errorf("can't write namespace %q with missing parent %q", entry.Path, parentPath)
+	}
+	return parent, nil
+}
 
+// writeNamespace stores entry's record in parent's view; parent comes from
+// parentOfLocked.
+func (ns *NamespaceStore) writeNamespace(ctx context.Context, storage logical.Storage, parent, entry *namespace.Namespace) error {
 	view := NamespaceView(storage, parent).SubView(namespaceStoreSubPath)
 	item, err := logical.StorageEntryJSON(entry.UUID, &entry)
 	if err != nil {
@@ -890,8 +912,9 @@ func (ns *NamespaceStore) ListNamespaces(ctx context.Context, includeParent bool
 	return ns.namespacesByPath.List(parent.Path, includeParent, recursive, ns.creationDeletionMap)
 }
 
-// taintNamespace is used to taint the namespace designated to be deleted
-func (ns *NamespaceStore) taintNamespace(ctx context.Context, namespaceToTaint *namespace.Namespace) error {
+// taintNamespace is used to taint the namespace designated to be deleted;
+// parent is the namespace whose view holds its record.
+func (ns *NamespaceStore) taintNamespace(ctx context.Context, parent, namespaceToTaint *namespace.Namespace) error {
 	// to be extra safe
 	if namespaceToTaint.ID == namespace.RootNamespaceID {
 		return errors.New("cannot taint root namespace")
@@ -906,7 +929,7 @@ func (ns *NamespaceStore) taintNamespace(ctx context.Context, namespaceToTaint *
 	}
 
 	nsCopy := namespaceToTaint.Clone(true /* preserve unlock */)
-	if err := ns.writeNamespace(ctx, ns.storage, nsCopy); err != nil {
+	if err := ns.writeNamespace(ctx, ns.storage, parent, nsCopy); err != nil {
 		return fmt.Errorf("failed to persist namespace taint: %w", err)
 	}
 
@@ -951,14 +974,15 @@ func (ns *NamespaceStore) DeleteNamespace(ctx context.Context, path string) (str
 		return "", fmt.Errorf("cannot delete namespace (%q) containing child namespaces", namespaceToDelete.Path)
 	}
 
-	if !namespaceToDelete.Tainted {
-		// taint the namespace
-		err = ns.taintNamespace(ctx, namespaceToDelete)
+	parent, err := ns.parentOfLocked(namespaceToDelete)
+	if err != nil {
+		return "", err
 	}
 
-	parent, err := namespace.FromContext(ctx)
-	if err != nil {
-		return "", fmt.Errorf("error loading parent namespace from context: %w", err)
+	if !namespaceToDelete.Tainted {
+		if err := ns.taintNamespace(ctx, parent, namespaceToDelete); err != nil {
+			return "", err
+		}
 	}
 
 	ns.creationDeletionMap[namespaceToDelete.UUID] = true
@@ -1184,16 +1208,9 @@ func (ns *NamespaceStore) UnlockNamespace(ctx context.Context, unlockKey, path s
 	namespaceToUnlock.Locked = false
 	namespaceToUnlock.UnlockKey = ""
 
-	parentPath, _ := namespaceToUnlock.ParentPath()
-	parentNs := ns.namespacesByPath.Get(parentPath)
-	if parentNs == nil {
-		return fmt.Errorf("namespace %q has no parent", namespaceToUnlock.Path)
-	}
-	parentCtx := namespace.ContextWithNamespace(ctx, parentNs)
-
 	// setNamespaceLocked now handles unlocking.
 	unlock = nil
-	return ns.setNamespaceLocked(parentCtx, namespaceToUnlock)
+	return ns.setNamespaceLocked(ctx, namespaceToUnlock)
 }
 
 // LockNamespace attempts to lock the namespace with provided path.
@@ -1240,16 +1257,9 @@ func (ns *NamespaceStore) LockNamespace(ctx context.Context, path string) (strin
 	namespaceToLock.Locked = true
 	namespaceToLock.UnlockKey = lockKey
 
-	parentPath, _ := namespaceToLock.ParentPath()
-	parentNs := ns.namespacesByPath.Get(parentPath)
-	if parentNs == nil {
-		return "", fmt.Errorf("namespace %q has no parent", namespaceToLock.Path)
-	}
-	parentCtx := namespace.ContextWithNamespace(ctx, parentNs)
-
 	// setNamespaceLocked now handles unlocking.
 	unlock = nil
-	if err := ns.setNamespaceLocked(parentCtx, namespaceToLock); err != nil {
+	if err := ns.setNamespaceLocked(ctx, namespaceToLock); err != nil {
 		return "", fmt.Errorf("unable to save locked namespace %q", namespaceToLock.Path)
 	}
 
