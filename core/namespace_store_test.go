@@ -5,12 +5,14 @@ package core
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
+	wlogical "github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -820,6 +822,7 @@ func TestNamespaceStore_ParentMustExist(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing parent")
+	assert.Equal(t, http.StatusBadRequest, wlogical.GetErrorCode(err), "a missing parent is the caller's mistake")
 }
 
 // TestNamespaceStore_TaintedNamespace tests that tainted namespaces cannot be modified

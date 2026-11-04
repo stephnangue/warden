@@ -378,7 +378,7 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 	}
 	parent, err := ns.parentOfLocked(entry)
 	if err != nil {
-		return err
+		return wlogical.ErrBadRequest(err.Error())
 	}
 
 	var exists bool
