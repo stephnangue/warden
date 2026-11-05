@@ -70,6 +70,7 @@ All notable changes to Warden are documented in this file.
 
 - **Built-in `default-cbp` and `default-mcp` policies** in every namespace grant the discovery paths. They can be edited, never deleted; emptying one withdraws its grants. (#818)
 - **Identity paths** authorize on the credential the caller presents, before any role. `/v1/<namespace>/sys/mcp` works by path, and audit records `auth.discovery`. (#819, #820, #821)
+- **A role write warns when agents cannot find the role**: its `provider_path` leads to no auth mount through an `auto_auth_path`, and the namespace sets none. The role still works, and a person's ticket still lists it. (#874)
 - **Policy compilation is about 2.7 times cheaper**, and a CEL condition converts request strings and strips its source once. (#822, #867)
 
 **Microsoft 365 and Entra**
