@@ -177,7 +177,35 @@ func (b *SystemBackend) handleRoleCreate(ctx context.Context, req *logical.Reque
 		return roleErrorResponse(name, err), nil
 	}
 	warnings = append(warnings, b.governedOnlyWarnings(ctx, req, role, false)...)
+	warnings = append(warnings, b.unlistedRoleWarnings(ctx, role)...)
 	return b.respondCreated(roleResponseData(role, role.Hash(), warnings)), nil
+}
+
+// unlistedRoleWarnings says when list_roles can never offer role to an agent:
+// discovery decides it at the auth mount its provider's auto_auth_path names,
+// else at the namespace's, and it has neither. The role still works, and a
+// person's ticket still lists it; resolved the way discovery resolves them,
+// so the warning and the menu cannot disagree.
+func (b *SystemBackend) unlistedRoleWarnings(ctx context.Context, role *logical.Role) []string {
+	if isBuiltinRoleName(role.Name) {
+		return nil
+	}
+	reason := "it has no provider_path"
+	if role.ProviderPath != "" {
+		providers, err := b.core.resolveDiscoveryProviders(ctx, []string{role.ProviderPath})
+		if err != nil {
+			return nil
+		}
+		if p, ok := providers[role.ProviderPath]; ok && p.authMount != "" {
+			return nil
+		}
+		reason = fmt.Sprintf("its provider %q names no auth mount through auto_auth_path", role.ProviderPath)
+	}
+	ns, err := namespace.FromContext(ctx)
+	if err != nil || b.core.namespaceAuthTarget(ctx, ns) != "" {
+		return nil
+	}
+	return []string{fmt.Sprintf("role %q: agents cannot find it with list_roles: %s, and the namespace sets no auto_auth_path", role.Name, reason)}
 }
 
 // governedOnlyWarnings says what a governed_only role just written takes
@@ -304,6 +332,7 @@ func (b *SystemBackend) handleRoleUpdate(ctx context.Context, req *logical.Reque
 			return roleErrorResponse(name, err), nil
 		}
 		warnings = append(warnings, b.governedOnlyWarnings(ctx, req, role, wasGovernedOnly)...)
+		warnings = append(warnings, b.unlistedRoleWarnings(ctx, role)...)
 		return b.respondSuccess(roleResponseData(role, role.Hash(), warnings)), nil
 	}
 }

@@ -478,6 +478,43 @@ func (e *discEnv) assertIntrospectUnauthorized(want error) {
 	assert.Equal(e.t, rolelessChallenge, resp.Headers.Get("WWW-Authenticate"))
 }
 
+// A role write warns when list_roles can never offer the role to an agent,
+// and only then: the warning follows the resolution the menu follows.
+func TestRoleWrite_WarnsWhenAgentsCannotFindIt(t *testing.T) {
+	write := func(e *discEnv, name, providerPath string) []string {
+		resp := tokenRequest(t, e.c, e.ctx, rootEntry, logical.CreateOperation, "roles/"+name,
+			map[string]any{"policies": []string{"p"}, "provider_path": providerPath})
+		require.False(t, resp.IsError(), "%v", resp.Data)
+		w, _ := resp.Data["warnings"].([]string)
+		return w
+	}
+	unlisted := func(t *testing.T, warnings []string) string {
+		for _, w := range warnings {
+			if strings.Contains(w, "agents cannot find it with list_roles") {
+				return w
+			}
+		}
+		return ""
+	}
+
+	t.Run("no namespace auto_auth_path", func(t *testing.T) {
+		e := newDiscEnv(t, "", "")
+		e.mountAuth("jwt/")
+		e.provider("vault", "vault/", "auth/jwt/")
+		e.provider("github", "github/", "")
+		assert.Empty(t, unlisted(t, write(e, "deploy", "vault/")), "a provider that names an auth mount")
+		assert.Contains(t, unlisted(t, write(e, "recipe", "")), "it has no provider_path")
+		assert.Contains(t, unlisted(t, write(e, "broken", "missing/")), `its provider "missing/" names no auth mount`)
+		assert.Contains(t, unlisted(t, write(e, "no-auto", "github/")), `its provider "github/" names no auth mount`)
+	})
+
+	t.Run("namespace auto_auth_path set", func(t *testing.T) {
+		e := newDiscEnv(t, "team/", "auth/jwt/")
+		e.mountAuth("jwt/")
+		assert.Empty(t, unlisted(t, write(e, "recipe", "")), "found at the namespace's auto_auth_path")
+	})
+}
+
 // A role without a usable provider is evaluated at the namespace's
 // auto_auth_path and listed without a URL; without one it is left out.
 func TestDiscoveryAdmit_RolesWithoutProvider(t *testing.T) {
