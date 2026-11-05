@@ -42,11 +42,12 @@ The injected bearer token is validated by the auth method that matches its
 issuer: the `kubernetes` method, for a projected ServiceAccount token, via the
 cluster's TokenReview API; or the `spiffe` method, for a JWT-SVID, against the
 trust-domain bundles. Because the request arrives with no
-`X-Warden-Token`, Warden uses [transparent authentication](/identity/authentication/):
-it logs the caller in against the provider's configured auth mount, resolves the
-role, and caches the result — no Warden session token is ever returned to the
-agent. The auth-method and role mechanics are in
-[Authentication](/identity/authentication/).
+`X-Warden-Token`, Warden uses [implicit authentication](/identity/authentication/#implicit-authentication):
+the provider's configured auth mount admits the token and Warden caches the
+admission — no Warden token is ever returned to the agent. On every request,
+the [groups](/identity/groups/) that match the token's facts decide whether the
+role the request names is granted, and the role's policies authorize the call.
+The auth-method mechanics are in [Authentication](/identity/authentication/).
 
 ## In practice
 
@@ -86,5 +87,5 @@ nothing in the pod.
   identity is an X.509/SVID rather than a bearer token.
 - [Platform Token Relay](/agent-identity/platform-issued-token/) — the same token, presented by
   the agent itself instead of a sidecar.
-- [Authentication](/identity/authentication/) — transparent auth and the
+- [Authentication](/identity/authentication/) — implicit authentication and the
   `kubernetes` / `spiffe` methods.

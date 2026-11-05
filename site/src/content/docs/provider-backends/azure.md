@@ -62,10 +62,11 @@ policy can still require them.
 | Mode | Supported | How |
 |---|---|---|
 | **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`. **Nothing stored.** |
+| **Certificate** | Yes | `auth_method=certificate`; a certificate registered on the app, its key stored in Warden or held in a KMS. Not rotated |
 | **Stored root → short-lived mint** | Yes | `auth_method=static`; a client secret in Warden storage, rotated via Microsoft Graph |
 | **Static inline** | No | Every mode mints a fresh token |
-| **Chaining** | Not as a consumer | An `azure` source takes no `secret_spec`. It is a chaining **producer**: `mint_method=secret_read` serves a Key Vault secret to other specs |
-| **Delegated user token** | No | The upstream receives a token minted for the app, not a forwarded user token |
+| **Chaining** | Producer; consumer for a certificate key | `mint_method=secret_read` serves a Key Vault secret to other specs. A `certificate` source's `secret_spec` names only a `transit_signer` that signs with its KMS-held key |
+| **Delegated user token** | By exchange | `mint_method=on_behalf_of` exchanges the user's Entra token for a token delegated by that user; the user's token itself is never forwarded. For Microsoft Graph, use the [Microsoft Graph provider](/provider-backends/msgraph/) |
 
 See the [Azure credential driver](/credential-drivers/azure/) for every source and spec key.
 
@@ -130,9 +131,9 @@ Warden needs network access to the following Azure endpoints:
 - `graph.microsoft.com` (Microsoft Graph, required for rotation)
 - Any additional Azure service endpoints you plan to proxy
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -142,13 +143,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/azure-user \
-    token_policies="azure-access" \
-    user_claim=sub \
-    cred_spec_name=azure-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -184,6 +183,51 @@ EOF
 ```
 
 See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
+
+### Allowed hosts
+
+The first path segment after `gateway/` names the Azure host the request goes to, and the
+request leaves carrying an Entra token. So Warden checks the host before it reads any
+credential:
+
+- it must be a plain lowercase hostname, with no IP address, port, userinfo or path
+  characters, or the answer is `400`;
+- it must match the mount's `allowed_host_suffixes`, or the answer is `403`.
+
+The default allows the public cloud's Microsoft-run endpoints:
+
+| Entry | Service |
+|---|---|
+| `.management.azure.com` | Resource Manager |
+| `.graph.microsoft.com` | Microsoft Graph |
+| `.vault.azure.net` | Key Vault |
+| `.blob.core.windows.net`, `.queue.core.windows.net`, `.table.core.windows.net`, `.file.core.windows.net`, `.dfs.core.windows.net` | Storage |
+| `.openai.azure.com` | Azure OpenAI |
+| `.cognitiveservices.azure.com` | Azure AI services |
+| `.services.ai.azure.com` | Azure AI Foundry |
+
+Each entry is named where the service starts, not by a broad suffix: `azure.com` and
+`core.windows.net` also hold hosts customers control, such as a VM's
+`<label>.<region>.cloudapp.azure.com` and static websites under `web.core.windows.net`.
+
+Sovereign clouds, Azure Monitor, Azure DevOps and custom domains are not in the default.
+To reach them, list every host the mount needs, the defaults you keep included:
+
+```bash
+warden write azure/config '{
+  "auto_auth_path": "auth/jwt/",
+  "allowed_host_suffixes": [
+    ".management.azure.com",
+    ".vault.azure.net",
+    ".monitor.azure.com",
+    ".dev.azure.com"
+  ]
+}'
+```
+
+An entry `.example.com` allows `example.com` and every host under it. An entry without
+the leading dot is refused, and so are `*` and a bare top-level domain. An empty list
+restores the default, and a mount that never set one follows the default as it changes.
 
 Verify the configuration:
 
@@ -238,7 +282,11 @@ assertion carries the registered claims only, and its `sub` is the agent's compo
 `wid:<namespaceID>:<mountAccessor>:<principalID>`. On the Azure side, add a
 **federated credential** to the spec's app registration with Warden's issuer URL, that
 exact subject, and the audience — see [Keyless credentials](/federation/keyless-credentials/).
-Read the subject from the audit log, or from the `subject` recorded on the credential.
+Entra matches the subject exactly, with no wildcard, so each agent needs its own federated
+credential, and an app holds at most 20. To build an agent's subject, read
+`auth.namespace_id`, `auth.mount_accessor` and `auth.principal_id` from the audit entry of
+one of its requests; in the root namespace, the namespace ID is `root`. The `subject` in a
+`bearer_token` credential's metadata is the app's client ID, not the agent.
 
 Three things about a federated spec are easy to get wrong:
 
@@ -344,7 +392,44 @@ Verify:
 warden cred spec read azure-ops
 ```
 
-## Step 4: Create a Policy
+### 3c. Certificate
+
+Where the tenant blocks client secrets and Entra cannot reach Warden's issuer, the source
+can authenticate with a certificate registered on the app, its key stored in Warden or
+held in a KMS. Certificates are not rotated. See
+[Certificate authentication](/credential-drivers/azure/#certificate-authentication).
+
+## Step 4: Create a Role and Grant It
+
+A [role](/identity/roles/) binds the credential spec and policy, and `provider_path` names the provider mount it is used with. Create it after the provider has its `auto_auth_path`; until then, agents cannot find the role through discovery. The policy comes in the next step, so the write warns that it does not exist yet:
+
+```bash
+warden role create azure-user -json '{
+  "policies": ["azure-access"],
+  "cred_spec_name": "azure-ops",
+  "provider_path": "azure/"
+}'
+```
+
+Nobody holds the role yet. A virtual [group](/identity/groups/) grants it to the callers the JWT mount admits:
+
+```bash
+warden identity group create azure-user-agents -json '{
+  "type": "virtual",
+  "roles": ["azure-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+This rule matches every token the mount accepts. Add selectors on the token's facts, such as `sub`, to grant the role to fewer callers.
+
+## Step 5: Create a Policy
 
 Create a policy that grants access to the Azure provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
@@ -383,9 +468,9 @@ Verify:
 warden policy read azure-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
-Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt), with `audience=warden` (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
 Requests use role-based paths. Warden performs implicit JWT authentication and injects the Azure Bearer token automatically.
 
@@ -426,6 +511,13 @@ curl "${AZURE_ENDPOINT}/graph.microsoft.com/v1.0/users" \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
+Graph JSON batching (`$batch`) is refused with `400` on a Graph host of any cloud, before
+a token is attached. A batch body carries up to twenty requests, each with its own method
+and path, which a path policy never sees. Send the requests one by one. Resource
+Manager's own `/batch` is not affected. To call Graph as the signed-in user, with paging
+links and errors in Graph's shape, use the
+[Microsoft Graph provider](/provider-backends/msgraph/).
+
 ### List Resource Groups
 
 ```bash
@@ -448,12 +540,12 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## Supported Azure Services
 
-The provider proxies requests to any Azure service reachable over HTTPS. The target host is extracted from the gateway path. Common services include:
+The provider proxies requests over HTTPS to any Azure host in the mount's [`allowed_host_suffixes`](#allowed-hosts). The target host is extracted from the gateway path. The default allows these, among others:
 
 | Service | Hostname | Description |
 |---------|----------|-------------|
 | Azure Resource Manager | `management.azure.com` | Manage Azure resources (VMs, networks, etc.) |
-| Microsoft Graph | `graph.microsoft.com` | Users, groups, applications, directory data |
+| Microsoft Graph | `graph.microsoft.com` | Users, groups and applications. `$batch` is refused |
 | Azure Key Vault | `*.vault.azure.net` | Secrets, keys, and certificates |
 | Azure Blob Storage | `*.blob.core.windows.net` | Object/blob storage |
 | Azure Queue Storage | `*.queue.core.windows.net` | Message queuing |
@@ -485,13 +577,13 @@ Warden supports automatic rotation of Azure service principal credentials via th
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The role, credential spec and policy are identical. Replace the JWT mount (Step 1), its group (Step 4) and the requests (Step 6) with the following.
 
 ### Enable Cert Auth
 
@@ -504,32 +596,34 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=azure-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
-### Create a Cert Role
+### Grant the Role to Certificates
 
-Create a role that binds allowed certificate identities to a credential spec and policy:
+A virtual group grants `azure-user` to the certificates the mount admits whose common name matches:
 
 ```bash
-warden write auth/cert/role/azure-user \
-    allowed_common_names="agent-*" \
-    token_policies="azure-access" \
-    cred_spec_name=azure-ops 
+warden identity group create azure-user-agents -json '{
+  "type": "virtual",
+  "roles": ["azure-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
 ```
 
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
+The `cn` selector supports glob patterns; you can also match on other certificate fields. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group) for the full set of fields.
 
 ### Configure Provider for Cert Auth
 
-Update the provider config to use cert auth:
+Update the provider config to use cert auth. `default_role` names the role a request takes when its URL names none:
 
 ```bash
 warden write azure/config <<EOF
 {
   "auto_auth_path": "auth/cert/",
+  "default_role": "azure-user",
   "timeout": "30s",
   "max_body_size": 10485760
 }
@@ -551,6 +645,12 @@ curl --cert client.pem --key client-key.pem \
 ```
 
 ## Troubleshooting
+
+### `403` "target host ... is not allowed on this mount"
+
+The host after `gateway/` is not in the mount's `allowed_host_suffixes`. Add it, with the
+defaults you still need — see [Allowed hosts](#allowed-hosts). A `400` instead means the
+host is not a plain hostname: an IP address, a port or an encoded character.
 
 ### "credential not found" or "invalid credential type" errors
 

@@ -70,9 +70,9 @@ spec key.
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -82,13 +82,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/scaleway-user \
-    token_policies="scaleway-access" \
-    user_claim=sub \
-    cred_spec_name=scaleway-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -132,7 +130,37 @@ Verify the configuration:
 warden read scaleway/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
+
+A [role](/identity/roles/) binds the credential spec and policy, and `provider_path` names the provider mount it is used with. Create it after the provider has its `auto_auth_path`; until then, agents cannot find the role through discovery. The spec and policy come in the next steps, so the write warns that they do not exist yet:
+
+```bash
+warden role create scaleway-user -json '{
+  "policies": ["scaleway-access"],
+  "cred_spec_name": "scaleway-ops",
+  "provider_path": "scaleway/"
+}'
+```
+
+Nobody holds the role yet. A virtual [group](/identity/groups/) grants it to the callers the JWT mount admits:
+
+```bash
+warden identity group create scaleway-user-agents -json '{
+  "type": "virtual",
+  "roles": ["scaleway-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+This rule matches every token the mount accepts. Add selectors on the token's facts, such as `sub`, to grant the role to fewer callers.
+
+## Step 4: Create a Credential Source and Spec
 
 ### Option A: Chained management key (recommended)
 
@@ -262,7 +290,7 @@ Verify:
 warden cred spec read scaleway-ops
 ```
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 Create a policy that grants access to the Scaleway provider gateway:
 
@@ -306,7 +334,7 @@ Verify:
 warden policy read scaleway-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -437,7 +465,7 @@ The region is extracted from the SigV4 Authorization header and used to route to
 
 ## Terraform Provider Limitation
 
-The native [Scaleway Terraform provider](https://registry.terraform.io/providers/scaleway/scaleway/latest) (`scaleway/scaleway`) validates that `secret_key` is a UUID, which is incompatible with Warden's JWT-based transparent authentication. It cannot be used to manage Scaleway resources through the Warden gateway.
+The native [Scaleway Terraform provider](https://registry.terraform.io/providers/scaleway/scaleway/latest) (`scaleway/scaleway`) validates that `secret_key` is a UUID, which is incompatible with Warden's JWT-based implicit authentication. It cannot be used to manage Scaleway resources through the Warden gateway.
 
 **Workarounds for Terraform users:**
 
@@ -461,13 +489,13 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The role, credential spec and policy are identical. Replace the JWT mount (Step 1), its group (Step 3) and the requests (Step 6) with the following.
 
 ### Enable Cert Auth
 
@@ -480,23 +508,24 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=scaleway-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
-### Create a Cert Role
+### Grant the Role to Certificates
 
-Create a role that binds allowed certificate identities to a credential spec and policy:
+A virtual group grants `scaleway-user` to the certificates the mount admits whose common name matches:
 
 ```bash
-warden write auth/cert/role/scaleway-user \
-    allowed_common_names="agent-*" \
-    token_policies="scaleway-access" \
-    cred_spec_name=scaleway-ops
+warden identity group create scaleway-user-agents -json '{
+  "type": "virtual",
+  "roles": ["scaleway-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
 ```
 
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
+The `cn` selector supports glob patterns; you can also match on other certificate fields. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group) for the full set of fields.
 
 ### Configure Provider for Cert Auth
 

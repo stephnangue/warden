@@ -15,14 +15,30 @@ stops. It is for local evaluation only, not production.
 
 ## 1. Deploy the quickstart stack
 
-This starts Ory Hydra, which issues the JWTs the provider guides authenticate in
-their Step 1 and Step 5:
+This starts Ory Hydra, which issues the JWTs the provider guides authenticate
+with:
 
 ```bash
 curl -fsSL -o docker-compose.quickstart.yml \
   https://raw.githubusercontent.com/stephnangue/warden/main/deploy/docker-compose.quickstart.yml
 docker compose -f docker-compose.quickstart.yml up -d
 ```
+
+The stack registers three OAuth2 clients, `my-agent`, `my-pipeline` and
+`my-admin`. Each may ask for the `warden` audience, the one the guides' JWT
+mount requires in `bound_audiences`. When a guide asks for a JWT, request one
+for `my-agent` and name that audience:
+
+```bash
+export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden" \
+  | jq -r '.access_token')
+```
+
+A token without the `warden` audience is refused by the mount. See
+[Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) for other identity
+providers.
 
 ## 2. Download the latest Warden binary
 

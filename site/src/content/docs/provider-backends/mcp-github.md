@@ -59,9 +59,9 @@ Whichever route you take, the token arrives as a Bearer:
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -71,13 +71,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/mcp-user \
-    token_policies="mcp-github-access,mcp-github-access-calls" \
-    user_claim=sub \
-    cred_spec_name=github-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ### Enable audit logging
@@ -119,14 +117,40 @@ EOF
 
 See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
+
+Create the role, then a virtual group that grants it to callers admitted through the JWT mount. The role lists both policies from Step 5 by name: the capability policy that grants the path and the MCP policy that governs the calls. The spec and the policies come in Steps 4 and 5; until they exist, the role write warns.
+
+```bash
+warden role create mcp-user -json '{
+  "policies": ["mcp-github-access", "mcp-github-access-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
+
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+## Step 4: Create a Credential Source and Spec
 
 Pick by whose GitHub identity the call should run as. Option A acts as the **calling
 user**; Option B acts as the **app**. Options C and D are narrower cases.
 
 If you already configured a `github` source + spec for the `github` REST provider,
-**reuse them here unchanged** for Option B or C — bind that spec to the role from Step 1
-and skip to Step 4.
+**reuse them here unchanged** for Option B or C — name that spec as the role's
+`cred_spec_name` in Step 3 and skip to Step 5.
 
 ### Option A: Per-user tokens from OpenBao/Vault (recommended for acting as a user)
 
@@ -381,7 +405,7 @@ GitHub user it acted as — while the token stays salted:
 If a captured field is sensitive, add its path to the audit device's `salt_fields`
 (e.g. `response.credential.metadata.email`) to HMAC it instead of logging in clear.
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 MCP traffic passes through two layers: the minted GitHub token (its scopes are the
 security boundary) and Warden's MCP policy (governance at the gateway).
@@ -415,7 +439,7 @@ EOF
 ```
 
 Bind **both** names on the role — an MCP policy comes into scope by being
-listed in `token_policies`, exactly like a capability policy.
+listed in the role's `policies`, exactly like a capability policy.
 
 Restrict to a vetted set of GitHub tools:
 
@@ -462,7 +486,7 @@ EOF
 `/gateway/` URL (POST=create, GET=read for the SSE stream, DELETE=delete for
 session close). MCP policy enforcement fires only on the POST half.
 
-## Step 5: Point an MCP Client at Warden
+## Step 6: Point an MCP Client at Warden
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -506,10 +530,11 @@ curl -X POST "${WARDEN_ADDR}/v1/github-mcp/role/mcp-user/gateway/" \
 
 ## TLS Certificate Authentication
 
-Steps 1 and 5 use JWT authentication. Alternatively, authenticate with a TLS
+Steps 1, 3 and 6 use JWT authentication. Alternatively, authenticate with a TLS
 client certificate — useful for workloads that already have X.509 certificates
-(Kubernetes pods with cert-manager, VMs, SPIFFE X.509-SVIDs). Steps 2–4 are
-unchanged; replace Steps 1 and 5 with the following.
+(Kubernetes pods with cert-manager, VMs, SPIFFE X.509-SVIDs). The provider mount,
+the role, the credential and the policies are unchanged; replace the JWT mount, the
+provider's `auto_auth_path`, the group and the client setup with the following.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
@@ -518,13 +543,7 @@ Certificate auth requires mTLS on the Warden listener so the client certificate 
 ```bash
 # Enable cert auth and trust your CA
 warden auth enable cert
-warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem default_role=mcp-user
-
-# Bind allowed cert identities to the credential spec and policy
-warden write auth/cert/role/mcp-user \
-    allowed_common_names="agent-*" \
-    token_policies="mcp-github-access,mcp-github-access-calls" \
-    cred_spec_name=github-ops
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 
 # Point the mount at the cert auth path
 warden write github-mcp/config <<EOF
@@ -534,7 +553,18 @@ warden write github-mcp/config <<EOF
   "max_body_size": 10485760
 }
 EOF
+
+# Grant the role to certificates whose common name starts with agent-
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
 ```
+
+A rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 `curl` smoke test, role from the URL path:
 

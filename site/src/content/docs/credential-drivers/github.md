@@ -96,7 +96,7 @@ warden cred spec create github-key-per-org \
 ```
 
 An agent claim other than `sub` resolves only if the spec lists it in
-`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the login does not
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the agent's credential does not
 carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
 works the same way via `assertion_user_claims`, and the two can be combined in one path.
 
@@ -104,7 +104,15 @@ See [credential chaining](/federation/credential-chaining/#producers).
 
 ## Credential issued
 
-The driver always issues the `github_token` type. In `app` mode the token is **dynamic** — it carries a TTL (~1h) tied to the installation token's expiry. In `pat` mode the token is **static** — no lease, no TTL. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation). GitHub App installation tokens are revocable and expire naturally; the driver relies on their short lifetime rather than tracking leases for explicit revocation.
+The driver always issues the `github_token` type. In `app` mode the token is **dynamic** — it carries a TTL (~1h) tied to the installation token's expiry. In `pat` mode the token is **static** — no lease, no TTL. See [the lifetime model](/concepts/credentials/#lifetime-and-revocation).
+
+An installation token carries no lease, so Warden never revokes it. It stays valid at
+GitHub until it expires, about an hour after it was minted, even after the session that
+received it ends or Warden stops serving it. The driver also keeps one token per App,
+installation, key and scope (`repositories`, `permissions`), shares it between callers of
+specs that match, and stops serving it five minutes before it expires, so the next
+request mints a new one. Scope the token as narrowly as the task allows, since a leaked
+one cannot be cut short from Warden.
 
 ## Capabilities
 

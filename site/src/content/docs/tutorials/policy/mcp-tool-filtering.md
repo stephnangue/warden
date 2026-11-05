@@ -94,15 +94,20 @@ warden status          # sealed: false
 
 ### Step 3 — trust Hydra's JWTs
 
-Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra via OIDC discovery. Warden runs
-on your host, so it reaches Hydra at `localhost:4444` for both discovery and key fetching:
+Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra's signing keys. Warden runs
+on your host, so it reaches Hydra at `localhost:4444`:
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config \
-  oidc_discovery_url=http://localhost:4444 \
-  bound_issuer=http://localhost:4444
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+The mount admits a token signed by Hydra, issued by it, and minted for the audience `warden`.
+It grants no role: a group does, in Step 5.
 
 ### Step 4 — front GitHub's MCP server
 
@@ -169,17 +174,37 @@ path "github-mcp/role/+/gateway*" {
 EOF
 ```
 
-**2. Create the role** that carries *both* policies and the GitHub credential. An
-MCP policy comes into scope the same way a capability policy does — by being named
-in `token_policies` — so leaving it out would deny every call:
+**2. Create the role** that carries *both* policies and the GitHub credential, and a group
+that grants it. An MCP policy comes into scope the same way a capability policy does — by
+being named in the role's `policies` — so leaving it out would deny every call:
 
 ```bash
-warden write auth/jwt/role/mcp-user \
-  token_policies=mcp-tools,mcp-tools-calls \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  token_ttl=1h
+warden role create mcp-user -json '{
+  "description": "Use the GitHub MCP server",
+  "policies": ["mcp-tools", "mcp-tools-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
+
+warden identity group create mcp-users -json '{
+  "type": "virtual",
+  "description": "Agents with a Hydra token for Warden",
+  "roles": ["mcp-user"],
+  "rules": [
+    {
+      "mount": ["auth/jwt/"]
+    }
+  ]
+}'
 ```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for this tutorial, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+The group's one rule trusts `auth/jwt/`, so every token that mount admits holds `mcp-user`.
+The request names the role in its URL path, and Warden checks on each request that a group
+grants it.
 
 **3. Turn on an audit log** so you can watch the decisions:
 
@@ -195,7 +220,7 @@ it's meant for Claude to present, so exporting it is fine:
 ```bash
 export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden" \
   | jq -r '.access_token')
 ```
 
@@ -309,6 +334,8 @@ The injected GitHub token never appears in the clear — the audit layer salts i
     -H "Accept: application/json, text/event-stream" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
   ```
+- **`authentication failed`** — the token was not minted for the audience `warden`. Mint it again
+  with `&audience=warden` (Step 6).
 - **`credential spec "github-ops" not found`** — Step 4's `cred spec create` failed (usually an
   invalid PAT — Warden verifies it on creation). Re-run that command with a valid token.
 - **`404` from GitHub on a tool call** — trailing-slash mismatch. The gateway URL must end

@@ -31,6 +31,9 @@ refresh token stays in the vault — so Warden stores nothing and one spec serve
 The OAuth client credential does not have to be stored. Set `secret_spec` (and optionally
 `secret_field`) **on the source**, and at mint time Warden fetches **both halves** — `client_id` and
 `client_secret` — from the referenced spec via [credential chaining](/federation/credential-chaining/).
+With `client_auth=private_key_jwt` the payload carries `private_key` instead of the secret,
+and the kid under `client_assertion_kid` or `kid`; see
+[Client authentication](#client-authentication).
 A chained source therefore stores neither half, so one source and one spec can serve a different
 OAuth client per agent.
 
@@ -42,6 +45,57 @@ Two constraints:
 - The reference belongs on the **source**, not the spec. Chaining on an `oauth2` *spec* used to mean
   "this material is a refresh token"; that is no longer supported, and a spec still carrying
   `secret_spec` is **rejected at write** with a message telling you to move the key to the source.
+
+## Client authentication
+
+The source's `client_auth` says how Warden authenticates to the token endpoint. It applies
+to every flow: the client-credentials grant, the authorization-code exchange and the
+refresh grant.
+
+| `client_auth` | What Warden sends | What it needs |
+|---|---|---|
+| `client_secret_post` (default) | `client_id` and `client_secret` in the form body | `client_secret` |
+| `client_secret_basic` | The pair in an `Authorization: Basic` header, nothing in the body | `client_secret` |
+| `private_key_jwt` | An RFC 7523 client assertion signed RS256 with `private_key` | `private_key`, optional `client_assertion_kid` |
+| `kms_private_key_jwt` | The same assertion, signed by a key held in a KMS | `secret_spec` naming a spec that mints a signing capability |
+
+A method refuses what it would never send. A secret method refuses `private_key`,
+`client_assertion_alg`, `client_assertion_kid` and `client_assertion_aud`;
+`private_key_jwt` refuses `client_secret`. A `client_assertion_kid` needs the key it names
+beside it. `client_assertion` and `client_assertion_type` cannot be set through
+`token_param.*`.
+
+`private_key` and `client_assertion_kid` resolve spec over source, like `client_id` and
+`client_secret`, so an `authorization_code` spec can bring its own client and key. A kid
+always travels with its key: a spec's key never inherits the source's kid. `private_key`
+is masked on read.
+
+**The assertion's audience.** By default the assertion names the token endpoint as its
+`aud`. Set `client_assertion_aud=issuer` to name the source's `issuer` instead, as its sole
+audience, for an authorization server that enforces draft-ietf-oauth-rfc7523bis. That
+mode requires `issuer`.
+
+**A fresh assertion on every attempt.** An authorization server refuses a client
+assertion it has already seen. When a token request is retried, after a `429`, a `5xx` or a
+dropped connection, Warden signs a new assertion for the retry instead of resending the
+first one.
+
+**Without holding the key.** `kms_private_key_jwt` takes the client id and kid from the
+capability's payload, and refuses `secret_field` and `client_assertion_alg`, which the
+payload and the key decide. The capability comes from the
+[`hvault`](/credential-drivers/vault/#transit_signer--signing-without-the-key) driver's
+`transit_signer` mint method:
+
+```bash
+warden cred source create oauth-kms -json '{
+  "type": "oauth2",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/token",
+    "client_auth": "kms_private_key_jwt",
+    "secret_spec": "signer-cap"
+  }
+}'
+```
 
 ## Credential issued
 
@@ -130,7 +184,7 @@ warden cred spec create oauth-client-per-tenant \
 ```
 
 An agent claim other than `sub` resolves only if the spec lists it in
-`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the login does not
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the agent's credential does not
 carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
 works the same way via `assertion_user_claims`, and the two can be combined in one path.
 
@@ -187,6 +241,12 @@ Keys for `warden cred source create <name> -type=oauth2 -config=key=value ...`:
 | `token_url` | Yes | — | OAuth2 token endpoint (HTTPS). |
 | `client_id` | No | — | OAuth2 client ID (source-level for client_credentials; may be set per-spec). Omit when chaining — it comes from the chained payload. |
 | `client_secret` | No | — | OAuth2 client secret (masked). Omit when chaining. |
+| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_post`, `client_secret_basic`, `private_key_jwt` or `kms_private_key_jwt`. See [Client authentication](#client-authentication). |
+| `private_key` | For `private_key_jwt` | — | PEM RSA private key that signs the client assertion (masked). May be set per spec. Omit when chaining. |
+| `client_assertion_alg` | No | `RS256` | Signing algorithm of the client assertion. `RS256` is the only value. |
+| `client_assertion_kid` | No | — | `kid` header of the client assertion, naming the key beside it. Omit when chaining. |
+| `client_assertion_aud` | No | `token_url` | Audience of the client assertion: `token_url` or `issuer`. |
+| `issuer` | For `client_assertion_aud=issuer` | — | The authorization server's issuer identifier (HTTPS). Also checked against the `iss` of an authorization-code callback that carries one. |
 | `secret_spec` | No | — | Chain the **whole client credential** (`client_id` + `client_secret`) from another cred spec via [credential chaining](/federation/credential-chaining/), so this source stores neither half. `client_credentials` grant only. |
 | `secret_field` | No | — | Field of the referenced spec's credential holding the client credential. |
 | `secret_cache_ttl` | No | *(off)* | Cache the chained client credential for a bounded TTL, keyed on the source. |
@@ -219,6 +279,8 @@ Keys operators set with `warden cred spec create ... -config=key=value`:
 | `scope` | No | source `default_scopes` | Scopes requested for `client_credentials`. |
 | `client_id` | No | source `client_id` | Client ID, resolved spec-over-source. |
 | `client_secret` | No | source `client_secret` | Client secret, resolved spec-over-source. |
+| `private_key` | No | source `private_key` | PEM RSA key for `client_auth=private_key_jwt`, resolved spec-over-source (masked). |
+| `client_assertion_kid` | No | — | `kid` for the spec's own `private_key`. Never inherited from the source. |
 | `refresh_token` | No | — | Sealed refresh token for `authorization_code` (set by consent). |
 | `access_token` | No | — | Sealed static access token for providers that issue no refresh token (set by consent). |
 | `access_token_expires_at` | No | — | RFC3339 expiry of a sealed static access token. |

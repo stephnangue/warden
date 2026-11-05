@@ -83,7 +83,7 @@ All API requests follow this pattern:
 | Code Engine (regional) | `…/gateway/api.eu-de.codeengine.cloud.ibm.com/v2/projects` |
 | COS Object Storage | S3 SigV4 client points at `…/role/{role}/gateway` — see [COS Object Storage](#cos-object-storage) |
 
-Only hosts matching the `allowed_host_suffixes` list (default: `.cloud.ibm.com`, `.appdomain.cloud`) are forwarded. Anything else returns HTTP 400.
+Only hosts matching the `allowed_host_suffixes` list (default: `.cloud.ibm.com`, `.appdomain.cloud`) are forwarded. Anything else returns HTTP 400 (the GCP and Azure providers answer a refused host with 403).
 
 ## Prerequisites
 
@@ -96,9 +96,9 @@ Only hosts matching the `allowed_host_suffixes` list (default: `.cloud.ibm.com`,
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -108,13 +108,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/ibmcloud-user \
-    token_policies="ibmcloud-access" \
-    user_claim=sub \
-    cred_spec_name=ibmcloud-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -137,7 +135,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with `auto_auth_path`. The `ibmcloud_url` field is retained for framework compatibility but is **ignored in API mode** — the target host is taken from the request path. Optional `allowed_host_suffixes` narrows or widens which IBM hostnames are proxyable.
+Configure the provider with `auto_auth_path`. Leave `ibmcloud_url` at its default (`https://cloud.ibm.com`) and API mode connects to the host named in the request path. Set it to anything else and every service is sent to that base instead — a VPC private endpoint or an enterprise egress proxy — with the target host kept as the leading path segment so the gateway there can route. Optional `allowed_host_suffixes` narrows or widens which IBM hostnames are proxyable; the host is checked against it either way.
 
 ```bash
 warden write ibmcloud/config <<EOF
@@ -173,7 +171,33 @@ Verify the configuration:
 warden read ibmcloud/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
+
+Create the role that names the policy and the credential spec, then a virtual group that grants it to callers admitted through the JWT mount. The spec and the policy come in Steps 4 and 5; until they exist, the role write warns.
+
+```bash
+warden role create ibmcloud-user -json '{
+  "policies": ["ibmcloud-access"],
+  "cred_spec_name": "ibmcloud-ops",
+  "provider_path": "ibmcloud/"
+}'
+
+warden identity group create ibmcloud-user-agents -json '{
+  "type": "virtual",
+  "roles": ["ibmcloud-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+## Step 4: Create a Credential Source and Spec
 
 ### Option A: Chained API key (recommended)
 
@@ -336,7 +360,7 @@ Verify:
 warden cred spec read ibmcloud-ops
 ```
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 Create a policy that grants access to the IBM Cloud provider gateway:
 
@@ -372,7 +396,7 @@ Verify:
 warden policy read ibmcloud-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -497,7 +521,7 @@ terraform plan
 
 ### Raw HTTP / curl
 
-Already covered in [Step 5](#step-5-get-a-jwt-and-make-requests). Any tool that can set a bearer header on an arbitrary URL works.
+Already covered in [Step 6](#step-6-get-a-jwt-and-make-requests). Any tool that can set a bearer header on an arbitrary URL works.
 
 ### COS clients
 
@@ -517,7 +541,7 @@ For these, either use an alternate client or accept that they bypass Warden's cr
 
 The IBM Cloud provider auto-detects COS requests by the presence of a SigV4 `Authorization` header. Any S3-compatible client works — AWS CLI, boto3, s3cmd, MinIO Client.
 
-### COS Transparent Auth with JWT
+### COS Implicit Authentication with JWT
 
 Configure your S3 client to point at Warden's gateway endpoint. Use your JWT as both the access key and secret key:
 
@@ -527,7 +551,7 @@ aws configure set aws_secret_access_key "${JWT_TOKEN}"
 aws configure set region us-south
 ```
 
-### COS Transparent Auth with Certificates
+### COS Implicit Authentication with Certificates
 
 For certificate-based authentication, use the role name as both the access key and secret key:
 
@@ -592,7 +616,7 @@ The provider injects a real IBM Cloud IAM token into every outbound request. Wit
 - **HTTPS-only** — the hook always constructs `https://` URLs; clients cannot downgrade by tweaking the path.
 - **Wildcard** (`allowed_host_suffixes: "*"`) disables host checking. Do not use in production.
 
-Combine this with fine-grained Warden policies (see [Step 4](#step-4-create-a-policy)) to restrict which roles can reach which service paths.
+Combine this with fine-grained Warden policies (see [Step 5](#step-5-create-a-policy)) to restrict which roles can reach which service paths.
 
 ## Cleanup
 
@@ -609,13 +633,13 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## TLS Certificate Authentication
 
-Steps 1-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate.
+Steps 1-6 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The role, the credential spec and the policy (Steps 3-5) are identical. Replace the JWT mount, the provider's `auto_auth_path`, the group and the requests with the following.
 
 ### Enable Cert Auth
 
@@ -626,18 +650,7 @@ warden auth enable cert
 ### Configure Trusted CA
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=ibmcloud-user
-```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/ibmcloud-user \
-    allowed_common_names="agent-*" \
-    token_policies="ibmcloud-access" \
-    cred_spec_name=ibmcloud-ops
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
 ### Configure Provider for Cert Auth
@@ -652,6 +665,22 @@ warden write ibmcloud/config <<EOF
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Grant `ibmcloud-user` with a group whose rule trusts the cert mount and matches the certificate's common name:
+
+```bash
+warden identity group create ibmcloud-user-agents -json '{
+  "type": "virtual",
+  "roles": ["ibmcloud-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+A rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 ### Make Requests with Certificates
 

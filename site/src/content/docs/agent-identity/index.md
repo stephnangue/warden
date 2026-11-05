@@ -4,9 +4,11 @@ title: "Agent Identity"
 
 Before Warden can broker access for an agent, it has to know *who the agent is*.
 The agent presents an **identity vehicle** — a JWT, a SPIFFE SVID, a client
-certificate, a platform-issued token — and Warden validates it, attaches the
-resulting principal to the policy decision and the audit trail, and mints the
-upstream credential on the agent's behalf. Warden never issues the agent's
+certificate, a platform-issued token — and Warden authenticates it, resolves the
+caller to its native identity and the groups that grant it roles, authorizes the
+request under the role it names, and mints the upstream credential on the
+agent's behalf. The principal is recorded in the policy decision and the audit
+trail. Warden never issues the agent's
 **inbound** identity — it only consumes one the agent (or its platform) already
 holds. (Separately, once an agent is authenticated, Warden can mint a *federated
 outbound* [identity assertion](/federation/oidc-issuer/) derived from that inbound
@@ -15,9 +17,10 @@ credentialling mechanism, not a source of the agent's own identity.)
 
 This section is about the **shape of that presentation**: who attaches the
 credential, and how it reaches Warden. The validation mechanics — the auth
-methods, transparent vs. explicit authentication, roles — live in
-[Authentication](/identity/authentication/); this section sits on top of
-them and helps you choose an approach.
+methods and implicit authentication — live in
+[Authentication](/identity/authentication/), and how groups grant roles in
+[Groups](/identity/groups/); this section sits on top of them and helps you
+choose an approach.
 
 ## Two questions
 
@@ -43,10 +46,11 @@ the *variant* says how it lands.
 | B1 | [Self-Minted SVID](/agent-identity/self-minted-identity/) | an SVID the agent fetched from the Workload API | `spiffe` |
 | B2 | [Platform Token Relay](/agent-identity/platform-issued-token/) | a token the platform issued (projected SA token, CI OIDC) | `kubernetes` / `jwt` |
 
-All four are **transparent authentication** — the agent points an ordinary
-client at Warden, sends no Warden session token, and re-presents its credential
-on each request. Warden validates it in line and caches the result. See
-[transparent authentication](/identity/authentication/).
+All four use **implicit authentication** — the agent points an ordinary
+client at Warden, sends no Warden token, and re-presents its credential on each
+request. Warden admits it in line and caches the admission; whether a group
+grants the role the request names is decided again on every request. See
+[implicit authentication](/identity/authentication/#implicit-authentication).
 
 ## Choosing
 
@@ -73,7 +77,8 @@ Is the agent identity-aware?
 ## See Also
 
 - [Authentication](/identity/authentication/) — the credential forms, auth
-  methods, and transparent auth these approaches build on.
+  methods, and implicit authentication these approaches build on.
+- [Groups](/identity/groups/) — how the verified facts grant a role.
 - [Tokens](/identity/tokens/) — what authentication produces.
 - [Agent Flow](/agent-flow/) — the end-to-end path once identity is
   established.

@@ -82,21 +82,17 @@ spec key.
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup:
 
 ```bash
-warden auth enable jwt -path=auth/jwt/
-warden write auth/jwt/config \
-  jwks_url="http://localhost:4444/.well-known/jwks.json" \
-  default_role="k8s-user"
-
-# Create a role
-warden write auth/jwt/role/k8s-user \
-  user_claim="sub" \
-  token_policies="k8s-readonly" \
-  token_ttl="1h"
+warden auth enable jwt
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -134,7 +130,32 @@ warden write kubernetes/config \
   auto_auth_path="auth/jwt/"
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
+
+Create the role that names the policy and the credential spec, then a virtual group that grants it to callers admitted through the JWT mount. The spec and the policy come in Steps 4 and 5; until they exist, the role write warns.
+
+```bash
+warden role create k8s-user -json '{
+  "policies": ["k8s-readonly"],
+  "cred_spec_name": "k8s-app-reader",
+  "provider_path": "kubernetes/"
+}'
+
+warden identity group create k8s-user-agents -json '{
+  "type": "virtual",
+  "roles": ["k8s-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+## Step 4: Create a Credential Source and Spec
 
 ### Option A: Keyless federation (recommended)
 
@@ -351,26 +372,26 @@ warden cred spec create k8s-api-consumer \
   -config ttl=30m
 ```
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 Create a policy that grants access to specific Kubernetes API paths:
 
 ```bash
 # Read-only access to pods and deployments in the default namespace
 warden policy write k8s-readonly - <<EOF
-path "kubernetes/gateway/api/v1/namespaces/default/pods*" {
+path "kubernetes/role/+/gateway/api/v1/namespaces/default/pods*" {
   capabilities = ["read"]
 }
-path "kubernetes/gateway/apis/apps/v1/namespaces/default/deployments*" {
+path "kubernetes/role/+/gateway/apis/apps/v1/namespaces/default/deployments*" {
   capabilities = ["read"]
 }
-path "kubernetes/gateway/api/v1/namespaces" {
+path "kubernetes/role/+/gateway/api/v1/namespaces" {
   capabilities = ["read"]
 }
 EOF
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -489,7 +510,7 @@ The Kubernetes provider creates short-lived ServiceAccount tokens via the [Token
 1. Client sends a request to a role-based gateway path with a JWT in the `Authorization: Bearer` header
 2. Warden implicitly authenticates the JWT against the configured auth backend
 3. Warden resolves the role to a credential spec and mints a ServiceAccount token via the TokenRequest API, authenticating that call with the caller's assertion (federation) or the stored source token (static)
-4. Warden replaces the `Authorization` header with the minted Kubernetes token
+4. Warden replaces the `Authorization` header with the minted Kubernetes token and strips any impersonation headers (`Impersonate-User`, `Impersonate-Group`, `Impersonate-Uid`, `Impersonate-Extra-*`), so a caller cannot act as another user through the minted token
 5. Request is proxied to the Kubernetes API server
 6. Token expires automatically after the configured TTL
 
@@ -508,7 +529,7 @@ Kubernetes has immediate consistency, so there is no activation delay.
 
 Set `rotation-period` on the source to a value shorter than `source_token_ttl` to ensure rotation happens before the current token expires. For example, with `source_token_ttl=24h`, a `rotation-period=12h` provides comfortable overlap.
 
-If rotation is not configured (no `source_service_account`/`source_namespace`), use a non-expiring Secret-based token as described in Step 3, or rotate manually:
+If rotation is not configured (no `source_service_account`/`source_namespace`), use a non-expiring Secret-based token as described in Step 4, or rotate manually:
 
 ```bash
 SOURCE_TOKEN=$(kubectl create token warden-token-creator -n warden --duration=24h)

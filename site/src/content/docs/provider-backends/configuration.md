@@ -32,7 +32,7 @@ EOF
 | `timeout` | duration | per provider | How long a **single** proxied call may take; when it passes before the upstream answers, the client gets `504`. The `mcp` and `mcp_aws` providers default to `60s`; others carry their own default. |
 | `listen_timeout` | duration | `10m` | **`mcp` / `mcp_aws` only.** Bounds a long-lived stream — `subscriptions/listen` and the legacy SSE GET — instead of `timeout`. |
 | `auto_auth_path` | string | Required | Path to the auth mount used for implicit authentication (e.g., `auth/jwt/`, `auth/cert/`). See [JWT auth](/auth-methods/jwt/) and [Certificate auth](/auth-methods/cert/). |
-| `default_role` | string | — | Auth role used when the request names none. It is the **lowest**-precedence source, not the highest — see [Selecting a role](/identity/roles/). |
+| `default_role` | string | — | A role of the namespace, used when the request names none. It is the **lowest**-precedence source, not the highest — see [Selecting a role](/identity/roles/#how-a-request-selects-a-role). It does not grant the role: a [group](/identity/groups/) must still grant it to the caller. |
 
 ## Request bodies and policy
 
@@ -65,7 +65,11 @@ request header, in addition to the agent's own credential. This is opt-in: with
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `user_auth_path` | string | — | Auth mount that validates the user credential. **Bearer-format mounts only.** Absent ⇒ no user principal. |
-| `user_auth_role` | string | *(mount default)* | Role the user auth uses. |
+
+The user is admitted with no role. `user_auth_role` is removed: a config write that sets it
+is refused, and a mount whose stored config still names it refuses every user credential
+until you remove it. The user token's audience is bound by the user auth mount's
+`bound_audiences`.
 
 :::caution[Changed in v0.20.0]
 `user_token_header` is retired, and `user_auth_path` is read from the **mount only** — no
@@ -99,9 +103,13 @@ private CA in production, supply the CA with `ca_data` instead.
 ## Selecting a role
 
 Which role a request runs under is resolved per request, and the order differs between
-gateway traffic and transparent operations — the `X-Warden-Role` header wins on the
+a provider's gateway and Warden's own API — the `X-Warden-Role` header wins on the
 former, the `role=` query parameter on the latter. Both chains are documented once in
-[Roles → Selecting a role](/identity/roles/).
+[Roles → How a request selects a role](/identity/roles/#how-a-request-selects-a-role).
+
+Naming a role does not grant it. Roles are granted per request by
+[groups](/identity/groups/): a virtual group grants its roles to the callers whose
+verified facts match one of its rules, a static group to the entities it lists.
 
 ## See Also
 

@@ -36,8 +36,10 @@ itself — the request body carries no credential header at all.
 The client certificate from the handshake is validated by the `cert` auth
 method (chain-of-trust against the configured CA bundle) or, for an X.509-SVID,
 the `spiffe` method against the trust-domain bundles. With no `X-Warden-Token`
-on the request, Warden uses [transparent authentication](/identity/authentication/)
-and resolves the identity from the certificate per request. The identity can
+on the request, Warden uses [implicit authentication](/identity/authentication/#implicit-authentication):
+the mount admits the certificate, and on every request the
+[groups](/identity/groups/) that match its facts decide whether the role the
+request names is granted. The identity can
 equally arrive on a forwarded header (`X-Forwarded-Client-Cert`) when Warden
 sits behind a TLS-terminating proxy. mTLS requires a Warden listener configured
 to request client certificates — see [Authentication](/identity/authentication/).
@@ -82,5 +84,5 @@ rotation, or the handshake — ever enters the agent. This is exactly the
   when identity is a JWT rather than a certificate.
 - [Self-Minted SVID](/agent-identity/self-minted-identity/) — the agent fetches and presents the
   SVID itself instead of letting a sidecar originate the tunnel.
-- [Authentication](/identity/authentication/) — transparent auth, mTLS, and the
+- [Authentication](/identity/authentication/) — implicit authentication, mTLS, and the
   `cert` / `spiffe` methods.

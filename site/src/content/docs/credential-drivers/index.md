@@ -90,7 +90,7 @@ view. **Keyless** columns are best; **Inline: static** is discouraged.
 | Driver (`type`) | Keyless: federation | Keyless: chaining | Inline: dynamic | Inline: static | Delegated |
 |---|:--:|:--:|:--:|:--:|:--:|
 | `aws` | ✓ | | ✓ | ✓ | |
-| `azure` | ✓ | | ✓ | ✓ | |
+| `azure` | ✓ | ✓ | ✓ | ✓ | |
 | `gcp` | ✓ | | ✓ | | |
 | `hvault` | ✓ | | ✓ | ✓ | |
 | `alicloud` | ✓ | | ✓ | | |
@@ -119,6 +119,19 @@ key for either belongs on an [`apikey`](/credential-drivers/apikey/) source.
 per request from another spec. Either way nothing standing sits in Warden's
 barrier — they differ in what the upstream trusts, an assertion or a secret.
 
+An assertion for an agent names it by its composite subject,
+`wid:<namespaceID>:<mountAccessor>:<principalID>`, and the trust policies on the
+upstream bind agents by that prefix. The `wid:` prefix is therefore reserved for agents.
+When a spec carries the user into the assertion (`assertion_user_claims`), a user whose
+principal begins with `wid:` is refused with `403`, before any assertion is built, so no
+user can present an agent's subject.
+
+`azure` authenticates an app registration in three ways: federation, a stored client
+secret, or a certificate (`auth_method=certificate`). The certificate's key is either
+stored in the source or held in a KMS. With `secret_spec` naming a spec that mints a
+signing capability, Warden signs the PS256 assertion Entra ID expects without ever reading
+the key, which is the chaining column above.
+
 `token_exchange` is keyless by **chaining**, which is easy to misread. It
 forwards a caller-derived subject token — often a Warden assertion — to an STS,
 so its *request* is federated; but the source must still authenticate itself to
@@ -131,7 +144,9 @@ A chained secret has to come from somewhere. Five mint methods can serve as the
 **producer** at the far end of a `secret_spec`: `hvault` `kv2_read`, `aws`
 `secret_read` (Secrets Manager), `gcp` `secret_read` (Secret Manager), `azure`
 `secret_read` (Key Vault), and `hvault` `transit_signer` — which yields not a secret but a scoped *signing
-capability*, so its consumer can sign without the key ever being read. A producer
+capability*, so its consumer can sign without the key ever being read. Its consumers are
+`token_exchange` and `oauth2` with `client_auth=kms_private_key_jwt`, and `azure` with
+`auth_method=certificate`. A producer
 can itself be federated, which is what makes a chain keyless end to end. See
 [credential chaining](/federation/credential-chaining/#producers).
 

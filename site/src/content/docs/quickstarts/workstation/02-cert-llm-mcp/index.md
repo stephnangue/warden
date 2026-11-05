@@ -60,7 +60,7 @@ inject. Download the **Warden CLI** onto your `PATH` (swap `darwin_arm64` for `d
 `linux_*`):
 
 ```bash
-VER=0.21.0
+VER=0.22.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -85,13 +85,13 @@ warden status
 
 # Enable cert auth if you haven't (identity = cert CN). Idempotent to re-run.
 warden auth enable cert 2>/dev/null || true
-warden write auth/cert/config trusted_ca_pem=@certs/ca.crt principal_claim=cn
+warden write auth/cert/config trusted_ca_pem=@certs/ca.crt
 ```
 
 ### Step 2 — route GitHub's MCP server through Warden
 
-Mount the generic `mcp` provider, store the PAT as a `github` credential, and bind a **second**
-cert-auth role (same cert, new role) to that credential.
+Mount the generic `mcp` provider, store the PAT as a `github` credential, create a **second**
+role bound to that credential, and grant it to the same certificate with a group.
 
 ```bash
 # Provider — GitHub's hosted MCP endpoint REQUIRES the trailing slash on its URL
@@ -108,7 +108,7 @@ warden cred source create github-src -type=github -rotation-period=0 \
 warden cred spec create github-ops -source github-src \
   -config mint_method=pat -config token=$GH_PAT
 
-# Policies + cert-auth role — same client cert (allowed_common_names="mcp-agent").
+# Policies + role, granted to the same client cert (CN mcp-agent) by a group.
 # Two policies: the capability policy grants the path, the MCP policy reaches
 # inside each tool call so read/list/search tools pass while state-changing ones
 # are denied at Warden (demonstrated in Step 6). Access is the intersection of
@@ -130,11 +130,29 @@ path "github-mcp/role/+/gateway*" {
 }
 EOF
 
-warden write auth/cert/role/github-user \
-  allowed_common_names="mcp-agent" \
-  token_policies="mcp-github-access,mcp-github-calls" token_ttl="1h" \
-  cred_spec_name="github-ops"
+warden role create github-user -json '{
+  "description": "Read-only GitHub tools through the GitHub MCP server",
+  "policies": ["mcp-github-access", "mcp-github-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
+
+warden identity group create github-users -json '{
+  "type": "virtual",
+  "description": "Workstation certificates allowed to use the GitHub MCP server",
+  "roles": ["github-user"],
+  "rules": [
+    {
+      "mount": ["auth/cert/"],
+      "cn": ["mcp-agent"]
+    }
+  ]
+}'
 ```
+
+:::caution[In production, register the agent]
+The group above grants the role to any caller its rule matches: fine for this quickstart, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
 
 > **Why a stored PAT?** It keeps this tutorial short and makes the same point — the token never
 > reaches the workstation. Beyond a tutorial, keep the token in your secret store and chain it
@@ -217,8 +235,8 @@ gateway, recorded, and never executed.**
 1. Step 3's curl returns a JSON-RPC tool list, not `401`/`403`.
 2. `claude mcp list` shows `github ✓ Connected` with **no token in the config** —
    `grep github ~/.claude.json` shows only the gateway URL.
-3. A read-only GitHub tool call from Claude returns data; `docker compose logs warden` shows a
-   cert login + `github-ops` credential issue.
+3. A read-only GitHub tool call from Claude returns data, served with the `github-ops`
+   credential.
 4. **Nothing on disk:** `grep -ri 'ghp_\|Bearer ' ~/.claude.json` finds no token — the config
    holds only the gateway URL.
 5. **Audit is real:** the `tools/list` call has an entry with `auth.role_name = "github-user"`,
@@ -246,8 +264,9 @@ token is a change in the store, not in Warden. The same goes for 01's Anthropic 
 
 - **GitHub `HTTP 404`** — trailing-slash mismatch. The gateway URL must end `…/gateway/`. The
   suffix after `gateway` is forwarded verbatim to the upstream.
-- **`403` + `WWW-Authenticate`** — the cert CN didn't match `allowed_common_names`, or the
-  `mcp-github-access` policy is missing.
+- **`403` `role "github-user" is not assumable through auth/cert/: no group grants it to this
+  caller`** — no group grants the role to this certificate: check the group's `cn` rule. A
+  `403` without that message means the `mcp-github-access` policy is missing.
 - **`401` from GitHub** — the PAT is wrong or lacks scope; re-create `github-ops` with a valid
   `$GH_PAT` (`repo` + `read:org`).
 - **`warden` hangs / connection refused** — confirm the stack is up (`docker compose ps`) and
@@ -264,4 +283,4 @@ rm -rf certs audit
 
 > To add Slack and AWS MCP servers behind the same cert, see the *Add more upstreams* appendix
 > referenced from the [series README](/quickstarts/workstation/). Each follows the same shape: mount the
-> provider → create the credential → add a cert-auth role for the same CN.
+> provider → create the credential → create a role → grant it to the same CN with a group.

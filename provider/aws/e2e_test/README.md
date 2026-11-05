@@ -81,41 +81,50 @@ EOF
   -min-ttl 600s \
   -max-ttl 8h
 
-# Enable JWT authentication
+# Enable JWT authentication; an agent mount binds the audience its tokens carry
 ./warden -n PROD/SEC auth enable jwt -description="jwt test auth method"
-./warden -n PROD/SEC write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
+./warden -n PROD/SEC write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 
-# Create JWT roles
-./warden -n PROD/SEC write auth/jwt/role/aws-streamer \
-    token_policies="aws-streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_local \
-    token_ttl=1h
-
-./warden -n PROD/SEC write auth/jwt/role/aws-kv \
-    token_policies="aws-streaming" \
-    user_claim=sub \
-    cred_spec_name=aws_static \
-    token_ttl=1h
-
-# Enable AWS provider
+# Enable the AWS provider; it authenticates agents at auth/jwt/
 ./warden -n PROD/SEC provider enable aws -description="aws provider"
-./warden -n PROD/SEC write aws/config proxy_domains="localhost,warden"
+./warden -n PROD/SEC write aws/config proxy_domains="localhost,warden" auto_auth_path=auth/jwt/
+
+# Create the roles, and a group granting both to every agent the JWT mount admits
+./warden -n PROD/SEC role create aws-streamer -json '{
+  "policies": ["aws-streaming"],
+  "cred_spec_name": "aws_local",
+  "provider_path": "aws/"
+}'
+./warden -n PROD/SEC role create aws-kv -json '{
+  "policies": ["aws-streaming"],
+  "cred_spec_name": "aws_static",
+  "provider_path": "aws/"
+}'
+./warden -n PROD/SEC identity group create aws-agents -json '{
+  "type": "virtual",
+  "roles": ["aws-streamer", "aws-kv"],
+  "rules": [{ "mount": ["auth/jwt/"] }]
+}'
 ```
 
 ### 3. Set Environment Variables
 
 ```bash
-# Get JWT token from Hydra
+# Get a JWT from Hydra, issued for the warden audience
 export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials&client_id=service-client-1&client_secret=service-secret-1-change-this&scope=api:read api:write' \
+  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write&audience=warden' \
   | jq -r '.access_token')
 
-# Login to Warden and extract credentials
-LOGIN_OUTPUT=$(./warden -n PROD/SEC login -method=jwt -token=$JWT -role=aws-kv)
-export AWS_ACCESS_KEY_ID=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*access_key_id=\([^,]*\).*/\1/')
-export AWS_SECRET_ACCESS_KEY=$(echo "$LOGIN_OUTPUT" | grep "| data" | sed 's/.*secret_access_key=\([^ |]*\).*/\1/')
+# The SDK signs with the role name as its access key and the JWT as its secret
+# and session token; Warden reads the role from the access key on every request
+export AWS_ACCESS_KEY_ID=aws-kv
+export AWS_SECRET_ACCESS_KEY="$JWT"
+export AWS_SESSION_TOKEN="$JWT"
 
 # Point AWS SDK to Warden proxy
 export AWS_ENDPOINT_URL=http://localhost:8400/v1/PROD/SEC/aws/gateway

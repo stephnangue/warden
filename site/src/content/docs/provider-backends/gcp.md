@@ -99,9 +99,9 @@ For key rotation support, the service account also needs:
 
 For impersonation, the source service account needs `iam.serviceAccounts.getAccessToken` on the target service account.
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -111,14 +111,15 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/gcp-user \
-    token_policies="gcp-access" \
-    user_claim=sub \
-    cred_spec_name=gcp-cloud-platform
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+The role and the group that grants it come in [Step 5](#step-5-grant-agents-the-role),
+once the provider, the spec and the policy exist.
 
 ## Step 2: Mount and Configure the Provider
 
@@ -153,6 +154,31 @@ EOF
 ```
 
 See [Provider configuration](/provider-backends/configuration/) for the full list of common config fields (`proxy_domains`, `timeout`, `tls_skip_verify`, `ca_data`, and more).
+
+### Which hosts the mount reaches
+
+The first path segment after `gateway/` names the Google API host, and the request leaves
+for it carrying an access token. So before any credential is read, Warden checks that host:
+
+- It must be a plain lowercase host name, with no IP address, port, user info or path
+  characters. Anything else is refused with `400`.
+- It must fall under one of the mount's `allowed_host_suffixes`. Any other host is
+  refused with `403`.
+
+The default is `.googleapis.com`. An entry starts with a dot, and `.example.com` allows
+`example.com` and every host under it; an entry without the dot, `*` and a bare top-level
+domain are refused. To narrow a mount to Cloud Storage and BigQuery:
+
+```bash
+warden write gcp/config '{
+  "allowed_host_suffixes": [".storage.googleapis.com", ".bigquery.googleapis.com"]
+}'
+```
+
+An empty list restores the default, and a mount that never set one follows the default.
+
+For model calls to Vertex AI, which run far longer than ordinary API calls, see
+[Keyless model access](/federation/keyless-model-access/#vertex-ai).
 
 Verify the configuration:
 
@@ -371,7 +397,35 @@ Verify:
 warden policy read gcp-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create gcp-user -json '{
+  "policies": ["gcp-access"],
+  "cred_spec_name": "gcp-cloud-platform",
+  "provider_path": "gcp/"
+}'
+
+warden identity group create gcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["gcp-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+On each request Warden authenticates the token at `auth/jwt/`, resolves the role the request names against the groups that match the token's facts, and authorizes the call with the role's policies.
+
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -479,13 +533,13 @@ When the source key rotates, all credential specs sharing that source automatica
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The source, spec, policy and role (Steps 3–5) are identical. Replace the JWT mount with a cert mount, point the provider at it, and grant the role through it.
 
 ### Enable Cert Auth
 
@@ -498,23 +552,8 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=gcp-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-Create a role that binds allowed certificate identities to a credential spec and policy:
-
-```bash
-warden write auth/cert/role/gcp-user \
-    allowed_common_names="agent-*" \
-    token_policies="gcp-access" \
-    cred_spec_name=gcp-cloud-platform
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -530,6 +569,22 @@ warden write gcp/config <<EOF
 EOF
 ```
 
+### Grant the Role to Certificates
+
+Grant `gcp-user` (Step 5) to certificates whose common name starts with `agent-`:
+
+```bash
+warden identity group create gcp-user-cert-agents -json '{
+  "type": "virtual",
+  "roles": ["gcp-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+A rule can also match other certificate fields, such as `org`, `ou` or `dns_san`. See [Cert auth](/auth-methods/cert/) for the facts a certificate proves.
+
 ### Make Requests with Certificates
 
 ```bash
@@ -538,7 +593,7 @@ curl --cert client.pem --key client-key.pem \
     --cacert warden-ca.pem \
     "https://warden.internal/v1/gcp/role/gcp-user/gateway/storage.googleapis.com/storage/v1/b?project=my-project"
 
-# Default role (no role in URL)
+# No role in URL: the provider's default_role applies, when the mount sets one
 curl --cert client.pem --key client-key.pem \
     --cacert warden-ca.pem \
     "https://warden.internal/v1/gcp/gateway/storage.googleapis.com/storage/v1/b?project=my-project"
