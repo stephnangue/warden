@@ -89,6 +89,23 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS_WrongSource(t *testing.T) {
 	assert.Contains(t, err.Error(), "aws source")
 }
 
+// The rds mint signs with the source's own credentials and never assumes
+// role_arn, so a spec naming it is refused where it is written, not stored to
+// sign as a principal other than the one it names.
+func TestDBAuthTokenCredType_ValidateConfig_RDS_RoleARNRefused(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method": "rds_iam_token",
+		"db_user":     "app_readonly",
+		"db_endpoint": "mydb.abc123.us-east-1.rds.amazonaws.com",
+		"role_arn":    "arn:aws:iam::123456789012:role/db-access",
+	}
+
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
+	assert.ErrorContains(t, err, "role_arn is not supported for rds_iam_token")
+}
+
 func TestDBAuthTokenCredType_ValidateConfig_RDS_MissingEndpoint(t *testing.T) {
 	ct := NewDBAuthTokenCredType()
 

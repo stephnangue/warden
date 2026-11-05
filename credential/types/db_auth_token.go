@@ -113,7 +113,7 @@ func (t *DBAuthTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("us-east-1"),
 
 		credential.StringField("role_arn").
-			Describe("AWS IAM role ARN for cross-account access (rds_iam_token)").
+			Describe("Not supported: an rds_iam_token spec naming it is refused, since the token is signed with the source's own credentials").
 			Example("arn:aws:iam::123456789:role/db-access"),
 
 		credential.StringField("target_service_account").
@@ -165,6 +165,12 @@ func (t *DBAuthTokenCredType) ValidateConfig(config credential.Config, sourceTyp
 		}
 		if config.Get("db_user") == "" {
 			return fmt.Errorf("rds_iam_token requires db_user")
+		}
+		// No mint path assumes it: the token is signed with the source's own
+		// credentials. Refused rather than ignored, so no spec reads as
+		// cross-account while signing as the source.
+		if config.Get("role_arn") != "" {
+			return fmt.Errorf("role_arn is not supported for rds_iam_token: the token is signed with the source's own credentials; grant rds-db:connect to the source's principal")
 		}
 	case "redshift_iam_token":
 		if sourceType != credential.SourceTypeAWS {
