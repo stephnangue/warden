@@ -223,9 +223,6 @@ type UserAttribution struct {
 	// omitted) for the root namespace. A delegation assertion's warden_namespace
 	// carries the same path, rendered "root" for the root namespace.
 	NamespacePath string `json:"namespace_path,omitempty"`
-	// RoleName is the auth role the user's token was validated under (the mount's
-	// user auth role) — the warden_role a delegation assertion carries for the user.
-	RoleName string `json:"role_name,omitempty"`
 	// Actors is the user token's OWN verified RFC 8693 "act" chain, outermost
 	// first — who handled the user's token before the agent presented it. A
 	// delegation assertion nests it under the agent as prior actors. Distinct from

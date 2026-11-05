@@ -370,7 +370,6 @@ func stampUserAttribution(entry *audit.LogEntry, req *logical.Request) {
 		TokenID:       ute.ID,
 		NamespaceID:   ute.NamespaceID,
 		NamespacePath: ute.NamespacePath,
-		RoleName:      ute.RoleName,
 		Actors:        toAuditActors(ute.Actors),
 	}
 }

@@ -296,7 +296,6 @@ func TestStampUserAttribution(t *testing.T) {
 		assert.NotContains(t, entry.Auth.User.Subject, "wid:", "user attribution must be the raw sub, not the wid composite")
 		assert.Equal(t, userTE.ID, entry.Auth.User.TokenID)
 		assert.Equal(t, userTE.NamespaceID, entry.Auth.User.NamespaceID)
-		assert.Empty(t, entry.Auth.User.RoleName, "a user is admitted with no role")
 
 		// The raw user credential must never be serialized into an audit record.
 		blob, err := json.Marshal(entry)
