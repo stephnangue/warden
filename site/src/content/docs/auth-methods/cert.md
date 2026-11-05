@@ -26,7 +26,7 @@ Coming from v0.21.0, where roles were bound on the auth mount? See [Upgrading fr
 - A **Warden server** unsealed and reachable from the workload's network.
 - A **PEM-encoded CA bundle** that issued (or transitively signed) the certificates your workloads present. Client certificates must allow client authentication in their extended key usage.
 - A way to get the certificate to Warden: direct mTLS at the Warden listener, or a trusted reverse proxy that terminates TLS and forwards the certificate in a header. See [How the Certificate Reaches Warden](#how-the-certificate-reaches-warden).
-- The [policies](/concepts/policies/) the role you grant will carry. Admitting a certificate grants no access on its own.
+- The [policies](/identity/policies/) the role you grant will carry. Admitting a certificate grants no access on its own.
 
 ## Enabling mTLS on the Listener
 
@@ -88,7 +88,7 @@ Every admission carries `mount` (here `auth/cert/`) and `kind` (`agent`), and th
 
 An empty value is not a fact: a certificate without a common name has no `cn`. On a cert mount, `facts` can only publish one of these fields again, under a name you choose; with the mapping above, `ou` is also the fact `team`. A mount maps at most 32 facts; names use lowercase letters, digits and `_ . : / -`, never `mount` or `kind`. A write of `facts` replaces the whole map.
 
-Mapped facts reach [CEL conditions](/concepts/cel-conditions/) as `agent.metadata.<name>`, a multi-valued field joined with commas. A policy can then gate a path with `condition = "agent.metadata.team.startsWith('platform')"`. The built-in fields are not in `agent.metadata` unless you map them, to another name or to themselves (`"cn": "cn"`).
+Mapped facts reach [CEL conditions](/identity/cel-conditions/) as `agent.metadata.<name>`, a multi-valued field joined with commas. A policy can then gate a path with `condition = "agent.metadata.team.startsWith('platform')"`. The built-in fields are not in `agent.metadata` unless you map them, to another name or to themselves (`"cn": "cn"`).
 
 ### The native identity
 

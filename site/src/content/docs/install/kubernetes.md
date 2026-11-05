@@ -561,15 +561,19 @@ for testing failover.
 ### Forcing a leader step-down
 
 ```bash
-LEADER=$(kubectl -n warden get pods -l app.kubernetes.io/name=warden \
+# Any pod will do: a standby forwards the step-down to the active node.
+POD=$(kubectl -n warden get pods -l app.kubernetes.io/name=warden \
   -o name | head -1 | sed 's|pod/||')
 
-kubectl -n warden exec "$LEADER" -- \
+kubectl -n warden exec "$POD" -- \
   curl -sk -X PUT https://localhost:8400/v1/sys/step-down \
   -H "X-Warden-Token: $ROOT_TOKEN"
 ```
 
-A standby is promoted within ~10s.
+The token must be the root token or carry a policy that grants `sudo` with `update`
+on `sys/step-down`. The call is audited, and it is refused in a namespace: send it
+without `X-Warden-Namespace`. A `204` means the step-down was accepted; a standby is
+promoted within ~10s.
 
 ### Increasing replica count
 

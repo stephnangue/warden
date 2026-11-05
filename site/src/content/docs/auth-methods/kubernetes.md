@@ -228,7 +228,7 @@ Every admission through a kubernetes mount carries these facts, which group rule
 
 A token whose reviewed username does not name a ServiceAccount is not admitted.
 
-`facts` can publish one of these fields again under a second name. Only these fields can be sources; a mount maps at most 32, and `mount` and `kind` are reserved. Mapped facts also reach [CEL conditions](/concepts/cel-conditions/) as `agent.metadata.<name>` (a multi-valued fact joined with commas); map a field to its own name to expose it unchanged:
+`facts` can publish one of these fields again under a second name. Only these fields can be sources; a mount maps at most 32, and `mount` and `kind` are reserved. Mapped facts also reach [CEL conditions](/identity/cel-conditions/) as `agent.metadata.<name>` (a multi-valued fact joined with commas); map a field to its own name to expose it unchanged:
 
 ```bash
 warden write auth/k8s-prod/config '{

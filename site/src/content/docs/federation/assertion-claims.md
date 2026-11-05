@@ -63,8 +63,8 @@ With no user disclosed, the top level names the agent:
 | Claim | Value |
 |---|---|
 | `sub` | The agent's composite `wid:…` subject. |
-| `warden_role` | The role the agent was admitted under. Empty for a role-less caller, such as a root token. |
-| `warden_metadata` | The agent's projected login metadata. Opt-in, see [`assertion_metadata_claims`](#login-metadata--assertion_metadata_claims). |
+| `warden_role` | The role the request runs under. Empty for a role-less caller, such as a root token. |
+| `warden_metadata` | The agent's projected metadata. Opt-in, see [`assertion_metadata_claims`](#agent-metadata--assertion_metadata_claims). |
 | `warden_resource` | The single downstream resource. Opt-in or derived, see [below](#pinning-a-resource--warden_resource). |
 
 ```json
@@ -95,12 +95,14 @@ delegation token**. The top level is the **user**, whose authority is used, and 
 
 | Claim | Value |
 |---|---|
-| `sub` | The user's id, as their IdP asserted it — the value the user auth role's `user_claim` selects, and the same value `{{user.sub}}` templates. |
+| `sub` | The user's id, as their IdP asserted it — the value the user auth mount's `user_claim` selects, and the same value `{{user.sub}}` templates. |
 | `warden_namespace` | The namespace path, such as `team-payments/`. The root namespace renders `root`. |
-| `warden_role` | The auth role the user's token was validated under. |
 | `warden_metadata` | The user's projected claims, from `assertion_user_claims`, without `sub`. |
 | `act` | The agent: its composite `sub`, `iss` (Warden's issuer URL), `warden_role` and `warden_metadata`. |
 | `warden_resource` | As above. |
+
+There is no `warden_role` at the user level: a user runs under no role, so only the
+agent in `act` carries one.
 
 ```json
 {
@@ -112,7 +114,6 @@ delegation token**. The top level is the **user**, whose authority is used, and 
   "exp": 1755248700,
   "jti": "5b7e2d91-0c4f-4a3e-8d6b-2f9a1c3e7b40",
   "warden_namespace": "team-payments/",
-  "warden_role": "employees",
   "warden_metadata": {
     "username": "alice"
   },
@@ -165,7 +166,7 @@ it and receives no user principal fails closed.
 :::note[Who may act for whom is decided by policy]
 The profile renders the pair of principals the agent's policy admitted; it does not decide
 that this agent may act for this user. Bind the two with a
-[CEL condition](/concepts/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
+[CEL condition](/identity/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
 the agent's policy — for example, the user token's `may_act` claim compared to the agent. Without one, any agent the
 policy authorizes may pair with any valid user token.
 :::
@@ -292,10 +293,11 @@ resource id may itself contain `:`, and Vault values carry no prefix at all).
 > mount on a secrets vault, or Warden's own JWT auth method — configured to trust Warden's
 > issuer.
 
-## Login metadata — `assertion_metadata_claims`
+## Agent metadata — `assertion_metadata_claims`
 
-Set **`assertion_metadata_claims`** (comma-separated) to project selected
-login-derived [token-metadata](/identity/tokens/) keys into the assertion, so an
+Set **`assertion_metadata_claims`** (comma-separated) to project selected keys of the
+agent's metadata — the [facts its auth mount maps](/identity/authentication/#facts), the
+same values CEL reads as `agent.metadata.<name>` — into the assertion, so an
 upstream trust policy can gate on attributes such as `team` or `env` without minting a
 distinct upstream role per value.
 

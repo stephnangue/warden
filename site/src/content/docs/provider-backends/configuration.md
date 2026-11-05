@@ -38,7 +38,7 @@ EOF
 
 Most providers that front a token-authenticated HTTP API — the LLM, Git, observability
 and ITSM providers, `vault`, `kubernetes` — read a request's body before policy runs, so a
-[condition](/concepts/cel-conditions/) can gate on its fields as `request.data.<field>`.
+[condition](/identity/cel-conditions/) can gate on its fields as `request.data.<field>`.
 The [`rest`](/provider-backends/rest/#request-bodies-and-policy) provider does so when its
 `parse_request_body` setting is on. The `mcp` providers parse the JSON-RPC call instead, for
 [MCP policy](/concepts/mcp/); the cloud providers (`aws`, `azure`, `gcp`, …) do not parse

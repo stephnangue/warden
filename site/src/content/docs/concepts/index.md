@@ -17,19 +17,23 @@ also jump straight to a topic.
 
 ## Identity and access
 
-How a caller proves who it is and what that lets it do.
+How a caller proves who it is and what that lets it do. Start with the
+[Identity & access](/identity/) section: it follows a request through
+authentication, the roles groups grant it, and authorization.
 
-- [Authentication](/identity/authentication/) — the three credential forms, transparent
-  authentication, and identity-channelling sidecars.
+- [Authentication](/identity/authentication/) — the credentials Warden accepts, implicit
+  authentication, and the facts an auth mount records.
 - [Auth Methods](/auth-methods/) — per-method setup guides for the
-  certificate, JWT/OIDC, Kubernetes, and SPIFFE backends.
-- [Tokens](/identity/tokens/) — what authentication produces: session and transparent
-  tokens, and the root token.
-- [Roles](/identity/roles/) — how a validated credential maps to policies and access,
-  resolved per request.
-- [Policies](/concepts/policies/) — capability-based authorization, path matching, and
+  certificate, JWT, OIDC, Kubernetes, and SPIFFE backends.
+- [Tokens](/identity/tokens/) — what authentication produces: identity tokens, service
+  tokens and tickets, and the root token.
+- [Groups](/identity/groups/) and [Roles](/identity/roles/) — how a caller comes to hold
+  a role on each request, and what the role names.
+- [Entities](/identity/entities/) and [Sponsors](/identity/sponsors/) — registering an
+  agent, and the people who answer for it.
+- [Policies](/identity/policies/) — capability-based authorization, path matching, and
   request-content rules.
-- [CEL Condition Cookbook](/concepts/cel-conditions/) — worked recipes for the `condition`
+- [CEL Condition Cookbook](/identity/cel-conditions/) — worked recipes for the `condition`
   expression, grouped by whether they gate on the agent alone or on the user it acts for.
 
 ## Brokering access

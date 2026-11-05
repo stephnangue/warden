@@ -130,6 +130,18 @@ former leader rejoins as a standby (pausing briefly before contending again).
 This is the graceful way to drain a node for maintenance without waiting for a
 lock to time out.
 
+```bash
+# root token, or a token whose policy grants sudo on sys/step-down
+warden write sys/step-down
+```
+
+The endpoint is a root path: it needs the root token or a policy that grants
+`sudo` with `update` on `sys/step-down`. It is served in the root namespace only:
+a request that names a namespace, by path or by `X-Warden-Namespace`, is refused
+with a 400. A step-down sent to a standby is forwarded to the active node. The
+request and its response are audited like any other `sys` call, and the node steps
+down once the response is written.
+
 ## See Also
 
 - [Storage](/concepts/storage/) — the shared backend and the `ha_enabled` lock table.

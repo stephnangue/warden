@@ -158,7 +158,7 @@ acted as well as who was acted for.
 > expresses it as a CEL condition —
 > `user.present && user.metadata.authorized_agent == agent.principal` — so the
 > pairing can be required before a credential is ever requested. See
-> [binding the user to the agent acting for them](https://wardengateway.com/concepts/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them).
+> [binding the user to the agent acting for them](https://wardengateway.com/identity/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them).
 > Enforcing it in both places is worth it for different reasons: at the gateway it
 > fails early and cheaply, and in OpenBao it holds even when the gateway's rule was
 > never written.

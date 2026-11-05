@@ -27,7 +27,7 @@ This section explains that model, in the order a request meets it.
    require it.
 3. **Authorize.** The [role](/identity/roles/) the request asks for must be
    one the caller holds; a role no group grants is refused. The role's
-   [policies](/concepts/policies/) then decide the call, and its
+   [policies](/identity/policies/) then decide the call, and its
    [credential spec](/concepts/credentials/) is what Warden injects upstream.
 
 A change to a group, a role or an entity applies from the next request: no
@@ -84,12 +84,25 @@ static group before you claim the agent's native identity.
 
 ## In this section
 
+**Authenticate**
+
 - [Authentication](/identity/authentication/) — auth mounts, the credentials they admit, and the facts they record.
 - [Tokens](/identity/tokens/) — service tokens, identity tokens and tickets.
+
+**Resolve**
+
 - [Groups](/identity/groups/) — virtual and static groups, and how they grant roles.
-- [Roles](/identity/roles/) — what a role names, and how a request selects one.
 - [Entities](/identity/entities/) — the identity store, registering agents, and enforcing registration.
 - [Sponsors](/identity/sponsors/) — the people who answer for an agent.
+
+**Authorize**
+
+- [Roles](/identity/roles/) — what a role names, and how a request selects one.
+- [Policies](/identity/policies/) — the rules a role names, and the built-in policies every request runs under.
+- [CEL conditions](/identity/cel-conditions/) — conditions on a policy, with a cookbook of recipes.
+
+**People and operators**
+
 - [Human operators](/identity/human-operators/) — `warden login`, tickets, and roles from your identity provider.
 - [Built-in roles](/identity/built-in-roles/) — the four operator roles Warden defines for you.
 

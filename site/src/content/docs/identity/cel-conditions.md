@@ -22,7 +22,7 @@ Evaluation is **fail-closed**: `false`, a type mismatch, or reading an absent ke
 
 This page is the cookbook. For the full semantics — the activation contract, cost bounds,
 how inputs reach the audit log — see
-[Policies → Fine-grained access](/concepts/policies/#fine-grained-access).
+[Policies → Fine-grained access](/identity/policies/#fine-grained-access).
 
 ## Quick reference
 
@@ -31,9 +31,9 @@ pages link here rather than repeating it.
 
 | Namespace | Fields |
 | --- | --- |
-| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `namespace`, `data.<key>` |
-| `agent` | `principal`, `role`, `namespace`, `policies` (list), `metadata.<key>`, `actors` (list of `{subject, issuer}`), `token_type`, `token_ttl_seconds`, `token_expires_at` |
-| `user` | `present`, `principal`, `role`, `namespace`, `metadata.<key>`, `actors`, `token_type`, `token_ttl_seconds`, `token_expires_at`. There is no `user.policies` ([why](#13-what-user-does-not-give-you)) |
+| `request` | `path`, `operation`, `client_ip`, `mount_point`, `mount_type`, `mount_class`, `mount_accessor`, `transparent`, `data_plane`, `namespace`, `data.<key>` |
+| `agent` | `present`, `principal`, `role`, `namespace`, `policies` (list), `groups` (list), `alias`, `entity.*` (`id`, `name`, `kind`, `state`, `governed_by`, `metadata`, `profile`), `metadata.<name>`, `actors` (list of `{subject, issuer}`), `token_type`, `token_ttl_seconds`, `token_expires_at` |
+| `user` | `present`, `principal`, `role` (always empty), `namespace`, `metadata.<name>`, `actors`, `token_type`, `token_ttl_seconds`, `token_expires_at`. There is no `user.policies`, `user.groups`, `user.alias` or `user.entity` ([why](#13-what-user-does-not-give-you)) |
 | `now` | the request timestamp |
 | `call` | `method`, `tool`, `args.<key>`, `batch_index` — **MCP policies only** |
 
@@ -49,14 +49,34 @@ Values you will reference often:
 
 - `request.operation` — one of `read`, `create`, `update`, `delete`, `list`, `scan`,
   `patch`. (For an MCP gateway POST it is always `update`; gate on `call.tool` instead.)
-- `agent.token_type` — how the principal authenticated: `spiffe_role`, `cert_role`,
-  `jwt_role`, or `kubernetes_role`. It describes the *credential*, not the principal —
-  which is why it carries the `token_` prefix.
+- `agent.token_type` — the kind of token the request runs under: `identity_token` (an
+  agent admitted from the credential it presents), `ticket_token` (a person signed in
+  with `warden login`) or `service_token` (a token Warden issued, such as root). It
+  describes the *token*, not the principal — which is why it carries the `token_`
+  prefix — and it does not name the auth method: to tell auth methods apart, use a
+  group ([recipe 2](#2-require-a-group)). `user.token_type` is `identity_token` whenever
+  a user is present.
+- `agent.role` — the role granted for this request. Empty for a service token, which
+  takes no role.
+- `agent.groups` — the caller's groups for this request, sorted: the virtual groups whose
+  rules match it, or, for a registered agent, the static groups that list its entity
+  while it is governed and active. Empty, never absent, when it is in none.
+- `agent.metadata.<name>` — the facts the admitting mount maps in its `facts`, by fact
+  name. Only mapped facts are there; a multi-valued fact is joined with commas.
+- `agent.alias` — the caller's native identity at the admitting mount. `agent.entity` —
+  the [entity](/identity/entities/) that claims it. Each is absent when there is none,
+  so guard it with `has()`.
+- `agent.present` — `false` only on a discovery call that needs no credential, such as
+  `tools/list` on `sys/mcp`; `true` everywhere else.
 - `request.mount_class` — `provider`, `auth`, `audit`, `system`, or `ns_system`.
+- `request.data_plane` — `true` on a provider's gateway and access paths; `false` on its
+  config and grant paths, on system and auth mounts, and on `sys/mcp`.
+- `request.transparent` — `true` when Warden admitted the agent's own credential on this
+  request (implicit authentication); `false` for a ticket or a service token.
 - `agent.namespace` / `request.namespace` — a namespace path: `""` for root, or
   `"team-a/"` / `"team-a/team-b/"` (trailing slash) for children. `agent.namespace` is
-  where the token was **minted**; `request.namespace` is the namespace the request
-  **targets**.
+  the token's namespace, where the caller was **admitted**; `request.namespace` is the
+  namespace the request **targets**.
 
 Functions available: the CEL standard library (`has()`, `size()`, `in`, `startsWith()` /
 `endsWith()` / `contains()`, `all()` / `exists()`, the `? :` ternary), optional access
@@ -83,7 +103,7 @@ every request, gateway or not.
 
 ### 1. Pin to a role
 
-Gate on *which role was assumed*, distinct from which method authenticated it:
+Gate on the role the request runs under, when one policy is shared by several roles:
 
 ```hcl
 path "prod/payments/*" {
@@ -92,21 +112,23 @@ path "prod/payments/*" {
 }
 ```
 
-### 2. Require a specific auth method
+### 2. Require a group
 
-Only accept callers that authenticated with SPIFFE (workload identity):
+`agent.groups` lists the caller's groups on this request. A virtual group's rules name
+the auth mounts they trust, so a group is how a condition tells auth methods apart —
+here, only callers in the group of SPIFFE workloads:
 
 ```hcl
 path "prod/payments/*" {
   capabilities = ["update"]
-  condition    = "agent.token_type == 'spiffe_role'"
+  condition    = "'spiffe-workloads' in agent.groups"
 }
 ```
 
-To require *any* hardware-backed method — certificate or SPIFFE, but not JWT or
-Kubernetes: `agent.token_type in ['cert_role', 'spiffe_role']`.
+To keep a path to agents only, refusing people's tickets and service tokens:
+`agent.token_type == 'identity_token'`.
 
-### 3. Principal or trust-domain prefix
+### 3. Principal, native identity or entity
 
 Match the verified principal — e.g. a SPIFFE trust domain:
 
@@ -117,9 +139,25 @@ path "prod/payments/*" {
 }
 ```
 
-### 4. Match a login-derived metadata label
+`agent.alias` is the native identity the admitting mount verified, and `agent.entity` the
+[entity](/identity/entities/) that claims it, when the agent is registered. Both are
+absent otherwise, so guard them. To require a registered agent of one team:
 
-`agent.metadata` carries the claims the auth method projected at login:
+```hcl
+path "prod/payments/*" {
+  capabilities = ["update"]
+  condition    = "has(agent.entity) && agent.entity.metadata.team == 'payments'"
+}
+```
+
+`agent.entity` carries `id`, `name`, `kind`, `state`, `governed_by`, `metadata` and
+`profile` (only the profile fields the entity sets).
+
+### 4. Match a mapped fact
+
+`agent.metadata` carries the facts the admitting mount maps in its `facts`, under their
+fact names (see [Authentication](/identity/authentication/)). Built-in facts are there
+only when mapped, and a multi-valued fact is joined with commas:
 
 ```hcl
 path "prod/*" {
@@ -150,7 +188,8 @@ a rolling window; reach for `token_expires_at` when comparing against a fixed in
 
 ### 6. Require an attached policy
 
-`agent.policies` is the list of policies bound to the token:
+`agent.policies` is the list of the granted role's policies (a service token's own, for a
+service token):
 
 ```hcl
 path "prod/break-glass/*" {
@@ -159,10 +198,11 @@ path "prod/break-glass/*" {
 }
 ```
 
-### 7. Reject implicit (transparent) tokens
+### 7. Refuse agents' own credentials on a path
 
-`request.transparent` is `true` when the identity was established implicitly from a
-forwarded JWT rather than an explicit login:
+`request.transparent` is `true` when Warden admitted the agent's own credential (a JWT, a
+client certificate) on this request. It is `false` for a person's ticket and for a service
+token, so this keeps a path to those:
 
 ```hcl
 path "admin/*" {
@@ -220,12 +260,12 @@ user's credential:
 | `may_act` | §4.4 | "one party is authorized to **become** the actor and act on behalf of another party" — a statement of permission, carried on the subject token | The user authenticates as themselves and their token names the agent allowed to act for them. **This is the usual shape for Warden's user leg.** |
 | `act` | §4.1 | "delegation **has occurred**", identifying the party that currently holds delegated authority | The credential presented on the user leg is itself a post-exchange delegation token (subject = the user, actor = the agent) |
 
-`metadata_claims` accepts any RFC 6901 JSON Pointer, so either maps the same way. Project
-it on the *user's* auth-method role:
+A mount's `facts` accepts a JSON Pointer into nested claims, so either maps the same way.
+Map it on the *user's* auth mount (the provider's `user_auth_path`), in its config:
 
-```hcl
-metadata_claims = {
-  "/may_act/sub" = "authorized_agent"
+```json
+"facts": {
+  "/may_act/sub": "authorized_agent"
 }
 ```
 
@@ -238,7 +278,7 @@ path "prod/payments/*" {
 }
 ```
 
-For a delegation token, map `"/act/sub" = "acting_agent"` and compare that instead. Note
+For a delegation token, map `"/act/sub": "acting_agent"` and compare that instead. Note
 that `act` chains nest — the outermost `act` names the *current* actor (the same identity
 as `user.actors[0]`), while nested ones record prior actors, so a pointer at `/act/sub`
 binds the party acting directly for the user rather than the far end of the chain.
@@ -288,17 +328,18 @@ path "finance/reports/*" {
 
 Four constraints worth knowing before writing a `user` condition:
 
-- **`user.policies` does not exist.** The user never authorizes — a request is authorized
-  by the agent's token alone — so exposing it would read like an authorization check that
-  it is not. Because `user` is a dynamic map, `'admin' in user.policies` **compiles
-  cleanly and then denies every request at runtime**. It fails closed, but it fails
-  silently; there is no write-time error to warn you.
+- **`user.policies` does not exist**, nor do `user.groups`, `user.alias` and
+  `user.entity`. The user never authorizes — a request is authorized under the agent's
+  role alone — and it is granted no role and no groups, so exposing them would read like
+  an authorization check that it is not. Because `user` is a dynamic map,
+  `'admin' in user.policies` **compiles cleanly and then denies every request at
+  runtime**. It fails closed, but it fails silently; there is no write-time error to warn
+  you.
 - **A bare `user.present` is rejected at write time** with `condition must evaluate to
   bool, got dyn`. A dynamic-map field types as `dyn`, and a condition must be a boolean.
   Compare it explicitly (`user.present == true`) or use it as a guard (`user.present && …`).
-- **`user.role` is not the person's job title.** It is the auth-mount role fixed by the
-  mount's `user_auth_role` — the same value for every user on that mount. Gate on
-  `user.metadata.<key>` instead.
+- **`user.role` is always empty.** The user runs under no role. Gate on
+  `user.metadata.<name>`, the facts the user's auth mount maps, instead.
 - **`user.namespace` is always `request.namespace`.** It carries no independent
   information, so it is never worth comparing.
 
@@ -419,8 +460,8 @@ path "secret/data/*" {
 
 ### 22. Confine a token to its own namespace
 
-A token minted in a parent namespace can, by default, act in its children. `agent.namespace`
-is where it was minted; `request.namespace` is what it targets:
+A token issued in a parent namespace can, by default, act in its children. `agent.namespace`
+is where it was issued; `request.namespace` is what it targets:
 
 ```hcl
 path "secret/data/*" {
@@ -429,7 +470,7 @@ path "secret/data/*" {
 }
 ```
 
-To let a parent-minted token read across children but write only at home:
+To let a token issued in a parent read across children but write only at home:
 
 ```hcl
 condition = "request.operation in ['read', 'list'] || agent.namespace == request.namespace"
@@ -459,9 +500,7 @@ path "mcp/gateway/github/*" {
 
 ### 24. Constrain tool arguments
 
-This is how argument restrictions are expressed. The former `allowed_params` /
-`denied_params` keys are removed and rejected at write — a CEL condition over `call.args`
-replaces them, and it is strictly more expressive:
+Argument restrictions are a CEL condition over `call.args`:
 
 ```hcl
 path "mcp/gateway/deploy/*" {
@@ -528,20 +567,27 @@ MCP policies only restrict.
 - **`request.operation` is `update` for MCP gateway POSTs.** Operation-conditional logic
   there is moot; branch on `call.tool` instead.
 - **A dynamic-map typo fails closed at runtime, not at write time.** `agent.metadta.env`
-  compiles and denies every request. Only undeclared *namespaces* (a bare `token`, or
-  `call` in a capability policy) are caught at write time.
+  compiles and denies every request. Only undeclared *namespaces* (a misspelled `agnet`,
+  or `call` in a capability policy) are caught at write time.
+- **Comments.** A `#` comment belongs to the HCL around a condition, never inside one: in
+  a condition, multi-line ones included, `#` is a syntax error and the policy is refused
+  when written. Inside a condition, use CEL's `//`.
 - **Not every reference is audited.** The values a condition reads are recorded under
-  `auth.policy_results.condition.inputs` (see [Audit](/concepts/audit/)), but `now.*` and
-  bracket/optional access (`request.data["k"]`, `call.args.?x`) are not captured there —
-  dotted field access (`request.data.model`) is.
-- **Audit `salt_fields` selectors use these same names.** A selector still written against
-  the old `token` namespace does not error after the v0.20.0 rename — it stops matching,
-  and the value it protected begins logging in clear. See
-  [Upgrading from v0.19.0](/upgrade/from-v0-19/).
+  `auth.policy_results.condition.inputs`, keyed by the path as the condition spells it
+  (see [Audit](/concepts/audit/)), but `now.*`, `has()` tests and bracket/optional access
+  (`request.data["k"]`, `call.args.?x`) are not captured there — dotted field access
+  (`request.data.model`) is.
+- **Audit `salt_fields` selectors use these same names.**
+  `auth.policy_results.condition.inputs.agent.metadata.env` salts that one input. A
+  selector that names a path no condition reads matches nothing and raises no error, so
+  when you rename a field in a condition, rename it in the selector too, or the new
+  input logs in clear.
+- **Coming from v0.21.0?** The token types and `user.role` changed; see
+  [Upgrading from v0.21.0](/upgrade/from-v0-21/#3-token-types-are-named-by-what-they-carry).
 
 ## See also
 
-- [Policies → Fine-grained access](/concepts/policies/#fine-grained-access) — condition
+- [Policies → Fine-grained access](/identity/policies/#fine-grained-access) — condition
   semantics and cost bounds.
 - [MCP](/concepts/mcp/) — the MCP policy type, its grammar, and the `call.*` namespace.
 - [Delegation](/concepts/delegation/) — the user principal and how consent is established.

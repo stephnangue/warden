@@ -29,7 +29,7 @@ from. Managing devices is therefore a root-namespace, operator-level operation.
 ## See Also
 
 - [Audit](/concepts/audit/) — the recording model: what's logged, HMAC salting, and fail-open/closed.
-- [Policies](/concepts/policies/) — the authorization decisions recorded in each entry.
+- [Policies](/identity/policies/) — the authorization decisions recorded in each entry.
 - [Credentials](/concepts/credentials/) — what "credential issued" in the log refers to.
 - [Audit Attribution](/use-cases/audit-attribution/) — tying every request back to an identity.
 - [`warden audit`](/cli/audit/) — the CLI for enabling, listing, and disabling devices.

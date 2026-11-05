@@ -163,8 +163,8 @@ commands to learn which agents exist.
 ## The `default-sponsor` policy
 
 The sponsor commands are reached through `default-sponsor`, one of the
-built-in [policies](/concepts/policies/) every namespace holds. It is attached
-to every request that is not a root request, and grants only the four sponsor
+built-in [policies](/identity/policies/) every namespace holds. It applies to
+every request that is not a root request, and grants only the four sponsor
 paths, by their exact shape. The commands themselves decide who sponsors what.
 
 ```hcl

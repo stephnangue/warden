@@ -15,7 +15,7 @@ write its own admin and read-only policies before anyone can run it:
 They ship with the binary and are never stored: an upgrade changes them in
 every namespace at once, and nobody can edit one. Each is a role like any
 other in every other way: a [group](/identity/groups/) grants it, a request
-names it, and the [policy](/concepts/policies/) it carries decides the call.
+names it, and the [policy](/identity/policies/) it carries decides the call.
 They are meant for people who sign in with `warden login` (see
 [Human operators](/identity/human-operators/)).
 
@@ -24,7 +24,7 @@ They are meant for people who sign in with `warden login` (see
 A built-in role has no credential spec and no named policies. Its whole grant
 is one policy body, which `warden role read <name> -fields policy_document`
 prints. Every body but `warden-admin`'s is a single `path "*"` stanza whose
-[condition](/concepts/cel-conditions/) names the paths it covers.
+[condition](/identity/cel-conditions/) names the paths it covers.
 `request.path` is relative to the namespace of the request, so a condition
 reads the same in every namespace the role reaches.
 
@@ -274,7 +274,7 @@ The same goes for a built-in role if someone edits one of the namespace's
 default policies to add an unconditional `path "*"`.
 
 **An edited default policy outranks a built-in only in its own namespace.**
-The token's namespace's default policies are attached beside the body, and the
+The token's namespace's default policies apply beside the body, and the
 most specific path decides. A stanza an operator adds there for a specific
 path decides that path in the token's namespace; in the namespaces below it,
 that stanza does not match and the body decides.

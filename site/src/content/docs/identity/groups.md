@@ -23,7 +23,7 @@ write names it again, and a write naming the wrong type is refused.
 
 The groups a caller belongs to on a request are recorded in the audit log
 (`groups`, with `role_granted_by` and `role_group_type` for the grant) and are
-available to [CEL conditions](/concepts/cel-conditions/) as `agent.groups`, so
+available to [CEL conditions](/identity/cel-conditions/) as `agent.groups`, so
 a policy can say `'ci-deployers' in agent.groups`.
 
 ## Virtual groups
@@ -284,7 +284,7 @@ path "sys/identity/group/*" {
 The condition gates reads too, and an unconditional stanza on the same path
 lifts it, so give the holder no other stanza there. Such a holder passes
 `-type virtual` to `read`, `list`, `update` and `delete`. See
-[Policies](/concepts/policies/).
+[Policies](/identity/policies/).
 
 ## Caps
 

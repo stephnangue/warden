@@ -2,7 +2,7 @@
 title: "policy"
 ---
 
-Manage [policies](/concepts/policies/) — the rules that control what an identity
+Manage [policies](/identity/policies/) — the rules that control what an identity
 may do. Warden has **two policy types**, and every subcommand selects one with
 `-type`:
 
@@ -154,12 +154,12 @@ EOF
 ```
 
 For the full variable namespaces, functions, and the worked recipes, see
-[Fine-grained access](/concepts/policies/#fine-grained-access) and the
-[CEL Condition Cookbook](/concepts/cel-conditions/).
+[Fine-grained access](/identity/policies/#fine-grained-access) and the
+[CEL Condition Cookbook](/identity/cel-conditions/).
 
 ## See Also
 
-- [Policies](/concepts/policies/) — the capability model and policy syntax.
-- [CEL Condition Cookbook](/concepts/cel-conditions/) — condition recipes, simple to complex.
+- [Policies](/identity/policies/) — the capability model and policy syntax.
+- [CEL Condition Cookbook](/identity/cel-conditions/) — condition recipes, simple to complex.
 - [Roles](/identity/roles/) — how policies attach to an identity.
 - [CLI overview](/cli/) — global flags, output formats, exit codes.

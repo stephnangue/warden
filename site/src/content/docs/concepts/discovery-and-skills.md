@@ -19,12 +19,12 @@ This has two halves:
 
 ## The Discovery Interface
 
-Warden runs its own MCP server at `/v1/sys/mcp` — always on, and needing no role:
-it authorizes on the identity the agent presents (a bearer JWT or an mTLS client
-certificate), exactly like the rest of Warden's introspection. A caller in a
-sub-namespace selects its scope with the usual `X-Warden-Namespace` header. This
-is the single surface an agent uses to discover what it can do. It exposes two
-tools:
+Warden runs its own MCP server at `/v1/sys/mcp` in every namespace. It takes no
+role: it authorizes on the identity the agent presents — a bearer JWT, an mTLS
+client certificate, or a person's ticket from `warden login`. A caller in a
+sub-namespace selects its scope with the `X-Warden-Namespace` header, or by path
+(`/v1/<namespace>/sys/mcp`). This is the single surface an agent uses to discover
+what it can do. It exposes two tools:
 
 - **`list_roles`** — the roles the caller's identity can assume, each with an
   operator-written description, its provider, the `skill://` URI of its skill,
@@ -39,6 +39,46 @@ An agent never needs role names, endpoints, or keys handed to it out of band —
 connects, and asks. (See
 [MCP → Warden as an MCP Server](/concepts/mcp/#warden-as-an-mcp-server-discovery-interface).)
 
+### Every call is authorized and audited
+
+The discovery server is a path like any other. Each call goes through the request
+path — Authenticate, Resolve, Authorize — and is recorded in the
+[audit log](/concepts/audit/). Every namespace holds two built-in policies that
+grant it, attached to every request that is not a root request:
+
+- **`default-cbp`** grants the discovery paths.
+- **`default-mcp`** is the discovery server's MCP contract: its methods, the
+  tools `list_roles` and `read_skill`, and `skill://*` resources.
+
+Both can be edited, but not deleted. Emptying one turns discovery off in the
+namespace. Narrowing `default-mcp` narrows what the lists show, since a list
+answer keeps only what the contract would let the caller call.
+
+```bash
+warden policy read default-cbp
+warden policy read -type mcp default-mcp
+```
+
+A credential is checked only where the answer depends on who asks:
+
+| Calls | Credential |
+|---|---|
+| `initialize`, `ping`, `server/discover`, `notifications/*`, `tools/list`, `resources/templates/list`, `logging/setLevel`, `subscriptions/listen` | None. The call runs anonymously; a credential sent with it is not checked. |
+| Every other method: `tools/call` (so `list_roles` and `read_skill`), `resources/list`, `resources/read`, `skills/list`, `skills/get`, … | Required. One such call makes a whole batch need it. |
+
+Without a credential, or with one no auth mount admits, the answer is HTTP `401`
+with `WWW-Authenticate: Bearer realm="warden"`. When no mount admitted the
+credential and some mount could not decide (it is not configured, or its verifier
+is unreachable), the answer is `503`, naming the mounts that failed: an outage,
+not a refusal. A batch of more than 50 messages is refused with `400`. A
+discovery request, a notification stream included, ends after one minute; a
+client that wants another reconnects.
+
+The audit entry of a call that presented a credential carries `auth.discovery`:
+the auth mounts that admitted it, with the native identity each verified and the
+entity that claims it, and the number of roles granted, never the groups. An
+anonymous call claims no token, and its entry says so.
+
 ## The Discovery Loop
 
 An agent runs this loop before touching any upstream. Every step is a call to the
@@ -47,8 +87,8 @@ MCP discovery server; each chains into the next:
 1. **Connect** — point the MCP client at `/v1/sys/mcp`, presenting the agent's
    identity (bearer JWT or client certificate) and, for a sub-namespace, the
    `X-Warden-Namespace` header.
-2. **List roles** — `list_roles` returns every role the identity can assume, each
-   with its description, provider, skill and URL. This is the agent's menu.
+2. **List roles** — `list_roles` returns every role groups grant the identity,
+   each with its description, provider, skill and URL. This is the agent's menu.
 3. **Match task → role** — the agent reads the descriptions, picks the
    most-scoped role for the step, and surfaces to the user rather than guessing
    when it is ambiguous.
@@ -100,13 +140,51 @@ LLM can pass at call time, which MCP does not offer today.)
 
 ## Discovering Roles
 
-`list_roles` answers *"which roles can **I** assume?"* It is identity-scoped:
-Warden detects the caller's credential form — a TLS client certificate, a generic
-JWT, or a Kubernetes ServiceAccount JWT — and fans out only to the auth mounts in
-the namespace that accept that form, returning the **union** of the roles each
-reports. A role the identity cannot assume never appears, so the menu is exactly
-the caller's reachable surface — and a mount that fails introspection surfaces as
-a warning rather than hiding the rest.
+`list_roles` answers *"which roles can **I** assume?"* It lists a role when two
+things hold, decided the way a request under that role would be:
+
+1. **The credential is admitted** by the auth mount the role's requests go
+   through: the one its provider's `auto_auth_path` names, or, when the role has
+   no provider or its provider names none, the one the namespace's
+   `auto_auth_path` names. A role that leads to no auth mount is never listed.
+2. **A [group](/identity/groups/) grants the role** to that caller (see below).
+
+A person signed in with `warden login` skips the first step: the ticket was
+admitted when they signed in, and the groups of the namespace that issued it
+decide. That is how [built-in operator roles](/identity/built-in-roles/), which
+have no provider, reach the people a group grants them to.
+
+:::note[Making sure agents find a role]
+Give the role a `provider_path` whose provider sets an `auto_auth_path`, or set
+the namespace's `auto_auth_path`. A role with neither is never listed to an
+agent, though it still exists; Warden warns when such a role is written, and
+`warden role list -all` shows every role of the namespace to an operator.
+:::
+
+Each mount checks the credential once per request,
+however many calls a batch carries. A role the identity cannot assume never
+appears, so the menu is exactly the caller's reachable surface. While another
+mount admits the credential, a mount that cannot decide surfaces as a line in
+`warnings` rather than hiding the rest.
+
+Who the caller is decides which groups apply:
+
+- **An unregistered agent** holds what the virtual groups matching its facts
+  grant.
+- **A registered agent**, one whose native identity an entity claims, holds what
+  its entity's static groups grant, and only while the entity is governed and
+  active. Its menu is empty otherwise.
+- **A person** signed in with `warden login` presents the ticket, on
+  `Authorization: Bearer` or `X-Warden-Token`, and sees the roles virtual groups
+  grant them in the namespace that issued it. See
+  [Human operators](/identity/human-operators/).
+
+Under `unknown_aliases=deny`, an agent Warden refuses on a mount that is not
+exempt — unclaimed, or claimed by an entity that is not governed — gets an empty
+menu. So does a suspended or retired entity's agent, in either mode. That menu is byte for byte the one a
+caller gets when no group grants it anything: discovery does not say why it is
+empty. A request to a gateway does: its `403` names the native identity and the
+reason. See [Entities](/identity/entities/#requiring-registration).
 
 Each entry looks like this:
 
@@ -128,8 +206,8 @@ Each entry looks like this:
 | `skill` | The `skill://<name>/SKILL.md` URI of the role's `skill`, or, when the role sets none, of the skill its provider type ships. |
 | `url` | Where to call the provider under this role, relative to the Warden address. It already carries the namespace. |
 
-The operator wires a role into discovery with two fields on the role itself,
-available on the jwt, cert, kubernetes and spiffe auth methods:
+The operator wires a [role](/identity/roles/) into discovery with two fields on
+the role itself:
 
 - **`provider_path`** — the mount path of the provider the role is used with,
   relative to the role's namespace (for example `vault/`).
@@ -138,20 +216,26 @@ available on the jwt, cert, kubernetes and spiffe auth methods:
   wrote.
 
 ```bash
-warden write auth/jwt/role/read-secret \
-  description="read app secrets" \
-  provider_path=vault/
+warden role update read-secret -json '{
+  "description": "read app secrets",
+  "provider_path": "vault/"
+}'
 ```
 
-A role write updates only the fields it names, so adding `provider_path` to an
+An update replaces only the fields it names, so adding `provider_path` to an
 existing role leaves the rest of it alone.
 
 Warden lists a role's `url` only when it can vouch for it: `provider_path` names a
-provider mount in the namespace, and that provider's `auto_auth_path` resolves to
-the auth mount the role lives on. Otherwise the role is listed without `url` and
-`provider`, and a line in `warnings` says why. A role with neither field is listed
-with its name and description only. An agent must not build a URL for a role that
-came without one.
+provider mount in the namespace, and that provider's `auto_auth_path` names an
+auth mount, the one its gateway admits callers through. Otherwise the role is
+listed without `url` and `provider`, and a line in `warnings` says why. A role
+with neither field is listed with its name and description only. An agent must
+not build a URL for a role that came without one.
+
+A [built-in operator role](/identity/built-in-roles/), such as `warden-viewer`, is
+listed the same way: no `url`, no `skill`, and a warning that it is a built-in
+operator role, used on Warden's own API with `?role=` or `X-Warden-Role`, not
+through a provider. It is for operating Warden, not for an agent's task.
 
 The URL's shape depends on the provider: most take the role in the path
 (`/v1/vault/role/read-secret/gateway/`), AWS reads it from the SigV4 access key and
@@ -169,7 +253,7 @@ at; the agent still calls the attached server rather than connecting to it.
 ## Skills
 
 A **skill** is an agent-facing markdown document, stored in a single global
-registry, that teaches an agent how to drive a role once it has been discovered.
+catalog, that teaches an agent how to drive a role once it has been discovered.
 On the discovery server each skill is a `SKILL.md` at `skill://<name>/SKILL.md`,
 with frontmatter in the Agent Skills format. A skill
 record has these fields:
@@ -260,7 +344,7 @@ focused, and cheap for an agent to read.
 ### Where skills come from
 
 - **Default provider skills** ship alongside each provider's code and are seeded
-  into the registry the **first time a provider of that type is mounted**. Seeding
+  into the catalog the **first time a provider of that type is mounted**. Seeding
   is idempotent: mounting a second instance does not overwrite your edits, and a
   skill that fails to seed never blocks the mount. Not every provider type ships
   one; a role on such a provider gets a `skill` only when you set one.
@@ -285,7 +369,9 @@ Point a role at a skill by setting the role's `skill` field, and any agent that
 discovers the role reads your recipe verbatim:
 
 ```bash
-warden write auth/jwt/role/on-call skill=oncall-runbook
+warden role update on-call -json '{
+  "skill": "oncall-runbook"
+}'
 ```
 
 Reads are open in any namespace; **mutations (`create`/`update`/`delete`) are
@@ -295,17 +381,17 @@ restricted to the root namespace** — a sub-namespace request is rejected with
 ## Everything Is Identity-Scoped
 
 Discovery never reveals more than the caller can actually use. `list_roles`
-returns only roles reachable by the caller's credential type in the caller's
-namespace, and the skills it can read are only those its roles lead to. It runs
-before any role is chosen — it needs no role token, only the identity the agent
-already holds. An agent's view of the system *is* its access, which is what lets
-it self-onboard safely without an operator hand-feeding it endpoints, role names,
-or keys.
+returns only the roles groups grant the caller in its namespace, and the skills
+it can read are only those its roles lead to. It runs before any role is chosen —
+it takes no role, only the identity the agent already holds. An agent's view of
+the system *is* its access, which is what lets it self-onboard safely without an
+operator hand-feeding it endpoints, role names, or keys.
 
 ## See Also
 
 - [MCP](/concepts/mcp/) — the discovery interface, and how a role's gateway is driven.
 - [Roles](/identity/roles/) — the view a `list_roles` entry stands for, one per step.
+- [Groups](/identity/groups/) — how a caller comes to hold the roles it is listed.
 - [Agent end-to-end flow](/agent-flow/) — the loop traced call by call.
 - [`warden skill`](/cli/skill/) — authoring and managing skills.
 - [Authentication](/identity/authentication/) — the identity discovery is scoped to.
