@@ -106,6 +106,24 @@ These are set at the top level of the file, outside any block.
 | `min_cred_spec_rotation_period` | *(none)* | Lower bound on the rotation period a credential spec may request (Go duration, e.g. `1h`). |
 | `max_cred_spec_rotation_period` | *(none)* | Upper bound on a credential spec's rotation period. Must be ≥ the minimum. |
 | `keyless_enforcement_level` | `warn` | What happens to an operator write that would leave a secret stored in Warden: `off` accepts it, `warn` accepts it with a warning, `enforce` refuses it. Judged at write time only — existing sources and specs keep minting. Read at startup. See [Keyless enforcement](/federation/keyless-credentials/#keyless-enforcement). |
+| `token_cache_megabytes` | `100` | Memory budget of the node's token cache, in MiB (`0` keeps the default). A token pushed out of a full cache is read from storage, or its caller authenticates again, on its next use. Read at startup. See [Cache sizes](#cache-sizes). |
+| `credential_cache_megabytes` | `64` | Memory budget of the node's cache of minted credentials, in MiB (`0` keeps the default). A credential pushed out of a full cache is minted again on its next use. Read at startup. See [Cache sizes](#cache-sizes). |
+
+### Cache sizes
+
+Each node keeps the tokens and the minted credentials it serves in memory, up to
+a budget counted in real bytes. At the defaults the token cache holds about
+113,000 service tokens, and the credential cache about 40,000 cloud credentials
+with session tokens, or 90,000 static API keys. A full cache drops entries
+rather than growing, and a dropped entry costs a storage read, a new login or a
+new mint on its next use. Raise the budgets on a busy node:
+
+```hcl
+token_cache_megabytes      = 256
+credential_cache_megabytes = 128
+```
+
+Each must be `0` or between `1` and `1048576`; any other value fails at startup.
 
 ## High-availability tuning
 

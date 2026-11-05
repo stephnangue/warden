@@ -100,6 +100,10 @@ warden status
 - a **bank**, served as an MCP server and as an HTTP API, behind Warden mounts, roles
   and policies — including a keyless credential the bank's authorization server mints
   from Warden's own identity assertion;
+- a [virtual group](/identity/groups/) per role, granting it to every agent the
+  identity provider signs — a shortcut for the tour; in production, register each
+  agent and grant its roles through a static group (see
+  [Governing an agent](/tutorials/identity/govern-an-agent/));
 - a **file audit device**, read with [`warden dev audit`](/cli/dev/#audit);
 - a mount in front of **GitHub's MCP server**, waiting for the reader's PAT.
 
@@ -268,8 +272,8 @@ behavior you might otherwise find surprising:
   your workflow depends on audit log output, enable an audit device explicitly
   after startup. (The [playground](#the-playground) enables one.)
 - **No automatic mounts.** Warden does not pre-mount any providers or auth
-  methods in dev mode. Enable the ones you need yourself. (The
-  [playground](#the-playground) mounts what its tour uses.)
+  methods in dev mode, and creates no roles or groups. Enable the ones you need
+  yourself. (The [playground](#the-playground) creates what its tour uses.)
 - **No real seal.** The barrier is auto-unsealed from an in-memory key; there is
   no Shamir ceremony, KMS, or recovery process to exercise.
 

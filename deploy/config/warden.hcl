@@ -98,6 +98,12 @@ listener "tcp" {
 #   - "required": Reject tokens without IP binding or requests without client IP
 # ip_binding_policy = "optional"
 
+# In-memory cache budgets, in MiB. A token pushed out of a full cache is read
+# from storage, or its caller authenticates again, on its next use; a
+# credential is minted again. Read at startup.
+# token_cache_megabytes      = 100
+# credential_cache_megabytes = 64
+
 # HA cluster tuning
 # All values are Go duration strings (e.g., "30s", "5m", "1h").
 # Omitted values use built-in defaults.

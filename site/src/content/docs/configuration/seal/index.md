@@ -7,8 +7,8 @@ title: "Seal"
 The `seal` stanza selects the mechanism that guards the barrier's **root key** —
 the master key that unlocks everything Warden persists. With no `seal` stanza the
 server uses [`shamir`](/configuration/seal/shamir/), which requires operators to
-supply unseal keys at startup. Declaring an **auto-unseal** seal (any of the KMS
-or HSM types below) lets a node fetch and decrypt its root key from an external
+supply unseal keys at startup. Declaring an **auto-unseal** seal (any of the
+other types below) lets a node fetch and decrypt its root key from an external
 service at boot with no human in the loop — configure one for any real
 deployment. See [Seal and Unseal](/concepts/seal-unseal/) for the barrier model
 and initialization.
@@ -27,12 +27,16 @@ seal "awskms" {
 | [`shamir`](/configuration/seal/shamir/) | Shamir secret sharing (default) | no |
 | [`awskms`](/configuration/seal/awskms/) | AWS KMS | yes |
 | [`azurekeyvault`](/configuration/seal/azurekeyvault/) | Azure Key Vault | yes |
-| [`gcpkms`](/configuration/seal/gcpkms/) | Google Cloud KMS | yes |
+| [`gcpckms`](/configuration/seal/gcpkms/) | Google Cloud KMS | yes |
 | [`transit`](/configuration/seal/transit/) | Vault / OpenBao Transit | yes |
-| [`pkcs11`](/configuration/seal/pkcs11/) | PKCS#11 HSM | yes |
 | [`ocikms`](/configuration/seal/ocikms/) | Oracle Cloud KMS | yes |
 | [`kmip`](/configuration/seal/kmip/) | KMIP server | yes |
 | [`static`](/configuration/seal/static/) | A static key in the config | yes |
+
+To keep the root key's wrapping key in an HSM, use the
+[`transit`](/configuration/seal/transit/#a-key-held-in-an-hsm) seal against a Transit
+key backed by the HSM. There is no PKCS#11 seal: a `seal "pkcs11"` stanza fails at
+startup.
 
 ## Common parameters
 

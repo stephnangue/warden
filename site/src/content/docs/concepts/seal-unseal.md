@@ -66,12 +66,11 @@ Supported seal types (the `type` label of the [seal stanza](#configuring-the-sea
 
 | `type` | Backing service |
 |--------|-----------------|
-| `transit` | A Vault/OpenBao Transit mount |
+| `transit` | A Vault/OpenBao Transit mount, whose key an HSM can back ([A key held in an HSM](/configuration/seal/transit/#a-key-held-in-an-hsm)) |
 | `awskms` | AWS KMS |
-| `gcpkms` | Google Cloud KMS |
+| `gcpckms` | Google Cloud KMS |
 | `azurekeyvault` | Azure Key Vault |
 | `ocikms` | Oracle Cloud KMS |
-| `pkcs11` | A PKCS#11 HSM |
 | `kmip` | A KMIP server |
 | `static` | A static key supplied directly in the config (`current_key` / `current_key_id`, with optional `previous_*` for rotation) |
 | `shamir` | Shamir secret sharing (the root key split into shares) — see below |
