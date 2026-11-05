@@ -51,8 +51,7 @@ Usage: warden identity entity create <name> [options]
             "team": "billing"
           },
           "aliases": [
-            { "mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent" },
-            { "mount": "auth/spiffe/",     "name": "spiffe://corp.example/ns/billing/sa/agent" }
+            { "mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent" }
           ]
         }'
 
