@@ -1,5 +1,7 @@
 ---
 title: "Centralized governance"
+sidebar:
+  order: 5
 ---
 
 _One control plane for every system an agent touches._

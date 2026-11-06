@@ -1,5 +1,7 @@
 ---
 title: "Access brokering"
+sidebar:
+  order: 2
 ---
 
 _Give agents access without giving them secrets._

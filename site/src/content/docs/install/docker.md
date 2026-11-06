@@ -26,7 +26,7 @@ your dependencies, or as the starting point for a deployment you build yourself.
 | | |
 |---|---|
 | Repository | `ghcr.io/stephnangue/warden` (public — no `docker login` needed) |
-| Release tag | `v<version>` — **with a leading `v`**, e.g. `v0.21.0` |
+| Release tag | `v<version>` — **with a leading `v`**, e.g. `v0.22.0` |
 | Moving tags | `latest`, `debug` |
 | Debug variant | `v<version>-debug` |
 | Base | `gcr.io/distroless/static-debian12:nonroot` — no shell, no package manager, no DNS tools |
@@ -49,9 +49,9 @@ and fail. The same applies to `command:` in a Compose file.
 :::
 
 :::note[Image tags carry a `v`, chart versions do not]
-Four numbers travel together and only two of them match. For the v0.21.0
-release: the git tag is `v0.21.0`, the image tag is `v0.21.0`, the release
-archive is `warden_0.21.0_<os>_<arch>.tar.gz`, and the Helm chart version is an
+Four numbers travel together and only two of them match. For the v0.22.0
+release: the git tag is `v0.22.0`, the image tag is `v0.22.0`, the release
+archive is `warden_0.22.0_<os>_<arch>.tar.gz`, and the Helm chart version is an
 unrelated number entirely. See
 [Chart version vs Warden version](/install/helm/#chart-version-vs-warden-version).
 :::
@@ -61,7 +61,7 @@ unrelated number entirely. See
 ## Pull
 
 ```bash
-docker pull ghcr.io/stephnangue/warden:v0.21.0   # pin this for anything persistent
+docker pull ghcr.io/stephnangue/warden:v0.22.0   # pin this for anything persistent
 docker pull ghcr.io/stephnangue/warden:latest    # fine for a throwaway
 ```
 
@@ -129,7 +129,7 @@ docker run -d --name warden \
   -v "$PWD/certs:/certs:ro" \
   -v "$PWD/seal:/seal:ro" \
   -v warden-audit:/var/log/warden \
-  ghcr.io/stephnangue/warden:v0.21.0
+  ghcr.io/stephnangue/warden:v0.22.0
 ```
 
 Every path the configuration names has to be mounted — `/certs` and `/seal`
@@ -288,7 +288,7 @@ docker run --read-only --tmpfs /tmp:rw,size=64m \
   -p 8400:8400 \
   -v "$PWD/warden.hcl:/config/warden.hcl:ro" \
   -v warden-audit:/var/log/warden \
-  ghcr.io/stephnangue/warden:v0.21.0
+  ghcr.io/stephnangue/warden:v0.22.0
 ```
 
 `-dev-tls` without explicit certificate files needs a writable temporary

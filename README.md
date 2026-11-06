@@ -74,6 +74,10 @@ Warden **need not hold a standing secret at all**. Rather than storing an upstre
 
 Agents don't need that access wired in ahead of time. They can ask Warden which roles and systems are open to them and read a per-system recipe at runtime, then connect — so a newly mounted system is reachable without redistributing config or rebuilding an SDK. See [the agent flow](https://wardengateway.com/agent-flow/) for the full loop.
 
+## Agent identity and governance
+
+Register every agent, name the team that answers for it, and refuse the ones nobody claimed. A credential proves which workload is calling, not who is accountable for it, so Warden keeps each agent in its identity store: the identity it presents, and the team that sponsors it. A registered agent holds only the roles granted to it by name, and only while its team stands behind it; one whose sponsor steps away, or that is suspended, loses them on its next call. Start by watching: Warden records which callers it would refuse. When every agent you rely on is registered, turn refusal on, and an agent nobody claimed gets nothing. People sign in with their company login and hold the roles their identity provider's groups give them, including built-in roles for running Warden itself. See [Identity and access](https://wardengateway.com/identity/).
+
 ## Use cases
 
 - **Access brokering** — Warden brokers the upstream credential into each request while the agent presents only its own identity — a JWT, a TLS client certificate, or a SPIFFE SVID — and never holds a key. Warden itself need not hold the secret either — it can prove the caller's identity so the upstream mints the credential, fetch the secret from your own store per request, or hold it and inject a scoped, short-lived credential. The same identity reaches every upstream the policy permits, so there's no per-system credential sprawl, nothing to rotate per integration, and nothing in the agent to leak.
@@ -92,10 +96,11 @@ Warden fronts systems across MCP servers, LLMs, cloud, code-hosting, observabili
 | Category | Providers | Warden does |
 |---|---|---|
 | MCP servers | [Generic](https://wardengateway.com/provider-backends/mcp/) — GitHub, Google Cloud, Slack, Cloudflare, …; [AWS](https://wardengateway.com/provider-backends/mcp_aws/) (SigV4) | Proxies tool calls — injects credentials, enforces tool-level policy |
-| LLM APIs | [Anthropic](https://wardengateway.com/provider-backends/anthropic/), [OpenAI](https://wardengateway.com/provider-backends/openai/), [Mistral](https://wardengateway.com/provider-backends/mistral/), [Cohere](https://wardengateway.com/provider-backends/cohere/) | Injects a short-lived token (keyless) or API key |
+| LLM APIs | [Anthropic](https://wardengateway.com/provider-backends/anthropic/), [OpenAI](https://wardengateway.com/provider-backends/openai/), [Mistral](https://wardengateway.com/provider-backends/mistral/), [Cohere](https://wardengateway.com/provider-backends/cohere/), [Amazon Bedrock](https://wardengateway.com/federation/keyless-model-access/) | Injects a short-lived token (keyless) or API key |
 | Cloud infrastructure | [AWS](https://wardengateway.com/provider-backends/aws/), [Azure](https://wardengateway.com/provider-backends/azure/), [GCP](https://wardengateway.com/provider-backends/gcp/), [Alicloud](https://wardengateway.com/provider-backends/alicloud/), [IBM Cloud](https://wardengateway.com/provider-backends/ibmcloud/), [OVH](https://wardengateway.com/provider-backends/ovh/), [Scaleway](https://wardengateway.com/provider-backends/scaleway/), [Cloudflare](https://wardengateway.com/provider-backends/cloudflare/) | Temporary credentials / Bearer tokens |
 | Code hosting & CI/CD | [GitHub](https://wardengateway.com/provider-backends/github/), [GitLab](https://wardengateway.com/provider-backends/gitlab/), [Atlassian](https://wardengateway.com/provider-backends/atlassian/), [Ansible Tower](https://wardengateway.com/provider-backends/ansible_tower/), [Terraform Enterprise](https://wardengateway.com/provider-backends/tfe/) | Injects App token, PAT, or Bearer token |
 | Observability | [Datadog](https://wardengateway.com/provider-backends/datadog/), [Dynatrace](https://wardengateway.com/provider-backends/dynatrace/), [Elastic](https://wardengateway.com/provider-backends/elastic/), [Grafana](https://wardengateway.com/provider-backends/grafana/), [Honeycomb](https://wardengateway.com/provider-backends/honeycomb/), [New Relic](https://wardengateway.com/provider-backends/newrelic/), [Prometheus](https://wardengateway.com/provider-backends/prometheus/), [Sentry](https://wardengateway.com/provider-backends/sentry/), [Splunk](https://wardengateway.com/provider-backends/splunk/) | Injects API key / proxies metrics |
+| Microsoft 365 | [Microsoft Graph](https://wardengateway.com/provider-backends/msgraph/) — mail, calendar, Teams, SharePoint, OneDrive, Entra ID | Calls Graph as the signed-in person the agent acts for, or as the app |
 | Incident & ITSM | [PagerDuty](https://wardengateway.com/provider-backends/pagerduty/), [ServiceNow](https://wardengateway.com/provider-backends/servicenow/), [Slack](https://wardengateway.com/provider-backends/slack/) | Injects Bearer token |
 | Kubernetes | [Kubernetes](https://wardengateway.com/provider-backends/kubernetes/) | Injects service account token |
 | Secrets backend | [HashiCorp Vault / OpenBao](https://wardengateway.com/provider-backends/vault/) | Mints short-lived tokens |
@@ -103,19 +108,25 @@ Warden fronts systems across MCP servers, LLMs, cloud, code-hosting, observabili
 
 ## Authentication methods
 
-Warden supports multiple methods for verifying caller identity.
+Agents prove who they are with the methods below; none binds a role at login, since groups grant roles on every request. People sign in with their company login.
 
 | Method | Identity Source | How the agent presents the credential to its SDK |
 |--------|----------------|----|
 | **JWT** | Signed JWT token | The **same JWT** goes in whichever credential slot the upstream SDK natively expects (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`, `X-Vault-Token`, `Authorization: Bearer`, …). Warden detects it, validates the identity, and swaps in the real upstream credential. Existing SDK code keeps working — only the base URL changes. |
 | **TLS Certificate** | X.509 client certificate | Identity is proven at the TLS handshake (or forwarded by a TLS-terminating proxy via `X-SSL-Client-Cert`). The SDK's credential slot is filled with any placeholder value — Warden ignores it once cert auth has proven the identity. Role selection follows the same per-provider conventions as JWT mode. |
 | **SPIFFE** | SPIFFE X.509-SVID or JWT-SVID | First-class SPIFFE identity on a single mount: a workload presents an X.509-SVID at the TLS handshake (or forwarded by a TLS-terminating proxy) or a JWT-SVID as a bearer token, and Warden verifies it against the trust domain's bundle — with federation across trust domains and periodic refresh. It relies on short-lived SVIDs and bundle rotation rather than revocation lists, so it suits workloads already issued identities by a SPIFFE provider such as SPIRE. |
-| **Kubernetes** | Kubernetes ServiceAccount token (projected SA JWT) | The pod's ServiceAccount token goes in the SDK's credential slot exactly as in JWT mode. Warden validates it by calling the issuing cluster's TokenReview API — no JWKS endpoint or public keys to distribute — and matches a role bound to the ServiceAccount's namespace and name. |
+| **Kubernetes** | Kubernetes ServiceAccount token (projected SA JWT) | The pod's ServiceAccount token goes in the SDK's credential slot exactly as in JWT mode. Warden validates it with the issuing cluster itself — no public keys to distribute — and groups grant roles by the ServiceAccount's namespace and name. |
+| **OIDC** (people) | Your company login: Microsoft Entra ID or any OpenID Connect provider | Operators sign in from the command line through their browser. The identity provider's groups decide which roles they hold, so access is managed where the rest of the company's is. |
 
 ## Tutorials
 
 Once the playground has shown you the ideas, put them to work on real
 systems.
+
+**Governing an agent.** In the same playground: register one of the
+tour's agents, have its team sponsor it, grant its roles by name, and
+then refuse the agents nobody claimed. See
+[the tutorial](https://wardengateway.com/tutorials/identity/govern-an-agent/).
 
 **Securing agents on the workstation — from one secret on disk to
 zero.** A three-part, hands-on series that takes a local coding

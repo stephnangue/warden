@@ -110,6 +110,37 @@ check "Seals: no \`pkcs11\` or \`gcpkms\` stanza" \
   'seal "(pkcs11|gcpkms)" *\{|configuration/seal/pkcs11' \
   "$docs" ${blog[@]+"${blog[@]}"} site/astro.config.mjs deploy
 
+# Roles moved off the auth mounts to sys/roles, granted per request by groups:
+# a Warden auth role path answers 410 (v0.22.0). Scoped to Warden commands and
+# Warden URLs, because Vault's own JWT auth roles (`vault write
+# auth/jwt/role/...`) are still the right thing to show where Warden logs in to
+# Vault.
+check "Roles: no Warden \`auth/<mount>/role/\` path" \
+  'warden +[a-z]+ +[^ ]*auth/[a-z-]+/role/|WARDEN_ADDR\}?/v1/auth/[a-z-]+/role/' \
+  "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}" core/seed/skills AGENTS.md
+
+# Service tokens are `wds.` since v0.22.0; a `cws.` token in an example is a
+# pre-upgrade token. Matches a token shape, not the prefix in prose.
+check "Tokens: no \`cws.\` token in an example" \
+  'cws\.[A-Za-z0-9]{8}' \
+  "$docs" ${blog[@]+"${blog[@]}"} "${skills[@]}" core/seed/skills AGENTS.md
+
+# The `internal` group type was renamed `static` before any release shipped it.
+check "Groups: no \`\"type\": \"internal\"\`" \
+  '"type": *"internal"' \
+  "$docs" ${blog[@]+"${blog[@]}"}
+
+# Names starting `warden-` are reserved for the built-in roles, and the
+# read-only one is `warden-viewer`.
+check "Built-in roles: no \`warden-reader\`" \
+  'warden-reader' \
+  "$docs" ${blog[@]+"${blog[@]}"} site/src/pages
+
+# DROPPED, not pending: `jwt_role` and `user_auth_role`. The first is the vault
+# credential driver's key for Vault's own JWT auth role, which is current; the
+# second is named only in callouts telling readers it is gone. A grep cannot
+# tell either from teaching a removed key.
+
 # --- Pending checks -----------------------------------------------------------
 #
 # A check may only be enabled by the PR that removes the LAST occurrence of its
