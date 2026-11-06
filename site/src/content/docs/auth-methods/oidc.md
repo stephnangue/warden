@@ -25,68 +25,23 @@ choice work for the person is covered in
 
 ## Step 1: Register Warden at the identity provider
 
-`warden login` listens on `http://localhost:8251/oidc/callback` and sends that
-as the redirect URI. Register it exactly. `-callback-port` changes the port:
-Entra ignores the port on a `localhost` redirect URI, so one entry covers
-every port; other identity providers may need each port registered.
+Register Warden as an OpenID Connect client that uses the authorization code
+grant:
 
-### Microsoft Entra ID
+- **Redirect URI.** `warden login` listens on
+  `http://localhost:8251/oidc/callback` and sends that as the redirect URI.
+  Register it exactly. `-callback-port` changes the port: some providers
+  ignore the port on a `localhost` redirect URI, others need each port
+  registered.
+- **Client type.** A confidential client with `client_auth` `client_secret`
+  or `private_key_jwt`; a public client with `none`.
+- **Claims.** A claim in the ID token listing each person's groups or roles,
+  for [groups](/identity/groups/) to match.
+- **Issuer.** The issuer the provider publishes must equal
+  `oidc_discovery_url` exactly, trailing slash included.
 
-1. **Create the app registration.** In the Entra admin center, under
-   *App registrations*, create an application for your tenant. Note the
-   *Application (client) ID* and the *tenant ID*.
-2. **Add the redirect URI.** Under *Authentication*, add a platform and the
-   redirect URI `http://localhost:8251/oidc/callback`. With `client_auth`
-   `client_secret` or `private_key_jwt`, Warden is a confidential client:
-   use the *Web* platform. With `client_auth` `none`, use *Mobile and desktop
-   applications*, which Entra treats as a public client. Entra refuses a
-   client secret or assertion from a public client. Entra ignores the port
-   when it matches a `localhost` redirect URI, so this one entry covers every
-   `-callback-port`; don't add entries that differ only in the port.
-3. **Leave implicit grant off.** Warden redeems the code at the token
-   endpoint and takes the ID token from that response; the *ID tokens
-   (used for implicit and hybrid flows)* checkbox is not needed.
-4. **Create a client credential.** Under *Certificates & secrets*, add a
-   client secret, or upload the certificate of an RSA key for
-   `private_key_jwt`.
-5. **Define app roles.** Under *App roles*, create one per level of access,
-   for example `Warden.Viewer`, allowed for users and groups. Assign people or
-   groups to them on the matching *Enterprise application*. An assigned app
-   role reaches the ID token in the `roles` claim. Setting *Assignment
-   required* on the enterprise application keeps everyone else from signing
-   in at all.
-6. **Or emit groups.** *Token configuration → Add groups claim* (the
-   manifest's `groupMembershipClaims`) puts group object IDs in the `groups`
-   claim. Prefer *Groups assigned to the application*: a person in more groups
-   than Entra puts in a token gets no `groups` claim but a reference to fetch
-   them, which Warden refuses (see [Limits](#limits-and-refusals)).
-7. **Add `auth_time`.** Entra's ID tokens omit it by default. Add it as an
-   optional claim of the ID token under *Token configuration*. Warden records
-   it in the audit log as the person's authentication time; without it, the
-   token's `iat` is used.
-8. **Enforce MFA and sign-in frequency at Entra.** Warden does not ask for a
-   second factor. A Conditional Access policy targeting this application can
-   require MFA and set a sign-in frequency. It governs sign-in only: a ticket
-   already issued lasts until `session_ttl` ends.
-
-Use the tenant-specific issuer
-`https://login.microsoftonline.com/<tenant-id>/v2.0` as
-`oidc_discovery_url`. The multi-tenant `common` and `organizations` endpoints
-publish a templated issuer, which never equals the URL, so discovery fails.
-
-Keep `profile` in the scopes: Entra includes `oid`, the user's object ID,
-only with it. `oid` is the same for the user across the tenant's
-applications, while `sub` is specific to each application, which makes `oid`
-the better native identity.
-
-### Other identity providers
-
-Any OpenID Connect provider works the same way: a confidential (or public)
-client with the authorization code grant, the redirect URI above, and a
-claim listing each person's groups or roles in the ID token. The issuer the
-provider publishes must equal `oidc_discovery_url` exactly, trailing slash
-included. Check your provider's documentation for how it names that claim
-and how many values it puts in a token.
+Step-by-step setup for Microsoft Entra ID, and notes for other providers, are
+in the [appendix](#appendix-identity-provider-setup).
 
 ## Step 2: Enable and configure the mount
 
@@ -291,6 +246,65 @@ the mount's namespace, e.g. `auth/oidc/`), that the claim is mapped in
 **Requests fail with `the presented ticket is not valid here`.** The ticket
 expired, its mount was disabled, or the request went to a namespace outside
 the ticket's own. Sign in again.
+
+## Appendix: identity provider setup
+
+### Microsoft Entra ID
+
+1. **Create the app registration.** In the Entra admin center, under
+   *App registrations*, create an application for your tenant. Note the
+   *Application (client) ID* and the *tenant ID*.
+2. **Add the redirect URI.** Under *Authentication*, add a platform and the
+   redirect URI `http://localhost:8251/oidc/callback`. With `client_auth`
+   `client_secret` or `private_key_jwt`, Warden is a confidential client:
+   use the *Web* platform. With `client_auth` `none`, use *Mobile and desktop
+   applications*, which Entra treats as a public client. Entra refuses a
+   client secret or assertion from a public client. Entra ignores the port
+   when it matches a `localhost` redirect URI, so this one entry covers every
+   `-callback-port`; don't add entries that differ only in the port.
+3. **Leave implicit grant off.** Warden redeems the code at the token
+   endpoint and takes the ID token from that response; the *ID tokens
+   (used for implicit and hybrid flows)* checkbox is not needed.
+4. **Create a client credential.** Under *Certificates & secrets*, add a
+   client secret, or upload the certificate of an RSA key for
+   `private_key_jwt`.
+5. **Define app roles.** Under *App roles*, create one per level of access,
+   for example `Warden.Viewer`, allowed for users and groups. Assign people or
+   groups to them on the matching *Enterprise application*. An assigned app
+   role reaches the ID token in the `roles` claim. Setting *Assignment
+   required* on the enterprise application keeps everyone else from signing
+   in at all.
+6. **Or emit groups.** *Token configuration → Add groups claim* (the
+   manifest's `groupMembershipClaims`) puts group object IDs in the `groups`
+   claim. Prefer *Groups assigned to the application*: a person in more groups
+   than Entra puts in a token gets no `groups` claim but a reference to fetch
+   them, which Warden refuses (see [Limits](#limits-and-refusals)).
+7. **Add `auth_time`.** Entra's ID tokens omit it by default. Add it as an
+   optional claim of the ID token under *Token configuration*. Warden records
+   it in the audit log as the person's authentication time; without it, the
+   token's `iat` is used.
+8. **Enforce MFA and sign-in frequency at Entra.** Warden does not ask for a
+   second factor. A Conditional Access policy targeting this application can
+   require MFA and set a sign-in frequency. It governs sign-in only: a ticket
+   already issued lasts until `session_ttl` ends.
+
+Use the tenant-specific issuer
+`https://login.microsoftonline.com/<tenant-id>/v2.0` as
+`oidc_discovery_url`. The multi-tenant `common` and `organizations` endpoints
+publish a templated issuer, which never equals the URL, so discovery fails.
+
+Keep `profile` in the scopes: Entra includes `oid`, the user's object ID,
+only with it. `oid` is the same for the user across the tenant's
+applications, while `sub` is specific to each application, which makes `oid`
+the better native identity.
+
+### Other identity providers
+
+Any OpenID Connect provider works the same way, with the requirements in
+[Step 1](#step-1-register-warden-at-the-identity-provider). Check your
+provider's documentation for how it names the groups or roles claim, how many
+values it puts in a token, and whether it ignores the port on a `localhost`
+redirect URI.
 
 ## See Also
 
