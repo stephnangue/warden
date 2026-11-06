@@ -289,7 +289,7 @@ Two safeguards keep an operator from locking themselves out:
 
 ## In policies and audit
 
-A [CEL condition](/concepts/cel-conditions/) reads the caller's native identity
+A [CEL condition](/identity/cel-conditions/) reads the caller's native identity
 as `agent.alias`, and its entity, when one claims it, as `agent.entity`, with
 `id`, `name`, `kind`, `state`, `governed_by`, `metadata` and `profile`. Guard
 with `has()`; an unguarded read on an unclaimed caller fails closed:

@@ -30,13 +30,22 @@ can safely run.
 
 Warden is the single point every agent request passes through, so it is the single
 place those concerns live. One agent identity is validated once and carried to
-every upstream the policy permits. One [policy](/concepts/policies/) surface,
+every upstream the policy permits. One [policy](/identity/policies/) surface,
 written in one language, governs access across every system — the same default-deny
 rules whether the agent is calling a cloud API, a Git host, or an MCP server. One
 [audit log](/concepts/audit/) records every request to every upstream. The
 [providers](/concepts/providers/) Warden ships front clouds, databases, code
 hosts, observability stacks, SaaS, and MCP servers alike, so adding a system means
 mounting a provider, not standing up another access model.
+
+The agent itself has a record to govern. Register it as an
+[entity](/identity/entities/) and it carries a description of what it does, a
+[sponsor](/identity/sponsors/) — the team that answers for it — and a state:
+active, suspended or retired. A registered agent holds roles only through the
+[static groups](/identity/groups/) that list it, and only while it is sponsored,
+described and active. Suspending the entity stops the agent on its next request,
+through every mount and every upstream, with no token to revoke. A namespace can
+also refuse agents nobody registered.
 
 Upstream credentials are governed in one place too. Warden
 [federates](/federation/keyless-credentials/) with upstreams that trust its identity, so
@@ -58,6 +67,8 @@ their access models bleeding together.
 
 - **One policy surface** — set, review, and answer access for every upstream in one
   place and one language, instead of across a dozen consoles.
+- **An owner for every agent** — each registered agent names the team that answers
+  for it, and one state change stops it everywhere.
 - **Hard tenant isolation** — namespaces give each team or environment a sealed
   boundary on shared infrastructure.
 - **Secrets stay fresh on their own** — Warden federates, chains, or holds and
@@ -71,8 +82,9 @@ through Warden, all under policies the platform team writes in one place. Each t
 works inside its own namespace, so `team-a`'s mounts and secrets are invisible to
 `team-b`. AWS and the database are reached by federation, Datadog's key is chained from
 the company's secret store, and the few secrets Warden holds itself rotate on schedule —
-without any team touching a key. Onboarding a new upstream is one provider mount; offboarding an
-agent is one identity removed — not a sweep across fifteen systems.
+without any team touching a key. Each agent is an entity its team sponsors. Onboarding a
+new upstream is one provider mount; offboarding an agent is one entity retired — not a
+sweep across fifteen systems.
 
 ## See Also
 
@@ -80,6 +92,8 @@ agent is one identity removed — not a sweep across fifteen systems.
   behind one gateway.
 - [Namespaces](/concepts/namespaces/) — the hard isolation boundary for mounts,
   policies, and tokens.
+- [Entities](/identity/entities/) and [Sponsors](/identity/sponsors/) — registering
+  an agent, and the team that answers for it.
 - [Keyless credentials](/federation/keyless-credentials/) and
   [credential chaining](/federation/credential-chaining/) — reaching upstreams without
   storing their secrets in Warden.

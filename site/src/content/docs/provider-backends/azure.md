@@ -30,7 +30,7 @@ to Entra ID.
 An Entra ID federated identity credential matches the assertion's issuer, subject and
 audience **exactly** and reads no other claim. So the assertion carries the agent's
 composite subject and nothing Entra cannot use, and the user — though authenticated at
-step 2, and available to [policy](/concepts/cel-conditions/#agent-acting-for-a-user) — is
+step 2, and available to [policy](/identity/cel-conditions/#agent-acting-for-a-user) — is
 never disclosed to Entra ID. See
 [Assertion claims](/federation/assertion-claims/#when-a-user-is-disclosed).
 
@@ -375,7 +375,7 @@ path "azure/role/+/gateway*" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/identity/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 

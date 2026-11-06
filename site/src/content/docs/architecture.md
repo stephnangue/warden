@@ -2,7 +2,7 @@
 title: "Architecture"
 ---
 
-Warden is a Go service that sits between workloads and providers. A [provider](/concepts/providers/) is a mounted backend that proxies a workload's request to an upstream service — authenticating the caller, checking [policy](/concepts/policies/), and injecting a [credential](/concepts/credentials/) on the way through. The workload talks to Warden as if it were the upstream and never holds the upstream secret.
+Warden is a Go service that sits between workloads and providers. A [provider](/concepts/providers/) is a mounted backend that proxies a workload's request to an upstream service — authenticating the caller, checking [policy](/identity/policies/), and injecting a [credential](/concepts/credentials/) on the way through. The workload talks to Warden as if it were the upstream and never holds the upstream secret.
 
 **Key design decisions:**
 - **Seal/unseal model** — Warden protects secrets at rest with envelope encryption behind a barrier. A running server unseals itself at startup from an auto-unseal seal (Transit, AWS/GCP/Azure/OCI KMS, PKCS#11, KMIP, or a static key); `shamir` is the default seal type and splits the key into shares. Dev mode uses an in-memory seal. See [Seal and Unseal](/concepts/seal-unseal/).

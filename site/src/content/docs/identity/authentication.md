@@ -166,7 +166,7 @@ the TokenReview validated. An empty value is not a fact: a certificate without
 a common name has no `cn`.
 
 [Group](/identity/groups/) rules select on these facts. Mapped facts also reach
-[CEL conditions](/concepts/cel-conditions/) as `agent.metadata.<name>`, a
+[CEL conditions](/identity/cel-conditions/) as `agent.metadata.<name>`, a
 multi-valued fact joined with commas.
 
 ## One mount, end to end
@@ -296,4 +296,4 @@ with `warden role use`.
   caller is granted what it may do.
 - [Entities](/identity/entities/): records that claim native identities.
 - [Auth Methods](/auth-methods/): per-method setup.
-- [Policies](/concepts/policies/) and [Namespaces](/concepts/namespaces/).
+- [Policies](/identity/policies/) and [Namespaces](/concepts/namespaces/).

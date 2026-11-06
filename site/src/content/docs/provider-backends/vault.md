@@ -428,7 +428,7 @@ path "vault/gateway*" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/identity/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 

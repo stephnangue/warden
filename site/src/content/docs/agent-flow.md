@@ -22,9 +22,10 @@ This document is for two audiences:
   homegrown harness.
 
 Discovery happens entirely over MCP: Warden runs its own MCP server at
-`/v1/sys/mcp` with two tools, `list_roles` and `read_skill`. The provider
-recipes an agent follows live in the skill registry (`read_skill`); this doc
-is the system-side view of the same contract.
+`/v1/sys/mcp` with two tools, `list_roles` and `read_skill`. Like every other
+request, each discovery call is authorized by policy and audited. The provider
+recipes an agent follows are skills, read with `read_skill`; this doc is the
+system-side view of the same contract.
 
 ## 1. The runtime contract
 
@@ -61,9 +62,9 @@ chains them before touching any upstream.
 
 ### Step 1 — List assumable roles
 
-`list_roles` (no arguments) introspects the caller's identity vehicle (JWT or
-client cert) and returns the roles that identity can assume in the current
-namespace:
+`list_roles` (no arguments) authenticates the caller's identity (JWT or client
+cert) and returns the roles [groups](/identity/groups/) grant it in the current
+namespace — for a registered agent, the roles its entity's static groups grant:
 
 ```json
 {
@@ -105,7 +106,9 @@ Warden derives `provider`, `skill` and `url` from the role's
 [`provider_path` and `skill` fields](/identity/roles/). A role the
 operator has not pointed at a provider is listed with its description only, and
 `warnings` says why a field is missing. The agent does not build a URL for such a
-role.
+role. A [built-in operator role](/identity/built-in-roles/) such as
+`warden-viewer` is listed the same way, with a warning that it is a built-in
+operator role: it is for operating Warden, not for an agent's task.
 
 ### Step 2 — Match task → role
 
@@ -195,10 +198,13 @@ The `troubleshooting` skill (`read_skill{uri: "skill://troubleshooting/SKILL.md"
 maps the errors an agent sees to a cause and a retry policy. Every identity can
 read it. Two surfaces:
 
-- **Discovery** — `list_roles` erroring with *"requires a JWT bearer token or
-  TLS client certificate"* means no identity reached the endpoint (the MCP
-  client connection lost/omitted it); an empty role list means the identity is
-  bound to no role — ask the operator. A role listed with no `url` or no
+- **Discovery** — HTTP **401** on `list_roles` means no identity reached the
+  endpoint (the MCP client connection lost or omitted it) or no auth mount
+  admits it; **503** means no mount could decide on it — retry with backoff. An
+  empty role list means no group grants the identity a role, or the namespace
+  refuses it (an unregistered agent where registration is required, or a
+  suspended entity); discovery does not say which, while a gateway's `403`
+  names the reason — ask the operator. A role listed with no `url` or no
   `skill` is not wired to a provider yet; `warnings` says why. `read_skill`
   *"not found"* means the skill is gone, or is not one this identity's roles
   can read — call `list_roles` again rather than guess.
@@ -242,9 +248,9 @@ re-run `list_roles` every N minutes or on a `403`/`404`, whichever comes first.
 The operator configures the trust relationship (JWKS endpoint or CA bundle),
 mounts providers, defines roles (each pointed at its provider with
 `provider_path`, and at a skill of its own with `skill` where the provider's
-default does not fit), writes policies, and attaches the agent runtime's MCP
-client to `/v1/sys/mcp` and the MCP-provider gateways. After this, the operator
-is not in the per-call loop.
+default does not fit), grants them to agents with groups, writes policies, and
+attaches the agent runtime's MCP client to `/v1/sys/mcp` and the MCP-provider
+gateways. After this, the operator is not in the per-call loop.
 
 Each provider seeds a default skill on first mount, but the catalog is the
 operator's to shape: they can override a seeded skill or author their own and

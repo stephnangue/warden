@@ -36,7 +36,7 @@ An IAM trust policy conditions on the agent's `sub` and its session tags — say
 `aws:PrincipalTag/<key>`. The user never reaches STS: a raw user id in `sub` would carry no
 namespace beside it, so any Warden namespace could mint it. To vary what a tool call reaches
 by the human behind it, give each population its own Warden role and spec, and bind the
-user to the agent with a [CEL condition](/concepts/cel-conditions/#agent-acting-for-a-user).
+user to the agent with a [CEL condition](/identity/cel-conditions/#agent-acting-for-a-user).
 
 :::note[Steps 3–6 run only on a cache miss]
 Warden caches the minted credential, so most tool calls skip straight from step 2 to step

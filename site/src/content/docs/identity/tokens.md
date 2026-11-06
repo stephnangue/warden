@@ -47,7 +47,7 @@ of durable storage.
 A service token is a bearer token Warden issues and keeps. Its value is `wds.`
 followed by 64 random characters; its ID is `wds_` followed by a hash of the
 value. Unlike the other two types, a service token carries its own
-[policies](/concepts/policies/) rather than taking a role per request.
+[policies](/identity/policies/) rather than taking a role per request.
 
 Service tokens are **written through** to Warden's encrypted storage, so they
 survive restarts and unseals, and each has an **accessor**: a random reference
@@ -169,7 +169,7 @@ The role granted for the request is recorded beside it, in `auth.role_name`,
 `auth.role_granted_by` and `auth.groups`, or in `auth.role_denied_reason` when
 no role was granted.
 
-In [CEL conditions](/concepts/cel-conditions/), `agent.token_type` holds the
+In [CEL conditions](/identity/cel-conditions/), `agent.token_type` holds the
 same strings: `identity_token`, `service_token` or `ticket_token`.
 `user.token_type` is `identity_token` whenever a user is present. A token type
 says how the caller authenticated, not which auth method admitted it; select on
@@ -189,4 +189,4 @@ path "prod/payments/*" {
   granted a role per request.
 - [Human operators](/identity/human-operators/): tickets in practice.
 - [Built-in roles](/identity/built-in-roles/): operator roles for tickets.
-- [Policies](/concepts/policies/) and [Namespaces](/concepts/namespaces/).
+- [Policies](/identity/policies/) and [Namespaces](/concepts/namespaces/).

@@ -26,7 +26,7 @@ Coming from v0.21.0, where roles were bound on the auth mount? See [Upgrading fr
   - A standalone **JWKS endpoint** (a URL serving the issuer's public keys as a JSON Web Key Set).
   - A set of **PEM-encoded RSA or ECDSA public keys**, when no JWKS endpoint is reachable.
 - The **audience** your issuer puts in tokens meant for Warden. An agent mount refuses to run without one.
-- The [policies](/concepts/policies/) the role you grant will carry. Admitting a token grants no access on its own.
+- The [policies](/identity/policies/) the role you grant will carry. Admitting a token grants no access on its own.
 
 ## Step 1: Configure the Key Source
 
@@ -145,7 +145,7 @@ Every admission carries `mount` (here `auth/jwt/`) and `kind` (`agent`), plus th
 
 A source in `facts` is a claim name (`client_id`), or a JSON Pointer into nested claims (`/tenant/id`, `/scp/0`, `/realm_access/roles`). A claim that is a JSON array gives one value per element; a string is one value, commas included. Fact names use lowercase letters, digits and `_ . : / -`; `mount` and `kind` are reserved, and a mount maps at most 32 facts. A write of `facts` replaces the whole map, and an empty map clears it.
 
-Mapped facts also reach [CEL conditions](/concepts/cel-conditions/) as `agent.metadata.<name>`, the values of a multi-valued fact joined with commas. With the mapping above, a policy can gate a path with `condition = "agent.metadata.tenant == 'acme'"`. The built-in facts are not in `agent.metadata` unless you map them to themselves (`"sub": "sub"`).
+Mapped facts also reach [CEL conditions](/identity/cel-conditions/) as `agent.metadata.<name>`, the values of a multi-valued fact joined with commas. With the mapping above, a policy can gate a path with `condition = "agent.metadata.tenant == 'acme'"`. The built-in facts are not in `agent.metadata` unless you map them to themselves (`"sub": "sub"`).
 
 ### The native identity
 

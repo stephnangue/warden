@@ -75,8 +75,10 @@ undeclared reference to 'token' (the `token` namespace was renamed to `agent`: .
 field it was salting is written to the audit log unprotected. Rewrite every selector:
 
 ```diff
-- salt_fields = ["token.metadata.env", "token.type"]
-+ salt_fields = ["agent.metadata.env", "agent.token_type"]
+- salt_fields = ["auth.policy_results.condition.inputs.token.metadata.env",
+-                "auth.policy_results.condition.inputs.token.type"]
++ salt_fields = ["auth.policy_results.condition.inputs.agent.metadata.env",
++                "auth.policy_results.condition.inputs.agent.token_type"]
 ```
 
 :::caution[There is no alias]
@@ -304,6 +306,6 @@ These are not breaking, but they change what you will observe in production.
   `http_idle_timeout` (1m), and streaming and gateway traffic sheds the deadlines
   entirely.
 
-See [CEL Conditions](/concepts/cel-conditions/) for the rewritten condition cookbook,
+See [CEL Conditions](/identity/cel-conditions/) for the rewritten condition cookbook,
 [MCP](/concepts/mcp/) for the policy type, and [Delegation](/concepts/delegation/) for the
 user principal.

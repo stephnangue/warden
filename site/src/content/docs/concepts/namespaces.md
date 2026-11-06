@@ -4,7 +4,7 @@ title: "Namespaces"
 
 A **namespace** is Warden's isolation boundary — its unit of multi-tenancy.
 Every [provider](/concepts/providers/) mount, [auth method](/auth-methods/),
-[role](/identity/roles/), [policy](/concepts/policies/), [credential](/concepts/credentials/) source and
+[role](/identity/roles/), [policy](/identity/policies/), [credential](/concepts/credentials/) source and
 spec, and [token](/identity/tokens/) belongs to exactly one namespace, and the boundary
 between namespaces is hard: configuration in one is invisible to another, and a
 policy in one cannot grant access in, or even name, another.
@@ -111,11 +111,11 @@ rather than on a tenant's resources.
 The principle: a namespace governs its own tenants' mounts and identities; it
 does not touch the server everyone shares.
 
-## Transparent Auth per Namespace
+## Implicit Auth per Namespace
 
 A namespace carries a `custom_metadata` map. One key is meaningful to Warden:
 **`auto_auth_path`**, which names the auth mount used for
-[transparent authentication](/identity/authentication/)
+[implicit authentication](/identity/authentication/#implicit-authentication)
 on *operational* requests in that namespace — the namespace-level counterpart to
 a [provider's](/concepts/providers/) own `auto_auth_path` for gateway requests. Set it so
 that callers in the namespace can authenticate implicitly from a JWT or
@@ -179,6 +179,6 @@ mid-creation or mid-deletion and should be treated as transient) and `locked`.
 - [Tokens](/identity/tokens/) — the parent→descendant validity rule in detail.
 - [Built-in roles](/identity/built-in-roles/) — what `enable_builtin_roles` turns on.
 - [Human operators](/identity/human-operators/) — central and tenant sign-in.
-- [Policies](/concepts/policies/) — per-namespace, isolated authorization.
+- [Policies](/identity/policies/) — per-namespace, isolated authorization.
 - [Providers](/concepts/providers/) — namespace addressing on gateway requests.
 - [Credentials](/concepts/credentials/) — sources and specs are namespace-scoped.

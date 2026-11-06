@@ -5,7 +5,7 @@ title: "Provider Backends"
 A **provider backend** is a mounted gateway that fronts an upstream system — an
 LLM API, a cloud control plane, a Git host, an observability platform. A workload
 sends its request to the Warden mount as if Warden were the upstream; Warden
-authenticates the caller, checks [policy](/concepts/policies/), injects the
+authenticates the caller, checks [policy](/identity/policies/), injects the
 right [credential](/concepts/credentials/), and proxies the call through. See
 [Providers](/concepts/providers/) for the gateway model and how a request
 flows.

@@ -16,17 +16,18 @@ or another agent the agent acts for*, not necessarily a person.
 Every gateway request resolves up to two principals:
 
 - The **agent** — the caller's own credential. It is authenticated, and it is the **sole
-  authorizer**: it alone carries the policies that drive the
-  [policy](/concepts/policies/) decision.
-- The **user** — a second, first-class token resolved through the same
-  [auth methods](/auth-methods/), via **secondary transparent authentication**. On a mount
+  authorizer**: the [role](/identity/roles/) its groups grant on the request carries the
+  policies that drive the [policy](/identity/policies/) decision.
+- The **user** — a second credential, admitted by the auth mount the provider's
+  `user_auth_path` names, through the same [auth methods](/auth-methods/). It is
+  admitted with no role, and no group grants it one. On a mount
   with `user_auth_path` set, the user's credential arrives in `Authorization` and the agent
   presents its own out of band, as a client certificate or in `X-Warden-Agent-Token`.
 
 The user is **identity-only**, which is a narrower claim than it sounds: the user grants
 no permissions — `user.policies` does not exist, and no policy is ever evaluated against
 the user's token — but the user *is* visible to the policy engine as a condition input.
-A [CEL condition](/concepts/cel-conditions/#agent-acting-for-a-user) can read `user.*` and
+A [CEL condition](/identity/cel-conditions/#agent-acting-for-a-user) can read `user.*` and
 refuse a request that has no user, or one whose user is not bound to the agent presenting
 it:
 
@@ -153,21 +154,26 @@ trail. The chain has a **single source — the cryptographically-verified RFC 86
 claim** on the caller's token — and appears as the `actors` array on the request's audit
 entry. Each actor is `{subject}`, plus `issuer` when that layer of the chain carried one;
 because every actor is verified, there is no `verified` field. The user's own token keeps
-its chain separately, under `auth.user.actors`, beside the user's `namespace_path` and
-`role_name`.
+its chain separately, under `auth.user.actors`, beside the user's `subject` and
+`namespace_path`.
 
 A signed JWT can carry a nested `act` claim, so the chain expresses "gateway → broker →
-agent"; Warden walks the nesting and persists the extracted actors on the
-[token](/identity/tokens/), so the chain survives transparent-token caching.
+agent"; Warden walks the nesting and records the extracted actors on the caller's
+[identity token](/identity/tokens/#identity-tokens), so the chain survives while the
+admission is cached.
 
 ## Configuration
 
-Set on the provider mount or namespace:
+Set on the provider mount:
 
 | Key | Default | Description |
 |---|---|---|
 | `user_auth_path` | *(off)* | The auth mount that validates the user credential. Bearer-format mounts only. Absent ⇒ no user principal. |
-| `user_auth_role` | *(mount default)* | Role the user auth uses. |
+
+The user token's audience is bound by the user auth mount's `bound_audiences`, or by
+the provider's resource identifier. A provider that still names the removed
+`user_auth_role` refuses every user credential until the key is removed; see
+[Upgrading from v0.21.0](/upgrade/from-v0-21/#providers-that-named-user_auth_role).
 
 :::caution[Changed in v0.20.0]
 `user_auth_path` is read from the **mount only** — it is no longer picked up from namespace
@@ -184,7 +190,7 @@ the assertion's `sub` becomes the user and the agent moves into `act`. See
 
 The assertion records the pair the agent's policy admitted; it does not decide that this
 agent may act for this user. That binding is a
-[CEL condition](/concepts/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
+[CEL condition](/identity/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
 the agent's policy, such as the one [above](#the-dual-principal-model).
 
 **Fail-closed matrix** — the request is denied when: the user credential equals the

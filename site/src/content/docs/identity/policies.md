@@ -2,27 +2,54 @@
 title: "Policies"
 ---
 
-A **policy** is how Warden decides what an authenticated caller may do. Once a
-request is [authenticated](/identity/authentication/) and its [token](/identity/tokens/)
-resolved, Warden evaluates the request against the policies attached to that
-token and either allows it or rejects it. No policy grants it, no access:
+A **policy** is how Warden decides what an authenticated caller may do. Every
+request takes the same path: Warden [authenticates](/identity/authentication/)
+the caller, resolves the [role](/identity/roles/) the request names against the
+caller's [groups](/identity/groups/), and authorizes the request against that
+role's policies, allowing or rejecting it. No policy grants it, no access:
 authorization is **default-deny**.
 
-Warden policies are **capability-based** (the policy type is `cbp`). A policy is
-an HCL document that grants capabilities on paths — and, for proxied
-[provider](/concepts/providers/) requests, can reach into the request itself to authorize
-individual upstream operations.
+## Two Policy Types
 
-## How Policies Attach to a Request
+Warden has two policy types. Both are HCL documents, and a role's `policies`
+field lists them together, by name: a name is unique across the two types.
 
-Policies are named, stored objects. A [role](/identity/roles/)'s `token_policies` lists
-the policy names a caller receives, and those names are recorded on the issued
-[token](/identity/tokens/). At request time Warden:
+| | Capability policy (`cbp`) | MCP policy (`mcp`) |
+|---|---|---|
+| **Decides** | Which paths a caller may reach, and with which capabilities (`read`, `create`, …). | Which [MCP](/concepts/mcp/) calls a caller may make: the methods, tools, resources and prompts they name, and their arguments. |
+| **Grants access** | Yes. It is the only type that grants. | No. It only narrows what a capability policy grants. |
+| **Applies to** | Every request. | MCP traffic through a gateway, and the discovery server. |
+| **With none in scope** | The request is denied. | MCP traffic is denied. |
+| **Written with** | `warden policy write <name> <file>` | `warden policy write -type mcp <name> <file>` |
 
-1. reads the policy names off the token,
-2. compiles the named policies into a single evaluatable rule set,
-3. evaluates the request against it, allowing only if a rule grants the needed
-   capability — and never if a rule explicitly denies it.
+A request to an MCP gateway needs both: a capability policy that grants its path,
+and an MCP policy that allows the call. When several MCP policies apply, one
+that allows the call is enough.
+
+Most of this page describes capability policies, which can also reach into a
+proxied [provider](/concepts/providers/) request to authorize individual upstream
+operations. MCP policies are covered in
+[Authorizing Gateway Requests](#authorizing-gateway-requests) and, in full, on the
+[MCP](/concepts/mcp/) page.
+
+## How Policies Decide a Request
+
+Policies are named, stored objects. A [role](/identity/roles/) lists them in its
+`policies` field, and a [group](/identity/groups/) grants the role. Nothing is
+kept on a [token](/identity/tokens/): the role is decided again on every
+request. A service token, such as the root token, carries its own policies
+instead and takes no role. At request time Warden:
+
+1. **Authenticate.** Admits the caller's credential, or checks its ticket or
+   service token.
+2. **Resolve.** Works out the caller's groups and checks that one of them
+   grants the role the request names. A request whose role is refused gets no
+   policy at all.
+3. **Authorize.** Compiles the role's policies (or the service token's), with
+   the namespace's [built-in policies](#built-in-policies), into a single
+   evaluatable rule set, and evaluates the request against it, allowing only if
+   a rule grants the needed capability — and never if a rule explicitly denies
+   it.
 
 When several policies grant capabilities on the **same path**, those grants are
 **unioned** (capabilities add up). When policies match a request through
@@ -30,8 +57,10 @@ When several policies grant capabilities on the **same path**, those grants are
 [Path matching](#path-matching)). A `deny` is absolute: it overrides any allow
 for that path, in any policy.
 
-There is **no implicit default policy** — a token carries exactly the policies
-its role granted, nothing more. (The one built-in is [`root`](#the-root-policy).)
+Besides the role's policies, every request that is not a root request gets the
+[built-in policies](#built-in-policies) of its token's namespace. They grant
+only discovery and the sponsor paths, so they change no decision on any other
+path.
 
 ## Policy Format
 
@@ -132,7 +161,7 @@ matching select the rule — it refines a grant, it does not create one.
 namespaces built from the request: `request` (path, operation, client IP, mount
 details, body values), `agent` (the authenticating principal), `user` (the
 optional second principal it acts for), and `now`. The
-[CEL Condition Cookbook](/concepts/cel-conditions/#quick-reference) carries the
+[CEL Condition Cookbook](/identity/cel-conditions/#quick-reference) carries the
 full field reference; it is the single source for that table.
 
 Secret material (the token value, accessor) is never exposed. `request.data` is
@@ -140,13 +169,10 @@ the request body for non-MCP providers; MCP tool-call arguments are exposed as
 `call.args` in an [MCP policy](/concepts/mcp/), a separate policy type with its
 own CEL environment — referencing `call` here is a compile-time error.
 
-:::caution[Renamed in v0.20.0]
-The `token` namespace is now **`agent`**; its `type`, `ttl_seconds` and
-`expires_at` fields become `agent.token_type`, `agent.token_ttl_seconds` and
-`agent.token_expires_at`. There is no alias — a stored policy referencing the old
-namespace fails to load. See
-[Upgrading from v0.19.0](/upgrade/from-v0-19/#1-the-token-cel-namespace-is-now-agent).
-:::
+**Comments.** HCL `#` comments go anywhere outside a condition. Inside a
+condition, including a multi-line `<<EOT` one, the text is CEL: a `#` there is
+a syntax error and the policy is refused when written. Use CEL's `//` comment
+there instead.
 
 **Helpers beyond the CEL built-ins:**
 
@@ -202,7 +228,7 @@ condition = "user.present && user.metadata.authorized_agent == agent.principal"
 
 For worked examples in four classes — an agent acting alone, an agent acting for
 a user, request/network/time shaping, and MCP tool calls — see the
-[CEL Condition Cookbook](/concepts/cel-conditions/).
+[CEL Condition Cookbook](/identity/cel-conditions/).
 
 ### Path expiration
 
@@ -282,8 +308,9 @@ body of the proxied request and authorizes each call by method, by the tool /
 resource / prompt it names, and by its arguments — before the request ever
 reaches the upstream.
 
-Those rules live in a **separate policy type**, not in the capability policy. A
-capability policy governs *paths and operations*; an MCP policy governs *calls*:
+Those rules live in the MCP policy type (see [Two Policy Types](#two-policy-types)),
+not in the capability policy. A capability policy governs *paths and operations*;
+an MCP policy governs *calls*:
 
 ```bash
 warden policy write -type mcp github-tools - <<'EOF'
@@ -302,29 +329,87 @@ EOF
 ```
 
 The two compose as an **intersection**: a request must be granted by a capability
-policy **and** permitted by every MCP policy in scope. An MCP policy is purely
-restrictive — it can never grant access a capability policy withholds.
-
-:::caution[Changed in v0.20.0]
-MCP rules were previously written as an `mcp` block nested inside a capability
-policy's `path` stanza. That nested block is now **rejected at parse**, and the
-grammar changed from `allowed_*` / `denied_*` keys to `methods` / `tools` /
-`resources` / `prompts` family blocks. MCP traffic with **no MCP policy in scope is now
-denied** where it previously passed unrestricted. See
-[Upgrading from v0.19.0](/upgrade/from-v0-19/#3-mcp-rules-are-a-first-class-policy-type).
-:::
+policy **and** permitted by the MCP policies in scope (when several apply, one
+that allows the call is enough). An MCP policy is purely restrictive — it can
+never grant access a capability policy withholds. MCP traffic with no MCP
+policy in scope is denied.
 
 See [MCP](/concepts/mcp/) for the full grammar and denial reasons. This is the
 authorization step a provider performs after authentication and before injecting
 a credential (see [How a request flows](/concepts/providers/#how-a-request-flows));
 gating on body content is why a streaming provider may parse the request body.
 
+## Built-in Policies
+
+Every namespace holds three built-in policies. Warden writes them when the
+namespace is created, and evaluates every request that is not a root request
+under them, beside the policies of the role. They are the built-ins of the
+token's namespace.
+
+| Policy | Type | Grants |
+|--------|------|--------|
+| `default-cbp` | `cbp` | The discovery endpoints: `create`, `read` and `delete` on `sys/mcp` (the [discovery server](/concepts/discovery-and-skills/)), and `read` on `sys/introspect/roles`. |
+| `default-mcp` | `mcp` | The discovery server's contract: its methods (`tools/list`, `tools/call`, `resources/list`, `resources/read`, `resources/templates/list`, `skills/list`, `skills/get`, `subscriptions/listen`, `logging/setLevel`), its tools `list_roles` and `read_skill`, and the `skill://*` resources. |
+| `default-sponsor` | `cbp` | The [sponsor](/identity/sponsors/) paths: `read` on `sys/identity/sponsor/+`, and `create` and `update` on its `suspend`, `handover` and `accept` verbs. |
+
+The discovery and sponsor paths are **identity paths**: they take no role.
+Warden authorizes them on the credential or ticket the caller presents, under
+the built-in policies. On the sponsor paths the handlers then decide who
+sponsors what: the caller must be a person signed in with a ticket, and a
+member of the entity's sponsor group.
+
+Each body names its paths exactly (the sponsor paths by their exact shape, one
+`+` for the entity name), never as a prefix, so evaluating every request
+under them changes no decision on any other path. Read them like any other
+policy:
+
+```bash
+warden policy read default-cbp
+warden policy read -type mcp default-mcp
+warden policy read default-sponsor
+```
+
+- **Edit them; you cannot delete them.** A delete is refused with
+  `cannot delete built-in policy "default-cbp"; edit it instead`. Warden never
+  overwrites an edit, an emptied body included.
+- **Empty one to turn its feature off.** An emptied `default-cbp` turns
+  discovery off in the namespace; an emptied `default-sponsor` turns sponsors
+  off and leaves discovery alone:
+
+  ```bash
+  warden policy write default-sponsor - <<'EOF'
+  # Sponsors are off in this namespace.
+  EOF
+  ```
+
+- **Narrow them with an exact-path deny.** The built-ins merge with the other
+  policies of the request. A condition or an MCP contract that another policy
+  puts on a discovery path does not narrow what the built-ins grant there:
+  the built-in's stanza has no condition, so the merged path is unconditional,
+  and MCP contracts are alternatives. Warden warns when such a policy is
+  written. A deny on the exact path does narrow it:
+
+  ```hcl
+  path "sys/mcp" {
+    capabilities = ["deny"]
+  }
+  ```
+
+  A request on an identity path takes no role, so a role's policies never
+  reach it. To narrow discovery for every caller in the namespace, edit the
+  built-in itself: a `default-mcp` without `read_skill` refuses that tool.
+
+- **Keep them to their paths.** A built-in applies to every caller in the
+  namespace, so a stanza you add to one for any other path applies to every
+  caller. Warden warns when a built-in is written with such a stanza.
+
 ## The Root Policy
 
-`root` is the one built-in policy. It grants every capability on every path and
-bypasses normal policy evaluation. It exists only in the root
-[namespace](/concepts/namespaces/), and a token holding `root` may hold no other policy.
-It is immutable — it cannot be edited or deleted through the API.
+`root` grants every capability on every path and bypasses normal policy
+evaluation. The built-in policies do not apply to a root request. `root`
+exists only in the root [namespace](/concepts/namespaces/), a token holding
+`root` may hold no other policy, and no role can list it. It is immutable — it
+cannot be edited or deleted through the API.
 
 Treat `root` as a break-glass grant: use it to bootstrap auth methods and
 policies, then rely on least-privilege policies for ordinary work.
@@ -332,9 +417,11 @@ policies, then rely on least-privilege policies for ordinary work.
 ## Namespaces
 
 Policies are per-[namespace](/concepts/namespaces/) and isolated. A policy's paths are
-implicitly scoped to its own namespace, and a request is evaluated only against
-policies in the namespace it resolves to. A policy in one namespace cannot grant
-access in, or refer to, another.
+implicitly scoped to its own namespace. A request is evaluated against the
+policies of its token's namespace — the namespace where the caller was
+admitted — together with that namespace's built-in policies, so a grant there
+can reach that namespace and the namespaces below it. A policy cannot grant
+access in, or refer to, a parent or a sibling namespace.
 
 ## Managing Policies
 
@@ -368,6 +455,21 @@ warden policy delete -type mcp github-tools
 Capability policies are stored under `sys/policies/cbp/<name>` and MCP policies
 under `sys/policies/mcp/<name>`. Names are unique **across** both types, so an
 MCP policy cannot reuse a capability policy's name.
+
+**Names have one spelling.** A policy name is lowercase letters, digits, `_`,
+`-` and `.`, starting and ending with a letter, digit or `_`. The policy
+endpoints accept a name only in that spelling; any other, such as `Admin`, is
+refused with `400`:
+
+```
+policy name "Admin" is not canonical: use "admin"
+```
+
+**Reserved names.** `default` and every name starting `default-` are reserved
+in both policy types: only the [built-in policy](#built-in-policies) of the
+matching type can be written under one, and a role that lists such a name is
+stored without it, with a warning. Role names starting `warden-` are reserved
+for the [built-in operator roles](/identity/built-in-roles/).
 
 Writes support a **check-and-set** version. It matters more for a policy than for
 ordinary data: when two writers race, the change that gets silently clobbered is
@@ -417,8 +519,12 @@ anyway will start seeing conflicts.
 
 ## See Also
 
-- [Roles](/identity/roles/) — how `token_policies` attaches policies to an identity.
+- [Roles](/identity/roles/) — how a role's `policies` reach a request.
+- [Groups](/identity/groups/) — how a role is granted, per request.
+- [Built-in roles](/identity/built-in-roles/) — operator roles whose grant is a policy body.
 - [Tokens](/identity/tokens/) — what a policy is evaluated against.
+- [CEL Condition Cookbook](/identity/cel-conditions/) — worked conditions and the field reference.
 - [Providers](/concepts/providers/) — where gateway/MCP authorization is applied.
 - [Authentication](/identity/authentication/) — what must happen before authorization.
 - [Namespaces](/concepts/namespaces/) — the isolation boundary for policies.
+- [Upgrading from v0.21.0](/upgrade/from-v0-21/) — for readers coming from v0.21.0.

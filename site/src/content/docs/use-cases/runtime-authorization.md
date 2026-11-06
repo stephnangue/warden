@@ -30,7 +30,7 @@ arguments*.
 
 Warden authorizes the **request**, not the session. Authority does not sit on the
 connection; it rides on each call and is evaluated the moment the call arrives,
-against the [policy](/concepts/policies/) attached to the agent's
+against the [policy](/identity/policies/) attached to the agent's
 [role](/identity/roles/). Authorization is **default-deny** — a call succeeds
 only if a rule grants exactly the capability it needs — and because [roles are
 per-request](/identity/roles/), the agent can run under
@@ -39,7 +39,7 @@ one call that genuinely needs it. Nothing accumulates; each call is judged on it
 own terms.
 
 The check reaches past the path into the content of the request. A policy can gate
-an operation on its [parameters](/concepts/policies/#parameter-constraints) and
+an operation on its [parameters](/identity/policies/#parameter-constraints) and
 on request context — source IP, time of day, day of week, and the calling identity's
 own [verified attributes](#authorize-on-whose-behalf-it-acts) — before any credential is
 minted. For [MCP](/concepts/mcp/) traffic it goes all the way inside the tool
@@ -55,7 +55,7 @@ failure — and every decision, allow or deny, is recorded.
 
 Some rules are not "which tool" but "how much": a payment under €1,500, a grant no
 longer than an hour, a refund within a smaller cap than a charge. For these a policy
-carries a [`condition`](/concepts/policies/#cel-conditions) — a CEL expression
+carries a [`condition`](/identity/policies/#cel-conditions) — a CEL expression
 evaluated against the same request, down to the tool-call arguments
 (`call.args.amount <= 1500`, `call.args.currency in ["USD","EUR"]`). It runs
 alongside the allow/deny lists and, like every other gate, fails closed: the value
@@ -70,11 +70,11 @@ this compartment?* But a compartment is usually shared — one analytics agent s
 whole team — and the same agent acts for different people. So there is a second
 question: *on whose behalf is this call made, and are they allowed?*
 
-Warden answers it from the token itself. When an agent authenticates, the
-[auth method](/auth-methods/) can copy verified attributes off the token
-it presents — a clearance level, a team, the user it is acting for — drawn from the
-IdP's claims, the client certificate, or the Kubernetes account. Those attributes
-travel with the token as **metadata**, and a policy rule can insist on them: the role
+Warden answers it from the credential itself. When an agent authenticates, the
+[auth mount](/identity/authentication/) records what it verified on the credential
+as **facts** — a clearance level, a team, the user it is acting for — drawn from the
+IdP's claims, the client certificate, or the Kubernetes account. The facts the mount
+maps reach policy as **metadata**, and a policy rule can insist on them: the role
 decides which systems the agent may reach, and the metadata decides whether *this*
 call is one the rule admits. Both have to hold.
 
@@ -92,7 +92,7 @@ baked into the rule — one policy stays correct for every identity that shares 
 overlay, many callers, nothing to maintain per person. The attribute that decided
 each call lands in the [audit log](/concepts/audit/), so a grant or a denial is
 explainable down to *why*. (The condition that expresses this reads
-[`agent.metadata`](/concepts/policies/#fine-grained-access).)
+[`agent.metadata.<name>`](/identity/policies/#fine-grained-access).)
 
 ## Benefits
 
@@ -119,10 +119,10 @@ with the exact tool that was blocked.
 
 ## See Also
 
-- [Policies](/concepts/policies/) — capabilities, conditions, parameter
+- [Policies](/identity/policies/) — capabilities, conditions, parameter
   constraints, and the MCP policy grammar.
-- [Roles](/identity/roles/) — per-request role binding
-  and changing role mid-session.
+- [Roles](/identity/roles/) — how a request selects a role, and how groups grant
+  it per request.
 - [Model Context Protocol](/concepts/mcp/) — authorizing individual tool calls
   by name and argument.
 - [Breach containment](/use-cases/breach-containment/) — the bounded blast radius this

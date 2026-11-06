@@ -24,7 +24,7 @@ Everything else builds on that:
   Anthropic and OpenAI) — and `keyless_enforcement_level` to warn about, or refuse,
   writes that would store one.
 - **[Assertion claims](/federation/assertion-claims/)** — how the assertion is shaped
-  and scoped: the profile per verifier, audience, `warden_resource`, login metadata,
+  and scoped: the profile per verifier, audience, `warden_resource`, agent metadata,
   the user an agent acts for, lifetime and the signing algorithm.
 - **[Credential chaining](/federation/credential-chaining/)** — source a provider's
   standing secret from your own secret store per request (`secret_spec`), reached

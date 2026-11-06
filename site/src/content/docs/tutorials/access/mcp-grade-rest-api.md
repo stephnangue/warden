@@ -42,7 +42,7 @@ construction. A plain REST API doesn't — unless something sits in front of it.
 
 Put **roles** between the agent and GitHub. A role is a named, reusable definition — set by an
 operator — that Warden resolves **on every request** into three things: *who may assume it* (the
-identity binding), *what it may do* (its [policy](/concepts/policies/)), and *what credential
+identity binding), *what it may do* (its [policy](/identity/policies/)), and *what credential
 Warden mints* upstream. The agent asks Warden *"what may I do?"*
 ([`list_roles`](/concepts/mcp/#warden-as-an-mcp-server-discovery-interface)), gets back only the
 roles its identity is admitted to, reads the one that fits, and fetches a

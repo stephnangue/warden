@@ -201,7 +201,7 @@ more than one header, or when a value contains a comma:
 ### Request bodies and policy
 
 With **`parse_request_body`** on, Warden reads a JSON or form body before policy runs, so
-a [condition](/concepts/cel-conditions/) can gate on its fields as `request.data.<field>`:
+a [condition](/identity/cel-conditions/) can gate on its fields as `request.data.<field>`:
 
 - **JSON** is `application/json`, `text/json` or any `+json` type (such as
   `application/vnd.api+json`), matched case-insensitively. A body with **no

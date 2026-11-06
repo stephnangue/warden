@@ -85,7 +85,7 @@ connection:
 warden status
 ```
 
-> **Note:** Warden does not cache tokens on disk. The dev server prints the root
+> **Note:** The CLI does not save the root token for you. The dev server prints the root
 > token to your terminal; you provide it to the CLI yourself by exporting
 > `WARDEN_TOKEN` (or passing `-token`). The same is true in production — a token,
 > mTLS client certificate, or Bearer JWT must be supplied on every request.

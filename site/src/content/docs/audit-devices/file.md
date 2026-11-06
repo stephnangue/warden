@@ -125,9 +125,9 @@ These keys go in the CLI `-json` payload, the HTTP `config` object, or — as st
 | `max_backups` | `5` | Number of rotated files to keep; older ones are pruned. |
 | `buffer_size` | `100` | Entries buffered before a flush. |
 | `flush_period` | `5s` | Maximum time between flushes. |
-| `hmac_key` | _(auto-generated)_ | The salt key for hashing sensitive fields. Generated if you don't supply one; masked on read. |
-| `salt_fields` | `["response.credential.data"]` | Dot-paths to HMAC instead of logging in clear. |
-| `omit_fields` | `["request.data","request.headers","response.data","response.headers"]` | Dot-paths to drop entirely. |
+| `hmac_key` | _(auto-generated)_ | The salt key for hashing sensitive fields. Generated if you don't supply one, or supply an empty one; masked on read. |
+| `salt_fields` | _(none)_ | Dot-paths to HMAC instead of logging in clear, added to `response.credential.data`, which every device salts. |
+| `omit_fields` | _(none)_ | Dot-paths to drop entirely. |
 | `prefix` | _(none)_ | Optional string prefixed to each log line. |
 | `enabled` | `true` | Whether the device is active. |
 | `skip_test` | `false` | Skip the write-test performed when the device is created. |
@@ -160,14 +160,47 @@ Two knobs control which fields are protected. See
 for the reasoning; the operational summary:
 
 - **`salt_fields`** — dot-paths whose values are replaced with
-  `hmac-sha256:<hex>` instead of plaintext. The default,
-  `response.credential.data`, salts every secret Warden injects (access keys,
-  tokens, passwords). Extend it to hash more, e.g. `auth.token_id`,
-  `request.data.password`, or the inputs a policy `condition` referenced — a whole
-  map (`auth.policy_results.condition.inputs`) or a single key
-  (`auth.policy_results.condition.inputs.request.data.model`).
-- **`omit_fields`** — dot-paths dropped from the entry entirely. The defaults drop
-  request and response bodies and headers, which are noisy and often sensitive.
+  `hmac-sha256:<hex>` instead of plaintext. Every device salts
+  `response.credential.data`, every secret Warden injects (access keys, tokens,
+  passwords), whatever this list says: your paths are added to it and never
+  replace it. Add paths to hash more, e.g. `auth.token_id`, `auth.principal_id`,
+  `auth.alias_name`, or the inputs a policy `condition` referenced — a whole map
+  (`auth.policy_results.condition.inputs`) or a single key
+  (`auth.policy_results.condition.inputs.request.data.model`). A path below
+  another listed path is dropped, so no value is hashed twice.
+- **`omit_fields`** — dot-paths dropped from the entry entirely, e.g.
+  `response.upstream_url` or `auth.policy_results.mcp_decision`. Nothing is
+  omitted by default.
+
+Request and response headers and bodies are never fields of an entry, so there is
+nothing to salt or omit there. A policy `condition` that reads a body field records
+the value under `auth.policy_results.condition.inputs`, where you can salt it.
+
+```bash
+warden audit enable file -path=siem -json '{
+    "type": "file",
+    "config": {
+        "file_path": "/var/log/warden/siem.log",
+        "salt_fields": [
+            "auth.token_id",
+            "auth.principal_id"
+        ],
+        "omit_fields": [
+            "response.upstream_url",
+            "auth.policy_results.mcp_decision"
+        ]
+    }
+}'
+```
+
+Two checks protect a configuration:
+
+- **A path that matches no audit field is refused** when you enable the device,
+  with a `400` that names the path. A device already stored with one still loads
+  at unseal, without that path, and the server logs a warning naming the device.
+- **A device without an HMAC key omits its salt paths** instead of writing them in
+  clear, and the server logs a warning. Warden generates a key for every device it
+  enables.
 
 The hash is deterministic under a given device's key, so the same value always
 produces the same hash and you can correlate occurrences without the log revealing
@@ -188,6 +221,19 @@ re-enabled device gets a fresh key, so hashes from before no longer correlate.
   which would silently stop auditing. Enable a replacement first, then disable.
 - **`hmac_key` reads back masked.** Expected — the salt is never returned. Use
   `sys/audit-hash/<path>` to hash a known value under the device's key.
+- **`enable` returns `invalid audit device configuration`.** A `salt_fields` or
+  `omit_fields` path names nothing the device can act on, and the error names it:
+  - `matches no audit field` — a misspelt name, or a `salt_fields` path under
+    `auth.policy_results.mcp_decision`;
+  - `request and response headers and bodies are not fields of an audit entry` — a
+    header or body path in `salt_fields` (in `omit_fields` it is accepted and does
+    nothing);
+  - `names a group of fields: salt the fields inside it` — a group such as
+    `auth.policy_results`, which can be omitted but not salted.
+- **The server log warns `audit device configuration changed to keep it safe`.**
+  A stored device was loaded without a path that matches no field, or without an
+  HMAC key, so its salt paths are omitted. The warning names the device and what
+  changed. Correct the device's configuration so the warning stops.
 - **`only 'json' format is supported`.** `format` must be `json`; no other format
   exists yet.
 
@@ -195,6 +241,6 @@ re-enabled device gets a fresh key, so hashes from before no longer correlate.
 
 - [Audit](/concepts/audit/) — the recording model, HMAC salting, and fail-open/closed.
 - [Audit Devices](/audit-devices/) — the section overview.
-- [Policies](/concepts/policies/) — the authorization decisions recorded in each entry.
+- [Policies](/identity/policies/) — the authorization decisions recorded in each entry.
 - [Credentials](/concepts/credentials/) — what "credential issued" in the log refers to.
 - [High Availability](/concepts/high-availability/) — audit continuity across leader failover.

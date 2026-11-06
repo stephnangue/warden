@@ -247,7 +247,7 @@ Every admission through a spiffe mount carries these facts:
 | `svid` | `x509` or `jwt`: the kind of SVID that carried it. |
 | `aud` | A JWT-SVID's audiences. An X.509-SVID has none. |
 
-`facts` can publish one of these fields again under a second name; no other source is accepted, so other JWT-SVID claims are never facts. A mount maps at most 32, and `mount` and `kind` are reserved. Mapped facts also reach [CEL conditions](/concepts/cel-conditions/) as `agent.metadata.<name>`; map a field to its own name to expose it unchanged:
+`facts` can publish one of these fields again under a second name; no other source is accepted, so other JWT-SVID claims are never facts. A mount maps at most 32, and `mount` and `kind` are reserved. Mapped facts also reach [CEL conditions](/identity/cel-conditions/) as `agent.metadata.<name>`; map a field to its own name to expose it unchanged:
 
 ```bash
 warden write auth/spiffe/config '{

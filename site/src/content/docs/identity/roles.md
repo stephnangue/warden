@@ -3,7 +3,7 @@ title: "Roles"
 ---
 
 A **role** is what a caller acts as on one request. It names what the caller may
-do there, the [policies](/concepts/policies/) Warden authorizes the request
+do there, the [policies](/identity/policies/) Warden authorizes the request
 against and the [credential spec](/concepts/credentials/) it mints from, and how
 [discovery](/concepts/discovery-and-skills/) describes it to agents.
 
@@ -56,9 +56,17 @@ skill and URL; the agent picks one per step. See
 | `cred_spec_name` | Optional. The credential spec Warden mints from for a request under the role. A spec that does not exist yet is accepted with a warning. |
 | `description` | What the role is for, in prose an agent reads to choose it (up to 1024 bytes). |
 | `skill` | Optional. The skill discovery hands an agent for this role; without one the role uses its provider's skill. |
-| `provider_path` | Optional. The provider mount the role is used with, relative to the namespace (`aws/`). Discovery builds the role's URL from it. |
+| `provider_path` | Optional. The provider mount the role is used with, relative to the namespace (`aws/`). Discovery builds the role's URL from it, and checks an agent's credential at the auth mount that provider's `auto_auth_path` names. |
 | `governed_only` | `false` by default. See [governed_only roles](#governed-only-roles). |
 | `metadata` | Free-form labels (up to 32 keys). |
+
+:::note[Making sure agents find a role]
+Give the role a `provider_path` whose provider sets an `auto_auth_path`, or set
+the namespace's `auto_auth_path`. A role with neither is never listed to an
+agent, though it still exists; Warden warns when such a role is written, and
+`warden role list -all` shows every role of the namespace to an operator. See
+[Discovering roles](/concepts/discovery-and-skills/#discovering-roles).
+:::
 
 A role name uses letters, digits, `_`, `-` and `.`, starting and ending with a
 letter, digit or `_`. Names starting `warden-` are reserved for the

@@ -134,8 +134,8 @@ warden cred spec create slack-user -json '{
 
 Now one spec serves every enrolled user, and each request resolves to that caller's own
 credential. The enrollment in step 2 used `U012ABCDEF` because that is what `{{user.sub}}`
-resolves to for that person — their user principal id at the auth mount they logged in
-through.
+resolves to for that person — their user principal id at the auth mount that admitted
+their credential.
 
 :::caution[Enrolling under the wrong name fails at request time, not at write time]
 `warden cred spec create` accepts any template without checking that a matching credential
@@ -152,8 +152,8 @@ user in the assertion's `sub`; listing **only `sub`** is the minimal form and di
 other user claim. A spec that sets it and receives no user principal fails closed with a 401
 challenge rather than falling back to some other credential.
 
-To key on something other than the principal — a provider-side user id carried in the user's
-login metadata, say — list that claim instead:
+To key on something other than the principal — a provider-side user id that the user auth
+mount maps as a [fact](/identity/authentication/#facts), say — list that claim instead:
 
 ```json
 "assertion_user_claims": "sub,slack_user_id",
@@ -241,7 +241,7 @@ possible because the delegation token keeps the user at the top level and the ag
 `act`, so a verifier can bind each independently rather than having to pick one.
 
 Neither gate decides that *this* agent may act for *this* user — that pairing is a
-[CEL condition](/concepts/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
+[CEL condition](/identity/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
 the agent's Warden policy, evaluated before any assertion is minted.
 
 One map serves the assertion claim and the template, so `{{user.sub}}` resolves to exactly

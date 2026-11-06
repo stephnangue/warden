@@ -111,5 +111,5 @@ warden protected-resource disable
   points here.
 - [Authentication](/identity/authentication/) — how the two credentials arrive on one
   request.
-- [CEL Conditions](/concepts/cel-conditions/#8-require-a-user-behind-the-agent) — writing a
+- [CEL Conditions](/identity/cel-conditions/#8-require-a-user-behind-the-agent) — writing a
   condition that requires a user.

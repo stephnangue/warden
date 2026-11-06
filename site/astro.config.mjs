@@ -67,14 +67,32 @@ export default defineConfig({
         { label: 'Install', autogenerate: { directory: 'install' } },
         { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
         {
+          // The identity model, in the order a request meets it. Authenticate: a
+          // mount admits a credential and names the facts it verified. Resolve:
+          // groups turn facts (or a listed entity) into roles for this one
+          // request. Authorize: the role's policies, and their conditions, decide.
+          label: 'Identity & access',
+          items: [
+            { slug: 'identity' },
+            { slug: 'identity/authentication' },
+            { slug: 'identity/tokens' },
+            { slug: 'identity/groups' },
+            { slug: 'identity/entities' },
+            { slug: 'identity/sponsors' },
+            { slug: 'identity/roles' },
+            { slug: 'identity/policies' },
+            { slug: 'identity/cel-conditions' },
+            { slug: 'identity/human-operators' },
+            { slug: 'identity/built-in-roles' },
+          ],
+        },
+        {
           // Concepts follow the curated reading order from concepts/index.md,
           // not alphabetical.
           label: 'Concepts',
           items: [
             { slug: 'concepts' },
             { slug: 'concepts/dev-server' },
-            { slug: 'concepts/policies' },
-            { slug: 'concepts/cel-conditions' },
             { slug: 'concepts/credentials' },
             { slug: 'concepts/providers' },
             { slug: 'concepts/mcp' },
@@ -85,23 +103,6 @@ export default defineConfig({
             { slug: 'concepts/seal-unseal' },
             { slug: 'concepts/storage' },
             { slug: 'concepts/high-availability' },
-          ],
-        },
-        {
-          // The identity model, in the order a request meets it: a mount admits
-          // a credential and names the facts it verified; groups turn facts (or a
-          // listed entity) into roles for this one request; a role names policies.
-          label: 'Identity & access',
-          items: [
-            { slug: 'identity' },
-            { slug: 'identity/authentication' },
-            { slug: 'identity/tokens' },
-            { slug: 'identity/groups' },
-            { slug: 'identity/roles' },
-            { slug: 'identity/entities' },
-            { slug: 'identity/sponsors' },
-            { slug: 'identity/human-operators' },
-            { slug: 'identity/built-in-roles' },
           ],
         },
         {

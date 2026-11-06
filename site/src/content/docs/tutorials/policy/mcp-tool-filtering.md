@@ -35,7 +35,7 @@ holds regardless of what the model decides to do.
 Route the MCP server through Warden and attach a policy that decides which tools the agent may use.
 Warden strict-parses every JSON-RPC call, **prunes `tools/list`** so the client only sees permitted
 tools, and refuses any disallowed `tools/call` before it leaves the gateway. See
-[MCP concepts](/concepts/mcp/) for the full grammar and [Policies](/concepts/policies/) for how a
+[MCP concepts](/concepts/mcp/) for the full grammar and [Policies](/identity/policies/) for how a
 policy attaches to a path.
 
 ### Prerequisites

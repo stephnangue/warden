@@ -66,7 +66,7 @@ handshake itself — a direct mTLS client, or a balancer in TLS passthrough — 
 :::caution[Behind a load balancer, list it]
 Without the entry, every request's client IP is the **balancer's** address. That is the
 IP a token's IP binding checks and the `request.client_ip` a
-[policy condition](/concepts/cel-conditions/#19-source-ip-allowlist) sees. Before v0.21.0,
+[policy condition](/identity/cel-conditions/#19-source-ip-allowlist) sees. Before v0.21.0,
 `trusted_proxies` governed only the forwarded client certificate. See
 [Upgrading from v0.20.0](/upgrade/from-v0-20/).
 :::
