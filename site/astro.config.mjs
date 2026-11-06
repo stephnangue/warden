@@ -287,7 +287,6 @@ export default defineConfig({
                 { slug: 'configuration/seal/azurekeyvault' },
                 { slug: 'configuration/seal/gcpkms' },
                 { slug: 'configuration/seal/transit' },
-                { slug: 'configuration/seal/pkcs11' },
                 { slug: 'configuration/seal/ocikms' },
                 { slug: 'configuration/seal/kmip' },
                 { slug: 'configuration/seal/static' },

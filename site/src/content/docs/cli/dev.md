@@ -34,8 +34,10 @@ warden dev jwt <agent|user> <sub> [options]
 ```
 
 Mints a JWT from the playground's identity provider. An agent presents its own; a
-user's is presented alongside an agent's when the agent acts for them. The token is
-printed bare, so it can be captured:
+user's is presented alongside an agent's when the agent acts for them. An agent's
+token carries the audience the playground's agent mount requires, so the playground's
+[groups](/identity/groups/) grant it every tour role; a user's carries another, and
+gets no role of its own. The token is printed bare, so it can be captured:
 
 ```bash
 AGENT=$(warden dev jwt agent agent-1) &&

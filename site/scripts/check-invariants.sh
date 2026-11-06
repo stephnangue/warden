@@ -102,6 +102,14 @@ check "Provider intros: no \"One credential mode is supported: static\"" \
   'One credential mode is supported: static' \
   "$docs"
 
+# No release ever supported a pkcs11 seal, and the gcp seal's type is
+# `gcpckms`: either stanza fails at startup. The seal pages may still name
+# `seal "pkcs11"` in prose to say it fails, so match the opening of a block,
+# and the sidebar slug of the deleted page (v0.22.0).
+check "Seals: no \`pkcs11\` or \`gcpkms\` stanza" \
+  'seal "(pkcs11|gcpkms)" *\{|configuration/seal/pkcs11' \
+  "$docs" ${blog[@]+"${blog[@]}"} site/astro.config.mjs deploy
+
 # --- Pending checks -----------------------------------------------------------
 #
 # A check may only be enabled by the PR that removes the LAST occurrence of its

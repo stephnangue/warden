@@ -2,14 +2,17 @@
 title: "GCP KMS Seal"
 ---
 
-> `seal "gcpkms"`
+> `seal "gcpckms"`
 
 Auto-unseal backed by **Google Cloud KMS**. At startup Warden asks Cloud KMS to
 decrypt the stored root key, so the node opens its barrier without an operator
 present.
 
+The stanza type is `gcpckms`, with a `c`: `seal "gcpkms"` fails at startup as an
+unknown type.
+
 ```hcl
-seal "gcpkms" {
+seal "gcpckms" {
   project    = "my-project"
   region     = "global"
   key_ring   = "warden"
