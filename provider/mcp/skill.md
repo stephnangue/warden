@@ -91,6 +91,11 @@ JWT expired (typical TTL 5–60 min) — refresh it in the client config.
   you send: a contradiction is refused with HTTP 400 and a JSON-RPC `-32020`,
   which means fix the headers, not the policy. Announce that revision and your
   JSON-RPC batches are refused too — batching left the spec in 2025-06-18.
+- **Upstream skills are resources.** If the server publishes skills
+  (`skills/list`, `skills/get`, `resources/directory/read`), they answer to
+  the same `resources` grant as `resources/read`, by URI: `skills/list` lists
+  only the skills you may fetch, and a `skills/get` outside the grant is
+  refused. A missing skill in the listing is the policy, not a bug.
 - **Subscribing to a resource needs the same grant as reading it.** A
   `subscriptions/listen` naming resource URIs — and the legacy
   `resources/subscribe` — answer to the `resources` allow-list, because a

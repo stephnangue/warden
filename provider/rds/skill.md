@@ -49,8 +49,8 @@ Present identity as `Authorization: Bearer <jwt>` (or an mTLS client
 cert). A `401` means the JWT expired (typical TTL 5–60 min) — refresh
 and retry.
 
-If the operator has set a `default_role` on the auth method, omitting
-`?role=` falls back to that default.
+Always name the role: `?role=<name>`, or the `X-Warden-Role` header. A
+request with neither is refused with `400` ("no role selected").
 
 ## Examples
 
@@ -110,8 +110,8 @@ to get a fresh token-bearing connection string.
   pre-created with `rds_iam` group membership.
 - **Role selection** is via `?role=<name>` query parameter on the
   access URL — distinct from gateway providers, which take the role as
-  a path segment (`/role/<name>/gateway/...`). Falls back to the auth
-  method's `default_role` when omitted.
+  a path segment (`/role/<name>/gateway/...`). There is no default:
+  without `?role=` or `X-Warden-Role` the request answers `400`.
 - **Connection failures are not Warden's responsibility.** A
   successful mint followed by a connection error means the DB
   endpoint, security group, or DB user is misconfigured — diagnose

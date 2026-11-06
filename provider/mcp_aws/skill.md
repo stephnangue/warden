@@ -101,6 +101,10 @@ convention. A `401` means the JWT expired (typical TTL 5–60 min) — refresh i
   JSON-RPC batches are refused too. Subscribing to a resource — modern
   `subscriptions/listen` or legacy `resources/subscribe` — answers to the
   `resources` allow-list, the same grant that governs reading it.
+- **Upstream skills are resources.** `skills/list`, `skills/get` and
+  `resources/directory/read` answer to that same `resources` grant, by URI:
+  `skills/list` lists only the skills you may fetch, and a `skills/get`
+  outside the grant is refused.
 - **Two mount-wide deadlines, picked by method.** `timeout` caps a single call
   (default 60 seconds); `listen_timeout` caps a `subscriptions/listen` stream
   (default 10 minutes), and only that method. Ask the operator to raise

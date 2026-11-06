@@ -18,12 +18,14 @@ branch on those, not on prose.
 | Symptom | Meaning | Action |
 |---|---|---|
 | `list_roles` errors: *"requires a JWT bearer token or TLS client certificate"* | no identity reached the endpoint | the identity is configured on the MCP client connection (the `Authorization` header set at attach time); it is missing or the JWT expired — refresh/re-attach |
-| `list_roles` returns an empty list | your identity is bound to no role in this namespace | ask the operator to bind your identity; don't guess role names |
+| `list_roles` returns an empty list | no group in this namespace grants your identity a role | ask the operator to grant you one (a group rule or membership); don't guess role names |
 | a role has no `url` or no `skill` (and `warnings` says why) | the operator has not wired that role to a provider, or its skill is missing | don't use that role or construct a URL for it — pick another role or ask the operator |
+| a role's warning says *"built-in operator role"* | the role administers Warden itself; it is not reached through a provider | don't use it to do the work — pick a provider role |
 | `read_skill` returns *skill "&lt;uri&gt;" not found* | the skill was removed after `list_roles` ran | call `list_roles` again; if the role still names it, ask the operator — don't fabricate an endpoint |
 
-Discovery authorizes on identity alone (no role), so a failure here is
-almost always the presented credential, not a policy.
+Discovery authorizes on identity alone (no role), under the namespace's
+built-in policies, and every call is audited. A failure here is almost
+always the presented credential, not a policy.
 
 ## Gateway errors (doing the work)
 
@@ -33,7 +35,10 @@ role's policy decides. Branch on the status:
 
 | Status | Meaning | Retry? |
 |---|---|---|
+| **400** *"no role selected"* | the request names no role | yes, with the role's `url` from `list_roles` — the role is its `role/<name>/` segment |
 | **401** (or MCP *"unauthorized"*) | identity missing or **JWT expired** (typical TTL 5–60 min; agents that hold a token for hours WILL hit this) | yes, after refreshing the token / re-attaching |
+| **403** *"role … is not assumable"* or *"requires governed membership"* | no group grants you that role | only with a role `list_roles` lists for you; otherwise ask the operator |
+| **403** naming your *native identity* — *"is unclaimed"*, *"not governed"*, *"suspended"*, *"retired"* | the namespace requires every agent to be registered and sponsored, and you are not (or no longer) | no — ask the operator; no role works until they fix your registration |
 | **403** with `WWW-Authenticate: Bearer` and an `error_description` naming a tool/method | the role's policy doesn't allow that call | only after switching to a role whose description matches the operation; if none fits, ask the operator — don't escalate |
 | **404** | wrong gateway URL, mount, or namespace | no — re-read the role's `url` from `list_roles` (non-MCP) or the client config (MCP) before retrying |
 | **5xx** | Warden or the upstream failed; the body often carries the upstream's text verbatim | bounded retry with backoff on transient upstream errors; a genuine Warden 500 is a bug to report |
