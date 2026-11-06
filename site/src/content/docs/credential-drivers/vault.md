@@ -157,9 +157,9 @@ Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `vault_address` | Yes | — | Vault/OpenBao server URL (`http://` or `https://`), e.g. `https://vault.example.com`. |
+| `vault_address` | Yes | — | Vault/OpenBao server URL, e.g. `https://vault.example.com`. An `http://` address needs `tls_skip_verify=true`. |
 | `vault_namespace` | No | — | Namespace to scope all requests to. |
-| `auth_method` | No | — | Authentication method: `approle` (stored `secret_id`), or `oidc_federation` ([keyless](/federation/keyless-credentials/) — per-request JWT-auth login). Omit to use a pre-set token. |
+| `auth_method` | Yes | — | Authentication method: `approle` (stored `secret_id`), or `oidc_federation` ([keyless](/federation/keyless-credentials/) — per-request JWT-auth login). Required on every create and edit. |
 | `role_id` | If approle | — | AppRole role ID. |
 | `secret_id` | If approle | — | AppRole secret ID (secret, masked on read). |
 | `approle_mount` | If approle | — | Mount path of the AppRole auth backend, e.g. `approle`. |
@@ -167,10 +167,23 @@ Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
 | `jwt_role` | If keyless | — | Vault JWT-auth role the assertion logs in as (can be overridden per spec). |
 | `jwt_mount` | No | `jwt` | Vault JWT/OIDC auth mount path (keyless). |
 | `audience` | No | — | Assertion audience (keyless only). When set, must equal the Vault role's `bound_audiences`. |
-| `ca_data` | No | — | Base64-encoded PEM CA bundle for outbound upstream calls (e.g. the IBM IAM token exchange used by `dynamic_ibm`). Does not affect the connection to the Vault/OpenBao server itself. |
-| `tls_skip_verify` | No | `false` | Disable TLS verification on those outbound upstream calls (test only). Does not affect the Vault/OpenBao connection. |
+| `ca_data` | No | — | Base64-encoded PEM CA bundle that the server's TLS certificate must chain to. It applies to the Vault/OpenBao connection and to the driver's other outbound calls, such as the IBM IAM token exchange of `dynamic_ibm`. |
+| `tls_skip_verify` | No | `false` | Skip TLS verification on those same connections, and allow an `http://` `vault_address` (development only). |
 
 The `token` and `secret_id_accessor` fields are also treated as sensitive and masked on read.
+
+### The client comes from the source config alone
+
+The Vault client of a source is built from that source's config, and nothing from the
+Warden server's environment reaches it: not `VAULT_TOKEN`, `VAULT_NAMESPACE`,
+`VAULT_HEADERS`, `VAULT_AGENT_ADDR` or `VAULT_WRAP_TTL`, nor the TLS settings
+`VAULT_CACERT` and `VAULT_SKIP_VERIFY`. Its TLS trust is `ca_data` and `tls_skip_verify`.
+A source therefore authenticates only as its `auth_method` says, and never sends the
+server's own token to the address it names.
+
+A source stored before `auth_method` was required keeps minting with the server's
+environment token, and logs a warning. Any edit of it is refused until it sets
+`auth_method`.
 
 ## Specs and mint methods
 
@@ -186,7 +199,7 @@ Each spec sets a `mint_method` that picks the Vault engine and the credential sh
 | `dynamic_ibm` | IBM Cloud keys | `ibm_mount`, `role_name`, `ttl`, `iam_endpoint`, `access_key_id`, `secret_access_key` |
 | `vault_token` | Vault token | `token_role`, `ttl`, `display_name`, `meta` |
 | `oauth2` | OAuth bearer token | `oauth2_mount`, `credential_name` |
-| `transit_signer` | A scoped **signing capability** (not a secret) | `transit_key` (required), `transit_mount`, `signing_alg`, `payload.*` |
+| `transit_signer` | A scoped **signing capability** (not a secret) | `transit_key` (required), `transit_mount`, `signing_alg` (`RS256` default, or `RS384`, `PS256`, `ES256`, `ES384`), `payload.*` |
 
 `mint_method` is **required** — there is no default; an unset value is rejected at mint.
 
@@ -197,9 +210,22 @@ short-lived token that may do nothing but sign with one named transit key, plus 
 coordinates naming that key. A consumer chains it and asks the KMS to sign,
 so the private key is read by nobody — including Warden.
 
-Its consumer is the [`token_exchange`](/credential-drivers/token-exchange/) driver with
-`client_auth=kms_private_key_jwt`, which signs its RFC 7523 client assertion remotely.
-Two constraints follow from that:
+Its consumers sign an assertion remotely, through `secret_spec`:
+
+- the [`token_exchange`](/credential-drivers/token-exchange/) and
+  [`oauth2`](/credential-drivers/oauth2/#client-authentication) drivers with
+  `client_auth=kms_private_key_jwt`, for an RFC 7523 client assertion;
+- the [`azure`](/credential-drivers/azure/) driver with `auth_method=certificate`, for the
+  certificate assertion Entra ID expects. That one is signed PS256, so its producer sets
+  `signing_alg=PS256`.
+
+`signing_alg` is one of `RS256` (the default), `RS384`, `PS256`, `ES256` or `ES384`, and
+the transit key must be able to sign with it. Unlike a source's client, a consumer
+signing through a capability trusts the CA that `VAULT_CACERT` names in the Warden
+server's environment: a capability names no CA, so that is the only way to reach a store
+behind a private one.
+
+Two constraints apply:
 
 - It is **exchange-path-only** — the capability exists to be chained, not injected into
   a proxied request.

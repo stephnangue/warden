@@ -83,9 +83,9 @@ spec key.
 - Warden running (see `deploy/docker-compose.quickstart.yml` in the repository root)
 - An identity provider that issues JWTs (Ory Hydra in the quickstart)
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -95,13 +95,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/alicloud-user \
-    token_policies="alicloud-access" \
-    user_claim=sub \
-    cred_spec_name=alicloud-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -314,7 +312,33 @@ path "alicloud/role/+/gateway/*" {
 EOF
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create alicloud-user -json '{
+  "policies": ["alicloud-access"],
+  "cred_spec_name": "alicloud-ops",
+  "provider_path": "alicloud/"
+}'
+
+warden identity group create alicloud-user-agents -json '{
+  "type": "virtual",
+  "roles": ["alicloud-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+## Step 6: Get a JWT and Make Requests
 
 Obtain a JWT from your identity provider (client credentials flow, implicit flow, etc.), then point the Alicloud CLI at Warden.
 
@@ -376,7 +400,7 @@ Create an `StsToken` profile. **`access-key-id` carries the Warden role name** (
 
 ```bash
 export JWT="eyJhbGciOiJIUzI1NiJ9..."   # obtained from your IdP
-export ROLE="alicloud-user"             # the auth/jwt/role/<name> you configured in Step 1
+export ROLE="alicloud-user"             # the role you created in Step 5
 
 aliyun configure set \
   --profile warden \
@@ -387,7 +411,7 @@ aliyun configure set \
   --region cn-hangzhou
 ```
 
-The CLI signs requests with ACS3-HMAC-SHA256 using `access-key-secret` and sets `x-acs-security-token` from `sts-token` — both are the JWT. `access-key-id` is part of the signed Credential field; Warden extracts it as the auth role for implicit JWT login.
+The CLI signs requests with ACS3-HMAC-SHA256 using `access-key-secret` and sets `x-acs-security-token` from `sts-token` — both are the JWT. `access-key-id` is part of the signed Credential field; Warden extracts it as the role the request asks for.
 
 ### Make requests
 
@@ -420,7 +444,7 @@ For each request, Warden extracts the JWT from `x-acs-security-token` (it starts
 
 ### Client-side signing inputs (for SDK users)
 
-In **both** JWT and cert flows, `access_key_id` carries the **role name**. Warden extracts it from the signed ACS3 `Credential` field and uses it as the auth role for implicit login. This is what lets a single nginx/Warden mount serve multiple roles transparently.
+In **both** JWT and cert flows, `access_key_id` carries the **role name**. Warden extracts it from the signed ACS3 `Credential` field and uses it as the role the request asks for. This is what lets a single nginx/Warden mount serve multiple roles.
 
 | Field | JWT auth | Cert auth |
 |---|---|---|
@@ -429,24 +453,25 @@ In **both** JWT and cert flows, `access_key_id` carries the **role name**. Warde
 | `x-acs-security-token` | the JWT | *omit* |
 | `endpoint` | `<real>.aliyuncs.com.warden.example.com` | same |
 
-For JWT auth, the JWT must have claims that match the declared role's `bound_claims` — otherwise auth fails. The client *declares* which role it wants via `access_key_id`; Warden *validates* the claim against the JWT before issuing credentials.
+A group must grant the declared role to the caller — otherwise the request is refused. The client *declares* which role it wants via `access_key_id`; Warden *checks* that one of the caller's groups grants it before issuing credentials.
 
 ### Role resolution
 
 Warden resolves the role in this order, first match wins:
-1. URL path segment `/role/<name>/gateway/...` (explicit, used when clients aren't going through the reverse proxy)
-2. `access_key_id` from the signed ACS3 `Credential` — via `GetAuthRoleFromRequest` (this is how the wildcard-subdomain setup works)
-3. `default_role` from provider config (fallback)
+1. `X-Warden-Role` header
+2. URL path segment `/role/<name>/gateway/...` (explicit, used when clients aren't going through the reverse proxy)
+3. `access_key_id` from the signed ACS3 `Credential` — via `GetAuthRoleFromRequest` (this is how the wildcard-subdomain setup works)
+4. `default_role` from provider config (fallback, a namespace role)
 
-Because of #2, the nginx `proxy_pass` does **not** need to hard-code a role. Serve everything at `/v1/alicloud/gateway/...` and let clients declare their role through the signed request.
+Because of #3, the nginx `proxy_pass` does **not** need to hard-code a role. Serve everything at `/v1/alicloud/gateway/...` and let clients declare their role through the signed request.
 
 ## OSS Object Storage
 
-OSS goes through the same wildcard subdomain as the OpenAPI path, and follows the same signing-inputs convention: **`aws_access_key_id` is the Warden role name**, not a placeholder. Warden extracts it from the signed SigV4 `Credential` field and uses it as the auth role.
+OSS goes through the same wildcard subdomain as the OpenAPI path, and follows the same signing-inputs convention: **`aws_access_key_id` is the Warden role name**, not a placeholder. Warden extracts it from the signed SigV4 `Credential` field and uses it as the role the request asks for.
 
 ```bash
 export JWT="eyJhbGciOiJIUzI1NiJ9..."
-export ROLE="alicloud-user"           # your auth/jwt/role/<name>
+export ROLE="alicloud-user"           # the role you created in Step 5
 
 aws configure set aws_access_key_id  "${ROLE}"
 aws configure set aws_secret_access_key "${JWT}"
@@ -457,17 +482,17 @@ aws s3 ls s3://my-bucket/ \
   --region cn-hangzhou
 ```
 
-Warden extracts the JWT from `X-Amz-Security-Token` (it starts with `eyJ`), authenticates against `auto_auth_path` using `${ROLE}` as the auth role (the JWT's claims must satisfy its `bound_claims`), strips the `.warden.example.com` suffix to get `oss-cn-hangzhou.aliyuncs.com`, verifies the client's SigV4 signature against the original subdomain host, and re-signs against the real OSS endpoint. Both path-style and virtual-hosted-bucket-style URLs work; the region is resolved from the SigV4 Credential scope.
+Warden extracts the JWT from `X-Amz-Security-Token` (it starts with `eyJ`), authenticates against `auto_auth_path` using `${ROLE}` as the requested role (a group must grant it to the token), strips the `.warden.example.com` suffix to get `oss-cn-hangzhou.aliyuncs.com`, verifies the client's SigV4 signature against the original subdomain host, and re-signs against the real OSS endpoint. Both path-style and virtual-hosted-bucket-style URLs work; the region is resolved from the SigV4 Credential scope.
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+Steps 2-4 (provider, credential and policy setup) are identical. Replace Steps 1, 5 and 6 with the following.
 
 ### Enable Cert Auth
 
@@ -478,18 +503,7 @@ warden auth enable cert
 ### Configure Trusted CA
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=alicloud-user
-```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/alicloud-user \
-    allowed_common_names="agent-*" \
-    token_policies="alicloud-access" \
-    cred_spec_name=alicloud-ops
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
 ### Update Provider Config for Cert Auth
@@ -504,9 +518,31 @@ warden write alicloud/config <<EOF
 EOF
 ```
 
+### Grant the Role to Certificates
+
+Create the role as in Step 5, and grant it with a group whose rule matches certificate fields:
+
+```bash
+warden role create alicloud-user -json '{
+  "policies": ["alicloud-access"],
+  "cred_spec_name": "alicloud-ops",
+  "provider_path": "alicloud/"
+}'
+
+warden identity group create alicloud-user-agents -json '{
+  "type": "virtual",
+  "roles": ["alicloud-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Values support glob patterns; a rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
+
 ### Make Requests with Certificates
 
-For cert-based transparent auth, the client signs with the **role name** as both `access_key_id` and `access_key_secret` (no JWT, no security token). Warden extracts the role from the ACS3 (or SigV4 for OSS) `Credential` field and matches it against the mTLS-authenticated identity.
+For implicit authentication with a certificate, the client signs with the **role name** as both `access_key_id` and `access_key_secret` (no JWT, no security token). Warden extracts the role from the ACS3 (or SigV4 for OSS) `Credential` field and checks that a group grants it to the certificate.
 
 ```bash
 # Alicloud OpenAPI (via any Alicloud SDK pointed at Warden over mTLS):

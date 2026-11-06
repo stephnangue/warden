@@ -60,7 +60,7 @@ claude --version
 Download the **Warden CLI** onto your `PATH` (swap `darwin_arm64` for `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.21.0
+VER=0.22.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -141,7 +141,16 @@ warden write auth/spiffe/trust-domain/example.org \
   bundle_pem=@example.org-ca.pem
 
 warden read auth/spiffe/trust-domain/example.org    # x509_authority_count > 0, empty last_error
+
+warden write auth/spiffe/config '{
+  "bound_audiences": ["warden"]
+}'
 ```
+
+ghostunnel presents an X.509-SVID, which carries no audience; `bound_audiences` is what a
+JWT-SVID would need to carry. The mount records the SVID's `spiffe_id`, `trust_domain` and
+`path` as facts, and its native identity is the SPIFFE ID. It grants no role: a group does,
+in Step 7.
 
 ### Step 6 — route the Anthropic API (LLM)
 
@@ -166,10 +175,12 @@ warden policy write anthropic-access - <<'EOF'
 path "anthropic/role/+/gateway*" { capabilities = ["create", "read", "update", "delete", "patch"] }
 EOF
 
-warden write auth/spiffe/role/anthropic \
-  trust_domain="example.org" \
-  allowed_spiffe_ids="spiffe://example.org/ghostunnel" \
-  token_policies="anthropic-access" cred_spec_name="anthropic-ops" token_ttl="1h"
+warden role create anthropic -json '{
+  "description": "Inference calls to the Anthropic API",
+  "policies": ["anthropic-access"],
+  "cred_spec_name": "anthropic-ops",
+  "provider_path": "anthropic/"
+}'
 ```
 
 ### Step 7 — route GitHub's MCP server
@@ -203,11 +214,33 @@ path "github-mcp/role/+/gateway*" {
 }
 EOF
 
-warden write auth/spiffe/role/github \
-  trust_domain="example.org" \
-  allowed_spiffe_ids="spiffe://example.org/ghostunnel" \
-  token_policies="mcp-github-access,mcp-github-calls" cred_spec_name="github-ops" token_ttl="30m"
+warden role create github -json '{
+  "description": "Read-only GitHub tools through the GitHub MCP server",
+  "policies": ["mcp-github-access", "mcp-github-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
+
+# One group grants both roles to the ghostunnel SVID
+warden identity group create workstation -json '{
+  "type": "virtual",
+  "description": "The workstation ghostunnel, by its SPIFFE ID",
+  "roles": ["anthropic", "github"],
+  "rules": [
+    {
+      "mount": ["auth/spiffe/"],
+      "spiffe_id": ["spiffe://example.org/ghostunnel"]
+    }
+  ]
+}'
 ```
+
+:::caution[In production, register the agent]
+The group above grants its roles to any caller its rule matches: fine for this quickstart, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant its roles through a [static group](/identity/groups/) that lists the entity. Mark the roles `governed_only` so no virtual group can grant them. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+One identity now holds two roles. Each request names its role in the URL path, and Warden
+checks on every request that a group grants it to the SVID.
 
 ### Step 8 — drive Claude Code (both routed over the SVID)
 
@@ -318,7 +351,9 @@ workstation nor Warden holds a long-lived upstream secret.
 ## Troubleshooting
 
 - **GitHub `HTTP 404`** — the gateway URL must end `…/gateway/` (trailing slash).
-- **`403`** — the SVID didn't match a role's `allowed_spiffe_ids`, or the policy is missing.
+- **`403` `role "…" is not assumable through auth/spiffe/: no group grants it to this
+  caller`** — no group grants the role to this SVID: check the group's `spiffe_id` rule. A
+  `403` without that message means the policy is missing.
   **`401`** — no client SVID captured; check ghostunnel is up and `--verify-uri` matches.
 - **Warden exits "workload API X509 source unavailable"** — register the SVIDs (Step 2) before
   starting Warden (Step 3); check `docker compose logs spire-agent`.

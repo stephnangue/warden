@@ -61,7 +61,7 @@ See [Keyless credentials](/federation/keyless-credentials/) for the trust setup 
 [Assertion claims](/federation/assertion-claims/) for what the assertion carries.
 
 :::note[The agent is the only principal here]
-The `aws` provider has no user leg — it accepts no `user_auth_path` or `user_auth_role`,
+The `aws` provider has no user leg — it accepts no `user_auth_path`,
 because an AWS SDK request has nowhere to carry a second credential. The agent's identity
 is what reaches Warden and what the assertion describes. For an MCP-shaped AWS upstream
 that *does* carry both principals, see [MCP AWS](/provider-backends/mcp_aws/).
@@ -73,7 +73,7 @@ that *does* carry both principals, see [MCP AWS](/provider-backends/mcp_aws/).
 |---|---|---|
 | **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`, as above. **Nothing stored.** |
 | **Stored root → short-lived mint** | Yes | `auth_method=static`; IAM keys in Warden storage, rotated automatically |
-| **Static inline** | No | AWS has no long-lived credential worth serving directly; every mode mints |
+| **Static inline** ⚠️ | Yes | A `local` source with an `aws_access_keys` spec holding `access_key_id` and `secret_access_key`. The keys are served as they are and never rotated — see [3c](#3c-static-keys-on-a-local-source) |
 | **Chaining** | Not as a consumer | An `aws` source cannot be fed by `secret_spec` — it takes no such key. It is a chaining **producer**: `mint_method=secret_read` serves a Secrets Manager secret to other specs |
 | **Delegated user token** | No | No user leg on this provider |
 
@@ -123,20 +123,21 @@ There is **no IAM user and no access key** to create. If you cannot federate and
 back to stored keys, [Appendix: IAM setup for stored keys](#appendix-iam-setup-for-stored-keys)
 has that setup instead.
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role
-warden write auth/jwt/role/aws-user \
-    token_policies="aws-access" \
-    user_claim=sub \
-    cred_spec_name=developer
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+The role and the group that grants it come in [Step 5](#step-5-grant-agents-the-role),
+once the provider, the specs and the policy exist.
 
 ## Step 2: Mount and Configure the Provider
 
@@ -371,6 +372,36 @@ duration strings.
 
 Each spec points to a different `role_arn`, so the IAM user's `AssumeRoles` policy must allow assuming all of them (the `devops-*` wildcard in the [appendix's AssumeRoles policy](#assumeroles) covers this).
 
+### 3c. Static keys on a local source
+
+:::caution[Not for production]
+The IAM keys sit in the spec, are served to AWS as they are, and are never rotated. Use
+this to try the provider with keys you already have, then move to
+[3a](#3a-keyless-federation-recommended).
+:::
+
+A `local` source holds nothing; the spec carries the key pair and names the
+`aws_access_keys` type, which a `local` source cannot infer:
+
+```bash
+warden cred source create aws-static-inline -json '{
+  "type": "local"
+}'
+
+warden cred spec create developer -json '{
+  "type": "aws_access_keys",
+  "source": "aws-static-inline",
+  "config": {
+    "access_key_id": "<AccessKeyId>",
+    "secret_access_key": "<SecretAccessKey>"
+  }
+}'
+```
+
+The spec takes these two keys and nothing else. `secret_access_key` is masked when the spec
+is read or listed. Warden signs each request with the keys directly; there is no
+`AssumeRole` step.
+
 ### What the driver can do beyond this
 
 `sts_assume_role` is the mint method proxied SDK traffic needs, and it is the only one this
@@ -463,7 +494,35 @@ Verify:
 warden policy read aws-access
 ```
 
-## Step 5: Configure AWS SDK and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create aws-user -json '{
+  "policies": ["aws-access"],
+  "cred_spec_name": "developer",
+  "provider_path": "aws/"
+}'
+
+warden identity group create aws-user-agents -json '{
+  "type": "virtual",
+  "roles": ["aws-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`. For the `deployer` and `operator` specs, create a role for each the same way.
+
+On each request Warden authenticates the token at `auth/jwt/`, resolves the role the request names against the groups that match the token's facts, and authorizes the call with the role's policies.
+
+## Step 6: Configure AWS SDK and Make Requests
 
 With Warden there is no explicit login step. The client embeds its identity directly in the AWS SDK credentials, and Warden authenticates implicitly on every request.
 
@@ -471,7 +530,7 @@ With Warden there is no explicit login step. The client embeds its identity dire
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT`.
 
-Configure the AWS SDK to use the JWT as credentials. The auth role name goes in `AWS_ACCESS_KEY_ID`, and the JWT goes in both `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`:
+Configure the AWS SDK to use the JWT as credentials. The role name goes in `AWS_ACCESS_KEY_ID`, and the JWT goes in both `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`:
 
 ```bash
 export AWS_ACCESS_KEY_ID="aws-user"
@@ -480,7 +539,7 @@ export AWS_SESSION_TOKEN="$JWT"
 export AWS_ENDPOINT_URL="http://localhost:8400/v1/aws/gateway"
 ```
 
-Warden reads the auth role name from `AWS_ACCESS_KEY_ID`, so this is how one mount serves
+Warden reads the role name from `AWS_ACCESS_KEY_ID`, so this is how one mount serves
 several roles: change that variable and the next request resolves to a different role, a
 different credential spec, and different AWS permissions. The mount's `default_role` is
 only the fallback for requests that carry no role at all — it does not override the value
@@ -523,22 +582,12 @@ Certificate auth requires mTLS on the Warden listener so the client certificate 
 
 #### Set up cert auth and configure the provider
 
-Replace Step 1 with cert auth setup, and update the provider's `auto_auth_path`:
+Replace Step 1 with cert auth setup, point the provider's `auto_auth_path` at it, and grant the role through the cert mount:
 
 ```bash
-# Enable cert auth
+# Enable cert auth and configure the trusted CA
 warden auth enable cert
-
-# Configure trusted CA
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=aws-user
-
-# Create a role
-warden write auth/cert/role/aws-user \
-    allowed_common_names="agent-*" \
-    token_policies="aws-access" \
-    cred_spec_name=developer
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 
 # Update the provider to use cert auth
 warden write aws/config <<EOF
@@ -548,13 +597,22 @@ warden write aws/config <<EOF
   "default_role": "aws-user"
 }
 EOF
+
+# Grant the aws-user role (Step 5) to certificates whose common name starts with agent-
+warden identity group create aws-user-cert-agents -json '{
+  "type": "virtual",
+  "roles": ["aws-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
 ```
 
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
+A rule can also match other certificate fields, such as `org`, `ou` or `dns_san`. See [Cert auth](/auth-methods/cert/) for the facts a certificate proves.
 
 #### Configure the AWS SDK
 
-The client uses the auth role name as both `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. No session token is needed:
+The client uses the role name as both `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. No session token is needed:
 
 ```bash
 export AWS_ACCESS_KEY_ID="aws-user"
@@ -660,7 +718,19 @@ The provider includes specialized processors for:
 | **S3** | Standard S3 operations | Virtual-hosted and path-style bucket addressing |
 | **S3 Control** | Account-level S3 operations | Tagging, access points, storage lens (requires wildcard DNS) |
 | **S3 Access Points** | Single-region access points | ARN-based routing |
-| **Generic AWS** | All other services | EC2, Lambda, DynamoDB, SQS, SNS, IAM, CloudWatch, etc. |
+| **Bedrock Runtime** | Model calls: Converse, InvokeModel, their streaming forms, guardrails | Sent to `bedrock-runtime.<region>`, though signed as `bedrock`. See [Keyless model access](/federation/keyless-model-access/) |
+| **Generic AWS** | All other services | EC2, Lambda, DynamoDB, SQS, SNS, IAM, CloudWatch, the Bedrock control plane, etc. |
+
+Warden forwards a request only to an AWS host, whatever the client signs. The region and
+service of the SigV4 credential scope may hold only letters, digits and hyphens, and the
+parts of an S3 access-point ARN that become the host only host-name characters; any other
+value is refused. Before it re-signs,
+Warden checks that the target is an `https://` host under an AWS partition's domain, and
+refuses any other with `400`.
+
+For model calls, mount a provider for Bedrock alone, with a `timeout` of `300s` or more and
+a larger `max_body_size` for big prompts. A model call that is not streamed sends its
+headers only when generation ends, and the mount's `timeout` bounds that wait.
 
 ## Known Limitations
 
@@ -745,7 +815,8 @@ Read the error code: Warden answers in the service's own protocol (see
 - **An authentication code** — `InvalidClientTokenId`, `AuthFailure` (EC2),
   `InvalidAccessKeyId` (S3) or `UnrecognizedClientException` (JSON services):
   1. Check that `auto_auth_path` points to a valid, enabled auth backend (e.g., `auth/jwt/`).
-  2. Ensure the auth role exists and has a valid `cred_spec_name`.
+  2. Ensure the role exists with a valid `cred_spec_name`, and that a group grants it
+     through that mount (see [Step 5](#step-5-grant-agents-the-role)).
   3. For JWT mode: verify the JWT is valid and not expired — an expired JWT is the
      usual cause.
   4. For cert mode: verify the client certificate is signed by the trusted CA configured in the cert auth backend.

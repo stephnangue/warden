@@ -58,7 +58,7 @@ Download the **Warden CLI** onto your `PATH` (Apple Silicon shown — swap `darw
 `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.21.0
+VER=0.22.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -105,16 +105,19 @@ openssl x509 -in certs/client.crt -noout -subject
 ```bash
 warden auth enable cert
 
-warden write auth/cert/config trusted_ca_pem=@certs/ca.crt principal_claim=cn
+warden write auth/cert/config trusted_ca_pem=@certs/ca.crt
 ```
 
-No `default_role` — the role is selected per request by the URL path. One certificate can map
-to many roles; here we create one for inference.
+The mount admits every certificate that chains to this CA and records its fields, such as
+`cn`, as facts. Its native identity is the CN, `mcp-agent`. The mount grants no role: a group
+grants roles to the certificate, and each request names its role in the URL path. One
+certificate can hold many roles; here we create one for inference.
 
 ### Step 3 — route the Anthropic API through Warden
 
-Mount the `anthropic` provider, store the Console key as a credential, and bind a cert-auth
-role to it. The key is validated via `GET /v1/models` at create time, so a bad key fails fast.
+Mount the `anthropic` provider, store the Console key as a credential, create a role bound to
+it, and a group that grants the role to the certificate. The key is validated via
+`GET /v1/models` at create time, so a bad key fails fast.
 
 ```bash
 # Provider: where Warden forwards inference calls
@@ -136,16 +139,38 @@ warden cred source create anthropic-src -type=apikey -rotation-period=0 \
 warden cred spec create anthropic-ops -source anthropic-src \
   -config api_key=@secrets/anthropic-key.txt
 
-# Policy + cert-auth role bound to the credential
+# Policy + role bound to the credential
 warden policy write anthropic-access - <<'EOF'
 path "anthropic/role/+/gateway*" { capabilities = ["create", "read", "update", "delete", "patch"] }
 EOF
 
-warden write auth/cert/role/anthropic-user \
-  allowed_common_names="mcp-agent" \
-  token_policies="anthropic-access" token_ttl="1h" \
-  cred_spec_name="anthropic-ops"
+warden role create anthropic-user -json '{
+  "description": "Inference calls to the Anthropic API",
+  "policies": ["anthropic-access"],
+  "cred_spec_name": "anthropic-ops",
+  "provider_path": "anthropic/"
+}'
+
+# Group: grants the role to the certificate whose CN is mcp-agent
+warden identity group create anthropic-users -json '{
+  "type": "virtual",
+  "description": "Workstation certificates allowed to call the model",
+  "roles": ["anthropic-user"],
+  "rules": [
+    {
+      "mount": ["auth/cert/"],
+      "cn": ["mcp-agent"]
+    }
+  ]
+}'
 ```
+
+:::caution[In production, register the agent]
+The group above grants the role to any caller its rule matches: fine for this quickstart, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+On each request, Warden authenticates the certificate at `auth/cert/`, resolves the roles its
+groups grant, and authorizes the call against the role's policies.
 
 ### Step 4 — smoke-test through the tunnel
 
@@ -246,9 +271,8 @@ against the caller's identity.
 
 1. `warden status` (through ghostunnel) connects.
 2. Step 4's curl returns a model list, not `401`/`403`.
-3. With `ANTHROPIC_BASE_URL` set, a `claude` prompt gets a response; `docker compose logs
-   warden` shows a cert login + `anthropic-ops` credential issue, and the upstream call carries
-   the injected `x-api-key` (your placeholder is stripped).
+3. With `ANTHROPIC_BASE_URL` set, a `claude` prompt gets a response; the upstream
+   call carries the injected `x-api-key` from `anthropic-ops` (your placeholder is stripped).
 4. Your key never left Warden: `printf '%s' "$ANTHROPIC_API_KEY"` on the workstation is just
    `placeholder`, and `grep -r sk-ant ~/.claude/` finds nothing.
 5. **Audit is real:** `audit/audit.log` has a `response` entry for your call with
@@ -282,8 +306,10 @@ spec stores a secret. In production, Warden need not hold one:
 
 - **`x509: certificate is valid for … not 127.0.0.1`** — the server cert lost its IP SAN.
   `docker compose down -v && rm -rf certs && docker compose up -d` to regenerate.
-- **`403` + `WWW-Authenticate`** — the cert's CN didn't match the role's `allowed_common_names`,
-  or the policy is missing. Re-check Step 2/Step 3.
+- **`403` `role "anthropic-user" is not assumable through auth/cert/: no group grants it to
+  this caller`** — no group grants the role to this certificate: check the group's `cn` rule
+  and its `mount` (`auth/cert/`, trailing slash included). A `403` without that message means
+  the policy is missing. Re-check Step 2/Step 3.
 - **`warden status` connection refused** — the stack isn't up yet (`docker compose ps`), or
   `WARDEN_ADDR` isn't set to `http://127.0.0.1:9000` in this shell.
 - **`cred spec create` fails** — the Console key in `secrets/anthropic-key.txt` is wrong; it's

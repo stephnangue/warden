@@ -102,7 +102,7 @@ warden cred spec create grafana-admin-per-env \
 ```
 
 An agent claim other than `sub` resolves only if the spec lists it in
-`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the login does not
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the agent's credential does not
 carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
 works the same way via `assertion_user_claims`, and the two can be combined in one path.
 

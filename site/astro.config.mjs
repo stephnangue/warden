@@ -113,6 +113,7 @@ export default defineConfig({
             { slug: 'federation' },
             { slug: 'federation/oidc-issuer' },
             { slug: 'federation/keyless-credentials' },
+            { slug: 'federation/keyless-model-access' },
             { slug: 'federation/assertion-claims' },
             { slug: 'federation/credential-chaining' },
             { slug: 'federation/oauth-3lo-store' },
@@ -175,6 +176,7 @@ export default defineConfig({
               items: [
                 { slug: 'provider-backends/aws' },
                 { slug: 'provider-backends/azure' },
+                { slug: 'provider-backends/msgraph' },
                 { slug: 'provider-backends/gcp' },
                 { slug: 'provider-backends/alicloud' },
                 { slug: 'provider-backends/ibmcloud' },

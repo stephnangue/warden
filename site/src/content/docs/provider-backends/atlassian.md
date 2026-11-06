@@ -70,9 +70,9 @@ key.
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -82,13 +82,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/atlassian-user \
-    token_policies="atlassian-access" \
-    user_claim=sub \
-    cred_spec_name=atlassian-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -247,7 +245,33 @@ path "jira-servicedesk/role/+/gateway*" {
 EOF
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create atlassian-user -json '{
+  "policies": ["atlassian-access"],
+  "cred_spec_name": "atlassian-ops",
+  "provider_path": "jira/"
+}'
+
+warden identity group create atlassian-user-agents -json '{
+  "type": "virtual",
+  "roles": ["atlassian-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+`provider_path` names the mount discovery points agents at; the role works on every Atlassian mount its policy covers. A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -452,7 +476,7 @@ For older Data Center versions without PAT support, use Basic Auth the same way 
 
 ## TLS Certificate Authentication
 
-Steps 1 and 5 use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. Steps 2-4 (provider, credential, and policy setup) are identical regardless of the auth method.
+Steps 1, 5 and 6 use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. Steps 2-4 (provider, credential, and policy setup) are identical regardless of the auth method.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
@@ -467,18 +491,7 @@ warden auth enable cert
 ### Configure Trusted CA
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=atlassian-user
-```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/atlassian-user \
-    allowed_common_names="agent-*" \
-    token_policies="atlassian-access" \
-    cred_spec_name=atlassian-ops
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
 ### Configure Provider for Cert Auth
@@ -494,6 +507,28 @@ warden write jira/config <<EOF
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Create the role as in Step 5, and grant it with a group whose rule matches certificate fields:
+
+```bash
+warden role create atlassian-user -json '{
+  "policies": ["atlassian-access"],
+  "cred_spec_name": "atlassian-ops",
+  "provider_path": "jira/"
+}'
+
+warden identity group create atlassian-user-agents -json '{
+  "type": "virtual",
+  "roles": ["atlassian-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Values support glob patterns; a rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 ### Make Requests with Certificates
 

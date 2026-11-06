@@ -147,7 +147,7 @@ vault write auth/warden_approle/role/warden-source \
 
 ### Create Token Roles
 
-Warden mints child Vault tokens via [token roles](https://developer.hashicorp.com/vault/docs/auth/token#token-roles). Create the roles referenced by the credential specs in Step 4:
+Warden mints child Vault tokens via [token roles](https://developer.hashicorp.com/vault/docs/auth/token#token-roles). Create the roles referenced by the credential specs in Step 5:
 
 ```bash
 # Read-only token role (used by the vault-reader cred spec)
@@ -177,9 +177,9 @@ vault write -f auth/warden_approle/role/warden-source/secret-id
 
 Save the `role_id`, `secret_id`, and `secret_id_accessor` from the output.
 
-## Step 2: Configure Cert Auth and Create a Role
+## Step 2: Configure Cert Auth
 
-Set up a TLS certificate auth method and create a role that binds the credential spec and policy. This uses the same CA that signed the client certificate generated in the Prerequisites.
+Set up a TLS certificate auth method. This uses the same CA that signed the client certificate generated in the Prerequisites.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -192,18 +192,8 @@ Set up a TLS certificate auth method and create a role that binds the credential
 warden auth enable cert
 
 # Configure with the CA that signs client certificates
-warden write auth/cert/config \
-    trusted_ca_pem=@$CERT_DIR/ca.pem \
-    default_role=vault-user
-
-# Create a role that binds the credential spec and policy
-warden write auth/cert/role/vault-user \
-    allowed_common_names="agent-*" \
-    token_policies="vault-access" \
-    cred_spec_name=vault-reader
+warden write auth/cert/config trusted_ca_pem=@$CERT_DIR/ca.pem
 ```
-
-The `allowed_common_names` field supports glob patterns. The client certificate generated in the Prerequisites has CN `agent-quickstart`, which matches `agent-*`. You can also match on other certificate fields; see [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ## Step 3: Mount and Configure the Provider
 
@@ -246,7 +236,37 @@ Verify:
 warden read vault/config
 ```
 
-## Step 4: Create a Credential Source and Specs
+## Step 4: Create a Role and Grant It
+
+A [role](/identity/roles/) binds the credential spec and policy, and `provider_path` names the provider mount it is used with. Create it after the provider has its `auto_auth_path`; until then, agents cannot find the role through discovery. The spec and policy come in the next steps, so the write warns that they do not exist yet:
+
+```bash
+warden role create vault-user -json '{
+  "policies": ["vault-access"],
+  "cred_spec_name": "vault-reader",
+  "provider_path": "vault/"
+}'
+```
+
+Nobody holds the role yet. A virtual [group](/identity/groups/) grants it to the certificates the mount admits whose common name matches:
+
+```bash
+warden identity group create vault-user-agents -json '{
+  "type": "virtual",
+  "roles": ["vault-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every certificate its `cn` pattern matches: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+The `cn` selector supports glob patterns. The client certificate generated in the Prerequisites has CN `agent-quickstart`, which matches `agent-*`. You can also match on other certificate fields; see [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group) for the full set of fields.
+
+## Step 5: Create a Credential Source and Specs
 
 ### Option A: Keyless federation (recommended)
 
@@ -384,26 +404,28 @@ warden cred spec create vault-admin \
   -max-ttl 8h
 ```
 
-## Step 5: Create a Policy
+## Step 6: Create a Policy
 
 Create a policy that grants access to the Vault provider gateway. Note that this policy is intentionally coarse-grained for simplicity, but it can be made much more fine-grained to restrict access to specific paths or capabilities as needed:
 
+The clients in this guide name the role in the URL (`/v1/vault/role/<role>/gateway`), so the policy grants that path:
+
 ```bash
 warden policy write vault-access - <<EOF
-path "vault/gateway*" {
+path "vault/role/+/gateway*" {
   capabilities = ["read", "create", "update", "delete", "patch"]
 }
 EOF
 ```
 
-For use cases where the role will be provided in the path, also grant access to role-based paths:
+A client that leaves the role out of the URL (`/v1/vault/gateway`, with the role in `X-Warden-Role` or the provider's `default_role`) reaches `vault/gateway*` instead; grant that path too if you use that form:
 
 ```bash
 warden policy write vault-access - <<EOF
-path "vault/gateway*" {
+path "vault/role/+/gateway*" {
   capabilities = ["read", "create", "update", "delete", "patch"]
 }
-path "vault/role/+/gateway*" {
+path "vault/gateway*" {
   capabilities = ["read", "create", "update", "delete", "patch"]
 }
 EOF
@@ -413,7 +435,7 @@ For tighter control, add runtime conditions to protect sensitive Vault paths. Fo
 
 ```bash
 warden policy write vault-prod-restricted - <<EOF
-path "vault/gateway/secret/data/*" {
+path "vault/role/+/gateway/secret/data/*" {
   capabilities = ["delete"]
   condition = <<-CEL
     cidrContains("10.0.0.0/8", request.client_ip) &&
@@ -422,7 +444,7 @@ path "vault/gateway/secret/data/*" {
   CEL
 }
 
-path "vault/gateway*" {
+path "vault/role/+/gateway*" {
   capabilities = ["read", "create", "update", "patch"]
 }
 EOF
@@ -436,7 +458,7 @@ Verify:
 warden policy read vault-access
 ```
 
-## Step 6: Make Requests with Client Certificates
+## Step 7: Make Requests with Client Certificates
 
 No login step is required. The client certificate is presented during the TLS handshake and Warden performs implicit authentication on every call — no session token to manage.
 
@@ -498,7 +520,7 @@ export VAULT_NAMESPACE=admin/team-a
 vault kv get secret/myapp
 ```
 
-Note that the `vault_namespace` on the **credential source** (Step 4) and the `X-Vault-Namespace` on **client requests** serve different purposes:
+Note that the `vault_namespace` on the **credential source** (Step 5) and the `X-Vault-Namespace` on **client requests** serve different purposes:
 - **Source `vault_namespace`**: Scopes Warden's own Vault API calls (AppRole auth, credential minting)
 - **Client `X-Vault-Namespace`**: Scopes the proxied request to a namespace in the target Vault instance
 
@@ -543,7 +565,7 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## JWT Authentication
 
-Steps 2 and 6 above use TLS certificate authentication. Alternatively, you can authenticate with a JWT. This is useful for workloads that obtain tokens from an identity provider (OIDC/OAuth2) — CI/CD pipelines, cloud functions, or services with federated identity.
+The steps above use TLS certificate authentication. Alternatively, you can authenticate with a JWT. This is useful for workloads that obtain tokens from an identity provider (OIDC/OAuth2) — CI/CD pipelines, cloud functions, or services with federated identity.
 
 > **Prerequisite:** JWT authentication requires an identity provider that issues JWTs. The quickstart uses [Ory Hydra](https://www.ory.sh/hydra/) via Docker Compose:
 > ```bash
@@ -552,23 +574,36 @@ Steps 2 and 6 above use TLS certificate authentication. Alternatively, you can a
 > docker compose -f docker-compose.quickstart.yml up -d
 > ```
 
-Steps 1, 3-5 (provider setup) are identical. Replace Steps 2 and 6 with the following.
+The role, credential spec and policy are identical. Replace the cert mount (Step 2), its group (Step 4) and the requests (Step 7) with the following.
 
 ### Enable JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/vault-user \
-    token_policies="vault-access" \
-    user_claim=sub \
-    cred_spec_name=vault-reader \
-    token_ttl=1h
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+### Grant the Role to JWTs
+
+A virtual group grants `vault-user` to the callers the JWT mount admits:
+
+```bash
+warden identity group create vault-user-agents -json '{
+  "type": "virtual",
+  "roles": ["vault-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+This rule matches every token the mount accepts. Add selectors on the token's facts, such as `sub`, to grant the role to fewer callers.
 
 ### JWT auth method
 
@@ -628,15 +663,15 @@ warden write vault/config vault_address=https://vault.example.com:8200
 
 ### "Unauthorized" on gateway requests
 
-1. Verify the credential spec is correctly bound to the cert auth role.
+1. Verify the role names the credential spec in `cred_spec_name`.
 2. Check that the Vault AppRole policy grants access to the paths being requested.
-3. Ensure the client certificate CN matches the `allowed_common_names` pattern on the role.
+3. Ensure the client certificate CN matches the `cn` selector of the group that grants the role.
 4. Verify the client certificate is signed by the CA configured in `trusted_ca_pem`.
 
 ### Request returns 403
 
 1. Verify `auto_auth_path` is set in the provider config.
-2. Ensure the cert auth role exists and is bound to a `vault_token` credential spec.
+2. Ensure the role exists, names a `vault_token` credential spec, and a group grants it through `auth/cert/`.
 3. Check the Warden policy grants access to `vault/role/+/gateway*`.
 
 ### TLS certificate errors

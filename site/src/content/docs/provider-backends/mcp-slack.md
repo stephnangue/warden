@@ -64,9 +64,9 @@ generic MCP page, pointed at a Slack OAuth engine.
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -76,13 +76,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/mcp-user \
-    token_policies="mcp-slack-access,mcp-slack-access-calls" \
-    user_claim=sub \
-    cred_spec_name=slack-mcp-creds
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ### Enable audit logging
@@ -138,7 +136,33 @@ Verify the configuration:
 warden read slack-mcp/config
 ```
 
-## Step 3: Create the Credential
+## Step 3: Create a Role and Grant It
+
+Create the role, then a virtual group that grants it to callers admitted through the JWT mount. The role lists both policies from Step 5 by name: the capability policy that grants the path and the MCP policy that governs the calls. The spec and the policies come in Steps 4 and 5; until they exist, the role write warns.
+
+```bash
+warden role create mcp-user -json '{
+  "policies": ["mcp-slack-access", "mcp-slack-access-calls"],
+  "cred_spec_name": "slack-mcp-creds",
+  "provider_path": "slack-mcp/"
+}'
+
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+## Step 4: Create the Credential
 
 The Slack MCP server is an OAuth 2.0 **resource server** that consumes user-scoped access
 tokens. Something has to play the OAuth client, hold each user's refresh token, and mint a
@@ -278,7 +302,7 @@ warden cred spec read slack-mcp-creds
 
 The agent's effective access is the intersection of three things: the app's
 configured scopes, what the user granted at consent time, and what the Warden
-policy bound to the role permits (the MCP policy — see [Step 4](#step-4-create-a-policy)).
+policy bound to the role permits (the MCP policy — see [Step 5](#step-5-create-a-policy)).
 The OAuth token bounds what Slack will allow; the Warden policy can only narrow
 it further, never widen it. See
 [Token Scopes and Tool Availability](#token-scopes-and-tool-availability).
@@ -345,7 +369,7 @@ called, and the Slack user it acted as — while the token stays salted:
 > device's `salt_fields` (e.g. `response.credential.metadata.email`) to HMAC it
 > rather than log it in the clear.
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 MCP traffic passes through two complementary layers of authorization. The minted
 Slack access token is the security boundary — its scopes and the consenting
@@ -388,7 +412,7 @@ EOF
 ```
 
 Bind **both** names on the role — an MCP policy comes into scope by being
-listed in `token_policies`, exactly like a capability policy.
+listed in the role's `policies`, exactly like a capability policy.
 
 A policy that restricts the agent to a vetted set of Slack tools:
 
@@ -460,7 +484,7 @@ in scope denies every call** (`no_mcp_policy`) — there is no pass-through defa
 so to let the OAuth token's scopes alone enforce authorization, write a wildcard
 MCP policy that allows every method and tool.
 
-## Step 5: Point an MCP Client at Warden
+## Step 6: Point an MCP Client at Warden
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -525,7 +549,7 @@ by default. Add `--scope project` to write a shared `.mcp.json` you can commit, 
 `--scope user` to make it available across all your projects.
 
 Confirm Claude Code registered it and completes the MCP handshake — this is where
-a missing lifecycle method in your policy (see Step 4) would surface as a hang:
+a missing lifecycle method in your policy (see Step 5) would surface as a hang:
 
 ```bash
 claude mcp list
@@ -540,7 +564,7 @@ consented token allow:
 
 The `role` segment in the URL selects which credential spec — and thus which
 consented Slack identity — backs the calls, via the role's `cred_spec_name`
-binding from Step 1 (here, `slack-mcp-creds`). The Hydra JWT is short-lived —
+binding from Step 3 (here, `slack-mcp-creds`). The Hydra JWT is short-lived —
 when it expires, refresh it, then `claude mcp remove slack` and re-add with the
 new token.
 
@@ -626,7 +650,7 @@ after `gateway` verbatim, so `gateway` maps to `https://mcp.slack.com/mcp` while
 
 ## TLS Certificate Authentication
 
-Steps 1 and 5 above use JWT authentication. Alternatively, you can authenticate
+Steps 1, 3 and 6 above use JWT authentication. Alternatively, you can authenticate
 with a TLS client certificate. This is useful for workloads that already have
 X.509 certificates — Kubernetes pods with cert-manager, VMs with machine
 certificates, or SPIFFE X.509-SVIDs from a service mesh.
@@ -635,9 +659,10 @@ certificates, or SPIFFE X.509-SVIDs from a service mesh.
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 2-4 (provider mount, credential, policy) are identical — the
-`mcp-slack-access` policy from Step 4 works for either auth method. Replace Steps
-1 and 5 with the following.
+The provider mount, the role, the credential and the policies are identical — the
+`mcp-slack-access` policies from Step 5 work for either auth method. Replace the
+JWT mount, the provider's `auto_auth_path`, the group and the client setup with the
+following.
 
 ### Enable Cert Auth
 
@@ -650,21 +675,8 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=mcp-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/mcp-user \
-    allowed_common_names="agent-*" \
-    token_policies="mcp-slack-access,mcp-slack-access-calls" \
-    cred_spec_name=slack-mcp-creds
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -679,6 +691,22 @@ warden write slack-mcp/config <<EOF
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Grant `mcp-user` with a group whose rule trusts the cert mount and matches the certificate's common name:
+
+```bash
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Selectors take glob patterns. A rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 For MCP-client mTLS patterns (local terminating sidecar, or `mcp-remote` as a
 Node bridge) and role selection with a certificate, see the equivalent section in
@@ -695,7 +723,7 @@ never widen it. A `tools/call` that fails with a Slack permission error
 (`missing_scope`, `not_in_channel`, …) means the app lacks a required user scope
 or the consenting user can't see that resource; a `tools/call` denied by Warden
 with a `403` + RFC 6750 `WWW-Authenticate` header (and a `rule_type` in the audit
-log) means the [Step 4](#step-4-create-a-policy) MCP policy blocked it. Read
+log) means the [Step 5](#step-5-create-a-policy) MCP policy blocked it. Read
 the error to tell the two layers apart.
 
 Common mappings (Slack **user-token** scopes):

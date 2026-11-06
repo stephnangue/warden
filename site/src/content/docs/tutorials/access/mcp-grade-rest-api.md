@@ -41,11 +41,12 @@ construction. A plain REST API doesn't — unless something sits in front of it.
 ## The solution
 
 Put **roles** between the agent and GitHub. A role is a named, reusable definition — set by an
-operator — that Warden resolves **on every request** into three things: *who may assume it* (the
-identity binding), *what it may do* (its [policy](/identity/policies/)), and *what credential
-Warden mints* upstream. The agent asks Warden *"what may I do?"*
-([`list_roles`](/concepts/mcp/#warden-as-an-mcp-server-discovery-interface)), gets back only the
-roles its identity is admitted to, reads the one that fits, and fetches a
+operator — of *what it may do* (its [policies](/identity/policies/)) and *what credential Warden
+mints* upstream. A **group** decides *who holds it*: its rules match the facts the auth mount
+verified about the caller. On every request Warden authenticates the caller, resolves the roles
+its groups grant, and authorizes the call under the role it names. The agent asks Warden *"what
+may I do?"* ([`list_roles`](/concepts/mcp/#warden-as-an-mcp-server-discovery-interface)), gets
+back only the roles its groups grant, reads the one that fits, and fetches a
 **[skill](/concepts/discovery-and-skills/)** — a small markdown recipe scoped to that role's
 endpoints. Then it calls the API with `gh api`, asserting the role in the URL. Authority rides on
 the call, never on the connection; the recipe is a few endpoints, never the whole spec. See
@@ -59,7 +60,8 @@ the agent acts with `gh api` instead of MCP tool calls.
 ### The four roles
 
 All five roles front the same `github` mount; each projects a different slice of the GitHub REST
-API. Four bind to the agent's identity; the fifth binds to a different one. The agent **creates
+API. One group grants four of them to the agent's identity; another group grants the fifth to
+a different identity. The agent **creates
 the repo itself** under the first role, then every other role operates on it.
 
 | Role | What its policy grants (REST endpoints) | Agent can assume? |
@@ -68,7 +70,7 @@ the repo itself** under the first role, then every other role operates on it.
 | `repo-reader` | `GET` repo metadata, README, contents, languages | ✅ |
 | `issue-manager` | list / open / edit / comment on issues | ✅ |
 | `label-curator` | list / create / rename / delete labels | ✅ |
-| `collaborator-admin` | add repo collaborators — **bound to another identity** | ❌ |
+| `collaborator-admin` | add repo collaborators — **granted to another identity** | ❌ |
 
 `repo-creator` shows the two ways a policy reaches fine-grained scope. The three repo-scoped roles
 pin the repo in the **URL path** (`…/repos/+/warden-gh-api/…`). But `POST /user/repos` has no repo
@@ -77,9 +79,9 @@ with a CEL condition: `request.data.name == "warden-gh-api"`. The agent can crea
 and no other.
 
 The fifth role is real and fully functional — it just belongs to a **different principal** (think:
-a human admin). The agent holds the wrong identity for it, so Warden never admits it: the role is
-invisible in `list_roles` and refused at the gateway. That is the whole lesson — the wall is the
-identity binding, checked on every request.
+a human admin). No group grants it to the agent's identity, so the role is invisible in
+`list_roles` and refused at the gateway. That is the whole lesson — the wall is the group's rule,
+checked on every request.
 
 ### Prerequisites
 
@@ -122,7 +124,7 @@ docker compose logs hydra-client-init | grep my-agent   # ->  [OK] my-agent
 
 This runs Ory Hydra with an in-memory database and one pre-created client, `my-agent` /
 `agent-secret`, that mints JWTs via the OAuth2 `client_credentials` grant. For that grant the JWT's
-`sub` claim is the client id — `my-agent` — which is exactly the identity our roles bind against.
+`sub` claim is the client id — `my-agent` — which is exactly the value our groups match on.
 
 ### Step 2 — start Warden (dev mode)
 
@@ -143,15 +145,21 @@ warden status          # sealed: false
 
 ### Step 3 — trust Hydra's JWTs
 
-Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra via OIDC discovery. Warden
+Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra's signing keys. Warden
 runs on your host, so it reaches Hydra at `localhost:4444`:
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config \
-  oidc_discovery_url=http://localhost:4444 \
-  bound_issuer=http://localhost:4444
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+The mount admits a token signed by Hydra, issued by it, and minted for the audience `warden`.
+It records the token's `sub` as a fact, and as the caller's native identity. It grants no role:
+groups do, in Step 5.
 
 ### Step 4 — front the GitHub REST API
 
@@ -194,16 +202,16 @@ rest.
 
 ### Step 5 — define the roles
 
-Each role is a **policy** (which endpoints it may call, by HTTP method) plus a **role binding**
-(who may assume it, which credential it mints). For a REST provider a policy is pure `path` +
+Each role is a **policy** (which endpoints it may call, by HTTP method) plus a **role** that names
+its policies and the credential it mints. Two groups then decide who holds which role. For a REST provider a policy is pure `path` +
 `capabilities`: a capability *is* the HTTP method — `GET` needs `read`, `POST` needs `create`,
 `PATCH` needs `patch`, `PUT` needs `update`, `DELETE` needs `delete`. The path Warden authorizes
 is the internal gateway path, `github/role/<role>/gateway/<api-path>`, so a policy scopes GitHub
 endpoints by writing patterns against it. Everything is default-deny; only what a rule grants gets
 through.
 
-Each binding also names the mount the role is used with, `provider_path=github/`, and the skill
-that teaches it, `skill=gh-…`. The discovery server turns those into the role's gateway URL and
+Each role also names the mount it is used with, `"provider_path": "github/"`, and the skill that
+teaches it, `"skill": "gh-…"`. The discovery server turns those into the role's gateway URL and
 skill URI. The skills don't exist yet; you write them in Step 6. Run the blocks below one at a
 time.
 
@@ -219,15 +227,13 @@ path "github/role/repo-creator/gateway/user/repos" {
 }
 EOF
 
-warden write auth/jwt/role/repo-creator \
-  bound_subject=my-agent \
-  token_policies=pol-repo-creator \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="create the warden-gh-api repository" \
-  provider_path=github/ \
-  skill=gh-repo-creator \
-  token_ttl=1h
+warden role create repo-creator -json '{
+  "description": "create the warden-gh-api repository",
+  "policies": ["pol-repo-creator"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github/",
+  "skill": "gh-repo-creator"
+}'
 ```
 
 **2. `repo-reader` — read one repo.** The owner segment is a `+` wildcard so the command copies
@@ -241,15 +247,13 @@ path "github/role/repo-reader/gateway/repos/+/warden-gh-api/contents/*" { capabi
 path "github/role/repo-reader/gateway/repos/+/warden-gh-api/languages"  { capabilities = ["read"] }
 EOF
 
-warden write auth/jwt/role/repo-reader \
-  bound_subject=my-agent \
-  token_policies=pol-repo-reader \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="read the warden-gh-api repo, its README, files and languages" \
-  provider_path=github/ \
-  skill=gh-repo-reader \
-  token_ttl=1h
+warden role create repo-reader -json '{
+  "description": "read the warden-gh-api repo, its README, files and languages",
+  "policies": ["pol-repo-reader"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github/",
+  "skill": "gh-repo-reader"
+}'
 ```
 
 **3. `issue-manager` — list, open, edit, and comment on issues.** `GET` needs `read`, `POST`
@@ -262,15 +266,13 @@ path "github/role/issue-manager/gateway/repos/+/warden-gh-api/issues/+"         
 path "github/role/issue-manager/gateway/repos/+/warden-gh-api/issues/+/comments" { capabilities = ["read", "create"] }
 EOF
 
-warden write auth/jwt/role/issue-manager \
-  bound_subject=my-agent \
-  token_policies=pol-issue-manager \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="list, open, edit and comment on issues in warden-gh-api" \
-  provider_path=github/ \
-  skill=gh-issue-manager \
-  token_ttl=1h
+warden role create issue-manager -json '{
+  "description": "list, open, edit and comment on issues in warden-gh-api",
+  "policies": ["pol-issue-manager"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github/",
+  "skill": "gh-issue-manager"
+}'
 ```
 
 **4. `label-curator` — manage labels.** Renaming is a `PATCH`, deleting a `DELETE`:
@@ -281,20 +283,19 @@ path "github/role/label-curator/gateway/repos/+/warden-gh-api/labels"   { capabi
 path "github/role/label-curator/gateway/repos/+/warden-gh-api/labels/+" { capabilities = ["read", "patch", "delete"] }
 EOF
 
-warden write auth/jwt/role/label-curator \
-  bound_subject=my-agent \
-  token_policies=pol-label-curator \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="list, create, rename and delete labels on warden-gh-api" \
-  provider_path=github/ \
-  skill=gh-label-curator \
-  token_ttl=1h
+warden role create label-curator -json '{
+  "description": "list, create, rename and delete labels on warden-gh-api",
+  "policies": ["pol-label-curator"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github/",
+  "skill": "gh-label-curator"
+}'
 ```
 
-**5. `collaborator-admin` — add collaborators, bound to a different identity.** The policy is
-fully functional; the only difference that matters is `bound_subject=admin-agent`, an identity the
-agent does **not** hold. It names no mount or skill, because the agent will never see it:
+**5. `collaborator-admin` — add collaborators, granted to a different identity.** The policy is
+fully functional; the only difference that matters is the group that grants it in block 6, whose
+rule matches `admin-agent`, an identity the agent does **not** hold. It names no mount or skill,
+because the agent will never see it:
 
 ```bash
 warden policy write pol-collaborator-admin - <<'EOF'
@@ -302,14 +303,50 @@ path "github/role/collaborator-admin/gateway/repos/+/warden-gh-api/collaborators
 path "github/role/collaborator-admin/gateway/repos/+/warden-gh-api/collaborators/+" { capabilities = ["read", "update"] }
 EOF
 
-warden write auth/jwt/role/collaborator-admin \
-  bound_subject=admin-agent \
-  token_policies=pol-collaborator-admin \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="add collaborators to warden-gh-api" \
-  token_ttl=1h
+warden role create collaborator-admin -json '{
+  "description": "add collaborators to warden-gh-api",
+  "policies": ["pol-collaborator-admin"],
+  "cred_spec_name": "github-ops"
+}'
 ```
+
+**6. Grant the roles.** A virtual group grants its roles to every caller whose facts match one of
+its rules. The first grants the four task roles to the token whose `sub` is `my-agent`; the second
+grants `collaborator-admin` to `admin-agent` only:
+
+```bash
+warden identity group create my-agent-tasks -json '{
+  "type": "virtual",
+  "description": "The tasks my-agent may run on warden-gh-api",
+  "roles": ["repo-creator", "repo-reader", "issue-manager", "label-curator"],
+  "rules": [
+    {
+      "mount": ["auth/jwt/"],
+      "sub": ["my-agent"]
+    }
+  ]
+}'
+
+warden identity group create admin-agent-tasks -json '{
+  "type": "virtual",
+  "description": "The admin identity that manages collaborators",
+  "roles": ["collaborator-admin"],
+  "rules": [
+    {
+      "mount": ["auth/jwt/"],
+      "sub": ["admin-agent"]
+    }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The groups above grant roles to any caller their rules match: fine for this tutorial, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant its roles through a [static group](/identity/groups/) that lists the entity. Mark the roles `governed_only` so no virtual group can grant them. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+One identity, four roles. The agent picks one per request through the `role/<role>/` segment of
+the URL, and Warden checks on each request that a group grants it. See [Groups](/identity/groups/)
+for the rule syntax.
 
 Finally, turn on an audit log so you can watch every decision — which role carried each call, and
 why each was allowed or denied:
@@ -444,7 +481,7 @@ present, so exporting it is fine:
 ```bash
 export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden" \
   | jq -r '.access_token')
 ```
 
@@ -481,7 +518,7 @@ Open a `claude` session and ask, in plain language:
 Claude calls Warden's `list_roles` tool and reports exactly four: `repo-creator`, `repo-reader`,
 `issue-manager`, and `label-curator` — each with the description you set, provider `github`, a
 `skill://gh-…/SKILL.md` URI, and its gateway `url`. `collaborator-admin` is **not on the list**:
-Warden only returns roles the presented identity is admitted to. The menu the agent plans against
+Warden only returns roles a group grants to the presented identity. The menu the agent plans against
 is already scoped to its identity — just like an MCP `tools/list`. So are the skills: the agent can
 read the four role skills and the shared ones, such as `gh-via-warden` and `troubleshooting`, and
 nothing else.
@@ -532,13 +569,15 @@ grants no `create`, and the issues path isn't in its allow-list at all — **def
 gateway**, before the call reaches GitHub. The same task succeeded a moment ago under
 `issue-manager`; the only thing that changed is which role carried it.
 
-**A role the agent isn't admitted to.** Ask for the collaborator change:
+**A role no group grants the agent.** Ask for the collaborator change:
 
 > **add `octocat` as a collaborator on `warden-gh-api`**
 
 There is no path to it. `collaborator-admin` never appeared in `list_roles`, and if Claude aims a
-request at that role's gateway anyway, Warden rejects it: the agent's identity (`sub=my-agent`)
-doesn't satisfy the role's `bound_subject=admin-agent`, so no token is ever minted for it. Claude
+request at that role's gateway anyway, Warden rejects it with `403`: no group grants the role to
+the agent's identity (`sub` `my-agent`), since the only group listing it matches `admin-agent`.
+The refusal reads `role "collaborator-admin" is not assumable through auth/jwt/: no group grants
+it to this caller`, and no GitHub credential is ever minted for the call. Claude
 has no assumable role that grants collaborator writes and tells you so. The agent could be confused,
 hallucinating, or actively manipulated — the answer is the same, because the boundary lives at the
 gateway, not in the model.
@@ -583,8 +622,10 @@ injected GitHub token never appears in the clear — the audit layer salts it to
 - **`gh` prints "gh: To use GitHub CLI... authenticate"** — set the placeholder token:
   `export GH_TOKEN=unused`. Its value is never used; the real credential is the `Authorization:
   Bearer $JWT` header Warden reads.
-- **`403` / "permission denied" on a call that should work** — the JWT expired (1h TTL) or the URL
-  named the wrong role. Mint a fresh JWT (Step 7) and re-check the `role/<role>/` segment. Quick
+- **`authentication failed`** — the JWT expired (1h TTL), or was not minted for the audience
+  `warden`. Mint it again with `&audience=warden` (Step 7).
+- **`403` / "permission denied" on a call that should work** — the URL named the wrong role, or
+  no group grants it: check the `my-agent-tasks` group's `sub` rule. Mint a fresh JWT (Step 7) and re-check the `role/<role>/` segment. Quick
   connectivity check for one role:
   ```bash
   gh api "$WARDEN_ADDR/v1/github/role/repo-reader/gateway/repos/OWNER/warden-gh-api" \
@@ -595,13 +636,14 @@ injected GitHub token never appears in the clear — the audit layer salts it to
 - **`credential spec "github-ops" not found`** — Step 4's `cred spec create` failed (usually an
   invalid PAT — Warden verifies it on creation). Re-run that command with a valid token.
 - **A role has no `url`, or no `skill`** — `list_roles` returns a `warnings` line saying why. Check
-  the role's `provider_path=github/` and `skill=…`, that the skill exists (`warden skill list`), and
+  the role's `"provider_path": "github/"` and `"skill": "…"`, that the skill exists (`warden skill list`), and
   that the mount's `auto_auth_path` is `auth/jwt/`, trailing slash included.
 - **A task ran under the wrong role, or a skill looks stale** — Claude keeps what it read earlier in
   the session. After changing a role, policy, or skill, exit Claude (`/exit`) and start a fresh
   session so it reads them again.
-- **The forbidden collaborator call "just works"** — check `collaborator-admin` was written with
-  `bound_subject=admin-agent`, not `my-agent`. That one field is the wall.
+- **The forbidden collaborator call "just works"** — check that only `admin-agent-tasks` lists
+  `collaborator-admin`, and that its rule matches `sub` `admin-agent`, not `my-agent`. That one
+  rule is the wall.
 
 ## Cleanup
 

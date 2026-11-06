@@ -97,7 +97,7 @@ reach depends on what the spec projects:
 | Template | Available when |
 |---|---|
 | `{{agent.sub}}` | Always — the agent's principal is projected unconditionally, given `subject_token_source` is `agent_identity` or `warden_identity`. |
-| `{{agent.<other>}}` | The claim is listed in `assertion_metadata_claims` **and** the agent's login actually carries it. |
+| `{{agent.<other>}}` | The claim is listed in `assertion_metadata_claims` **and** the agent's credential actually carries it. |
 | `{{user.<claim>}}` | The claim is listed in `assertion_user_claims`, which requires `subject_token_source=warden_identity`. |
 
 Resolution happens **at mint time**, not at spec create — a spec whose template can never
@@ -110,6 +110,46 @@ Substituted values are constrained — a claim value must match an allow-list, c
 empty, and cannot span a path segment; any `.` or `..` segment it composes is rejected
 after substitution. A caller therefore cannot steer the template at a key it was not
 meant to reach.
+
+### The client assertion's audience
+
+A client assertion, from `private_key_jwt` or `kms_private_key_jwt`, names by default the
+endpoint it is sent to as its `aud`. An authorization server that enforces
+draft-ietf-oauth-rfc7523bis wants its **issuer identifier** instead, as the sole audience.
+Set `client_assertion_aud=issuer` and name the issuer:
+
+- `issuer` is the issuer of the server behind `token_url`. A single-hop exchange and leg 1
+  of `id_jag` name it.
+- `resource_issuer` is the issuer of the resource authorization server behind
+  `resource_token_url`. Leg 2 of `id_jag` names it, and `id_jag` requires it in this mode.
+
+Both must be `https://` (`http://` only with `tls_skip_verify`), with no query or
+fragment. Each is refused where nothing would read it: `client_assertion_aud` on a method
+that sends no assertion, `issuer` and `resource_issuer` outside issuer mode, and
+`resource_issuer` on a grant other than `id_jag`.
+
+```bash
+warden cred source create exchange-src -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/token",
+    "client_auth": "kms_private_key_jwt",
+    "secret_spec": "signer-cap",
+    "client_assertion_aud": "issuer",
+    "issuer": "https://idp.example.com"
+  }
+}'
+```
+
+### A fresh assertion on every attempt
+
+An authorization server refuses a client assertion it has already seen. When a token
+request is retried, after a `429`, a `5xx` or a dropped connection, Warden signs a new
+assertion for the retry rather than resending the first one. With `kms_private_key_jwt`
+that is one remote signature per attempt.
+
+On `id_jag`, the ID-JAG that leg 2 presents is single-use too, and a new client assertion
+cannot replace it: a leg-2 retry after the server consumed the ID-JAG still fails.
 
 ## Public clients — `client_auth=none`
 
@@ -321,6 +361,9 @@ Keys for `warden cred source create <name> -type=token_exchange -config=key=valu
 | `secret_cache_ttl` | No | *(off)* | Cache the chained secret for a bounded TTL, keyed on the source. |
 | `client_assertion_alg` | No | `RS256` | Signing algorithm for the client assertion. `RS256` is the only supported value. |
 | `client_assertion_kid` | No | — | Optional `kid` header for the client assertion. |
+| `client_assertion_aud` | No | `token_url` | Audience of the client assertion: `token_url` names each endpoint it is sent to, `issuer` names the server's issuer identifier. See [The client assertion's audience](#the-client-assertions-audience). |
+| `issuer` | For `client_assertion_aud=issuer` | — | Issuer identifier of the server behind `token_url`. Read only in issuer mode. |
+| `resource_issuer` | For `id_jag` in issuer mode | — | Issuer identifier of the resource authorization server behind `resource_token_url`, named on leg 2. |
 | `resource_token_url` | For `id_jag` | — | Resource authorization-server token endpoint (HTTPS) for ID-JAG leg 2. |
 | `ca_data` | No | — | Base64-encoded PEM CA certificate for custom/self-signed CAs (masked). |
 | `tls_skip_verify` | No | `false` | Skip TLS certificate verification (development only). |

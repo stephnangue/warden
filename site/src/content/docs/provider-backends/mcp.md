@@ -174,26 +174,24 @@ credential's lease and the session.
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
 :::caution[Auth paths are not checked against mounted backends]
 `auto_auth_path` is required to be non-empty, but Warden does **not** verify that the mount
-it names actually exists — nor for `user_auth_path` or `user_auth_role`. A typo is accepted
+it names actually exists — nor for `user_auth_path`. A typo is accepted
 at write time and surfaces only when a request arrives and fails to authenticate. Enable
 the auth mounts first, and re-read the config after writing it.
 :::
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/mcp-user \
-    token_policies="mcp-access,mcp-access-calls" \
-    user_claim=sub \
-    cred_spec_name=mcp-creds
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ### Enable audit logging
@@ -248,7 +246,33 @@ Verify the configuration:
 warden read cloudflare-mcp/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
+
+Create the role, then a virtual group that grants it to callers admitted through the JWT mount. The role lists both policies from Step 5 by name: the capability policy that grants the path and the MCP policy that governs the calls. The spec and the policies come in Steps 4 and 5; until they exist, the role write warns.
+
+```bash
+warden role create mcp-user -json '{
+  "policies": ["mcp-access", "mcp-access-calls"],
+  "cred_spec_name": "mcp-creds",
+  "provider_path": "cloudflare-mcp/"
+}'
+
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+## Step 4: Create a Credential Source and Spec
 
 Configure whichever mode you picked in [How a request flows](#how-a-request-flows). They
 appear here in the same order — best first.
@@ -419,8 +443,8 @@ policy — is covered in [OAuth 3LO credential store](/federation/oauth-3lo-stor
 naming contract: a user must be enrolled under exactly the name `credential_name` resolves
 to for them, and nothing validates that until the first request.
 
-`jwt_role` is required on a federated source and names the JWT-auth role the assertion logs
-in as; `jwt_mount` defaults to `jwt`. The credential's TTL follows the minted token's own
+`jwt_role` is required on a federated source and names the role on the store's JWT auth
+mount that the assertion logs in as; `jwt_mount` defaults to `jwt`. The credential's TTL follows the minted token's own
 `expire_time`, so Warden re-mints as it approaches expiry rather than serving a stale one.
 
 ### Option C: Keyless federation
@@ -570,7 +594,7 @@ Verify the spec:
 warden cred spec read mcp-creds
 ```
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 MCP traffic passes through two complementary layers of authorization. The minted
 bearer token is the security boundary — its scopes bound what the agent can
@@ -614,7 +638,7 @@ EOF
 ```
 
 Bind **both** names on the role — an MCP policy comes into scope by being listed
-in `token_policies`, exactly like a capability policy.
+in the role's `policies`, exactly like a capability policy.
 
 A policy that restricts the agent to a vetted set of tools:
 
@@ -693,7 +717,7 @@ client that read them at the top level before v0.21.0 reads them there now. A ba
 or a notification, which has no single `id` to echo, is answered with `"id": null`.
 The audit log records the matched rule and the offending tool or parameter.
 
-## Step 5: Point an MCP Client at Warden
+## Step 6: Point an MCP Client at Warden
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -742,7 +766,7 @@ the mount's configured upstream URL plus the gateway suffix.
 
 ## TLS Certificate Authentication
 
-Steps 1 and 5 above use JWT authentication. Alternatively, you can authenticate
+Steps 1, 3 and 6 above use JWT authentication. Alternatively, you can authenticate
 with a TLS client certificate — useful for workloads that already have X.509
 certificates (Kubernetes pods with cert-manager, VMs with machine certificates,
 or SPIFFE X.509-SVIDs from a service mesh).
@@ -751,9 +775,10 @@ or SPIFFE X.509-SVIDs from a service mesh).
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 2–4 (provider mount, credential, policy) are identical — the `mcp-access`
-policy from Step 4 works for either auth method. Replace Steps 1 and 5 with the
-following (substitute your own mount path for `cloudflare-mcp`).
+The provider mount, the role, the credential and the policies are identical — the
+`mcp-access` policies from Step 5 work for either auth method. Replace the JWT mount,
+the provider's `auto_auth_path`, the group and the client setup with the following
+(substitute your own mount path for `cloudflare-mcp`).
 
 ### Enable Cert Auth
 
@@ -764,21 +789,8 @@ warden auth enable cert
 ### Configure Trusted CA
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=mcp-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/mcp-user \
-    allowed_common_names="agent-*" \
-    token_policies="mcp-access,mcp-access-calls" \
-    cred_spec_name=mcp-creds
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -793,6 +805,22 @@ warden write cloudflare-mcp/config <<EOF
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Grant `mcp-user` with a group whose rule trusts the cert mount and matches the certificate's common name:
+
+```bash
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Selectors take glob patterns. A rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 ### Make Requests with Certificates
 
@@ -851,7 +879,7 @@ the forwarded header when the listener is configured to do so.
 
 Substitute your mount's actual `path` and `<namespace>`; `${VAR}` placeholders in
 HTTP-transport `headers` are not expanded by the major clients today. Drop
-`X-Warden-Role` when cert auth's `default_role` already covers the binding.
+`X-Warden-Role` when the provider's `default_role` already names the role.
 
 **Pattern B: `mcp-remote` as a Node bridge.** Many installations already use
 `mcp-remote` (an npx-launched HTTP-to-stdio bridge). It runs in Node, so Node's
@@ -885,4 +913,4 @@ With cert auth, the role resolves (in priority order):
 
 1. `X-Warden-Role` header — what the JSON examples set
 2. `/role/<role>/` segment in the URL path — for clients that can't send custom headers
-3. `default_role` on the cert auth method's config — useful when one cert maps 1:1 to one role
+3. `default_role` on the provider's config — a role of the namespace, used when the request names none

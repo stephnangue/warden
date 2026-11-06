@@ -38,7 +38,7 @@ A running Warden server. See the [AWS provider README](/provider-backends/aws/) 
 
 ### 2. AWS IAM credentials
 
-Two IAM identities are recommended — a **service user** (whose access keys Warden holds and rotates) and a **database role** (with only the redshift credential-issuing permission, assumed via STS). This separation ensures the database-scoped identity cannot manage IAM keys.
+Warden does not hold a database password: on each access request it calls AWS for a short-lived database credential. `redshift_iam_token` has no federated form, so the credential source holds IAM keys. Two IAM identities are recommended — a **service user** (whose access keys the source holds and Warden rotates) and a **database role** (with only the redshift credential-issuing permission, assumed via STS through the source's `assume_role_arn`). This separation ensures the database-scoped identity cannot manage IAM keys.
 
 **Service IAM user** (`warden-svc`) — holds access keys, can assume the database role and rotate its own keys:
 
@@ -139,20 +139,17 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "IAMR:warden
 
 Warden controls which workload gets a token for which IAM identity; Redshift controls what that identity can do.
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Set up JWT auth for workload authentication. The auth role does **not** need a `cred_spec_name` — the Redshift provider resolves credentials via path-based provider grants instead.
+Set up JWT auth for workload authentication. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
 ```bash
 warden auth enable jwt
-
-warden write auth/jwt/config \
-    jwks_url=http://localhost:4444/.well-known/jwks.json \
-    default_role=db-user
-
-warden write auth/jwt/role/db-user \
-    token_policies="redshift-access" \
-    user_claim=sub
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Redshift Provider
@@ -171,7 +168,32 @@ warden provider list
 warden read redshift/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
+
+Create the role that names the policy, then a virtual group that grants it to callers admitted through the JWT mount. The role does **not** need a `cred_spec_name` — the Redshift provider resolves credentials through its grants (Step 5) instead. The policy comes in Step 6; until it exists, the role write warns.
+
+```bash
+warden role create db-user -json '{
+  "policies": ["redshift-access"],
+  "provider_path": "redshift/"
+}'
+
+warden identity group create db-user-agents -json '{
+  "type": "virtual",
+  "roles": ["db-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+## Step 4: Create a Credential Source and Spec
 
 > **Heads-up:** Unlike `rds_iam_token` (local SigV4 signing, no network call), `redshift_iam_token` actually hits the AWS API. Warden runs a smoke-test mint against AWS at credential-spec creation time, so the spec command will fail fast if the cluster/workgroup doesn't exist or the IAM principal lacks `redshift:GetClusterCredentialsWithIAM` / `redshift-serverless:GetCredentials`.
 
@@ -228,7 +250,7 @@ warden cred spec create redshift-long-running \
   -config duration_seconds=3600
 ```
 
-## Step 4: Create Grants on the Provider
+## Step 5: Create Grants on the Provider
 
 Grants map access paths to credential specs and include the database name in the connection string:
 
@@ -248,7 +270,7 @@ Verify:
 warden read redshift/grants/readonly
 ```
 
-## Step 5: Create a Policy
+## Step 6: Create a Policy
 
 ```bash
 warden policy write redshift-access - <<EOF
@@ -268,23 +290,16 @@ path "redshift/access/*" {
 EOF
 ```
 
-## Step 6: Get a Connection String
+## Step 7: Get a Connection String
 
-Get a JWT from your identity provider, then call the access path:
-
-```bash
-curl -s -H "Authorization: Bearer $JWT_TOKEN" \
-  "${WARDEN_ADDR}/v1/redshift/access/readonly" | jq
-```
-
-The auth method's `default_role` determines which policies apply. To use a specific auth role, pass the `role` query parameter:
+Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`, then call the access path, naming the role with the `role` query parameter:
 
 ```bash
 curl -s -H "Authorization: Bearer $JWT_TOKEN" \
-  "${WARDEN_ADDR}/v1/redshift/access/readonly?role=data-team" | jq
+  "${WARDEN_ADDR}/v1/redshift/access/readonly?role=db-user" | jq
 ```
 
-The grant itself is always selected by the path (`/access/<grant-name>`); `role` just overrides which auth role — and therefore which policies — Warden uses to authorize the request.
+The grant itself is always selected by the path (`/access/<grant-name>`); `role` selects which role — and therefore which policies — Warden uses to authorize the request. An access path has no `default_role`: a request names its role with `?role=` or the `X-Warden-Role` header, or it is refused with `400`. An operator can present a service token or a ticket from `warden login` on `X-Warden-Token` instead of a JWT; Warden then skips implicit authentication and checks that token.
 
 Response:
 
@@ -302,12 +317,12 @@ The connection string is ready-to-use with any postgres driver:
 **psql:**
 ```bash
 psql "$(curl -s -H "Authorization: Bearer $JWT_TOKEN" \
-  "${WARDEN_ADDR}/v1/redshift/access/readonly" | jq -r .connection_string)"
+  "${WARDEN_ADDR}/v1/redshift/access/readonly?role=db-user" | jq -r .connection_string)"
 ```
 
 **Go:**
 ```go
-req, _ := http.NewRequest("GET", wardenAddr+"/v1/redshift/access/readonly", nil)
+req, _ := http.NewRequest("GET", wardenAddr+"/v1/redshift/access/readonly?role=db-user", nil)
 req.Header.Set("Authorization", "Bearer "+jwtToken)
 
 resp, _ := http.DefaultClient.Do(req)
@@ -322,7 +337,7 @@ db, err := sql.Open("postgres", result["connection_string"].(string))
 import psycopg2, requests
 
 resp = requests.get(
-    f"{WARDEN_ADDR}/v1/redshift/access/readonly",
+    f"{WARDEN_ADDR}/v1/redshift/access/readonly?role=db-user",
     headers={"Authorization": f"Bearer {jwt_token}"},
 ).json()
 

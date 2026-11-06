@@ -93,7 +93,7 @@ warden cred spec create elastic-key-in-sm \
 [keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
 
 **Scoped secrets: A key per squad.** A producer's locator key templates on verified
-claims, so one spec resolves to a different secret per caller. Each squad holds its own cluster key so its minted keys inherit only that squad's index privileges. The squad travels on the agent's login, so no user need be present.
+claims, so one spec resolves to a different secret per caller. Each squad holds its own cluster key so its minted keys inherit only that squad's index privileges. The squad is a fact of the agent's own credential, so no user need be present.
 
 ```bash
 warden cred spec create elastic-key-per-squad \
@@ -106,7 +106,7 @@ warden cred spec create elastic-key-per-squad \
 ```
 
 An agent claim other than `sub` resolves only if the spec lists it in
-`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the login does not
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the agent's credential does not
 carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
 works the same way via `assertion_user_claims`, and the two can be combined in one path.
 

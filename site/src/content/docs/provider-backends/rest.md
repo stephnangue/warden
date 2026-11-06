@@ -132,9 +132,9 @@ user, so one user's token is never served to another.
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -144,14 +144,15 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/billing-user \
-    token_policies="billing-access" \
-    user_claim=sub \
-    cred_spec_name=billing-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+The role and the group that grants it come in [Step 5](#step-5-grant-agents-the-role),
+once the provider, the spec and the policy exist.
 
 ## Step 2: Mount and Configure the Provider
 
@@ -439,7 +440,35 @@ path "billing-api/role/+/gateway*" {
 EOF
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create billing-user -json '{
+  "policies": ["billing-access"],
+  "cred_spec_name": "billing-ops",
+  "provider_path": "billing-api/"
+}'
+
+warden identity group create billing-user-agents -json '{
+  "type": "virtual",
+  "roles": ["billing-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+On each request Warden authenticates the token at `auth/jwt/`, resolves the role the request names against the groups that match the token's facts, and authorizes the call with the role's policies.
+
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -490,7 +519,7 @@ backend for.
 | Upstream | `base_url` | `token_header` | `token_prefix` | `headers` |
 |---|---|---|---|---|
 | Google Gemini | `https://generativelanguage.googleapis.com` | `x-goog-api-key` | `""` | — |
-| Azure OpenAI | `https://<resource>.openai.azure.com` | `api-key` | `""` | — |
+| Azure OpenAI (stored key; for keyless, use the [`azure` provider](/federation/keyless-model-access/#azure-openai)) | `https://<resource>.openai.azure.com` | `api-key` | `""` | — |
 | Groq | `https://api.groq.com/openai/v1` | `Authorization` | `Bearer ` | — |
 | Together AI | `https://api.together.xyz/v1` | `Authorization` | `Bearer ` | — |
 | Fireworks AI | `https://api.fireworks.ai/inference/v1` | `Authorization` | `Bearer ` | — |
@@ -531,6 +560,9 @@ model APIs above, which have no dedicated backend.
   `oauth_bearer_token`, and rejects anything else, so use the
   [`gcp` provider](/provider-backends/gcp/). (Gemini on the *generative-language* endpoint
   above is a different API and works fine here, because it takes a plain key.)
+
+Both, and Azure OpenAI through the [`azure` provider](/provider-backends/azure/), need no
+stored key at all: see [Keyless model access](/federation/keyless-model-access/).
 
 ## Token Management
 

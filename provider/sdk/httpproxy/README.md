@@ -10,7 +10,7 @@ The `httpproxy` package provides a configuration-driven framework for building W
 - HTTP reverse proxy with a per-mount timeout (overridable per request via `SelectTimeout`) that also bounds the wait for response headers, and max body size enforcement
 - Header sanitization (security, hop-by-hop, proxy headers)
 - HTTP/2 transport with connection pooling and lazy initialization
-- Config validation (URL — https, or http with `tls_skip_verify` — `timeout`, `max_body_size`, `auto_auth_path`, `default_role`, the `user_auth_path`/`user_auth_role` pairing, `tls_skip_verify`/`ca_data`)
+- Config validation (URL — https, or http with `tls_skip_verify` — `timeout`, `max_body_size`, `auto_auth_path`, `default_role`, `user_auth_path`, `tls_skip_verify`/`ca_data`, and the removed `user_auth_role` refused)
 - Optional per-request dispatch for multi-protocol providers (different upstream, credentials, header policy, or body cap per request)
 - Opt-in hooks for refusing requests, rewriting responses, MCP policy enforcement, and answering Warden's own failures in the upstream's error shape
 
@@ -54,9 +54,8 @@ Configuration:
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
 - timeout: Request timeout (default: 30s)
 - auto_auth_path: Auth mount for implicit auth (e.g., 'auth/jwt/')
-- default_role: Fallback role for implicit auth
+- default_role: Role a request uses when it names none (a group must still grant it)
 - user_auth_path: Auth mount for the user principal (optional)
-- user_auth_role: Role for the user principal (optional)
 `
 ```
 
@@ -245,7 +244,7 @@ For a scheme carried inside `Authorization` (`ApiKey `, `Splunk `), build on `lo
 
 ## Extra config fields
 
-Every mount has nine standard config fields: the URL (`URLConfigKey`), `max_body_size`, `timeout`, `auto_auth_path`, `default_role`, `user_auth_path`, `user_auth_role`, `tls_skip_verify` and `ca_data`. For anything beyond them, use `ExtraConfigFields` with the state callbacks. See the GitHub provider for a complete example:
+Every mount has eight standard config fields: the URL (`URLConfigKey`), `max_body_size`, `timeout`, `auto_auth_path`, `default_role`, `user_auth_path`, `tls_skip_verify` and `ca_data`. For anything beyond them, use `ExtraConfigFields` with the state callbacks. See the GitHub provider for a complete example:
 
 ```go
 var Spec = &httpproxy.ProviderSpec{
@@ -356,7 +355,7 @@ See `provider/sdk/githttp` for the SDK and `provider/github/git.go` for a consum
 
 ## Custom role extraction
 
-Warden resolves the auth role for every gateway request from up to four sources. By default the framework consults the URL path (`/role/{name}/gateway/...`) and the mount's `default_role` config; providers that want to derive the role from somewhere else — e.g., an HTTP Basic Auth username carried by a non-Warden client — set `GetAuthRoleFromRequest`:
+Warden resolves the role a gateway request asks for from up to four sources; a group must then grant it to the caller. By default the framework consults the URL path (`/role/{name}/gateway/...`) and the mount's `default_role` config; providers that want to derive the role from somewhere else — e.g., an HTTP Basic Auth username carried by a non-Warden client — set `GetAuthRoleFromRequest`:
 
 ```go
 GetAuthRoleFromRequest func(r *http.Request) string
@@ -399,7 +398,7 @@ See `provider/sdk/githttp` for the SDK and `provider/github/git.go` for a consum
 
 ## Validating config
 
-The framework validates the standard fields on mount and on every config write: the URL must be `https://` with a host (`http://` is accepted when `tls_skip_verify` is true), `max_body_size` must be within 1 byte–100MB, `timeout` at least 1s, and `user_auth_role` requires `user_auth_path`.
+The framework validates the standard fields on mount and on every config write: the URL must be `https://` with a host (`http://` is accepted when `tls_skip_verify` is true), `max_body_size` must be within 1 byte–100MB, `timeout` at least 1s, and a write naming the removed `user_auth_role` is refused.
 
 Provider-specific checks go in two places:
 
