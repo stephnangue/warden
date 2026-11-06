@@ -4,7 +4,7 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
-## [v0.22.0] — YYYY-MM-DD
+## [v0.22.0] — 2026-11-06
 
 ### Breaking Changes
 
