@@ -393,6 +393,21 @@ func TestAliasAdd_And_Move(t *testing.T) {
 	assert.Equal(t, true, out["claimed"])
 }
 
+// A new claim's warning (virtual groups no longer grant the caller roles)
+// reaches stderr and the JSON output.
+func TestAliasAdd_Warnings(t *testing.T) {
+	const warning = "native identity (auth/jwt/, repo:corp/x) is now claimed by entity billing-agent: virtual groups no longer grant it roles"
+	_, stdout, stderr := setupEntityFake(t, http.StatusOK, `{"data":{
+		"entity":"billing-agent","mount":"auth/jwt/","mount_accessor":"auth_jwt_1","name":"repo:corp/x",
+		"warnings":["`+warning+`"]
+	}}`)
+	cmd := freshAliasCmd(&aliasAddFlags, claimCommand)
+	require.NoError(t, cmd.Flags().Set("json", `{"mount": "auth/jwt/", "name": "repo:corp/x", "to": "billing-agent"}`))
+	require.NoError(t, runAliasClaim(cmd, &aliasAddFlags, false))
+	assert.Contains(t, stderr.String(), warning)
+	assert.Equal(t, []any{warning}, decodeOut(t, stdout)["warnings"])
+}
+
 // remove names the entity it releases from; the mount may be named by
 // accessor, which still names a mount disabled since.
 func TestAliasRemove(t *testing.T) {
@@ -472,6 +487,13 @@ var schemaDocs = map[string]string{
 			"force":{"type":"boolean"}
 		}}}}}}
 	}}}}}`,
+	"sys/identity/config": `{"data":{"openapi":{"paths":{"/sys/identity/config":{
+		"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{
+			"unknown_aliases":{"type":"string"},
+			"exempt_mounts":{"type":"array"},
+			"force":{"type":"boolean"}
+		}}}}}}
+	}}}}}`,
 	"sys/identity/entity/{entity}/alias": `{"data":{"openapi":{"paths":{"/sys/identity/entity/{entity}/alias":{
 		"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{
 			"mount":{"type":"string"},
@@ -479,6 +501,26 @@ var schemaDocs = map[string]string{
 			"move":{"type":"boolean"}
 		}}}}}}
 	}}}}}`,
+}
+
+// identity config write and reset honour -dry-run: the write is validated
+// against the path's schema, and nothing is sent.
+func TestIdentityConfig_DryRun(t *testing.T) {
+	f, stdout, _ := setupFake(t, http.StatusOK, `{"data":{}}`)
+	helpers.SetDryRun(true)
+	t.Cleanup(func() {
+		configUnknownAliases, configExemptMounts = "", nil
+		ConfigWriteCmd.Flags().Lookup("exempt-mount").Changed = false
+	})
+
+	configUnknownAliases = "deny"
+	require.NoError(t, ConfigWriteCmd.Flags().Set("exempt-mount", "auth/break-glass/"))
+	require.NoError(t, runConfigWrite(ConfigWriteCmd, nil))
+	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
+	stdout.Reset()
+	require.NoError(t, runConfigReset(ConfigResetCmd, nil))
+	assert.Equal(t, true, decodeOut(t, stdout)["validated"])
+	assert.Zero(t, f.count())
 }
 
 // -dry-run validates the payload against the server's schema of the path

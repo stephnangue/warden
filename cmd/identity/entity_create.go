@@ -19,7 +19,7 @@ var (
 		Long: `
 Usage: warden identity entity create <name> [options]
 
-  Create an entity: an agent of record and the native identities it
+  Create an entity: a registered agent and the native identities it
   presents through auth mounts. "kind" is "agent" (the default; the only
   kind yet) and never changes. An entity is created active and without a
   sponsor: propose one afterwards ('warden identity entity sponsor
@@ -51,8 +51,7 @@ Usage: warden identity entity create <name> [options]
             "team": "billing"
           },
           "aliases": [
-            { "mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent" },
-            { "mount": "auth/spiffe/",     "name": "spiffe://corp.example/ns/billing/sa/agent" }
+            { "mount": "auth/kubernetes/", "name": "system:serviceaccount:billing:agent" }
           ]
         }'
 

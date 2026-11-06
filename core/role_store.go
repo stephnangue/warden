@@ -444,7 +444,7 @@ func (s *RoleStore) validateRole(ctx context.Context, role *logical.Role) ([]str
 		if !isReservedPolicyName(p) {
 			return false
 		}
-		if p == builtinCBPPolicy || p == builtinMCPPolicy {
+		if slices.Contains(builtinPolicyNames, p) {
 			warnings = append(warnings, fmt.Sprintf("policy %q is attached to every request already; dropped from the role", p))
 		} else {
 			warnings = append(warnings, fmt.Sprintf("policy name %q is reserved for built-in policies and names no policy; dropped from the role", p))

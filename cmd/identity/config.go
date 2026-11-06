@@ -180,6 +180,19 @@ func runConfigWrite(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if helpers.ResolveDryRun() {
+		payload := map[string]any{}
+		if input.UnknownAliases != "" {
+			payload["unknown_aliases"] = input.UnknownAliases
+		}
+		if input.ExemptMounts != nil {
+			payload["exempt_mounts"] = stringsToAny(input.ExemptMounts)
+		}
+		if input.Force {
+			payload["force"] = true
+		}
+		return helpers.DryRun(c, "POST", "sys/identity/config", payload)
+	}
 	cfg, err := c.Sys().WriteIdentityConfig(&input)
 	if err != nil {
 		return fmt.Errorf("error writing the identity config: %w", err)
@@ -191,6 +204,9 @@ func runConfigReset(cmd *cobra.Command, args []string) error {
 	c, err := helpers.Client()
 	if err != nil {
 		return err
+	}
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "DELETE", "sys/identity/config", nil)
 	}
 	cfg, err := c.Sys().ResetIdentityConfig()
 	if err != nil {

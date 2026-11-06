@@ -106,6 +106,10 @@ func runAliasClaim(cmd *cobra.Command, f *aliasFlags, move bool) error {
 	if claim.MovedFrom != "" {
 		out["moved_from"] = claim.MovedFrom
 	}
+	helpers.PrintWarnings(claim.Warnings)
+	if len(claim.Warnings) > 0 {
+		out["warnings"] = claim.Warnings
+	}
 	return helpers.RenderMap(out, func() {
 		msg := fmt.Sprintf("Success! Native identity %q on %s is claimed by entity %s", claim.Name, claim.Mount, claim.Entity)
 		if claim.MovedFrom != "" {

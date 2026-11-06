@@ -1,6 +1,6 @@
 // Package identity implements `warden identity`, the namespace's identity
 // objects: `warden identity group` manages the groups that grant roles (sudo
-// on sys/identity/group); `warden identity entity` the entities of record and
+// on sys/identity/group); `warden identity entity` the registered agents and
 // `warden identity alias` the native identities they claim (sudo on
 // sys/identity/entity and sys/identity/lookup); and `warden identity usage`
 // counts them against their caps (read on sys/identity/usage).
@@ -32,10 +32,11 @@ Usage: warden identity <subcommand> [options]
           ]
         }'
 
-  An entity is an agent of record: the team accountable for it (its
-  sponsor, a virtual group of humans), its lifecycle state, and the native
-  identities it presents through auth mounts (a service account, a SPIFFE
-  ID, a JWT subject), each claimed by one entity.
+  An entity is a registered agent in the identity store: the team
+  accountable for it (its sponsor, a virtual group of humans), its
+  lifecycle state, and the native identities it presents through auth
+  mounts (a service account, a SPIFFE ID, a JWT subject), each claimed by
+  one entity.
 
       $ warden identity entity create billing-agent -json '{
           "description": "Reconciles supplier invoices",
@@ -51,7 +52,7 @@ Usage: warden identity <subcommand> [options]
 
 var EntityCmd = &cobra.Command{
 	Use:   "entity",
-	Short: "Manage the entities of record (sudo)",
+	Short: "Manage registered agents, the entities of the identity store (sudo)",
 	Long: `
 Usage: warden identity entity <subcommand> [options]
 

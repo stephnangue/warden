@@ -10,6 +10,7 @@ wget --post-data='{
   "grant_types": ["client_credentials"],
   "response_types": [],
   "scope": "api:read api:write",
+  "audience": ["warden"],
   "token_endpoint_auth_method": "client_secret_post"
 }' \
   --header="Content-Type: application/json" \
@@ -25,6 +26,7 @@ wget --post-data='{
   "grant_types": ["client_credentials"],
   "response_types": [],
   "scope": "api:read api:write",
+  "audience": ["warden"],
   "token_endpoint_auth_method": "client_secret_post"
 }' \
   --header="Content-Type: application/json" \
@@ -40,6 +42,7 @@ wget --post-data='{
   "grant_types": ["client_credentials"],
   "response_types": [],
   "scope": "api:read api:write",
+  "audience": ["warden"],
   "token_endpoint_auth_method": "client_secret_post"
 }' \
   --header="Content-Type: application/json" \
@@ -55,6 +58,7 @@ wget --post-data='{
   "grant_types": ["client_credentials"],
   "response_types": [],
   "scope": "api:admin api:read",
+  "audience": ["warden"],
   "token_endpoint_auth_method": "client_secret_post"
 }' \
   --header="Content-Type: application/json" \
@@ -79,5 +83,5 @@ echo ""
 echo "Test with:"
 echo "curl -X POST http://localhost:4444/oauth2/token \\"
 echo "  -H 'Content-Type: application/x-www-form-urlencoded' \\"
-echo "  -d 'grant_type=client_credentials&client_id=service-client-1&client_secret=service-secret-1-change-this&scope=api:read api:write'"
+echo "  -d 'grant_type=client_credentials&client_id=agent&client_secret=test@agent&scope=api:read api:write&audience=warden'"
 echo ""

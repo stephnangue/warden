@@ -128,6 +128,13 @@ func runGroupMemberAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if helpers.ResolveDryRun() {
+		var member any = entity
+		if until != "" {
+			member = map[string]any{"name": entity, "until": until}
+		}
+		return helpers.DryRun(c, "PUT", "sys/identity/group/{name}", map[string]any{"type": "static", "members": []any{member}})
+	}
 	g, err := editMembers(c, group, func(members []api.GroupMemberInput) []api.GroupMemberInput {
 		members = slices.DeleteFunc(members, func(m api.GroupMemberInput) bool { return m.Name == entity })
 		return append(members, api.GroupMemberInput{Name: entity, Until: until})
@@ -146,6 +153,9 @@ func runGroupMemberRemove(cmd *cobra.Command, args []string) error {
 	c, err := helpers.Client()
 	if err != nil {
 		return err
+	}
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "PUT", "sys/identity/group/{name}", map[string]any{"type": "static", "members": []any{}})
 	}
 	found := false
 	g, err := editMembers(c, group, func(members []api.GroupMemberInput) []api.GroupMemberInput {
@@ -171,6 +181,9 @@ func runGroupPrune(cmd *cobra.Command, args []string) error {
 	c, err := helpers.Client()
 	if err != nil {
 		return err
+	}
+	if helpers.ResolveDryRun() {
+		return helpers.DryRun(c, "PUT", "sys/identity/group/{name}", map[string]any{"type": "static"})
 	}
 	// A write with no change: the server drops the expired members.
 	g, err := c.Sys().UpdateGroup(group, &api.GroupInput{Type: "static"})

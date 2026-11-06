@@ -461,9 +461,13 @@ func TestRoles_MissingPolicyAndSpecWarn(t *testing.T) {
 		"cred_spec_name": "deploy-role",
 	})
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "a missing policy or spec is stored, not refused")
+	// The role has no provider_path and root no auto_auth_path, so it also
+	// warns that agents cannot find it.
+	const unlisted = `role "deploy": agents cannot find it with list_roles: it has no provider_path, and the namespace sets no auto_auth_path`
 	assert.ElementsMatch(t, []string{
 		`policy "deploy" does not exist yet`,
 		`credential spec "deploy-role" does not exist yet`,
+		unlisted,
 	}, respWarnings(resp))
 
 	p := testParsePolicy(t, `path "aws/*" { capabilities = ["read"] }`)
@@ -482,7 +486,7 @@ func TestRoles_MissingPolicyAndSpecWarn(t *testing.T) {
 
 	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/deploy", map[string]any{"description": "now they exist"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Empty(t, respWarnings(resp))
+	assert.Equal(t, []string{unlisted}, respWarnings(resp), "the policy and the spec exist now")
 }
 
 func TestRoles_DiscoveryFieldValidation(t *testing.T) {

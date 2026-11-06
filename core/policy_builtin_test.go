@@ -262,21 +262,27 @@ func TestBuildCBP_RefusedGrantGetsNoBuiltins(t *testing.T) {
 	assert.Equal(t, []string{"deny"}, cbp.Capabilities(ctx, "sys/introspect/roles"))
 }
 
-// A role is stored without reserved names, with a warning for each.
+// A role is stored without reserved names, with a warning for each: a
+// built-in, default-sponsor included, is attached to every request already;
+// any other reserved name names no policy.
 func TestRoleWrite_DropsReservedPolicyNames(t *testing.T) {
 	c := createTestCore(t)
-	role := &logical.Role{Name: "deploy", Policies: []string{"deploy", builtinCBPPolicy, "default"}}
+	role := &logical.Role{Name: "deploy", Policies: []string{"deploy", builtinCBPPolicy, builtinSponsorPolicy, "default"}}
 	warnings, err := c.roleStore.Create(rootCtx(), role)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"deploy"}, role.Policies)
 
-	var reserved int
-	for _, w := range warnings {
-		if strings.Contains(w, "attached to every request already") || strings.Contains(w, "reserved for built-in policies") {
-			reserved++
+	warningFor := func(name string) string {
+		for _, w := range warnings {
+			if strings.Contains(w, fmt.Sprintf("%q", name)) {
+				return w
+			}
 		}
+		return ""
 	}
-	assert.Equal(t, 2, reserved, "%v", warnings)
+	assert.Contains(t, warningFor(builtinCBPPolicy), "attached to every request already")
+	assert.Contains(t, warningFor(builtinSponsorPolicy), "attached to every request already")
+	assert.Contains(t, warningFor("default"), "reserved for built-in policies and names no policy")
 }
 
 // BenchmarkBuildCBP_Builtins measures what the built-ins add to every

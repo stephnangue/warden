@@ -27,7 +27,6 @@ Usage: warden namespace update <path> [options]
     Typed flags (human-friendly):
 
       $ warden namespace update my-team -metadata=environment=staging -metadata=team=devops
-      $ warden namespace update my-team -metadata=""        # clear
       $ warden namespace update acme -enable-builtin-roles
       $ warden namespace update acme -enable-builtin-roles=false
 
@@ -35,6 +34,7 @@ Usage: warden namespace update <path> [options]
 
       $ warden namespace update my-team -json @ns.json
       $ cat ns.json | warden namespace update my-team -json -
+      $ warden namespace update my-team -json '{"custom_metadata": {}}'   # clear
 
   -enable-builtin-roles makes the built-in operator roles (warden-admin,
   warden-provider-admin, warden-security-admin, warden-viewer) resolvable in

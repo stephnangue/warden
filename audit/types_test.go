@@ -15,18 +15,17 @@ func TestCloneUserAttribution(t *testing.T) {
 	entry := &LogEntry{Auth: &Auth{User: &UserAttribution{
 		Subject:       "alice",
 		NamespacePath: "team-payments/orders/",
-		RoleName:      "users",
 		Actors:        []ActorRef{{Subject: "broker-beta", Issuer: "https://idp.example.com"}},
 	}}}
 
 	clone := entry.Clone()
 	entry.Auth.User.Actors[0].Subject = "modified"
-	entry.Auth.User.RoleName = "modified"
+	entry.Auth.User.NamespacePath = "modified"
 
 	if got := clone.Auth.User.Actors[0]; got != (ActorRef{Subject: "broker-beta", Issuer: "https://idp.example.com"}) {
 		t.Errorf("clone shares the user's actor chain: %+v", got)
 	}
-	if clone.Auth.User.RoleName != "users" || clone.Auth.User.NamespacePath != "team-payments/orders/" {
+	if clone.Auth.User.Subject != "alice" || clone.Auth.User.NamespacePath != "team-payments/orders/" {
 		t.Errorf("clone user fields mismatch: %+v", clone.Auth.User)
 	}
 }
@@ -52,8 +51,8 @@ func TestUserAttribution_JSONCompat(t *testing.T) {
 		Actors: []ActorRef{{Subject: "orchestrator", Issuer: "https://idp.example.com"}},
 		User: &UserAttribution{
 			Subject: "alice", TokenID: "t1", NamespaceID: "ns-77c0d4",
-			NamespacePath: "team-payments/orders/", RoleName: "users",
-			Actors: []ActorRef{{Subject: "broker-beta", Issuer: "https://idp.example.com"}},
+			NamespacePath: "team-payments/orders/",
+			Actors:        []ActorRef{{Subject: "broker-beta", Issuer: "https://idp.example.com"}},
 		},
 	})
 	if err != nil {
@@ -61,7 +60,7 @@ func TestUserAttribution_JSONCompat(t *testing.T) {
 	}
 	want = `{"actors":[{"subject":"orchestrator","issuer":"https://idp.example.com"}],` +
 		`"user":{"subject":"alice","token_id":"t1","namespace_id":"ns-77c0d4",` +
-		`"namespace_path":"team-payments/orders/","role_name":"users",` +
+		`"namespace_path":"team-payments/orders/",` +
 		`"actors":[{"subject":"broker-beta","issuer":"https://idp.example.com"}]}}`
 	if string(b) != want {
 		t.Errorf("got  %s\nwant %s", b, want)

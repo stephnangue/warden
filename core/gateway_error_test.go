@@ -154,7 +154,8 @@ func TestRenderGatewayFailure_PolicyDenialThroughCore(t *testing.T) {
 
 	require.Len(t, rec.responses, 1)
 	assert.Equal(t, http.StatusTeapot, rec.responses[0].Response.StatusCode)
-	assert.Equal(t, p.got.Err.Error(), rec.responses[0].Error)
+	assert.Equal(t, auditErrorText(p.got.Err), rec.responses[0].Error)
+	assert.Equal(t, "permission denied", rec.responses[0].Error, "the failure's message, not the multierror's bulleted text")
 }
 
 // A failure that comes back after routing still finds its renderer: routing
