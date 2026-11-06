@@ -109,7 +109,7 @@ warden protected-resource disable
 
 - [Delegation](/concepts/delegation/) — the user principal and the `401` challenge that
   points here.
-- [Authentication](/concepts/authentication/) — how the two credentials arrive on one
+- [Authentication](/identity/authentication/) — how the two credentials arrive on one
   request.
 - [CEL Conditions](/concepts/cel-conditions/#8-require-a-user-behind-the-agent) — writing a
   condition that requires a user.

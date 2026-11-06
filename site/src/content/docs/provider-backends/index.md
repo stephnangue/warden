@@ -94,7 +94,7 @@ reference.
 
 - [Providers](/concepts/providers/) — the gateway model: how a request is authenticated, authorized, and proxied.
 - [Credentials](/concepts/credentials/) — what each provider injects into the proxied request.
-- [Roles](/concepts/roles/) — how the role on a request selects access and credential.
+- [Roles](/identity/roles/) — how the role on a request selects access and credential.
 - [`warden provider`](/cli/provider/) — the CLI for enabling, listing, tuning, and disabling providers.
 - [Concepts](/concepts/) — how Warden works, end to end.
 </content>

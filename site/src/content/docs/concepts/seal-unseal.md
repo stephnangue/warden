@@ -79,7 +79,7 @@ Supported seal types (the `type` label of the [seal stanza](#configuring-the-sea
 ## Initialization
 
 A new server is **initialized once**. Initialization generates the root key,
-sets up the barrier, and issues the first [root token](/concepts/tokens/):
+sets up the barrier, and issues the first [root token](/identity/tokens/):
 
 ```bash
 warden operator init
@@ -166,5 +166,5 @@ which is exactly why dev mode is never for production.
 
 - [Storage](/concepts/storage/) — the backend the barrier encrypts.
 - [High Availability](/concepts/high-availability/) — why auto-unseal matters for a cluster.
-- [Tokens](/concepts/tokens/) — the root token that initialization issues.
+- [Tokens](/identity/tokens/) — the root token that initialization issues.
 - [Dev Server](/concepts/dev-server/) — auto-init and auto-unseal for local work.

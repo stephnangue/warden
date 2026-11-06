@@ -42,7 +42,7 @@ three things: *who may assume it* (the identity binding), *what it may do* (its 
 ([`list_roles`](/concepts/mcp/#warden-as-an-mcp-server-discovery-interface)), gets back only
 the roles its identity is admitted to, and **asserts one role per call** by pointing at that
 role's gateway. Authority rides on the call, never on the connection — so there is no ambient
-grant to reuse, and a task can only ever touch its own slice. See [Roles](/concepts/roles/)
+grant to reuse, and a task can only ever touch its own slice. See [Roles](/identity/roles/)
 and [Runtime authorization](/use-cases/runtime-authorization/) for the full picture.
 
 ### The four roles

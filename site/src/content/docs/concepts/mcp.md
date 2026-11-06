@@ -311,7 +311,7 @@ It exposes two tools:
 
 - **`list_roles`** — the roles the caller's identity can assume. This is the
   agent's menu (see
-  [Roles → Discovery](/concepts/roles/#discovery-what-roles-can-i-assume)). Each
+  [Roles → Discovery](/identity/roles/)). Each
   role comes with its operator-written **description**, the **provider** type it
   is used with, its **skill** as a `skill://<name>/SKILL.md` URI, and the **url**
   to call it at, relative to the Warden address. Warden derives the last three
@@ -339,7 +339,7 @@ above.
 An agent points its MCP client at the mount's gateway URL and presents its
 identity — a bearer credential (the JWT in `IDENTITY_TOKEN`, shown below) or an
 mTLS client certificate on the TLS connection — which Warden resolves through
-[transparent authentication](/concepts/authentication/#transparent-authentication):
+[transparent authentication](/identity/authentication/):
 
 ```json
 {
@@ -353,7 +353,7 @@ The agent need not hold or attach that credential itself — a **sidecar** can
 channel its identity to Warden (here a bearer JWT, so a tool like
 [Robin](https://github.com/stephnangue/robin)), leaving the agent to speak plain
 MCP to its local sidecar. See
-[Channelling Identity with a Sidecar](/concepts/authentication/#channelling-identity-with-a-sidecar).
+[Channelling Identity with a Sidecar](/identity/authentication/).
 
 From there the agent uses MCP normally — `tools/list`, `tools/call`, and the rest
 — while Warden injects the real upstream credential and applies the policy. As
@@ -368,4 +368,4 @@ skill that documents its quirks.
 - [Credentials](/concepts/credentials/) — the bearer token or AWS credential injected.
 - [Audit](/concepts/audit/) — where each MCP decision is recorded.
 - [Discovery and Skills](/concepts/discovery-and-skills/) — how an agent finds an MCP mount.
-- [Roles](/concepts/roles/) — the discovery loop `list_roles`/`read_skill` mirrors, one role per step.
+- [Roles](/identity/roles/) — the discovery loop `list_roles`/`read_skill` mirrors, one role per step.

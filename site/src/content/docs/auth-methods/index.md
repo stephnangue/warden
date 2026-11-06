@@ -7,8 +7,8 @@ credential a caller presents and issues a token carrying a set of policies. Ever
 method in this family also participates in **transparent authentication** — the
 workload presents the credential it already holds on each request and Warden
 resolves an identity in-line, with no separate login step. See
-[Authentication](/concepts/authentication/) for the model and
-[Roles](/concepts/roles/) for how a validated credential maps to policies.
+[Authentication](/identity/authentication/) for the model and
+[Roles](/identity/roles/) for how a validated credential maps to policies.
 
 Warden ships four auth methods. Each page below is a setup guide — prerequisites,
 configuration, roles, transparent-auth wiring, a configuration reference, and
@@ -28,8 +28,8 @@ over its neighbours — the [JWT](/auth-methods/jwt/), [Kubernetes](/auth-method
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — credential forms, explicit vs. transparent auth, and CLI behaviour.
-- [Roles](/concepts/roles/) — how a validated credential maps to policies and token settings.
+- [Authentication](/identity/authentication/) — credential forms, explicit vs. transparent auth, and CLI behaviour.
+- [Roles](/identity/roles/) — how a validated credential maps to policies and token settings.
 - [Agent Identity](/agent-identity/) — how a workload or its sidecar presents its credential to Warden.
 - [`warden auth`](/cli/auth/) — the CLI for enabling, listing, and disabling auth methods.
 - [Concepts](/concepts/) — how Warden works, end to end.

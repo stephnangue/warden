@@ -3,7 +3,7 @@ title: "Policies"
 ---
 
 A **policy** is how Warden decides what an authenticated caller may do. Once a
-request is [authenticated](/concepts/authentication/) and its [token](/concepts/tokens/)
+request is [authenticated](/identity/authentication/) and its [token](/identity/tokens/)
 resolved, Warden evaluates the request against the policies attached to that
 token and either allows it or rejects it. No policy grants it, no access:
 authorization is **default-deny**.
@@ -15,9 +15,9 @@ individual upstream operations.
 
 ## How Policies Attach to a Request
 
-Policies are named, stored objects. A [role](/concepts/roles/)'s `token_policies` lists
+Policies are named, stored objects. A [role](/identity/roles/)'s `token_policies` lists
 the policy names a caller receives, and those names are recorded on the issued
-[token](/concepts/tokens/). At request time Warden:
+[token](/identity/tokens/). At request time Warden:
 
 1. reads the policy names off the token,
 2. compiles the named policies into a single evaluatable rule set,
@@ -417,8 +417,8 @@ anyway will start seeing conflicts.
 
 ## See Also
 
-- [Roles](/concepts/roles/) — how `token_policies` attaches policies to an identity.
-- [Tokens](/concepts/tokens/) — what a policy is evaluated against.
+- [Roles](/identity/roles/) — how `token_policies` attaches policies to an identity.
+- [Tokens](/identity/tokens/) — what a policy is evaluated against.
 - [Providers](/concepts/providers/) — where gateway/MCP authorization is applied.
-- [Authentication](/concepts/authentication/) — what must happen before authorization.
+- [Authentication](/identity/authentication/) — what must happen before authorization.
 - [Namespaces](/concepts/namespaces/) — the isolation boundary for policies.

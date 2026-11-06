@@ -269,7 +269,7 @@ A `*`/`*` binding (both names and namespaces only contain `"*"`) is refused at r
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — the credential forms and how transparent auth resolves an identity per request.
-- [Roles](/concepts/roles/) — how a validated credential maps to policies and token settings.
+- [Authentication](/identity/authentication/) — the credential forms and how transparent auth resolves an identity per request.
+- [Roles](/identity/roles/) — how a validated credential maps to policies and token settings.
 - [Agent Identity](/agent-identity/) — how a workload or its sidecar presents this credential to Warden.
 - [Auth Methods](/auth-methods/) — the other auth methods Warden ships.

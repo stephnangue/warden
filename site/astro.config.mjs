@@ -73,9 +73,6 @@ export default defineConfig({
           items: [
             { slug: 'concepts' },
             { slug: 'concepts/dev-server' },
-            { slug: 'concepts/authentication' },
-            { slug: 'concepts/tokens' },
-            { slug: 'concepts/roles' },
             { slug: 'concepts/policies' },
             { slug: 'concepts/cel-conditions' },
             { slug: 'concepts/credentials' },
@@ -88,6 +85,23 @@ export default defineConfig({
             { slug: 'concepts/seal-unseal' },
             { slug: 'concepts/storage' },
             { slug: 'concepts/high-availability' },
+          ],
+        },
+        {
+          // The identity model, in the order a request meets it: a mount admits
+          // a credential and names the facts it verified; groups turn facts (or a
+          // listed entity) into roles for this one request; a role names policies.
+          label: 'Identity & access',
+          items: [
+            { slug: 'identity' },
+            { slug: 'identity/authentication' },
+            { slug: 'identity/tokens' },
+            { slug: 'identity/groups' },
+            { slug: 'identity/roles' },
+            { slug: 'identity/entities' },
+            { slug: 'identity/sponsors' },
+            { slug: 'identity/human-operators' },
+            { slug: 'identity/built-in-roles' },
           ],
         },
         {

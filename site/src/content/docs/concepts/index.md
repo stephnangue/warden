@@ -19,13 +19,13 @@ also jump straight to a topic.
 
 How a caller proves who it is and what that lets it do.
 
-- [Authentication](/concepts/authentication/) — the three credential forms, transparent
+- [Authentication](/identity/authentication/) — the three credential forms, transparent
   authentication, and identity-channelling sidecars.
 - [Auth Methods](/auth-methods/) — per-method setup guides for the
   certificate, JWT/OIDC, Kubernetes, and SPIFFE backends.
-- [Tokens](/concepts/tokens/) — what authentication produces: session and transparent
+- [Tokens](/identity/tokens/) — what authentication produces: session and transparent
   tokens, and the root token.
-- [Roles](/concepts/roles/) — how a validated credential maps to policies and access,
+- [Roles](/identity/roles/) — how a validated credential maps to policies and access,
   resolved per request.
 - [Policies](/concepts/policies/) — capability-based authorization, path matching, and
   request-content rules.

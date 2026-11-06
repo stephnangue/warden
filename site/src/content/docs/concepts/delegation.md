@@ -158,7 +158,7 @@ its chain separately, under `auth.user.actors`, beside the user's `namespace_pat
 
 A signed JWT can carry a nested `act` claim, so the chain expresses "gateway → broker →
 agent"; Warden walks the nesting and persists the extracted actors on the
-[token](/concepts/tokens/), so the chain survives transparent-token caching.
+[token](/identity/tokens/), so the chain survives transparent-token caching.
 
 ## Configuration
 
@@ -198,4 +198,4 @@ either token has expired.
 - [Credential chaining](/federation/credential-chaining/) — per-user secrets from a keyless vault.
 - [Assertion claims](/federation/assertion-claims/) — the delegation token's `sub`, `warden_namespace` and `act`.
 - [Audit](/concepts/audit/) — where the actor chain and `Auth.User` are recorded.
-- [Tokens](/concepts/tokens/) — where a verified `act` chain is persisted.
+- [Tokens](/identity/tokens/) — where a verified `act` chain is persisted.

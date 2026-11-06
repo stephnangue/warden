@@ -17,8 +17,8 @@ Each operation produces two entries — a **request** entry when it arrives and 
 **response** entry when it completes — serialized as one JSON object per line.
 Between them they capture:
 
-- **Identity** — the [token](/concepts/tokens/) ID and accessor, token type, principal
-  and [role](/concepts/roles/), the granted policies, and the
+- **Identity** — the [token](/identity/tokens/) ID and accessor, token type, principal
+  and [role](/identity/roles/), the granted policies, and the
   [namespace](/concepts/namespaces/). The human an agent acts for is a separate **user
   principal**, recorded as `auth.user`.
 - **Why a decision went the way it did** — when a policy `condition` decided the request, the
@@ -196,7 +196,7 @@ request with a bad token logs `error` and no `auth`, because no identity existed
 | `token_id`, `token_accessor` | The calling token. |
 | `token_type` | e.g. `warden_token`. |
 | `principal_id` | The authenticated principal. |
-| `role_name` | The [role](/concepts/roles/) asserted. |
+| `role_name` | The [role](/identity/roles/) asserted. |
 | `policies` | Policies granted to the token. |
 | `policy_results` | The authorization decision — see below. |
 | `token_ttl`, `expires_at` | Seconds remaining; Unix expiry. |
@@ -707,7 +707,7 @@ operator-level operation, not something a tenant configures.
 - [Policies](/concepts/policies/) — the authorization decisions recorded in each entry.
 - [MCP](/concepts/mcp/) — the rule types `mcp_decision` reports.
 - [Credentials](/concepts/credentials/) — what "credential issued" in the log refers to.
-- [Tokens](/concepts/tokens/) — the identity fields logged per request.
+- [Tokens](/identity/tokens/) — the identity fields logged per request.
 - [Namespaces](/concepts/namespaces/) — recorded per entry; devices are root-scoped.
 - [Audit Devices](/audit-devices/) — setup guides for enabling and configuring a device.
 - [Configuration → Audit](/configuration/audit/) — declaring devices at startup in the config file.

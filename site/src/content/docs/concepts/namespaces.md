@@ -3,9 +3,9 @@ title: "Namespaces"
 ---
 
 A **namespace** is Warden's isolation boundary — its unit of multi-tenancy.
-Every [provider](/concepts/providers/) mount, [auth method](/concepts/authentication/#auth-methods),
-[role](/concepts/roles/), [policy](/concepts/policies/), [credential](/concepts/credentials/) source and
-spec, and [token](/concepts/tokens/) belongs to exactly one namespace, and the boundary
+Every [provider](/concepts/providers/) mount, [auth method](/auth-methods/),
+[role](/identity/roles/), [policy](/concepts/policies/), [credential](/concepts/credentials/) source and
+spec, and [token](/identity/tokens/) belongs to exactly one namespace, and the boundary
 between namespaces is hard: configuration in one is invisible to another, and a
 policy in one cannot grant access in, or even name, another.
 
@@ -57,7 +57,7 @@ and is visible only there. Deleting a namespace tears all of it down together
 
 ### The one cross-namespace rule
 
-The boundary is one-directional along the hierarchy: a [token](/concepts/tokens/) issued
+The boundary is one-directional along the hierarchy: a [token](/identity/tokens/) issued
 in a **parent** namespace is valid in that namespace **and all of its
 descendants**, but never in a sibling or an ancestor. This is the *only* way
 identity crosses a namespace line — a child's token cannot reach up to its
@@ -98,7 +98,7 @@ does not touch the server everyone shares.
 
 A namespace carries a `custom_metadata` map. One key is meaningful to Warden:
 **`auto_auth_path`**, which names the auth mount used for
-[transparent authentication](/concepts/authentication/#transparent-authentication)
+[transparent authentication](/identity/authentication/)
 on *operational* requests in that namespace — the namespace-level counterpart to
 a [provider's](/concepts/providers/) own `auto_auth_path` for gateway requests. Set it so
 that callers in the namespace can authenticate implicitly from a JWT or
@@ -133,8 +133,8 @@ mid-creation or mid-deletion and should be treated as transient) and `locked`.
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — identity is established within a namespace.
-- [Tokens](/concepts/tokens/) — the parent→descendant validity rule in detail.
+- [Authentication](/identity/authentication/) — identity is established within a namespace.
+- [Tokens](/identity/tokens/) — the parent→descendant validity rule in detail.
 - [Policies](/concepts/policies/) — per-namespace, isolated authorization.
 - [Providers](/concepts/providers/) — namespace addressing on gateway requests.
 - [Credentials](/concepts/credentials/) — sources and specs are namespace-scoped.

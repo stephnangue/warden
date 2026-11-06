@@ -2,7 +2,7 @@
 title: "role"
 ---
 
-Discover the [roles](/concepts/roles/) the presented identity can assume. A
+Discover the [roles](/identity/roles/) the presented identity can assume. A
 role selects the policies and credential a request runs with; pass one on any
 command with the global `-r/--role` flag (or `WARDEN_ROLE`).
 
@@ -41,6 +41,6 @@ for mTLS, and set `-n/--namespace` as needed before running.
 
 ## See Also
 
-- [Roles](/concepts/roles/) — how a role selects policies and a credential.
-- [Authentication](/concepts/authentication/) — how the identity is established.
+- [Roles](/identity/roles/) — how a role selects policies and a credential.
+- [Authentication](/identity/authentication/) — how the identity is established.
 - [CLI overview](/cli/) — global flags, output formats, exit codes.

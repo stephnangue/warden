@@ -26,7 +26,7 @@ request to one internal path built from four parts:
 ```
 
 - `<mount>` — the provider mount that fronts the upstream.
-- `role/<role>` — the [role](/concepts/roles/) the request runs as. Omitted when the
+- `role/<role>` — the [role](/identity/roles/) the request runs as. Omitted when the
   role is supplied another way — the mount's `default_role`, or a
   provider-specific extractor (for example, `aws` and other SigV4 providers take
   the role from the access-key ID in the request signature).
@@ -136,15 +136,15 @@ namespace needs neither. The CLI sets the header from `WARDEN_NAMESPACE`.
 
 1. **Authenticate.** With no `X-Warden-Token`, the provider authenticates the
    caller transparently against the auth mount named by its `auto_auth_path`
-   config (see [Authentication](/concepts/authentication/)). The caller's identity — a
+   config (see [Authentication](/identity/authentication/)). The caller's identity — a
    JWT or client certificate — is often
-   [channelled by a sidecar](/concepts/authentication/#channelling-identity-with-a-sidecar)
+   [channelled by a sidecar](/identity/authentication/)
    (Robin or ghostunnel) rather than attached by the workload itself.
 2. **Resolve the role.** Warden picks the role from — in order — the
    `X-Warden-Role` header, the `role/<role>/gateway/` path segment, a
    provider-specific extractor (e.g. the access-key ID in an AWS SigV4
    `Authorization` header, or a Basic-Auth username), then the mount's
-   `default_role` (see [Selecting a Role](/concepts/roles/#selecting-a-role)).
+   `default_role` (see [Selecting a Role](/identity/roles/)).
 3. **Authorize.** Warden evaluates the request against the [policies](/concepts/policies/)
    on the caller's token before any credential is minted. Providers that need to
    gate on request content can have the body parsed for this check; a denied
@@ -267,8 +267,8 @@ where to send traffic and how to authenticate the caller.
 
 A provider does not name a credential spec. It only declares which credential
 *type* it can inject and reads `req.Credential` at request time. The binding
-comes from identity: a [role](/concepts/roles/)'s `cred_spec_name` puts a credential spec
-on the issued [token](/concepts/tokens/), and Warden resolves and mints that
+comes from identity: a [role](/identity/roles/)'s `cred_spec_name` puts a credential spec
+on the issued [token](/identity/tokens/), and Warden resolves and mints that
 [credential](/concepts/credentials/) when the gateway request arrives. The same mount
 therefore serves different access levels depending on the role the caller
 presents — without any per-mount credential configuration.
@@ -329,8 +329,8 @@ This is how an AI agent learns to use a mount it has been granted. See
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — how a gateway request is authenticated.
-- [Roles](/concepts/roles/) — how the role on each request selects access and credential.
+- [Authentication](/identity/authentication/) — how a gateway request is authenticated.
+- [Roles](/identity/roles/) — how the role on each request selects access and credential.
 - [Credentials](/concepts/credentials/) — what gets injected into the proxied request.
 - [Namespaces](/concepts/namespaces/) — the scope a provider mount lives in.
 - [Discovery and Skills](/concepts/discovery-and-skills/) — how agents find and use mounts.

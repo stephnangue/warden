@@ -34,7 +34,7 @@ the `X-Warden-Token` header. A **JWT** (any value beginning with `eyJ`) is inste
 sent as `Authorization: Bearer …`, so the server's transparent-auth path can
 resolve it against the namespace's configured auth method. mTLS is also supported
 — set `WARDEN_CLIENT_CERT` / `WARDEN_CLIENT_KEY` and the server authenticates the
-client certificate directly. See [Authentication](/concepts/authentication/).
+client certificate directly. See [Authentication](/identity/authentication/).
 
 ## Global flags
 
@@ -44,7 +44,7 @@ variable equivalent; the flag wins when both are set.
 | Flag | Env | Description |
 |---|---|---|
 | `-n`, `--namespace` | `WARDEN_NAMESPACE` | [Namespace](/concepts/namespaces/) to scope the command to. |
-| `-r`, `--role` | `WARDEN_ROLE` | [Role](/concepts/roles/) to assume for the command. |
+| `-r`, `--role` | `WARDEN_ROLE` | [Role](/identity/roles/) to assume for the command. |
 | `-o`, `--output` | `WARDEN_OUTPUT` | Output format: `table`, `json`, `ndjson`, or `text`. |
 | `-F`, `--fields` | `WARDEN_FIELDS` | Comma-separated dot-paths to project from structured output. |
 | `-D`, `--dry-run` | `WARDEN_DRY_RUN` | Validate the payload locally against the server schema and exit without sending. |

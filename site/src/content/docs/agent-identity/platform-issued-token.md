@@ -31,9 +31,9 @@ The relayed token is validated by the auth method that matches its issuer: the
 `kubernetes` method verifies a ServiceAccount token via the cluster's
 TokenReview API; the `jwt` method verifies a CI OIDC token against the
 provider's discovery URL or JWKS. With no `X-Warden-Token` on the request,
-Warden uses [transparent authentication](/concepts/authentication/#transparent-authentication)
+Warden uses [transparent authentication](/identity/authentication/)
 to resolve the token to a role per request and caches the result. See
-[Authentication](/concepts/authentication/#auth-methods).
+[Authentication](/identity/authentication/).
 
 ## In practice
 
@@ -73,5 +73,5 @@ identity is scoped to the exact workflow run.
 - [Self-Minted SVID](/agent-identity/self-minted-identity/) — the agent presents its own
   credential here too, but mints a SPIFFE SVID instead of relaying a platform
   token.
-- [Authentication](/concepts/authentication/) — transparent auth and the
+- [Authentication](/identity/authentication/) — transparent auth and the
   `kubernetes` / `jwt` methods.
