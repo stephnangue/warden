@@ -1,5 +1,7 @@
 ---
 title: "Runtime authorization"
+sidebar:
+  order: 4
 ---
 
 _Control every call at runtime — down to the argument, and on whose behalf._

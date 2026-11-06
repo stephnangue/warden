@@ -1,5 +1,7 @@
 ---
 title: "Use Cases"
+sidebar:
+  order: 0
 ---
 
 An agent only earns its keep when it can reach real systems — clouds, code hosts,

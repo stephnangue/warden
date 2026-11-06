@@ -1,5 +1,7 @@
 ---
 title: "Audit & attribution"
+sidebar:
+  order: 6
 ---
 
 _Know exactly who did what, on whose behalf._

@@ -1,5 +1,7 @@
 ---
 title: "Breach containment"
+sidebar:
+  order: 3
 ---
 
 _When an agent is compromised, keep the damage small._
