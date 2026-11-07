@@ -91,7 +91,9 @@ func NewClientWithoutSession() (*api.Client, error) {
 // a notice, so commands that need no credential still work. A session store
 // that cannot be used (no home directory, an unreadable or tampered file) is
 // warned about and skipped, never a reason to fail a command that does not
-// need it.
+// need it. A session whose ticket is bound to a key that cannot be loaded (a
+// locked keystore, a deleted item) fails the command instead, naming why: its
+// ticket is useless without the key.
 func attachSession(client *api.Client) error {
 	if api.ReadWardenVariable(api.EnvWardenToken) != "" || api.ReadWardenVariable(api.EnvWardenClientCert) != "" {
 		return nil
@@ -120,8 +122,10 @@ func attachSession(client *api.Client) error {
 		fmt.Fprintf(errWriter, "Warning: %v\n", ErrSessionExpired)
 		return nil
 	}
+	if err := UseSession(client, s); err != nil {
+		return err
+	}
 	noteFallback(s, ns)
-	client.SetToken(s.Token)
 	if api.ReadWardenVariable(api.EnvWardenRole) == "" && s.Role != "" {
 		client.SetRole(s.Role)
 	}
@@ -157,8 +161,10 @@ func RequireSession() (*api.Client, *Session, error) {
 	if err := checkSessionHeaders(s); err != nil {
 		return nil, nil, err
 	}
+	if err := UseSession(client, s); err != nil {
+		return nil, nil, err
+	}
 	noteFallback(s, ns)
-	client.SetToken(s.Token)
 	return client, s, nil
 }
 
@@ -166,9 +172,11 @@ func RequireSession() (*api.Client, *Session, error) {
 var ErrNoSession = errors.New("no session for this Warden address and namespace; run warden login")
 
 // ClearCredentials removes every credential and the role from client: the
-// token, and the Authorization header a JWT in WARDEN_TOKEN is moved to.
+// token, its proof signer, and the Authorization header a JWT in WARDEN_TOKEN
+// is moved to.
 func ClearCredentials(client *api.Client) {
 	client.ClearToken()
+	client.SetRequestSigner(nil)
 	client.ClearRole()
 	h := client.Headers()
 	h.Del("Authorization")

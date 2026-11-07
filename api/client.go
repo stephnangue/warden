@@ -42,6 +42,9 @@ const (
 	EnvWardenProxyAddr     = "WARDEN_PROXY_ADDR"
 	EnvWardenRole          = "WARDEN_ROLE"
 
+	// TokenHeaderName is the header name the client token is sent in
+	TokenHeaderName = "X-Warden-Token"
+
 	// NamespaceHeaderName is the header name used to specify the namespace
 	NamespaceHeaderName = "X-Warden-Namespace"
 
@@ -499,6 +502,20 @@ type Client struct {
 	config     *Config
 	token      string
 	headers    http.Header
+	signer     RequestSigner
+}
+
+// RequestSigner signs one attempt of a request, just before it is sent: every
+// attempt afresh, retries included. It may set headers on req and must not
+// consume its body, which it reads through req.GetBody.
+type RequestSigner func(req *http.Request)
+
+// SetRequestSigner makes s sign every request the client sends; nil stops
+// signing. Like the token, it is not copied by Clone.
+func (c *Client) SetRequestSigner(s RequestSigner) {
+	c.modifyLock.Lock()
+	defer c.modifyLock.Unlock()
+	c.signer = s
 }
 
 // NewClient returns a new client for the given configuration.
@@ -1173,6 +1190,7 @@ func (c *Client) rawRequestWithContext(ctx context.Context, r *Request) (*Respon
 	if ns != "" {
 		r.Headers.Set(NamespaceHeaderName, ns)
 	}
+	signer := c.signer
 
 	c.modifyLock.RUnlock()
 
@@ -1219,6 +1237,11 @@ func (c *Client) rawRequestWithContext(ctx context.Context, r *Request) (*Respon
 		CheckRetry:   checkRetry,
 		Logger:       logger,
 		ErrorHandler: retryablehttp.PassthroughErrorHandler,
+	}
+	if signer != nil {
+		// The hook runs before every attempt, once the body is rewound, on
+		// the very request sent.
+		client.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, _ int) { signer(req) }
 	}
 
 	var result *Response

@@ -19,6 +19,7 @@ import (
 	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/cmd/helpers"
 	"github.com/stephnangue/warden/cmd/roles"
+	"github.com/stephnangue/warden/helper/dpop"
 )
 
 var (
@@ -129,31 +130,40 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	if !flagForce && !flagNoStore {
 		if cur, err := helpers.LoadSession(addr, ns); err == nil && cur != nil &&
 			cur.Mount == "auth/"+mount+"/" && time.Until(cur.ExpiresAt) > reuseMargin {
-			accepted, err := sessionAccepted(client, cur)
-			if err != nil {
-				return err
+			if err := helpers.UseSession(client, cur); err != nil {
+				fmt.Fprintf(stderr, "The saved session cannot be used (%v); signing in again.\n", err)
+			} else {
+				accepted, err := sessionAccepted(client)
+				if err != nil {
+					return err
+				}
+				if accepted {
+					return keepSession(cmd, client, cur, requested)
+				}
+				fmt.Fprintln(stderr, "The saved session is no longer accepted; signing in again.")
 			}
-			if accepted {
-				return keepSession(cmd, client, cur, requested)
-			}
-			fmt.Fprintln(stderr, "The saved session is no longer accepted; signing in again.")
 			helpers.ClearCredentials(client)
 		}
 	}
 
-	s, err := signIn(cmd.Context(), client, mount, stderr)
+	s, key, err := signIn(cmd.Context(), client, mount, stderr)
 	if err != nil {
 		return err
 	}
 	s.Addr, s.Namespace = addr, ns
+	if key != nil {
+		s.SetKey(key)
+	}
 
-	client.SetToken(s.Token)
+	if err := helpers.UseSession(client, s); err != nil {
+		return err
+	}
 	role, roleErr := roles.ChooseRole(client, requested)
 	s.Role = role
 
 	if flagNoStore {
 		fmt.Fprintln(cmd.OutOrStdout(), s.Token)
-	} else if err := helpers.SaveSession(s); err != nil {
+	} else if err := keepNewSession(s, key, stderr); err != nil {
 		return err
 	}
 	fmt.Fprintf(stderr, "Signed in to namespace %s; session valid until %s (%s).\n",
@@ -164,16 +174,44 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	return roleErr
 }
 
-// sessionAccepted asks the server whether s's ticket is still accepted: the
-// file says nothing of a mount disabled since (which ends every session it
-// issued), a deleted namespace, or a keyring restored without the ticket's
-// key. One read of sys/introspect/roles, which takes no role, answers it: a
-// refusal (401, 403) means it is not, any other failure is returned.
-func sessionAccepted(client *api.Client, s *helpers.Session) (bool, error) {
-	client.SetToken(s.Token)
+// keepNewSession keeps a new login's session: its key, when its ticket is
+// bound to one, then the file. The keystore item replaces the previous
+// session's, so it is written only now, when nothing else can stop the file
+// from following; it is removed again if the file cannot be written. A session
+// that keeps no key in the keystore removes the item a previous session left
+// there.
+func keepNewSession(s *helpers.Session, key *dpop.Key, stderr io.Writer) error {
+	if key != nil {
+		if err := helpers.StoreSessionKey(s, key, stderr); err != nil {
+			return err
+		}
+	}
+	if err := helpers.SaveSession(s); err != nil {
+		if derr := helpers.DeleteSessionKey(s); derr != nil {
+			return fmt.Errorf("%w (and %v)", err, derr)
+		}
+		return err
+	}
+	if s.KeyStore != helpers.KeyStoreOS {
+		_ = helpers.DeleteSessionKey(&helpers.Session{Addr: s.Addr, Namespace: s.Namespace, KeyStore: helpers.KeyStoreOS})
+	}
+	return nil
+}
+
+// sessionAccepted asks the server whether the session client presents is still
+// accepted: the file says nothing of a mount disabled since (which ends every
+// session it issued), a deleted namespace, or a keyring restored without the
+// ticket's key. One read of sys/introspect/roles, which takes no role, answers
+// it: a refusal (401, 403) means it is not, any other failure is returned. So
+// is a proof refused for a clock off the server's, which a new session would
+// not cure.
+func sessionAccepted(client *api.Client) (bool, error) {
 	_, err := client.Operator().ReadWithData("sys/introspect/roles", nil)
 	if err == nil {
 		return true, nil
+	}
+	if _, skewed := helpers.ProofClockSkew(err); skewed {
+		return false, helpers.WithHint(fmt.Errorf("checking the saved session: %w", err), helpers.ProofRefusal(err))
 	}
 	var re *api.ResponseError
 	if errors.As(err, &re) && (re.StatusCode == http.StatusUnauthorized || re.StatusCode == http.StatusForbidden) {
@@ -193,7 +231,6 @@ func keepSession(cmd *cobra.Command, client *api.Client, s *helpers.Session, req
 	if requested == "" || requested == s.Role {
 		return nil
 	}
-	client.SetToken(s.Token)
 	role, err := roles.ChooseRole(client, requested)
 	if err != nil {
 		return err
@@ -208,37 +245,51 @@ func keepSession(cmd *cobra.Command, client *api.Client, s *helpers.Session, req
 
 // signIn runs the login against the oidc mount at auth/<mount>/: auth_url,
 // the browser, the loopback redirect, then callback. It returns the session
-// with its token, mount and expiry.
-func signIn(ctx context.Context, client *api.Client, mount string, stderr io.Writer) (*helpers.Session, error) {
+// with its token, mount and expiry, and the key its ticket is bound to, or nil
+// for a bearer ticket.
+//
+// It offers a new key (its thumbprint, dpop_jkt) unless -no-store asks for a
+// token to hand to another tool, which could not use a bound one, and proves
+// it at callback. A server that binds tickets says so (dpop_bound); one that
+// does not ignores the offer, and the key is dropped.
+func signIn(ctx context.Context, client *api.Client, mount string, stderr io.Writer) (*helpers.Session, *dpop.Key, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	l, err := newCallbackListener(flagPort)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer l.Close()
 
 	binding, proof, err := newBinding()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	base := "auth/" + mount + "/"
-	res, err := client.Operator().Write(base+"auth_url", map[string]any{
+	start := map[string]any{
 		"redirect_uri":  l.RedirectURI(),
 		"login_binding": binding,
-	})
+	}
+	var key *dpop.Key
+	if !flagNoStore {
+		if key, err = dpop.GenerateKey(); err != nil {
+			return nil, nil, err
+		}
+		start["dpop_jkt"] = key.Thumbprint()
+	}
+	res, err := client.Operator().Write(base+"auth_url", start)
 	if err != nil {
 		var re *api.ResponseError
 		if errors.As(err, &re) && re.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf("no oidc auth mount at %s in this namespace; name it with -path: %w", base, err)
+			return nil, nil, fmt.Errorf("no oidc auth mount at %s in this namespace; name it with -path: %w", base, err)
 		}
-		return nil, fmt.Errorf("starting the sign-in: %w", err)
+		return nil, nil, fmt.Errorf("starting the sign-in: %w", err)
 	}
 	authURL, _ := dataString(res, "auth_url")
 	state, _ := dataString(res, "state")
 	if authURL == "" || state == "" {
-		return nil, errors.New("starting the sign-in: the server returned no authorization URL")
+		return nil, nil, errors.New("starting the sign-in: the server returned no authorization URL")
 	}
 	l.Serve(state)
 
@@ -255,28 +306,35 @@ func signIn(ctx context.Context, client *api.Client, mount string, stderr io.Wri
 	defer cancel()
 	r, err := l.Wait(waitCtx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	data := map[string]any{"state": state, "code": r.Code, "login_proof": proof}
 	if r.Error != "" {
 		data["error"], data["error_description"] = r.Error, r.ErrorDescription
 	}
+	if key != nil {
+		client.SetRequestSigner(helpers.ProofSigner(client.Address(), key, ""))
+	}
 	res, err = client.Operator().Write(base+"callback", data)
+	client.SetRequestSigner(nil)
 	if err != nil {
-		return nil, fmt.Errorf("finishing the sign-in: %w", err)
+		return nil, nil, fmt.Errorf("finishing the sign-in: %w", err)
 	}
 	inner, _ := res.Data["data"].(map[string]any)
 	token, _ := inner["token"].(string)
 	if token == "" {
-		return nil, errors.New("finishing the sign-in: the server returned no session token")
+		return nil, nil, errors.New("finishing the sign-in: the server returned no session token")
 	}
 	expires, _ := dataString(res, "expire_at")
 	exp, err := time.Parse(time.RFC3339Nano, expires)
 	if err != nil {
-		return nil, fmt.Errorf("finishing the sign-in: the session's expiry %q: %w", expires, err)
+		return nil, nil, fmt.Errorf("finishing the sign-in: the session's expiry %q: %w", expires, err)
 	}
-	return &helpers.Session{Mount: base, Token: token, ExpiresAt: exp}, nil
+	if inner["dpop_bound"] != "true" {
+		key = nil
+	}
+	return &helpers.Session{Mount: base, Token: token, ExpiresAt: exp}, key, nil
 }
 
 // newBinding draws the login's secret and returns its binding (base64url of

@@ -18,8 +18,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/zalando/go-keyring"
+
 	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/cmd/helpers"
+	"github.com/stephnangue/warden/helper/dpop"
 )
 
 // fakeWarden answers the requests warden login makes: auth_url and callback
@@ -41,6 +44,19 @@ type fakeWarden struct {
 	// one whose mount was disabled, or a server failing.
 	refused       string
 	refusedStatus int
+
+	// bind makes the mount bind its ticket to the key the login offers
+	// (jkt), and check the proof of it at callback and on
+	// sys/introspect/roles, as the server does; proofs counts those that
+	// passed. skew, when set, is how far the server's clock is ahead.
+	bind   bool
+	jkt    string
+	proofs int
+	skew   time.Duration
+
+	// onRoles runs on every sys/introspect/roles, as the role picker lists
+	// the roles.
+	onRoles func()
 }
 
 const fakeTicket = "wdt.fake-ticket"
@@ -58,7 +74,8 @@ func newFakeWarden(t *testing.T, roles ...string) *fakeWarden {
 
 func (f *fakeWarden) serve(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
-	if raw, _ := io.ReadAll(r.Body); len(raw) > 0 {
+	raw, _ := io.ReadAll(r.Body)
+	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &body)
 	}
 	reply := func(status int, v any) {
@@ -68,11 +85,38 @@ func (f *fakeWarden) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().Add(f.skew)
+	w.Header().Set("Date", now.UTC().Format(http.TimeFormat))
+	// checkProof checks r's proof of f.jkt, as the server does; a request
+	// proof (ticket set) signs the request too.
+	checkProof := func(ticket string) bool {
+		want := &dpop.Want{JKT: f.jkt, Method: r.Method, Path: r.URL.EscapedPath(), Now: now}
+		if ticket != "" {
+			want.ATH, want.Body = dpop.Hash([]byte(ticket)), true
+			want.Context = &dpop.Context{
+				Role:        r.Header.Get(api.RoleHeaderName),
+				Namespace:   r.Header.Get(api.NamespaceHeaderName),
+				Provider:    r.Header.Get(api.ProviderHeaderName),
+				Request:     r.Header.Get("X-Warden-Request"),
+				ContentType: r.Header.Get("Content-Type"),
+				Query:       dpop.Hash([]byte(r.URL.RawQuery)),
+				Body:        dpop.Hash(raw),
+			}
+		}
+		if _, err := dpop.Verify(r.Header.Values(dpop.HeaderName), want); err != nil {
+			w.Header().Set("WWW-Authenticate", `DPoP error="invalid_dpop_proof", algs="ES256"`)
+			reply(http.StatusUnauthorized, map[string]any{"errors": []string{err.Error()}})
+			return false
+		}
+		f.proofs++
+		return true
+	}
 	base := "/v1/auth/" + f.mount + "/"
 	switch r.URL.Path {
 	case base + "auth_url":
 		f.redirectURI, _ = body["redirect_uri"].(string)
 		f.binding, _ = body["login_binding"].(string)
+		f.jkt, _ = body["dpop_jkt"].(string)
 		f.namespace = r.Header.Get(api.NamespaceHeaderName)
 		assert.Empty(f.t, r.Header.Get("X-Warden-Token"), "the login sends no credential")
 		assert.Empty(f.t, r.Header.Get("Authorization"), "not even a JWT from WARDEN_TOKEN")
@@ -94,15 +138,28 @@ func (f *fakeWarden) serve(w http.ResponseWriter, r *http.Request) {
 			reply(http.StatusBadRequest, map[string]any{"errors": []string{"login refused"}})
 			return
 		}
+		inner := map[string]any{"token": fakeTicket}
+		if f.bind && f.jkt != "" {
+			if !checkProof("") {
+				return
+			}
+			inner["dpop_bound"] = "true"
+		}
 		reply(http.StatusCreated, map[string]any{"data": map[string]any{
 			"token_type": "ticket_token",
 			"expire_at":  time.Now().Add(time.Hour).Format(time.RFC3339Nano),
-			"data":       map[string]any{"token": fakeTicket},
+			"data":       inner,
 		}})
 	case "/v1/sys/introspect/roles":
 		f.rolesSeen = r.Header.Clone()
+		if f.onRoles != nil {
+			f.onRoles()
+		}
 		if f.refused != "" && r.Header.Get("X-Warden-Token") == f.refused {
 			reply(f.refusedStatus, map[string]any{"errors": []string{"the presented ticket is not valid here"}})
+			return
+		}
+		if f.bind && r.Header.Get("X-Warden-Token") == fakeTicket && !checkProof(fakeTicket) {
 			return
 		}
 		reply(http.StatusOK, map[string]any{"data": map[string]any{"roles": f.roles, "warnings": []string{}}})
@@ -139,7 +196,7 @@ type loginRun struct {
 // directory unless dir is given.
 func login(t *testing.T, f *fakeWarden, env map[string]string, set func()) loginRun {
 	t.Helper()
-	for _, k := range []string{api.EnvWardenToken, api.EnvWardenRole, api.EnvWardenNamespace} {
+	for _, k := range []string{api.EnvWardenToken, api.EnvWardenRole, api.EnvWardenNamespace, helpers.EnvSessionKeystore} {
 		t.Setenv(k, "")
 	}
 	t.Setenv(api.EnvWardenAddress, f.srv.URL)
@@ -489,4 +546,190 @@ func TestLogin_SessionCheckFails(t *testing.T) {
 	run := login(t, f, nil, nil)
 	assert.ErrorContains(t, run.err, "checking the saved session")
 	assert.False(t, f.signedIn())
+}
+
+// sessionKeyItem is the keystore item of the session for f's address.
+func sessionKeyItem(t *testing.T, f *fakeWarden) string {
+	t.Helper()
+	addr, err := helpers.NormalizeAddr(f.srv.URL)
+	require.NoError(t, err)
+	sum := sha256.Sum256([]byte(addr + "|"))
+	return "session-" + fmt.Sprintf("%x", sum)[:16]
+}
+
+// A mount that binds tickets gets the thumbprint of a new key, a proof of it
+// at callback, and a proof on every request after; the key is kept in the OS
+// keystore, never in the session file.
+func TestLogin_BindsKey(t *testing.T) {
+	keyring.MockInit()
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	f.bind = true
+	run := login(t, f, nil, nil)
+	require.NoError(t, run.err, run.stderr)
+
+	s := savedSession(t, f, "")
+	assert.Equal(t, helpers.KeyStoreOS, s.KeyStore)
+	assert.Empty(t, s.Key, "the key is not in the file")
+	enc, err := keyring.Get("warden", sessionKeyItem(t, f))
+	require.NoError(t, err)
+	raw, err := base64.RawURLEncoding.DecodeString(enc)
+	require.NoError(t, err)
+	key, err := dpop.ParseKey(raw)
+	require.NoError(t, err)
+	assert.Equal(t, f.jkt, key.Thumbprint(), "the key offered is the key kept")
+	assert.Equal(t, 2, f.proofs, "the callback's proof and the role listing's")
+	assert.NotContains(t, run.stderr, "Warning")
+
+	// The next login keeps the session, checking it with a proof.
+	run = login(t, f, nil, nil)
+	require.NoError(t, run.err, run.stderr)
+	assert.Contains(t, run.stderr, "Already signed in")
+	assert.Equal(t, 3, f.proofs)
+
+	// Logout removes the key with the session.
+	setSessionEnv(t, "")
+	t.Setenv(api.EnvWardenAddress, f.srv.URL)
+	require.NoError(t, LogoutCmd.RunE(LogoutCmd, nil))
+	_, err = keyring.Get("warden", sessionKeyItem(t, f))
+	assert.ErrorIs(t, err, keyring.ErrNotFound)
+}
+
+// A keystore that cannot be written puts the key in the session file, and
+// says so; WARDEN_SESSION_KEYSTORE=file does the same without a word.
+func TestLogin_KeyInSessionFile(t *testing.T) {
+	for name, tc := range map[string]struct {
+		env      map[string]string
+		mock     func()
+		warnings bool
+	}{
+		"keystore unavailable": {nil, func() { keyring.MockInitWithError(fmt.Errorf("no secret service")) }, true},
+		"chosen":               {map[string]string{helpers.EnvSessionKeystore: "file"}, keyring.MockInit, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.mock()
+			useSessions(t)
+			f := newFakeWarden(t, "operator")
+			f.bind = true
+			run := login(t, f, tc.env, nil)
+			require.NoError(t, run.err, run.stderr)
+
+			s := savedSession(t, f, "")
+			assert.Equal(t, helpers.KeyStoreFile, s.KeyStore)
+			assert.NotEmpty(t, s.Key)
+			assert.Equal(t, tc.warnings, strings.Contains(run.stderr, "kept in the session file"), run.stderr)
+			assert.Equal(t, 2, f.proofs)
+		})
+	}
+}
+
+// A server that does not bind tickets ignores the key offered; -no-store,
+// for a token handed to another tool, offers none.
+func TestLogin_BearerTicket(t *testing.T) {
+	keyring.MockInit()
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	run := login(t, f, nil, nil)
+	require.NoError(t, run.err, run.stderr)
+	assert.NotEmpty(t, f.jkt, "a key is offered")
+	s := savedSession(t, f, "")
+	assert.Empty(t, s.KeyStore, "the server did not bind the ticket")
+	assert.False(t, s.Bound())
+	_, err := keyring.Get("warden", sessionKeyItem(t, f))
+	assert.ErrorIs(t, err, keyring.ErrNotFound)
+
+	run = login(t, f, nil, func() { flagNoStore = true })
+	require.NoError(t, run.err, run.stderr)
+	assert.Empty(t, f.jkt, "-no-store offers no key")
+}
+
+// A new login writes its key to the keystore only once its role is chosen,
+// just before its file: a login stopped in the role picker leaves the previous
+// session and its key as they were. A new session kept in the file removes the
+// previous session's keystore item.
+func TestLogin_KeystoreChangesWithTheFile(t *testing.T) {
+	keyring.MockInit()
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	f.bind = true
+	require.NoError(t, login(t, f, nil, nil).err)
+	first, err := keyring.Get("warden", sessionKeyItem(t, f))
+	require.NoError(t, err)
+
+	var during string
+	f.onRoles = func() { during, _ = keyring.Get("warden", sessionKeyItem(t, f)) }
+	run := login(t, f, nil, func() { flagForce = true })
+	require.NoError(t, run.err, run.stderr)
+	assert.Equal(t, first, during, "the previous key stays while the role is chosen")
+	second, err := keyring.Get("warden", sessionKeyItem(t, f))
+	require.NoError(t, err)
+	assert.NotEqual(t, first, second, "then the new key replaces it")
+
+	f.onRoles = nil
+	run = login(t, f, map[string]string{helpers.EnvSessionKeystore: "file"}, func() { flagForce = true })
+	require.NoError(t, run.err, run.stderr)
+	assert.Equal(t, helpers.KeyStoreFile, savedSession(t, f, "").KeyStore)
+	_, err = keyring.Get("warden", sessionKeyItem(t, f))
+	assert.ErrorIs(t, err, keyring.ErrNotFound, "the previous session's item is removed")
+}
+
+// Logout removes the session file even when the keystore cannot be reached,
+// and only warns about the key: the file holds the ticket.
+func TestLogout_KeystoreUnreachable(t *testing.T) {
+	keyring.MockInit()
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	f.bind = true
+	require.NoError(t, login(t, f, nil, nil).err)
+
+	keyring.MockInitWithError(fmt.Errorf("no session bus"))
+	setSessionEnv(t, "")
+	t.Setenv(api.EnvWardenAddress, f.srv.URL)
+	stderr := &bytes.Buffer{}
+	LogoutCmd.SetErr(stderr)
+	require.NoError(t, LogoutCmd.RunE(LogoutCmd, nil))
+	assert.Nil(t, savedSession(t, f, ""), "the file is gone")
+	assert.Contains(t, stderr.String(), "Warning")
+	assert.Contains(t, stderr.String(), "no session bus")
+}
+
+// A saved session whose key cannot be read is not used: warden login says
+// why and signs in again, with a new key.
+func TestLogin_UnreadableKeySignsInAgain(t *testing.T) {
+	keyring.MockInit()
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	f.bind = true
+	require.NoError(t, login(t, f, nil, nil).err)
+	require.NoError(t, keyring.Delete("warden", sessionKeyItem(t, f)))
+
+	run := login(t, f, nil, nil)
+	require.NoError(t, run.err, run.stderr)
+	assert.Contains(t, run.stderr, "cannot be used")
+	assert.Contains(t, run.stderr, "OS keystore")
+	_, err := keyring.Get("warden", sessionKeyItem(t, f))
+	assert.NoError(t, err, "the new login keeps a new key")
+}
+
+// A proof refused because this machine's clock is off the server's is not a
+// reason to sign in again, which would not help: warden login says so.
+func TestLogin_ClockSkew(t *testing.T) {
+	keyring.MockInit()
+	useSessions(t)
+	f := newFakeWarden(t, "operator")
+	f.bind = true
+	require.NoError(t, login(t, f, nil, nil).err)
+
+	f.mu.Lock()
+	f.skew, f.redirectURI = 2*time.Minute, ""
+	f.mu.Unlock()
+	run := login(t, f, nil, nil)
+	require.Error(t, run.err)
+	assert.False(t, f.signedIn(), "no sign-in")
+	assert.Equal(t, helpers.ExitAuth, helpers.RenderError(run.err))
+	assert.Contains(t, helpers.ProofRefusal(run.err), "off the server's")
+	// The server's Date has whole seconds.
+	skew, skewed := helpers.ProofClockSkew(run.err)
+	assert.True(t, skewed)
+	assert.InDelta(t, (-2 * time.Minute).Seconds(), skew.Seconds(), 1.5)
 }

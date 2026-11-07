@@ -13,11 +13,15 @@ var PrintCmd = &cobra.Command{
 	Long: `
 Usage: warden print <subcommand>
 
-  Prints values of the current warden login session, for other tools.
+  Prints values of the current warden login session.
+
+  A session whose token is bound to a key (the oidc mount's dpop_enabled, on
+  by default) is usable only by warden commands, which prove the key on every
+  request: its token alone is refused.
 
   Example:
 
-      $ curl -H "Authorization: Bearer $(warden print token)" "$WARDEN_ADDR/v1/sys/introspect/roles"
+      $ warden print token
 `,
 }
 
@@ -33,6 +37,9 @@ var printTokenCmd = &cobra.Command{
 			return err
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), s.Token)
+		if s.Bound() {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Note: this session's token is bound to the key warden login keeps with it; it is refused without a proof of that key.")
+		}
 		return nil
 	},
 }

@@ -2,15 +2,24 @@ package helpers
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zalando/go-keyring"
 
 	"github.com/stephnangue/warden/api"
+	"github.com/stephnangue/warden/helper/dpop"
 )
 
 const clientTestAddr = "https://warden.example:8400"
@@ -19,7 +28,7 @@ const clientTestAddr = "https://warden.example:8400"
 // temporary directory, and returns it and what it wrote on stderr.
 func newSessionClient(t *testing.T, env map[string]string) (*api.Client, string) {
 	t.Helper()
-	for _, k := range []string{api.EnvWardenToken, api.EnvWardenRole, api.EnvWardenNamespace} {
+	for _, k := range []string{api.EnvWardenToken, api.EnvWardenRole, api.EnvWardenNamespace, EnvSessionKeystore} {
 		t.Setenv(k, "")
 	}
 	t.Setenv(api.EnvWardenAddress, clientTestAddr)
@@ -198,4 +207,133 @@ func TestRequireSession(t *testing.T) {
 	saveTestSession(t, "team-a/dev", "operator", -time.Minute)
 	_, _, err = RequireSession()
 	assert.ErrorIs(t, err, ErrSessionExpired)
+}
+
+// The signer proves the key over each attempt as it is sent: its method, its
+// path relative to the address's own (as the server behind a prefix-stripping
+// load balancer sees it), the ticket, the selectors, the query and the body;
+// a retry is signed afresh. A request carrying another credential is not
+// signed.
+func TestProofSigner_SignsEachAttemptAsSent(t *testing.T) {
+	key, err := dpop.GenerateKey()
+	require.NoError(t, err)
+	const ticket = "wdt.bound"
+	var (
+		mu     sync.Mutex
+		proofs []string
+		errs   []error
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		values := r.Header.Values(dpop.HeaderName)
+		if r.Header.Get(api.TokenHeaderName) != ticket {
+			errs = append(errs, nil)
+			assert.Empty(t, values, "a request without the ticket carries no proof")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, err := dpop.Verify(values, &dpop.Want{
+			JKT: key.Thumbprint(), Method: r.Method, Now: time.Now(), Body: true,
+			Path: strings.TrimPrefix(r.URL.EscapedPath(), "/warden"),
+			ATH:  dpop.Hash([]byte(ticket)),
+			Context: &dpop.Context{
+				Role:      r.Header.Get(api.RoleHeaderName),
+				Namespace: r.Header.Get(api.NamespaceHeaderName),
+				Query:     dpop.Hash([]byte(r.URL.RawQuery)),
+				Body:      dpop.Hash(body),
+			},
+		})
+		proofs, errs = append(proofs, values...), append(errs, err)
+		if len(proofs) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := api.DefaultConfig()
+	cfg.Address = srv.URL + "/warden"
+	cfg.MaxRetries = 1
+	cfg.MinRetryWait, cfg.MaxRetryWait = time.Millisecond, time.Millisecond
+	client, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	client.SetToken(ticket)
+	client.SetRole("operator")
+	client.SetNamespace("team-a")
+	client.SetRequestSigner(ProofSigner(cfg.Address, key, ticket))
+
+	req := client.NewRequest(http.MethodPut, "/v1/sys/policies/acl/team-read")
+	req.Params.Set("cas", "1")
+	require.NoError(t, req.SetJSONBody(map[string]any{"policy": `path "x" {}`}))
+	_, err = client.RawRequestWithContext(context.Background(), req)
+	require.NoError(t, err)
+
+	mu.Lock()
+	require.Len(t, proofs, 2, "the first attempt and its retry")
+	assert.NoError(t, errs[0])
+	assert.NoError(t, errs[1])
+	assert.NotEqual(t, proofs[0], proofs[1], "the retry is signed afresh")
+	mu.Unlock()
+
+	client.SetToken("wdt.another")
+	_, err = client.RawRequestWithContext(context.Background(), client.NewRequest(http.MethodGet, "/v1/sys/mounts"))
+	require.NoError(t, err)
+}
+
+// A session whose key cannot be loaded fails the command, naming why, rather
+// than send a ticket that is refused without its key.
+func TestClient_UnreadableSessionKeyFails(t *testing.T) {
+	keyring.MockInit()
+	useSessionDir(t)
+	s := saveTestSession(t, "", "operator", time.Hour)
+	s.KeyStore = KeyStoreOS
+	require.NoError(t, SaveSession(s))
+	for _, k := range []string{api.EnvWardenToken, api.EnvWardenRole, api.EnvWardenNamespace, EnvSessionKeystore} {
+		t.Setenv(k, "")
+	}
+	t.Setenv(api.EnvWardenAddress, clientTestAddr)
+	SetTestClient(nil)
+	t.Cleanup(func() { SetTestClient(nil) })
+
+	_, err := Client()
+	assert.ErrorContains(t, err, "could not be read from the OS keystore")
+	_, _, err = RequireSession()
+	assert.ErrorContains(t, err, "could not be read from the OS keystore")
+
+	key, err := dpop.GenerateKey()
+	require.NoError(t, err)
+	require.NoError(t, StoreSessionKey(s, key, io.Discard))
+	require.Equal(t, KeyStoreOS, s.KeyStore)
+	client, err := Client()
+	require.NoError(t, err, "with the key in the keystore, the session is used")
+	assert.Equal(t, s.Token, client.Token())
+}
+
+func TestProofRefusal(t *testing.T) {
+	refusal := func(challenge, date string) error {
+		h := http.Header{}
+		h.Set("WWW-Authenticate", challenge)
+		if date != "" {
+			h.Set("Date", date)
+		}
+		return &api.ResponseError{StatusCode: http.StatusUnauthorized, Header: h}
+	}
+	now := time.Now().UTC()
+	t.Setenv(api.EnvWardenToken, "")
+
+	assert.Contains(t, ProofRefusal(refusal(`DPoP error="invalid_token", algs="ES256"`, "")), "refused as a bearer token")
+	assert.Contains(t, ProofRefusal(refusal(`DPoP error="invalid_dpop_proof", algs="ES256"`, now.Format(http.TimeFormat))), "warden login -force")
+	assert.Contains(t, ProofRefusal(refusal(`DPoP error="invalid_dpop_proof", algs="ES256"`, now.Add(-time.Minute).Format(http.TimeFormat))), "clock")
+	assert.Empty(t, ProofRefusal(refusal(`Bearer error="invalid_token"`, "")))
+	assert.Empty(t, ProofRefusal(errors.New("other")))
+
+	_, skewed := ProofClockSkew(refusal(`DPoP error="invalid_dpop_proof"`, now.Add(10*time.Second).Format(http.TimeFormat)))
+	assert.False(t, skewed, "within the window")
+
+	// A bound ticket in WARDEN_TOKEN rides X-Warden-Token with no proof.
+	t.Setenv(api.EnvWardenToken, "wdt.bound")
+	assert.Contains(t, ProofRefusal(refusal(`DPoP error="invalid_dpop_proof", algs="ES256"`, now.Format(http.TimeFormat))), "unset WARDEN_TOKEN")
 }
