@@ -104,10 +104,31 @@ type Admission struct {
 	// The token cache counts it in the cost of the entry that holds it.
 	Bytes int64
 
+	// Binding is the key every request presenting a ticket of this admission
+	// must prove it holds; nil for a bearer ticket and for every other
+	// admission. The auth method that builds a login's admission sets its JKT
+	// to bind the ticket it issues; core completes it once the ticket is
+	// sealed, and it never changes after. It lives here, rather than on the
+	// token entry, because the cached entry and every per-request copy share
+	// it: no path that rebuilds or copies an entry can drop it and turn a
+	// bound ticket into a bearer one.
+	Binding *KeyBinding
+
 	// membership caches the groups and roles computed for this admission.
 	// It lives here so the cached token entry and every per-request copy share
 	// it: a recompute on one request is seen by the next.
 	membership atomic.Pointer[Membership]
+}
+
+// KeyBinding is the key a ticket is bound to.
+type KeyBinding struct {
+	// JKT is the RFC 7638 thumbprint of the key.
+	JKT string
+
+	// ATH is the hash of the ticket value a proof carries as its ath
+	// (dpop.Hash), computed once so a request does not hash the ticket.
+	// Empty until core seals the ticket.
+	ATH string
 }
 
 // LoadMembership returns the cached membership, or nil when none has been

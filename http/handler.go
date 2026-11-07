@@ -264,6 +264,7 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
+			restoreClientPath(req)
 			// Do NOT rewrite req.Host — preserve the original Host header
 			// so signature-sensitive protocols (e.g., AWS SigV4) that sign
 			// the Host header are not broken by forwarding. req.URL.Host
@@ -521,6 +522,22 @@ func isForwardedGatewayRequest(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// restoreClientPath puts back the path req's request line carried, which this
+// node may have rewritten (the X-Warden-Provider prefix here, a role header in
+// core). The active node serves the same handler, so it rewrites the path again
+// itself; and a DPoP proof signs the path the client sent, which the active
+// node must therefore see.
+func restoreClientPath(req *http.Request) {
+	if req.RequestURI == "" {
+		return
+	}
+	u, err := url.ParseRequestURI(req.RequestURI)
+	if err != nil || !strings.HasPrefix(u.Path, "/") {
+		return
+	}
+	req.URL.Path, req.URL.RawPath = u.Path, u.RawPath
 }
 
 // forwardToActive forwards a request to the active node via the shared

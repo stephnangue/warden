@@ -120,6 +120,9 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 			if !adm.AuthTime.IsZero() {
 				auditAuth.AuthTime = adm.AuthTime.Unix()
 			}
+			if adm.Binding != nil {
+				auditAuth.DPoPJKT = adm.Binding.JKT
+			}
 			// A ticket on an identity path names no mount, so it takes no
 			// role; the mount that admitted it is still the issuing one.
 			if auditAuth.MountAccessor == "" && te.Type == logical.TokenTypeTicket {
@@ -278,6 +281,7 @@ func (c *Core) buildRequestAuditEntry(
 	}
 	stampRoleGrant(entry, req)
 	stampDiscovery(entry, req)
+	stampProof(entry, req)
 	stampUserAttribution(entry, req)
 	stampMCPClient(entry, req)
 
@@ -286,6 +290,18 @@ func (c *Core) buildRequestAuditEntry(
 	}
 
 	return entry
+}
+
+// stampProof records the DPoP proof a bound ticket's request carried. A no-op
+// for every other request.
+func stampProof(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.ProofID == "" {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	entry.Auth.ProofID = req.ProofID
 }
 
 // stampRoleGrant records how the request's role was decided when its token
@@ -432,6 +448,7 @@ func (c *Core) buildResponseAuditEntry(
 	stampRoleGrant(entry, req)
 	stampSponsored(entry, req)
 	stampDiscovery(entry, req)
+	stampProof(entry, req)
 	stampUserAttribution(entry, req)
 	stampMCPClient(entry, req)
 

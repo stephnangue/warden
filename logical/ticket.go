@@ -44,9 +44,16 @@ type TicketPayload struct {
 	// the issuing mount's live mapping on every request.
 	Facts json.RawMessage `json:"facts"`
 
-	// Cnf is reserved for a proof-of-possession key binding. This release
-	// issues none and refuses a ticket that carries one.
-	Cnf json.RawMessage `json:"cnf,omitempty"`
+	// Cnf binds the ticket to a key its holder must prove it holds on every
+	// request (RFC 7800); nil for a bearer ticket. Releases before it refuse
+	// a ticket that carries one.
+	Cnf *TicketConfirmation `json:"cnf,omitempty"`
+}
+
+// TicketConfirmation is a ticket's key binding.
+type TicketConfirmation struct {
+	// JKT is the RFC 7638 thumbprint of the bound key (RFC 9449 §6.1).
+	JKT string `json:"jkt"`
 }
 
 // TicketLen returns the length of the ticket token value whose payload

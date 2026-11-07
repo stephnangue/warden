@@ -25,7 +25,11 @@ import (
 //  2. the issuing mount still exists in the ticket's namespace (the accessor
 //     is looked up exactly) and publishes facts;
 //  3. that mount still admits the kind the ticket was issued for;
-//  4. the request's namespace is the ticket's or one of its children.
+//  4. the request's namespace is the ticket's or one of its children;
+//  5. for a ticket bound to a key, proof proves the request holds it
+//     (checkTicketProof). It refuses with a *ticketProofError, or the coded
+//     error of a body it could not buffer; a nil proof refuses every bound
+//     ticket.
 //
 // Disabling the issuing mount, or deleting its namespace, therefore refuses
 // every ticket it issued from the next request on: a mount enabled again has a
@@ -36,7 +40,7 @@ import (
 // nobody issued, nor with old ones replayed. On
 // a hit it takes the router's read lock once and an atomic load; a miss also
 // decrypts.
-func (c *Core) lookupTicket(ctx context.Context, value string) (*TokenEntry, error) {
+func (c *Core) lookupTicket(ctx context.Context, value string, proof *ticketProof) (*TokenEntry, error) {
 	if c.Sealed() {
 		return nil, errors.New("the core is sealed")
 	}
@@ -90,6 +94,12 @@ func (c *Core) lookupTicket(ctx context.Context, value string) (*TokenEntry, err
 		}
 		return nil, err
 	}
+	if b := entry.Admission.Binding; b != nil {
+		if err := c.checkTicketProof(b, proof); err != nil {
+			s.logger.Debug("ticket proof refused", logger.String("token_id", id), logger.Err(err))
+			return nil, err
+		}
+	}
 
 	if s.config.EnableMetrics {
 		s.metrics.IncrementTokensResolved()
@@ -121,6 +131,7 @@ func (c *Core) ticketEntry(ctx context.Context, id, value string) (*TokenEntry, 
 		Kind:          p.Kind,
 		AuthTime:      timeOrZero(p.AuthTime),
 		Bytes:         int64(len(p.Facts)),
+		Binding:       ticketBinding(p, value),
 	}
 	return &TokenEntry{
 		ID:            id,

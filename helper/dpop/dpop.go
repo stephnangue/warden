@@ -348,7 +348,8 @@ func checkContext(got, want *Context, body bool) error {
 	return nil
 }
 
-// isCoord reports whether s has the shape of a base64url P-256 coordinate.
+// isCoord reports whether s has the shape of a base64url P-256 coordinate, 32
+// bytes, the size of a SHA-256 too.
 func isCoord(s string) bool {
 	if len(s) != coordLen {
 		return false
@@ -360,6 +361,12 @@ func isCoord(s string) bool {
 		}
 	}
 	return true
+}
+
+// ValidThumbprint reports whether s has the shape of a key thumbprint: the
+// unpadded base64url of a SHA-256.
+func ValidThumbprint(s string) bool {
+	return isCoord(s)
 }
 
 // thumbprint returns the RFC 7638 thumbprint of the P-256 key with base64url

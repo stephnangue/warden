@@ -2,6 +2,7 @@ package logical
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 )
@@ -140,6 +141,21 @@ type Request struct {
 	ClientIP  string
 	RequestID string
 
+	// ReceivedAt is when the HTTP layer built the request, before its body
+	// was read. A DPoP proof's freshness is measured from it, so a slow upload
+	// does not age a proof that was fresh when the request arrived. Zero on a
+	// request core builds itself.
+	ReceivedAt time.Time `json:"-"`
+
+	// ProofID identifies the DPoP proof a bound ticket's request carried (a
+	// truncated hash of its jti), for the audit. Empty on every other request.
+	ProofID string `json:"-"`
+
+	// body is the request body as core buffered it, and hasBody says whether
+	// it did; read through BufferedBody.
+	body    []byte
+	hasBody bool
+
 	// Whether the request is unauthenticated, as in, had no client token
 	// attached. Useful in some situations where the client token is not made
 	// accessible.
@@ -222,6 +238,18 @@ func (r *Request) TokenEntry() *TokenEntry {
 
 func (r *Request) SetTokenEntry(te *TokenEntry) {
 	r.tokenEntry = te
+}
+
+// BufferedBody returns the request body core buffered whole, and whether it
+// did. The slice is the one the body is replayed from: read only.
+func (r *Request) BufferedBody() ([]byte, bool) {
+	return r.body, r.hasBody
+}
+
+// SetBufferedBody records b as the request body core buffered whole. Core
+// calls it from the one place it buffers a body.
+func (r *Request) SetBufferedBody(b []byte) {
+	r.body, r.hasBody = b, true
 }
 
 // RoleGrant returns the role grant core resolved for this request, or nil when

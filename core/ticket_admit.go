@@ -25,31 +25,33 @@ var errTicketInUserSlot = errors.New("a ticket is an operator credential; presen
 // provider's extractor reads (an API key header, git's Basic password).
 var errTicketMisplaced = errors.New("a ticket is presented on X-Warden-Token or as an Authorization bearer")
 
-// ticketValue returns the ticket req presents, or "", and whether a ticket
-// rides where none is accepted. Only two headers carry one: X-Warden-Token,
-// which wins whatever else the request carries, and the Authorization bearer
-// when it is the credential the request's extractor took as the caller (not a
-// protected resource's user, which captureUserContext refuses).
-func ticketValue(req *logical.Request) (value string, misplaced bool) {
+// ticketValue returns the ticket req presents, or "", whether it rides the
+// Authorization bearer, and whether a ticket rides where none is accepted.
+// Only two headers carry one: X-Warden-Token, which wins whatever else the
+// request carries, and the Authorization bearer when it is the credential the
+// request's extractor took as the caller (not a protected resource's user,
+// which captureUserContext refuses).
+func ticketValue(req *logical.Request) (value string, bearer, misplaced bool) {
 	if req.HTTPRequest == nil {
-		return "", false
+		return "", false, false
 	}
 	h := req.HTTPRequest.Header
 	if v := h.Get(logical.HeaderWardenToken); v != "" {
 		if isTicketValue(v) {
-			return v, false
+			return v, false, false
 		}
-		return "", false
+		return "", false, false
 	}
 	if v := logical.StripBearer(h.Get("Authorization")); isTicketValue(v) && v == req.ClientToken {
-		return v, false
+		return v, true, false
 	}
-	return "", isTicketValue(req.ClientToken) || isTicketValue(h.Get(logical.HeaderWardenAgentToken))
+	return "", false, isTicketValue(req.ClientToken) || isTicketValue(h.Get(logical.HeaderWardenAgentToken))
 }
 
 // ticketSurface tells admitTicket, once a ticket is presented, the role the
-// request asks for and how a refusal is rendered on its surface.
-type ticketSurface func() (role string, refuse func(error) *logical.Response)
+// request asks for, whether it is a provider's surface, and how a refusal is
+// rendered there.
+type ticketSurface func() (role string, provider bool, refuse func(error) *logical.Response)
 
 // admitTicket admits the ticket req presents, if it presents one, and returns
 // the response refusing it, or nil. It runs on every path once the request's
@@ -71,11 +73,20 @@ type ticketSurface func() (role string, refuse func(error) *logical.Response)
 // provider's gateway or access surface, 403 elsewhere, and 400 for a request
 // that selects no role. A request that presents no ticket costs a few header
 // reads.
-func (c *Core) admitTicket(ctx context.Context, req *logical.Request, identityPath bool, surface ticketSurface) *logical.Response {
-	value, misplaced := ticketValue(req)
+//
+// A ticket bound to a key opens only with the request's proof of it
+// (checkTicketProof), which signs the body when body is set: on the branch
+// where core reads the body whole. A refused proof is a 401 with a DPoP
+// challenge on every surface. On a provider's surface a bound ticket also
+// selects its role with X-Warden-Role, the one selector there that outranks
+// all others and that the proof signs, so a replayed proof cannot reach a
+// role through an unsigned one (a SigV4 or Basic credential, default_role).
+func (c *Core) admitTicket(ctx context.Context, req *logical.Request, identityPath, body bool, surface ticketSurface) *logical.Response {
+	value, bearer, misplaced := ticketValue(req)
 	if value == "" && !misplaced {
 		return nil
 	}
+	proof := &ticketProof{req: req, bearer: bearer, body: body}
 	if identityPath {
 		if !rolelessNeedsIdentity(req) {
 			return nil
@@ -83,24 +94,30 @@ func (c *Core) admitTicket(ctx context.Context, req *logical.Request, identityPa
 		if misplaced {
 			return rolelessUnauthorized(errTicketMisplaced)
 		}
-		te, err := c.lookupTicket(ctx, value)
+		te, err := c.lookupTicket(ctx, value, proof)
 		if err != nil {
 			c.logger.Warn("ticket refused", logger.Err(err), logger.String("path", req.Path))
+			if resp := ticketProofRefusal(err); resp != nil {
+				return resp
+			}
 			return rolelessUnauthorized(errTicketRefused)
 		}
 		return c.admitTicketRoleless(ctx, req, te)
 	}
 
-	r, refuse := surface()
+	r, provider, refuse := surface()
 	if misplaced {
 		return refuse(errTicketMisplaced)
 	}
-	te, err := c.lookupTicket(ctx, value)
+	te, err := c.lookupTicket(ctx, value, proof)
 	if err != nil {
 		c.logger.Warn("ticket refused", logger.Err(err), logger.String("path", req.Path))
+		if resp := ticketProofRefusal(err); resp != nil {
+			return resp
+		}
 		return refuse(errTicketRefused)
 	}
-	if r == "" {
+	if r == "" || provider && te.Admission.Binding != nil && req.HTTPRequest.Header.Get("X-Warden-Role") == "" {
 		return refuse(errNoRoleSelected)
 	}
 	req.TicketAdmitted = true
@@ -114,8 +131,8 @@ func (c *Core) admitTicket(ctx context.Context, req *logical.Request, identityPa
 // transparent surface: the role from ?role= then X-Warden-Role, and a refusal
 // that is 400 for no role and 403 otherwise.
 func operationsTicketSurface(req *logical.Request) ticketSurface {
-	return func() (string, func(error) *logical.Response) {
-		return operationsRole(req), func(err error) *logical.Response {
+	return func() (string, bool, func(error) *logical.Response) {
+		return operationsRole(req), false, func(err error) *logical.Response {
 			if errors.Is(err, errNoRoleSelected) {
 				return logical.ErrorResponse(logical.ErrBadRequest(noRoleSelectedOperations))
 			}
@@ -129,8 +146,8 @@ func operationsTicketSurface(req *logical.Request) ticketSurface {
 // refusal rendered as a failed implicit auth there is, with noRole for a
 // request that selects none.
 func providerTicketSurface(req *logical.Request, backend logical.Backend, noRole string) ticketSurface {
-	return func() (string, func(error) *logical.Response) {
-		return providerRole(req, backend), func(err error) *logical.Response {
+	return func() (string, bool, func(error) *logical.Response) {
+		return providerRole(req, backend), true, func(err error) *logical.Response {
 			return providerImplicitAuthFailure(req, err, noRole)
 		}
 	}

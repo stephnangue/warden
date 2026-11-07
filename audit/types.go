@@ -157,6 +157,14 @@ type Auth struct {
 	// it (a ticket does).
 	AuthTime int64 `json:"auth_time,omitempty"`
 
+	// DPoPJKT is the thumbprint of the key a ticket is bound to, and ProofID
+	// identifies the proof of it the request carried (a truncated hash of its
+	// jti). Warden keeps no record of proofs, so a repeated ProofID is how a
+	// replayed one shows; the CLI signs every attempt afresh. Both empty for
+	// a bearer credential.
+	DPoPJKT string `json:"dpop_jkt,omitempty"`
+	ProofID string `json:"proof_id,omitempty"`
+
 	// Namespace binding
 	NamespaceID   string `json:"namespace_id,omitempty"`
 	NamespacePath string `json:"namespace_path,omitempty"`

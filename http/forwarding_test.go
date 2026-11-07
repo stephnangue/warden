@@ -407,3 +407,37 @@ func TestGetProxy_ForwardedChainEndsWithTheClient(t *testing.T) {
 		})
 	}
 }
+
+// A standby forwards the path the client sent, not the one it rewrote: the
+// active node rewrites it again, and a DPoP proof signs the client's.
+func TestGetProxy_ForwardsTheClientsPath(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	cert := &x509.Certificate{}
+	cert.Subject.CommonName = "fw-test"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Leaf: cert}}}
+	f := newStandbyForwarder(log, func() *tls.Config { return tlsCfg }, 30)
+	proxy := f.getProxy("https://leader:8201", "https://leader:8200")
+	require.NotNil(t, proxy)
+	capture := &capturingTransport{}
+	proxy.Transport = capture
+
+	for _, tc := range []struct {
+		name, target, rewritten, wantPath, wantQuery string
+	}{
+		{"X-Warden-Provider prefix", "/github/user?per_page=5", "/v1/github/user", "/github/user", "per_page=5"},
+		{"role header rewrite", "/v1/aws/gateway/x", "/v1/aws/role/admin/gateway/x", "/v1/aws/gateway/x", ""},
+		{"encoded slash kept", "/v1/bedrock/gateway/model/a%2Fb/invoke", "/v1/bedrock/gateway/model/a/b/invoke", "/v1/bedrock/gateway/model/a%2Fb/invoke", ""},
+		{"absolute form", "https://standby:8200/v1/sys/mounts", "/v1/sys/mounts", "/v1/sys/mounts", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.URL.Path, req.URL.RawPath = tc.rewritten, ""
+			proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+			require.NotNil(t, capture.sent)
+			assert.Equal(t, tc.wantPath, capture.sent.URL.EscapedPath())
+			assert.Equal(t, tc.wantQuery, capture.sent.URL.RawQuery)
+			assert.Equal(t, "leader:8201", capture.sent.URL.Host)
+		})
+	}
+}

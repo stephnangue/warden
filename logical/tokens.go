@@ -25,11 +25,12 @@ const (
 	HeaderWardenAgentToken = "X-Warden-Agent-Token"
 )
 
-// WardenRequestHeaders returns every X-Warden-* header a client may send to
-// Warden: credentials, routing selectors, and retired and reserved names. None
-// means anything to an upstream and the credentials are secrets, so every
-// gateway strips them all before proxying. A new X-Warden-* header is added
-// here, once. The slice is fresh on each call.
+// WardenRequestHeaders returns every header a client sends to Warden for
+// Warden alone: the X-Warden-* credentials, routing selectors, and retired and
+// reserved names, and the DPoP proof of a bound ticket. None means anything to
+// an upstream and the credentials are secrets, so every gateway strips them
+// all before proxying. A new such header is added here, once. The slice is
+// fresh on each call.
 func WardenRequestHeaders() []string {
 	return []string{
 		HeaderWardenToken,
@@ -50,6 +51,9 @@ func WardenRequestHeaders() []string {
 		// native identity. Stripped already, so no upstream comes to rely on
 		// it.
 		"X-Warden-Agent",
+		// The proof of the key a ticket is bound to: Warden checks it, and the
+		// upstream is called with a credential Warden supplies.
+		"DPoP",
 	}
 }
 
