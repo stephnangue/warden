@@ -3,8 +3,6 @@ package core
 import (
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/stephnangue/warden/helper/dpop"
@@ -60,7 +58,7 @@ func (c *Core) checkTicketProof(b *logical.KeyBinding, proof *ticketProof) error
 		return &ticketProofError{proofErrInvalidToken, errors.New("a bound ticket was presented as a bearer token")}
 	}
 	req, r := proof.req, proof.req.HTTPRequest
-	path, ok := requestTargetPath(r)
+	path, ok := dpop.RequestPath(r)
 	if !ok {
 		return &ticketProofError{proofErrInvalidProof, errors.New("the request line's target does not parse")}
 	}
@@ -109,22 +107,6 @@ func (c *Core) proofBody(req *logical.Request) ([]byte, error) {
 		return nil, nil
 	}
 	return c.readAndRestoreBody(req, maxRequestBodySize)
-}
-
-// requestTargetPath is the path r's request line carried, escaped, and whether
-// it parses. r.URL's may have been rewritten on the way in (the
-// X-Warden-Provider prefix, a role header), and a proof signs the client's, so
-// a request line that does not parse is never replaced by it. A request no
-// client sent (built in process) has no request line, and its URL is its own.
-func requestTargetPath(r *http.Request) (string, bool) {
-	if r.RequestURI == "" {
-		return r.URL.EscapedPath(), true
-	}
-	u, err := url.ParseRequestURI(r.RequestURI)
-	if err != nil {
-		return "", false
-	}
-	return u.EscapedPath(), true
 }
 
 // ticketProofRefusal renders err when it refuses a bound ticket for its proof,

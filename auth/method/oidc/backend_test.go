@@ -15,6 +15,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/helper/dpop"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -88,6 +90,10 @@ type env struct {
 	b       *oidcAuthBackend
 	key     []byte
 	storage sdklogical.Storage
+
+	// dpopKey is the key logins offer at auth_url and prove at callback, as
+	// warden login does.
+	dpopKey *dpop.Key
 }
 
 func newEnv(t *testing.T) *env {
@@ -100,8 +106,10 @@ func newEnv(t *testing.T) *env {
 
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
+	dk, err := dpop.GenerateKey()
+	require.NoError(t, err)
 	e := &env{t: t, ctx: namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace),
-		tp: tp, key: key, storage: &sdklogical.InmemStorage{}}
+		tp: tp, key: key, storage: &sdklogical.InmemStorage{}, dpopKey: dk}
 	e.b = e.newBackend(testAccessor)
 	return e
 }
@@ -145,13 +153,32 @@ func (e *env) baseConfig() map[string]any {
 
 func (e *env) call(b *oidcAuthBackend, path string, data map[string]any) *logical.Response {
 	e.t.Helper()
+	return e.callHTTP(b, path, data, nil)
+}
+
+// callHTTP is call for a request that arrived as hr.
+func (e *env) callHTTP(b *oidcAuthBackend, path string, data map[string]any, hr *http.Request) *logical.Response {
+	e.t.Helper()
 	resp, err := b.HandleRequest(e.ctx, &logical.Request{
-		Operation: logical.UpdateOperation, Path: path, Data: data,
+		Operation: logical.UpdateOperation, Path: path, Data: data, HTTPRequest: hr,
 		MountAccessor: testAccessor, MountPoint: testMountPoint, ClientIP: "10.0.0.1",
 	})
 	require.NoError(e.t, err)
 	require.NotNil(e.t, resp)
 	return resp
+}
+
+// callbackRequest is the HTTP request of a callback carrying a login proof
+// of k, signed at iat; no proof when k is nil.
+func (e *env) callbackRequest(k *dpop.Key, iat time.Time) *http.Request {
+	e.t.Helper()
+	hr := httptest.NewRequest(http.MethodPost, "/v1/"+testMountPoint+"callback", nil)
+	if k != nil {
+		p, err := k.Sign(dpop.Claims{Method: http.MethodPost, URL: "https://warden.example" + hr.URL.Path, IssuedAt: iat})
+		require.NoError(e.t, err)
+		hr.Header.Set(dpop.HeaderName, p)
+	}
+	return hr
 }
 
 // configure writes the base config with over applied (a nil value drops the
@@ -189,12 +216,13 @@ func secret() (binding, proof string) {
 	return base64.RawURLEncoding.EncodeToString(h[:]), base64.RawURLEncoding.EncodeToString(s)
 }
 
-// start runs auth_url and primes the test provider with the login's PKCE
-// verifier and nonce, as a browser round trip would carry them.
+// start runs auth_url, offering e's key, and primes the test provider with the
+// login's PKCE verifier and nonce, as a browser round trip would carry them.
 func (e *env) start(b *oidcAuthBackend) (state, proof string) {
 	e.t.Helper()
 	binding, proof := secret()
-	resp := e.call(b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding})
+	resp := e.call(b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding,
+		"dpop_jkt": e.dpopKey.Thumbprint()})
 	require.NoError(e.t, resp.Err)
 	state = resp.Data["state"].(string)
 
@@ -207,9 +235,11 @@ func (e *env) start(b *oidcAuthBackend) (state, proof string) {
 	return state, proof
 }
 
+// finish runs callback with a login proof of e's key, as warden login does.
 func (e *env) finish(b *oidcAuthBackend, state, proof string) *logical.Response {
 	e.t.Helper()
-	return e.call(b, "callback", map[string]any{"state": state, "code": testAuthCode, "login_proof": proof})
+	return e.callHTTP(b, "callback", map[string]any{"state": state, "code": testAuthCode, "login_proof": proof},
+		e.callbackRequest(e.dpopKey, time.Now()))
 }
 
 func (e *env) login(claims map[string]any) *logical.Response {

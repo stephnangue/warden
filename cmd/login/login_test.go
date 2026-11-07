@@ -138,18 +138,18 @@ func (f *fakeWarden) serve(w http.ResponseWriter, r *http.Request) {
 			reply(http.StatusBadRequest, map[string]any{"errors": []string{"login refused"}})
 			return
 		}
-		inner := map[string]any{"token": fakeTicket}
+		data := map[string]any{
+			"token_type": "ticket_token",
+			"expire_at":  time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+			"data":       map[string]any{"token": fakeTicket},
+		}
 		if f.bind && f.jkt != "" {
 			if !checkProof("") {
 				return
 			}
-			inner["dpop_bound"] = "true"
+			data["dpop_bound"] = "true"
 		}
-		reply(http.StatusCreated, map[string]any{"data": map[string]any{
-			"token_type": "ticket_token",
-			"expire_at":  time.Now().Add(time.Hour).Format(time.RFC3339Nano),
-			"data":       inner,
-		}})
+		reply(http.StatusCreated, map[string]any{"data": data})
 	case "/v1/sys/introspect/roles":
 		f.rolesSeen = r.Header.Clone()
 		if f.onRoles != nil {

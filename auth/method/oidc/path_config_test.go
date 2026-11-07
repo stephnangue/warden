@@ -142,6 +142,48 @@ func TestConfigWrite_Merge(t *testing.T) {
 	assert.Equal(t, "sub", e.b.mountFacts.Load().AliasSource)
 }
 
+// dpop_enabled is on unless set false: by default, for a configuration stored
+// before the key existed, and across a write that does not send it. Turning
+// it off warns that sessions already issued stay bound; nothing else does.
+func TestConfigWrite_DPoPEnabled(t *testing.T) {
+	e := newEnv(t)
+	resp := e.configure(nil)
+	require.NoError(t, resp.Err)
+	assert.Empty(t, resp.Warnings)
+	read := func(b *oidcAuthBackend) any {
+		r, err := b.HandleRequest(e.ctx, &logical.Request{Operation: logical.ReadOperation, Path: "config"})
+		require.NoError(t, err)
+		return r.Data["dpop_enabled"]
+	}
+	assert.Equal(t, true, read(e.b), "on by default")
+
+	resp = e.call(e.b, "config", map[string]any{"dpop_enabled": false})
+	require.NoError(t, resp.Err)
+	require.Len(t, resp.Warnings, 1)
+	assert.Contains(t, resp.Warnings[0], "already issued stay bound")
+
+	resp = e.call(e.b, "config", map[string]any{"session_ttl": "2h"})
+	require.NoError(t, resp.Err)
+	assert.Empty(t, resp.Warnings, "no warning when it stays off")
+	assert.Equal(t, false, read(e.b), "a write that does not send it keeps it off")
+	assert.Equal(t, false, read(e.newBackend(testAccessor)), "a stored false survives a reload")
+
+	resp = e.call(e.b, "config", map[string]any{"dpop_enabled": true})
+	require.NoError(t, resp.Err)
+	assert.Empty(t, resp.Warnings, "turning it on warns of nothing")
+
+	// A configuration stored before the key existed reads as on.
+	entry, err := e.storage.Get(e.ctx, "config")
+	require.NoError(t, err)
+	var stored map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &stored))
+	delete(stored, "dpop_enabled")
+	entry.Value, err = json.Marshal(stored)
+	require.NoError(t, err)
+	require.NoError(t, e.storage.Put(e.ctx, entry))
+	assert.Equal(t, true, read(e.newBackend(testAccessor)))
+}
+
 func manyFacts(n int) map[string]any {
 	f := make(map[string]any, n)
 	for i := range n {

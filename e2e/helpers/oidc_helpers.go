@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
+	clihelpers "github.com/stephnangue/warden/cmd/helpers"
+	"github.com/stephnangue/warden/helper/dpop"
 	"github.com/stephnangue/warden/internal/playground"
 )
 
@@ -116,8 +119,10 @@ func OIDCLogin(t *testing.T, port int, home, person string, env map[string]strin
 	flags := []string{"login", "-no-browser", "-callback-port=0", "-timeout=" + loginDeadline.String()}
 	cmd := exec.CommandContext(ctx, WardenBin(), append(flags, args...)...)
 	cmd.WaitDelay = 5 * time.Second
+	// The session's key is kept in its file, never in the keychain of
+	// whoever runs the suite, and SessionTicket reads it from there.
 	cmd.Env = append(cmd.Environ(), "WARDEN_SKIP_VERIFY=true", "WARDEN_ADDR="+NodeURL(port), "HOME="+home,
-		"WARDEN_TOKEN=", "WARDEN_ROLE=", "WARDEN_NAMESPACE=")
+		"WARDEN_TOKEN=", "WARDEN_ROLE=", "WARDEN_NAMESPACE=", clihelpers.EnvSessionKeystore+"="+clihelpers.KeyStoreFile)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -186,7 +191,9 @@ func openAsBrowser(authURL, person string) {
 	}
 }
 
-// SessionTicket returns the ticket of the only session saved under home.
+// SessionTicket returns the ticket of the only session saved under home. A
+// ticket bound to a key is recorded with it, so every request presenting it
+// on X-Warden-Token is signed as the warden CLI signs it (signBoundTicket).
 func SessionTicket(t *testing.T, home string) string {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(home, ".warden", "sessions", "*.json"))
@@ -195,12 +202,41 @@ func SessionTicket(t *testing.T, home string) string {
 	data, err := os.ReadFile(files[0])
 	require.NoError(t, err)
 	var s struct {
-		Token string `json:"token"`
-		Role  string `json:"role"`
+		Token    string `json:"token"`
+		Role     string `json:"role"`
+		KeyStore string `json:"key_store"`
+		Key      string `json:"key"`
 	}
 	require.NoError(t, json.Unmarshal(data, &s))
 	require.True(t, strings.HasPrefix(s.Token, "wdt."), "a ticket")
+	switch s.KeyStore {
+	case "":
+	case clihelpers.KeyStoreFile:
+		raw, err := base64.RawURLEncoding.DecodeString(s.Key)
+		require.NoError(t, err)
+		k, err := dpop.ParseKey(raw)
+		require.NoError(t, err)
+		boundKeys.Store(s.Token, k)
+	default:
+		t.Fatalf("the session keeps its key in %q: e2e logins keep it in the file", s.KeyStore)
+	}
 	return s.Token
+}
+
+// boundKeys holds the key of every bound ticket SessionTicket read.
+var boundKeys sync.Map
+
+// signBoundTicket signs r as the warden CLI does when it presents, on
+// X-Warden-Token, a ticket whose key SessionTicket recorded. A ticket it does
+// not know (a forged one, a bearer one) goes as it is.
+func signBoundTicket(r *http.Request) {
+	ticket := r.Header.Get("X-Warden-Token")
+	if ticket == "" {
+		return
+	}
+	if k, ok := boundKeys.Load(ticket); ok {
+		clihelpers.ProofSigner(r.URL.Scheme+"://"+r.URL.Host, k.(*dpop.Key), ticket)(r)
+	}
 }
 
 // SessionCLI runs a warden command against the node at port with the
@@ -279,7 +315,8 @@ func TicketListRolesInNS(t *testing.T, port int, namespace, ticket string) ([]Ti
 	return out.Roles, out.Warnings
 }
 
-// headerTransport sets one header on every request.
+// headerTransport sets one header on every request, and signs it when it
+// presents a bound ticket (signBoundTicket).
 type headerTransport struct {
 	base          http.RoundTripper
 	header, value string
@@ -288,5 +325,6 @@ type headerTransport struct {
 func (h headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set(h.header, h.value)
+	signBoundTicket(r)
 	return h.base.RoundTrip(r)
 }

@@ -67,6 +67,11 @@ type oidcConfig struct {
 	Scopes              []string      `json:"scopes"`
 	SessionTTL          time.Duration `json:"session_ttl"`
 
+	// DPoPEnabled binds every session the mount issues to a key the client
+	// proves it holds (RFC 9449). A pointer so a configuration stored before
+	// the key reads as on, and a stored false survives; validate fills it.
+	DPoPEnabled *bool `json:"dpop_enabled,omitempty"`
+
 	// Facts: entity_kind (always human), the claims the mount publishes
 	// beyond its built-ins, and alias_name_source (default sub).
 	helper.FactsConfig
@@ -100,6 +105,10 @@ func (c *oidcConfig) validate() error {
 	}
 	if c.SessionTTL == 0 {
 		c.SessionTTL = defaultSessionTTL
+	}
+	if c.DPoPEnabled == nil {
+		on := true
+		c.DPoPEnabled = &on
 	}
 	if c.EntityKind == "" {
 		c.EntityKind = logical.EntityKindHuman
@@ -280,6 +289,12 @@ func (c *oidcConfig) newProvider(ctx context.Context) (*liveProvider, error) {
 		return nil, fmt.Errorf("discovery at %s: %w", c.OIDCDiscoveryURL, err)
 	}
 	return &liveProvider{Provider: p, tokenURL: info.TokenURL}, nil
+}
+
+// dpop reports whether c binds the sessions it issues to a key: on unless
+// dpop_enabled is false.
+func (c *oidcConfig) dpop() bool {
+	return c.DPoPEnabled == nil || *c.DPoPEnabled
 }
 
 // extraScopes returns c's scopes without openid.

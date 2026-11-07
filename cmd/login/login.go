@@ -331,7 +331,7 @@ func signIn(ctx context.Context, client *api.Client, mount string, stderr io.Wri
 	if err != nil {
 		return nil, nil, fmt.Errorf("finishing the sign-in: the session's expiry %q: %w", expires, err)
 	}
-	if inner["dpop_bound"] != "true" {
+	if bound, _ := dataString(res, "dpop_bound"); bound != "true" {
 		key = nil
 	}
 	return &helpers.Session{Mount: base, Token: token, ExpiresAt: exp}, key, nil
