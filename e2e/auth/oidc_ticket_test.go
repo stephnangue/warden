@@ -259,6 +259,140 @@ func TestOIDCLogin_Failover(t *testing.T) {
 	h.AssertClusterHealthy(t)
 }
 
+// standbyOf returns a node other than the one at port.
+func standbyOf(port int) int {
+	for _, p := range h.NodePorts {
+		if p != port {
+			return p
+		}
+	}
+	return port
+}
+
+// assertProofRefused asserts a 401 carrying the DPoP challenge.
+func assertProofRefused(t *testing.T, what string, status int, body []byte, headers map[string][]string) {
+	t.Helper()
+	assert.Equal(t, http.StatusUnauthorized, status, "%s: %s", what, body)
+	assert.Contains(t, headers["Www-Authenticate"], `DPoP error="invalid_dpop_proof", algs="ES256"`, what)
+}
+
+// A bound ticket's proof is checked on every request, keeping no record of
+// proofs: an identical replay inside the window is accepted, and shows in the
+// audit log as a repeated proof_id; a stale proof, and a replay that changes
+// the role, the query or the body, are refused.
+func TestOIDCLogin_DPoPReplay(t *testing.T) {
+	e := newHumanEnv(t)
+	home := t.TempDir()
+	require.NoError(t, e.login(t, home, personAda, "-role="+e.role).Err)
+	ticket := h.SessionTicket(t, home)
+	list := h.NodeURL(e.port) + "/v1/sys/providers?warden-list=true"
+
+	signed := h.SignedTicketHeaders(t, ticket, "GET", list, asRole(e.role), "", time.Now())
+	for range 2 {
+		status, body := h.DoRequest(t, "GET", list, signed, "")
+		require.Equal(t, http.StatusOK, status, string(body))
+	}
+	pid := h.ProofID(t, signed["DPoP"])
+	require.Eventually(t, func() bool {
+		n := 0
+		for _, entry := range h.ReadAuditEntries(t, h.NodeNumberForPort(e.port), pid) {
+			if entry.Type == "request" && entry.Auth != nil && entry.Auth.ProofID == pid {
+				n++
+			}
+		}
+		return n == 2
+	}, 10*time.Second, 200*time.Millisecond, "the replay shows as a repeated proof_id")
+
+	stale := h.SignedTicketHeaders(t, ticket, "GET", list, asRole(e.role), "", time.Now().Add(-45*time.Second))
+	status, body, headers := h.DoRequestWithResponseHeaders(t, "GET", list, stale, "")
+	assertProofRefused(t, "a stale proof", status, body, headers)
+
+	otherRole := map[string]string{}
+	for k, v := range signed {
+		otherRole[k] = v
+	}
+	otherRole["X-Warden-Role"] = "warden-viewer"
+	status, body, headers = h.DoRequestWithResponseHeaders(t, "GET", list, otherRole, "")
+	assertProofRefused(t, "a replay with another role header", status, body, headers)
+
+	byQuery := h.SignedTicketHeaders(t, ticket, "GET", list+"&role="+e.role, nil, "", time.Now())
+	status, body, headers = h.DoRequestWithResponseHeaders(t, "GET", list+"&role=warden-viewer", byQuery, "")
+	assertProofRefused(t, "a replay with another role in the query", status, body, headers)
+
+	write := h.NodeURL(e.port) + "/v1/sys/policies/cbp/" + h.UniqueMount("e2e-dpop-denied")
+	posted := h.SignedTicketHeaders(t, ticket, "POST", write, asRole(e.role), `{"policy":"a"}`, time.Now())
+	status, body, _ = h.DoRequestWithResponseHeaders(t, "POST", write, posted, `{"policy":"a"}`)
+	assert.Equal(t, http.StatusForbidden, status, "admitted, then denied by policy: %s", body)
+	status, body, headers = h.DoRequestWithResponseHeaders(t, "POST", write, posted, `{"policy":"b"}`)
+	assertProofRefused(t, "a replay with another body", status, body, headers)
+}
+
+// Every check holds on any node: a standby forwards the request as the client
+// sent it, so the active node checks the proof over the same path, query and
+// body, including a path the X-Warden-Provider header has core rewrite.
+func TestOIDCLogin_DPoPThroughStandby(t *testing.T) {
+	e := newHumanEnv(t)
+	reader := h.UniqueMount("e2e-human-reader")
+	e.grant(t, reader, "", h.Role{
+		Policies:     []string{"vault-gateway-access"},
+		CredSpec:     "vault-token-reader",
+		ProviderPath: "vault",
+	})
+	home := t.TempDir()
+	require.NoError(t, e.login(t, home, personAda, "-role="+e.role).Err)
+	ticket := h.SessionTicket(t, home)
+	standby := standbyOf(e.port)
+
+	write := h.NodeURL(standby) + "/v1/sys/policies/cbp/" + h.UniqueMount("e2e-dpop-denied") + "?x=1"
+	posted := h.SignedTicketHeaders(t, ticket, "POST", write, asRole(e.role), `{"policy":"a"}`, time.Now())
+	status, body, _ := h.DoRequestWithResponseHeaders(t, "POST", write, posted, `{"policy":"a"}`)
+	assert.Equal(t, http.StatusForbidden, status, "the active node checked the proof, then policy denied: %s", body)
+	status, body, headers := h.DoRequestWithResponseHeaders(t, "POST", write, posted, `{"policy":"b"}`)
+	assertProofRefused(t, "another body through a standby", status, body, headers)
+
+	for _, port := range []int{e.port, standby} {
+		status, body := h.TicketRequest(t, "GET", "v1/secret/data/e2e/app-config", port, ticket,
+			map[string]string{"X-Warden-Provider": "vault", "X-Warden-Role": reader})
+		assert.Equal(t, http.StatusOK, status, "X-Warden-Provider on node %d: %s", port, body)
+	}
+}
+
+// A mount with dpop_enabled=false issues bearer tickets, which any client can
+// present. The setting decides only the tickets issued after it changes:
+// turning it on leaves a bearer ticket working as one, and turning it off
+// (which warns so) leaves a bound ticket requiring its proof.
+func TestOIDCLogin_DPoPDisabled(t *testing.T) {
+	e := newHumanEnv(t)
+	bearerMount := h.UniqueMount("oidc-e2e-bearer")
+	h.EnableAuth(t, e.port, "", bearerMount, "oidc", h.OIDCMountConfig(e.idp, map[string]any{"dpop_enabled": false}))
+	role := h.UniqueMount("e2e-human-bearer")
+	h.GrantRole(t, e.port, bearerMount, role, h.Role{Policies: []string{e.role + "-policy"}}, operators)
+	t.Cleanup(func() { h.RevokeRoleBestEffort(e.port, bearerMount, role) })
+	introspect := h.NodeURL(e.port) + "/v1/sys/introspect/roles"
+
+	home := t.TempDir()
+	require.NoError(t, h.OIDCLogin(t, e.port, home, personAda, nil, nil, "-path="+bearerMount, "-role="+role).Err)
+	bearer := h.SessionTicket(t, home)
+	status, body := h.DoRequest(t, "GET", introspect, map[string]string{"Authorization": "Bearer " + bearer}, "")
+	require.Equal(t, http.StatusOK, status, "a bearer ticket as a bearer token: %s", body)
+	assert.Contains(t, string(body), role)
+
+	h.MustNS(t, e.port, "", "PUT", h.AuthMountPath(bearerMount)+"config", `{"dpop_enabled":true}`)
+	status, body = h.DoRequest(t, "GET", introspect, map[string]string{"Authorization": "Bearer " + bearer}, "")
+	assert.Equal(t, http.StatusOK, status, "turning binding on leaves an issued bearer ticket as it was: %s", body)
+
+	home2 := t.TempDir()
+	require.NoError(t, e.login(t, home2, personAda, "-role="+e.role).Err)
+	bound := h.SessionTicket(t, home2)
+	resp := h.MustNS(t, e.port, "", "PUT", h.AuthMountPath(e.mount)+"config", `{"dpop_enabled":false}`)
+	assert.Contains(t, string(resp), "already issued stay bound")
+	status, body, headers := h.DoRequestWithResponseHeaders(t, "GET", introspect, map[string]string{"Authorization": "Bearer " + bound}, "")
+	assert.Equal(t, http.StatusUnauthorized, status, "a bound ticket stays bound: %s", body)
+	assert.Contains(t, headers["Www-Authenticate"], `DPoP error="invalid_token", algs="ES256"`)
+	status, body = h.TicketRequest(t, "GET", "sys/introspect/roles", e.port, bound, nil)
+	assert.Equal(t, http.StatusOK, status, "with its proof: %s", body)
+}
+
 // Disabling the mount ends every session it issued, even once it is enabled
 // again; warden login then notices and signs in anew.
 func TestOIDCLogin_MountDisableEndsSessions(t *testing.T) {
@@ -374,6 +508,14 @@ func TestOIDCLogin_Refusals(t *testing.T) {
 			status, _ = h.TicketRequest(t, "GET", "sys/introspect/roles", e.port, bad, nil)
 			assert.Equal(t, http.StatusUnauthorized, status, "%s on discovery", name)
 		}
+	})
+
+	t.Run("a login offering no key on a binding mount", func(t *testing.T) {
+		binding := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+		status, body := h.DoRequest(t, "POST", fmt.Sprintf("%s/v1/auth/%s/auth_url", h.NodeURL(e.port), e.mount), nil,
+			h.JSON(t, map[string]any{"redirect_uri": "http://localhost:8251/oidc/callback", "login_binding": binding}))
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Contains(t, string(body), "dpop_enabled")
 	})
 
 	t.Run("a callback without the login proof", func(t *testing.T) {

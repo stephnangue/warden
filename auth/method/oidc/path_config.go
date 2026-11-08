@@ -223,8 +223,12 @@ func (b *oidcAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Requ
 	b.installConfig(&next, p)
 	resp := &logical.Response{StatusCode: http.StatusOK, Data: map[string]any{"message": "configuration updated"}}
 	if wasBinding && !next.dpop() {
-		resp.AddWarning("sessions this mount already issued stay bound to their keys until they expire " +
-			"(at most session_ttl); sessions from the next login on are bearer tokens")
+		const warning = "sessions this mount already issued stay bound to their keys until they expire " +
+			"(at most session_ttl); sessions from the next login on are bearer tokens"
+		// In the data, where clients read warnings (the HTTP layer writes no
+		// other), and in Warnings, which the audit records.
+		resp.Data["warnings"] = []string{warning}
+		resp.AddWarning(warning)
 	}
 	return resp, nil
 }
