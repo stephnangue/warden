@@ -59,11 +59,12 @@ func NewClusterListener(cfg ClusterListenerConfig) (*ClusterListener, error) {
 		writeTimeout = 60 * time.Second
 	}
 
-	// Wrap the handler to re-parse any cert forwarding headers from the
-	// original request. ParseForwardedCert re-extracts the original client
-	// cert from headers (X-SSL-Client-Cert / XFCC) that the standby's
-	// reverse proxy preserved. This is safe because the cluster listener
-	// enforces mTLS — only authenticated cluster nodes can send requests here.
+	// Wrap the handler to re-parse the client certificate of the original
+	// request. ParseForwardedCert re-extracts it from the header the standby's
+	// reverse proxy set (X-SSL-Client-Cert), and the handshake marker beside
+	// it says where the standby got it. This is safe because the cluster
+	// listener enforces mTLS — only authenticated cluster nodes can send
+	// requests here.
 	//
 	// The client's address and the request id are taken from the forwarding
 	// node the same way, for the same reason: that node already resolved both
@@ -71,8 +72,16 @@ func NewClusterListener(cfg ClusterListenerConfig) (*ClusterListener, error) {
 	clusterHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		if cert := listener.ParseForwardedCert(r); cert != nil {
-			ctx = listener.WithForwardedClientCert(ctx, cert)
+			// The forwarding node says whether the certificate came from its
+			// own handshake with the client. One that does not say, an older
+			// node among them, passed on a certificate a header supplied.
+			if r.Header.Get(listener.ForwardedCertHandshakeHeader) == listener.ForwardedCertHandshakeTrue {
+				ctx = listener.WithHandshakeClientCert(ctx, cert)
+			} else {
+				ctx = listener.WithForwardedClientCert(ctx, cert)
+			}
 		}
+		r.Header.Del(listener.ForwardedCertHandshakeHeader)
 		if ip := forwardingNodeClientIP(r); ip != nil {
 			if _, port, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 				r.RemoteAddr = net.JoinHostPort(ip.String(), port)

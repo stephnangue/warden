@@ -628,3 +628,68 @@ func TestParseSSLClientCertHeader(t *testing.T) {
 		t.Fatal("expected nil for non-PEM data")
 	}
 }
+
+// Only a certificate taken from the connection's own handshake is recorded as
+// one: a trusted proxy's header never is, even when the connection also
+// presents a certificate. Nobody outside the cluster can claim otherwise, so
+// the internal marker is removed from every request, whoever sent it.
+func TestCertForwardingMiddleware_HandshakeProvenance(t *testing.T) {
+	headerPEM, _ := generateTestCert(t, "header-cert")
+	_, tlsCert := generateTestCert(t, "tls-cert")
+	encodedHeader := url.QueryEscape(headerPEM)
+
+	const trustedPeer, untrustedPeer = "127.0.0.1:12345", "192.0.2.1:12345"
+	tests := []struct {
+		name          string
+		peer          string
+		header        string
+		tls           bool
+		wantCN        string
+		wantHandshake bool
+	}{
+		{name: "direct mTLS", peer: untrustedPeer, tls: true, wantCN: "tls-cert", wantHandshake: true},
+		{name: "passthrough from a trusted peer", peer: trustedPeer, tls: true, wantCN: "tls-cert", wantHandshake: true},
+		{name: "trusted proxy's header", peer: trustedPeer, header: encodedHeader, wantCN: "header-cert"},
+		{name: "trusted proxy's header over its own TLS", peer: trustedPeer, header: encodedHeader, tls: true, wantCN: "header-cert"},
+		{name: "unusable header over TLS", peer: trustedPeer, header: "not-a-cert", tls: true, wantCN: "tls-cert", wantHandshake: true},
+		{name: "untrusted peer's header", peer: untrustedPeer, header: encodedHeader},
+		{name: "untrusted peer's header over TLS", peer: untrustedPeer, header: encodedHeader, tls: true, wantCN: "tls-cert", wantHandshake: true},
+		{name: "no certificate", peer: untrustedPeer},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotCN, gotMarker string
+			var gotHandshake bool
+			handler := trustedForwardingMiddleware([]string{"127.0.0.1/32"})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if cert := listener.ForwardedClientCert(r.Context()); cert != nil {
+						gotCN = cert.Subject.CommonName
+					}
+					gotHandshake = listener.ClientCertFromHandshake(r.Context())
+					gotMarker = r.Header.Get(listener.ForwardedCertHandshakeHeader)
+				}),
+			)
+
+			req := httptest.NewRequest("GET", "/test", nil)
+			req.RemoteAddr = tc.peer
+			req.Header.Set(listener.ForwardedCertHandshakeHeader, listener.ForwardedCertHandshakeTrue)
+			if tc.header != "" {
+				req.Header.Set("X-SSL-Client-Cert", tc.header)
+			}
+			if tc.tls {
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{tlsCert}}
+			}
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			if gotCN != tc.wantCN {
+				t.Fatalf("expected CN %q, got %q", tc.wantCN, gotCN)
+			}
+			if gotHandshake != tc.wantHandshake {
+				t.Fatalf("expected handshake %v, got %v", tc.wantHandshake, gotHandshake)
+			}
+			if gotMarker != "" {
+				t.Fatalf("expected the internal marker removed, got %q", gotMarker)
+			}
+		})
+	}
+}

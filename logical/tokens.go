@@ -54,6 +54,9 @@ func WardenRequestHeaders() []string {
 		// The proof of the key a ticket is bound to: Warden checks it, and the
 		// upstream is called with a credential Warden supplies.
 		"DPoP",
+		// Internal to the cluster, and already removed at every listener.
+		// Listed too, so that no gateway can pass it on whatever reaches it.
+		listener.ForwardedCertHandshakeHeader,
 	}
 }
 

@@ -300,14 +300,21 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 			}
 
 			// Re-inject any forwarded client certificate that the API
-			// middleware extracted and stripped. The cluster listener
-			// needs it as a header to pass the cert to the leader.
+			// middleware extracted and stripped: the active node's cluster
+			// listener reads it from a header. The cert headers and the
+			// handshake marker are cleared first: the marker vouches for
+			// the certificate set here, and only for it.
+			listener.StripCertHeaders(req)
+			req.Header.Del(listener.ForwardedCertHandshakeHeader)
 			if cert := listener.ForwardedClientCert(req.Context()); cert != nil {
 				pemBytes := pem.EncodeToMemory(&pem.Block{
 					Type:  "CERTIFICATE",
 					Bytes: cert.Raw,
 				})
 				req.Header.Set("X-SSL-Client-Cert", url.QueryEscape(string(pemBytes)))
+				if listener.ClientCertFromHandshake(req.Context()) {
+					req.Header.Set(listener.ForwardedCertHandshakeHeader, listener.ForwardedCertHandshakeTrue)
+				}
 			}
 
 			// Carry the request id this node assigned, so the active node

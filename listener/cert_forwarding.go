@@ -17,18 +17,54 @@ type contextKey string
 
 const ctxForwardedClientCert contextKey = "forwarded_client_cert"
 
+// ForwardedCertHandshakeHeader tells the active node that the client
+// certificate a standby forwards came from that standby's own TLS handshake
+// with the client. It is internal to the cluster: the forwarding proxy sets it
+// and the cluster listener consumes it. Its only accepted value is
+// ForwardedCertHandshakeTrue; anything else, or nothing, is a certificate a
+// header supplied.
+const (
+	ForwardedCertHandshakeHeader = "X-Warden-Forwarded-Cert-Handshake"
+	ForwardedCertHandshakeTrue   = "true"
+)
+
+// clientCert is a request's client certificate and how Warden came by it.
+// handshake is true only when the certificate came from a TLS handshake with
+// the client, on this node or on the standby that forwarded the request: the
+// client then proved it holds the certificate's key. It says nothing of
+// whether the certificate is trusted, which is for the auth mount to decide.
+type clientCert struct {
+	cert      *x509.Certificate
+	handshake bool
+}
+
 // ForwardedClientCert retrieves the client certificate stored in the context
 // by the cert forwarding middleware. The cert may originate from a forwarding
 // header (trusted proxy / LB), the TLS connection state (direct mTLS / LB
 // passthrough), or re-injection by the cluster listener on forwarded requests.
 func ForwardedClientCert(ctx context.Context) *x509.Certificate {
-	cert, _ := ctx.Value(ctxForwardedClientCert).(*x509.Certificate)
-	return cert
+	cc, _ := ctx.Value(ctxForwardedClientCert).(clientCert)
+	return cc.cert
 }
 
-// WithForwardedClientCert returns a new context with the forwarded client cert set.
+// ClientCertFromHandshake reports whether the context's client certificate came
+// from a TLS handshake with the client (see clientCert). False when there is
+// no certificate.
+func ClientCertFromHandshake(ctx context.Context) bool {
+	cc, _ := ctx.Value(ctxForwardedClientCert).(clientCert)
+	return cc.handshake
+}
+
+// WithForwardedClientCert returns a new context holding a client certificate
+// that a header supplied, which proves nothing about who holds its key.
 func WithForwardedClientCert(ctx context.Context, cert *x509.Certificate) context.Context {
-	return context.WithValue(ctx, ctxForwardedClientCert, cert)
+	return context.WithValue(ctx, ctxForwardedClientCert, clientCert{cert: cert})
+}
+
+// WithHandshakeClientCert returns a new context holding a client certificate
+// that came from a TLS handshake with the client.
+func WithHandshakeClientCert(ctx context.Context, cert *x509.Certificate) context.Context {
+	return context.WithValue(ctx, ctxForwardedClientCert, clientCert{cert: cert, handshake: true})
 }
 
 // ParseForwardedCert extracts a client certificate from forwarding headers

@@ -37,9 +37,11 @@ import (
 //     headers are stripped. Failing that, the certificate of the TLS
 //     connection itself — a direct mTLS client, or a load balancer in TLS
 //     passthrough — which Go's TLS stack took from the handshake, so it cannot
-//     be forged through a header. The cluster listener does not use this
-//     middleware, so standby-to-leader forwarding never picks up a node's
-//     certificate as the client's.
+//     be forged through a header. Only this last source is recorded as coming
+//     from a handshake; the cluster's internal header saying so is removed,
+//     since only a forwarding node may set it. The cluster listener does not
+//     use this middleware, so standby-to-leader forwarding never picks up a
+//     node's certificate as the client's.
 func trustedForwardingMiddleware(trustedProxies []string) func(http.Handler) http.Handler {
 	networks := parseCIDRs(trustedProxies)
 
@@ -66,6 +68,7 @@ func trustedForwardingMiddleware(trustedProxies []string) func(http.Handler) htt
 				listener.StripCertHeaders(r)
 			}
 			r.Header.Del(listener.ForwardedRequestIDHeader)
+			r.Header.Del(listener.ForwardedCertHandshakeHeader)
 			if !plausibleRequestID(requestID) {
 				requestID = listener.NewRequestID()
 			}
@@ -73,7 +76,7 @@ func trustedForwardingMiddleware(trustedProxies []string) func(http.Handler) htt
 
 			if listener.ForwardedClientCert(ctx) == nil &&
 				r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-				ctx = listener.WithForwardedClientCert(ctx, r.TLS.PeerCertificates[0])
+				ctx = listener.WithHandshakeClientCert(ctx, r.TLS.PeerCertificates[0])
 			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
