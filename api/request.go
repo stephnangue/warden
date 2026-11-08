@@ -98,7 +98,7 @@ func (r *Request) toRetryableHTTP() (*retryablehttp.Request, error) {
 	// explicit Warden tokens and prevents transparent-mode implicit auth from
 	// treating the token as a JWT credential.
 	if len(r.ClientToken) != 0 {
-		req.Header.Set("X-Warden-Token", r.ClientToken)
+		req.Header.Set(TokenHeaderName, r.ClientToken)
 	}
 
 	return req, nil

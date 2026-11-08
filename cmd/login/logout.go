@@ -17,7 +17,8 @@ Usage: warden logout
 
   Deletes the session warden login saved for the current Warden address and
   namespace (or, when the namespace has none, the nearest parent's, which is
-  the one commands use there). The session token itself stays valid until it
+  the one commands use there), and the key it keeps in the OS keystore. The
+  session token itself stays valid until it
   expires: a session cannot be revoked before; disabling its auth mount ends
   every session it issued.
 
@@ -39,8 +40,9 @@ Usage: warden logout
 		stderr := cmd.ErrOrStderr()
 		s, err := helpers.FindSession(addr, ns)
 		if err != nil {
-			// A file that cannot be read is still removed: logout is how it is
-			// cleared.
+			// A file that cannot be read is still removed, with any key the
+			// keystore holds for it: logout is how they are cleared.
+			_ = helpers.DeleteSessionKey(&helpers.Session{Addr: addr, Namespace: ns, KeyStore: helpers.KeyStoreOS})
 			if derr := helpers.DeleteSession(addr, ns); derr != nil {
 				return fmt.Errorf("%w (and removing it failed: %v)", err, derr)
 			}
@@ -51,8 +53,13 @@ Usage: warden logout
 			fmt.Fprintf(stderr, "No session for %s (namespace %s).\n", addr, helpers.DisplayNamespace(ns))
 			return nil
 		}
+		// The file goes whatever becomes of the key: it holds the ticket, and a
+		// key left behind is useless without it.
 		if err := helpers.DeleteSession(s.Addr, s.Namespace); err != nil {
 			return err
+		}
+		if err := helpers.DeleteSessionKey(s); err != nil {
+			fmt.Fprintf(stderr, "Warning: %v\n", err)
 		}
 		fmt.Fprintf(stderr, "Signed out of %s (namespace %s). The session token stays valid until %s.\n",
 			s.Addr, helpers.DisplayNamespace(s.Namespace), s.ExpiresAt.Local().Format("15:04"))

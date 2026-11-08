@@ -79,6 +79,12 @@ func RenderError(err error) ExitCode {
 		return ExitOK
 	}
 	code, exit := classify(err)
+	var he *hintedError
+	if !errors.As(err, &he) {
+		if hint := ProofRefusal(err); hint != "" {
+			err = WithHint(err, hint)
+		}
+	}
 
 	format := ResolveFormat()
 	switch format {

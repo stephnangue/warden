@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/stephnangue/warden/helper/dpop"
 )
 
 // Session is what warden login keeps between commands: one Warden address and
@@ -27,6 +29,15 @@ type Session struct {
 	Token     string    `json:"token"`
 	Role      string    `json:"role,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
+
+	// KeyStore is where the proof key of a ticket bound to a key is kept
+	// (KeyStoreOS, KeyStoreFile); empty for a bearer ticket. Key is the key
+	// itself, its private scalar in base64url, when kept in this file.
+	KeyStore string `json:"key_store,omitempty"`
+	Key      string `json:"key,omitempty"`
+
+	// key is the proof key, once loaded (loadKey).
+	key *dpop.Key
 }
 
 // Expired reports whether the session's ticket has expired at now.
@@ -86,11 +97,16 @@ func NormalizeNamespace(ns string) string {
 	return strings.Trim(strings.TrimSpace(ns), "/")
 }
 
-// sessionPath returns the file of the session for addr and ns, both
-// normalized: the first 16 hex characters of SHA-256(addr|ns).
-func sessionPath(dir, addr, ns string) string {
+// sessionID names the session for addr and ns, both normalized: the first 16
+// hex characters of SHA-256(addr|ns).
+func sessionID(addr, ns string) string {
 	sum := sha256.Sum256([]byte(addr + "|" + ns))
-	return filepath.Join(dir, hex.EncodeToString(sum[:])[:16]+".json")
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// sessionPath returns the file of the session for addr and ns.
+func sessionPath(dir, addr, ns string) string {
+	return filepath.Join(dir, sessionID(addr, ns)+".json")
 }
 
 // SaveSession writes s, replacing the session for its address and namespace.

@@ -2,6 +2,7 @@ package login
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/cmd/helpers"
+	"github.com/stephnangue/warden/helper/dpop"
 )
 
 func TestPrintToken(t *testing.T) {
@@ -29,6 +31,31 @@ func TestPrintToken(t *testing.T) {
 	saveSession(t, "team-a/dev", -time.Minute)
 	err = printTokenCmd.RunE(printTokenCmd, nil)
 	assert.ErrorIs(t, err, helpers.ErrSessionExpired)
+}
+
+// A bound session's token still prints, with a note on stderr that it is
+// refused without the session's key.
+func TestPrintToken_BoundSession(t *testing.T) {
+	useSessions(t)
+	setSessionEnv(t, "")
+	key, err := dpop.GenerateKey()
+	require.NoError(t, err)
+	s := &helpers.Session{Addr: sessionAddr, Mount: "auth/oidc/", Token: "wdt.bound", ExpiresAt: time.Now().Add(time.Hour)}
+	t.Setenv(helpers.EnvSessionKeystore, "file")
+	require.NoError(t, helpers.StoreSessionKey(s, key, io.Discard))
+	require.NoError(t, helpers.SaveSession(s))
+
+	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
+	printTokenCmd.SetOut(out)
+	printTokenCmd.SetErr(errOut)
+	require.NoError(t, printTokenCmd.RunE(printTokenCmd, nil))
+	assert.Equal(t, "wdt.bound\n", out.String(), "stdout carries the token alone")
+	assert.Contains(t, errOut.String(), "bound to the key")
+
+	saveSession(t, "", time.Hour)
+	errOut.Reset()
+	require.NoError(t, printTokenCmd.RunE(printTokenCmd, nil))
+	assert.Empty(t, errOut.String(), "a bearer session gets no note")
 }
 
 func TestPrintToken_CorruptFile(t *testing.T) {

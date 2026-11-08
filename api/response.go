@@ -51,6 +51,7 @@ func (r *Response) Error() error {
 		HTTPMethod: r.Request.Method,
 		URL:        r.Request.URL.String(),
 		StatusCode: r.StatusCode,
+		Header:     r.Header,
 	}
 
 	// Decode the error response if we can. Note that we wrap the bodyBuf
@@ -105,6 +106,10 @@ type ResponseError struct {
 
 	// StatusCode is the HTTP status code.
 	StatusCode int
+
+	// Header is the response's headers: a refusal's WWW-Authenticate
+	// challenge, the server's Date.
+	Header http.Header
 
 	// RawError marks that the underlying error messages returned by Warden were
 	// not parsable. The Errors slice will contain the raw response body as the
