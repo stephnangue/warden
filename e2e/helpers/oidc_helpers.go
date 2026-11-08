@@ -228,15 +228,72 @@ var boundKeys sync.Map
 
 // signBoundTicket signs r as the warden CLI does when it presents, on
 // X-Warden-Token, a ticket whose key SessionTicket recorded. A ticket it does
-// not know (a forged one, a bearer one) goes as it is.
+// not know (a forged one, a bearer one) goes as it is, and so does a request
+// that brings its own proof (SignedTicketHeaders): a replay, or a tampered
+// one.
 func signBoundTicket(r *http.Request) {
 	ticket := r.Header.Get("X-Warden-Token")
-	if ticket == "" {
+	if ticket == "" || r.Header.Get(dpop.HeaderName) != "" {
 		return
 	}
 	if k, ok := boundKeys.Load(ticket); ok {
 		clihelpers.ProofSigner(r.URL.Scheme+"://"+r.URL.Host, k.(*dpop.Key), ticket)(r)
 	}
+}
+
+// SignedTicketHeaders returns headers for a request of method to rawURL with
+// body, presenting the bound ticket with a proof signed at iat as the warden
+// CLI signs one: headers, X-Warden-Token, the Content-Type DoRequest adds to a
+// body, and DPoP. Sending them again replays the proof; sending them with
+// another request tampers with it.
+func SignedTicketHeaders(t *testing.T, ticket, method, rawURL string, headers map[string]string, body string, iat time.Time) map[string]string {
+	t.Helper()
+	k, ok := boundKeys.Load(ticket)
+	require.True(t, ok, "the ticket is bound to a key SessionTicket recorded")
+	// Canonical names, as the request carries them and the signer reads them.
+	out := map[string]string{"X-Warden-Token": ticket}
+	for name, v := range headers {
+		out[http.CanonicalHeaderKey(name)] = v
+	}
+	if body != "" && out["Content-Type"] == "" {
+		out["Content-Type"] = "application/json"
+	}
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	get := func(name string) string { return out[http.CanonicalHeaderKey(name)] }
+	proof, err := k.(*dpop.Key).Sign(dpop.Claims{
+		Method:   method,
+		URL:      u.Scheme + "://" + u.Host + u.EscapedPath(),
+		IssuedAt: iat,
+		ATH:      dpop.Hash([]byte(ticket)),
+		Context: &dpop.Context{
+			Role:        get("X-Warden-Role"),
+			Namespace:   get("X-Warden-Namespace"),
+			Provider:    get("X-Warden-Provider"),
+			Request:     get("X-Warden-Request"),
+			ContentType: get("Content-Type"),
+			Query:       dpop.Hash([]byte(u.RawQuery)),
+			Body:        dpop.Hash([]byte(body)),
+		},
+	})
+	require.NoError(t, err)
+	out[dpop.HeaderName] = proof
+	return out
+}
+
+// ProofID is the id the audit log records for proof: a truncated hash of its
+// jti.
+func ProofID(t *testing.T, proof string) string {
+	t.Helper()
+	parts := strings.Split(proof, ".")
+	require.Len(t, parts, 3)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var c struct {
+		JTI string `json:"jti"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &c))
+	return dpop.Hash([]byte(c.JTI))[:16]
 }
 
 // SessionCLI runs a warden command against the node at port with the

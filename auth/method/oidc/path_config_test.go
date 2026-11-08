@@ -149,7 +149,7 @@ func TestConfigWrite_DPoPEnabled(t *testing.T) {
 	e := newEnv(t)
 	resp := e.configure(nil)
 	require.NoError(t, resp.Err)
-	assert.Empty(t, resp.Warnings)
+	assert.Nil(t, resp.Data["warnings"])
 	read := func(b *oidcAuthBackend) any {
 		r, err := b.HandleRequest(e.ctx, &logical.Request{Operation: logical.ReadOperation, Path: "config"})
 		require.NoError(t, err)
@@ -157,20 +157,24 @@ func TestConfigWrite_DPoPEnabled(t *testing.T) {
 	}
 	assert.Equal(t, true, read(e.b), "on by default")
 
+	// The warning rides the data, which the HTTP layer writes, and Warnings,
+	// which the audit records.
 	resp = e.call(e.b, "config", map[string]any{"dpop_enabled": false})
 	require.NoError(t, resp.Err)
-	require.Len(t, resp.Warnings, 1)
-	assert.Contains(t, resp.Warnings[0], "already issued stay bound")
+	warnings, _ := resp.Data["warnings"].([]string)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "already issued stay bound")
+	assert.Equal(t, warnings, resp.Warnings)
 
 	resp = e.call(e.b, "config", map[string]any{"session_ttl": "2h"})
 	require.NoError(t, resp.Err)
-	assert.Empty(t, resp.Warnings, "no warning when it stays off")
+	assert.Nil(t, resp.Data["warnings"], "no warning when it stays off")
 	assert.Equal(t, false, read(e.b), "a write that does not send it keeps it off")
 	assert.Equal(t, false, read(e.newBackend(testAccessor)), "a stored false survives a reload")
 
 	resp = e.call(e.b, "config", map[string]any{"dpop_enabled": true})
 	require.NoError(t, resp.Err)
-	assert.Empty(t, resp.Warnings, "turning it on warns of nothing")
+	assert.Nil(t, resp.Data["warnings"], "turning it on warns of nothing")
 
 	// A configuration stored before the key existed reads as on.
 	entry, err := e.storage.Get(e.ctx, "config")
