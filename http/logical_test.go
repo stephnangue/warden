@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"encoding/json"
 	"errors"
@@ -150,12 +151,15 @@ func TestBuildLogicalRequest_BasicGET(t *testing.T) {
 	req.RemoteAddr = "192.168.1.1:12345"
 	w := httptest.NewRecorder()
 
+	before := time.Now()
 	logicalReq := buildLogicalRequest(w, req)
 
 	assert.Equal(t, logical.ReadOperation, logicalReq.Operation)
 	assert.Equal(t, "secret/data/mykey", logicalReq.Path)
 	assert.Equal(t, "192.168.1.1", logicalReq.ClientIP)
 	assert.Equal(t, req, logicalReq.HTTPRequest)
+	assert.False(t, logicalReq.ReceivedAt.Before(before), "ReceivedAt is when the request was built")
+	assert.False(t, logicalReq.ReceivedAt.After(time.Now()))
 	// ResponseWriter is wrapped in StatusRecordingWriter for status code capture
 	srw, ok := logicalReq.ResponseWriter.(*logical.StatusRecordingWriter)
 	assert.True(t, ok, "ResponseWriter should be wrapped in StatusRecordingWriter")

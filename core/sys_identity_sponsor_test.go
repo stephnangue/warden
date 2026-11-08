@@ -415,7 +415,7 @@ func TestSponsorSurface_MembershipComputedOnce(t *testing.T) {
 	perRequest := matches.Load()
 	require.NotZero(t, perRequest)
 
-	te, err := e.c.lookupTicket(e.ctx, e.value)
+	te, err := e.c.lookupTicket(e.ctx, e.value, nil)
 	require.NoError(t, err)
 	matches.Store(0)
 	compute(te.Admission, te.Admission.Mount.Load(), e.c.grantIndex(namespace.RootNamespaceID), time.Now())

@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/dpop"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
@@ -64,11 +67,13 @@ func TestTicketRequest_ChildGatewayResolvesSpecInRequestNamespace(t *testing.T) 
 // ticketRequestEnv is a ticketEnv with an audit recorder, a role "operator"
 // that the group "humans" grants to every human the oidc mount admits with the
 // app role Warden.Operator, a role "auditor" no group grants, a gateway at
-// fakegw/ and one live ticket.
+// fakegw/, one live bearer ticket, and one live ticket bound to key.
 type ticketRequestEnv struct {
 	*ticketEnv
 	audit *accessAuditRecorder
 	value string
+	key   *dpop.Key
+	bound string
 }
 
 func newTicketRequestEnv(t *testing.T) *ticketRequestEnv {
@@ -101,7 +106,256 @@ path "fakegw/role/operator/gateway/*" { capabilities = ["read"] }
 	mountGateway(t, e.c, "fakegw/", &ticketGateway{mockTransparentModeProvider{transparentMode: true, autoAuthPath: "auth/agent-jwt/"}})
 
 	e.value, _ = e.login(e.ctx, e.issuer, e.mount, time.Hour)
+	e.key, err = dpop.GenerateKey()
+	require.NoError(t, err)
+	e.bound, _ = e.loginBound(e.ctx, e.issuer, e.mount, time.Hour, e.key.Thumbprint())
 	return e
+}
+
+// doBound runs a request presenting e's bound ticket on X-Warden-Token, with a
+// proof signed as the CLI signs one when sign is set. tamper, when set,
+// changes the request after it is signed, as a replay of the proof would.
+func (e *ticketRequestEnv) doBound(method, target string, headers map[string]string, body string, sign bool, tamper func(*http.Request)) (*logical.Response, *logical.Request, error) {
+	e.t.Helper()
+	hr := httptest.NewRequest(method, "/v1/"+target, strings.NewReader(body))
+	hr.Header.Set(logical.HeaderWardenToken, e.bound)
+	for k, v := range headers {
+		hr.Header.Set(k, v)
+	}
+	if sign {
+		hr.Header.Set(dpop.HeaderName, signProof(e.t, e.key, e.bound, hr, body, time.Now()))
+	}
+	if tamper != nil {
+		tamper(hr)
+	}
+	op := logical.ReadOperation
+	switch {
+	case method == http.MethodPost:
+		op = logical.CreateOperation
+	case strings.HasSuffix(hr.URL.Path, "sys/providers"):
+		op = logical.ListOperation
+	}
+	req := &logical.Request{
+		Path: strings.TrimPrefix(hr.URL.Path, "/v1/"), Operation: op, HTTPRequest: hr,
+		RequestID: "req-ticket", ReceivedAt: time.Now(),
+	}
+	resp, err := e.c.HandleRequest(context.Background(), req)
+	return resp, req, err
+}
+
+// signProof returns the proof the CLI sends with hr, whose body is body, for
+// ticket under key, issued at iat.
+func signProof(t *testing.T, key *dpop.Key, ticket string, hr *http.Request, body string, iat time.Time) string {
+	t.Helper()
+	p, err := key.Sign(dpop.Claims{
+		Method:   hr.Method,
+		URL:      "https://warden.example" + hr.URL.EscapedPath(),
+		IssuedAt: iat,
+		ATH:      dpop.Hash([]byte(ticket)),
+		Context: &dpop.Context{
+			Role:        hr.Header.Get("X-Warden-Role"),
+			Namespace:   hr.Header.Get("X-Warden-Namespace"),
+			Provider:    hr.Header.Get("X-Warden-Provider"),
+			Request:     hr.Header.Get("X-Warden-Request"),
+			ContentType: hr.Header.Get("Content-Type"),
+			Query:       dpop.Hash([]byte(hr.URL.RawQuery)),
+			Body:        dpop.Hash([]byte(body)),
+		},
+	})
+	require.NoError(t, err)
+	return p
+}
+
+// setTarget points hr at target, as a client sending it would.
+func setTarget(hr *http.Request, target string) {
+	hr.RequestURI = "/v1/" + target
+	u, _ := url.ParseRequestURI(hr.RequestURI)
+	hr.URL.Path, hr.URL.RawPath, hr.URL.RawQuery = u.Path, u.RawPath, u.RawQuery
+}
+
+// assertProofRefused asserts resp refuses the request's proof with the DPoP
+// challenge naming code.
+func assertProofRefused(t *testing.T, resp *logical.Response, code string) {
+	t.Helper()
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Equal(t, `DPoP error="`+code+`", algs="ES256"`, resp.Headers.Get("WWW-Authenticate"))
+}
+
+func TestTicketRequest_Bound(t *testing.T) {
+	e := newTicketRequestEnv(t)
+	require.NoError(t, e.c.namespaceStore.SetNamespace(rootCtx(), &namespace.Namespace{Path: "team-a/"}))
+	role := map[string]string{"X-Warden-Role": "operator"}
+
+	t.Run("a proof admits it", func(t *testing.T) {
+		resp, req, err := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", true, nil)
+		require.NoError(t, err)
+		require.Nil(t, resp.Err)
+		assert.True(t, req.TicketAdmitted)
+		assert.Equal(t, "group:humans", req.RoleGrant().GrantedBy)
+
+		entry := e.audit.requestFor(t, "sys/providers")
+		require.NotNil(t, entry.Auth)
+		assert.Equal(t, e.key.Thumbprint(), entry.Auth.DPoPJKT)
+		assert.Len(t, entry.Auth.ProofID, 16)
+		assert.Equal(t, req.ProofID, entry.Auth.ProofID)
+	})
+
+	t.Run("the first request without a proof is refused", func(t *testing.T) {
+		before := e.c.tokenStore.GetMetrics()
+		resp, req, err := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", false, nil)
+		require.NoError(t, err)
+		assertProofRefused(t, resp, proofErrInvalidProof)
+		assert.False(t, req.TicketAdmitted)
+		assert.Nil(t, req.TokenEntry())
+		assert.Equal(t, before["tokens_resolved"], e.c.tokenStore.GetMetrics()["tokens_resolved"],
+			"a refused proof is not a resolved token")
+	})
+
+	t.Run("as a bearer token it is refused", func(t *testing.T) {
+		resp, req, err := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", true, func(hr *http.Request) {
+			hr.Header.Del(logical.HeaderWardenToken)
+			hr.Header.Set("Authorization", "Bearer "+e.bound)
+		})
+		require.NoError(t, err)
+		assertProofRefused(t, resp, proofErrInvalidToken)
+		assert.False(t, req.TicketAdmitted)
+	})
+
+	t.Run("under the DPoP scheme it is not a credential", func(t *testing.T) {
+		_, req, _ := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", true, func(hr *http.Request) {
+			hr.Header.Del(logical.HeaderWardenToken)
+			hr.Header.Set("Authorization", "DPoP "+e.bound)
+		})
+		assert.False(t, req.TicketAdmitted)
+		assert.Nil(t, req.TokenEntry())
+	})
+
+	t.Run("a request line that does not parse is refused, never replaced by the rewritten path", func(t *testing.T) {
+		resp, _, err := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", true, func(hr *http.Request) {
+			hr.RequestURI = "http://[::1/v1/sys/providers"
+		})
+		require.NoError(t, err)
+		assertProofRefused(t, resp, proofErrInvalidProof)
+	})
+
+	t.Run("a stale proof is refused", func(t *testing.T) {
+		resp, _, err := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", false, func(hr *http.Request) {
+			hr.Header.Set(dpop.HeaderName, signProof(t, e.key, e.bound, hr, "", time.Now().Add(-dpop.Window-2*time.Second)))
+		})
+		require.NoError(t, err)
+		assertProofRefused(t, resp, proofErrInvalidProof)
+	})
+
+	t.Run("a slow body does not age a proof fresh on arrival", func(t *testing.T) {
+		hr := httptest.NewRequest(http.MethodGet, "/v1/sys/providers?role=operator", nil)
+		hr.Header.Set(logical.HeaderWardenToken, e.bound)
+		arrived := time.Now().Add(-time.Minute)
+		hr.Header.Set(dpop.HeaderName, signProof(t, e.key, e.bound, hr, "", arrived))
+		req := &logical.Request{Path: "sys/providers", Operation: logical.ListOperation, HTTPRequest: hr, ReceivedAt: arrived}
+		resp, err := e.c.HandleRequest(context.Background(), req)
+		require.NoError(t, err)
+		require.Nil(t, resp.Err)
+	})
+
+	// A replayed proof cannot change what the request does.
+	for name, tamper := range map[string]func(*http.Request){
+		"another role header":  func(hr *http.Request) { hr.Header.Set("X-Warden-Role", "auditor") },
+		"another role query":   func(hr *http.Request) { setTarget(hr, "sys/providers?role=auditor") },
+		"a query byte":         func(hr *http.Request) { setTarget(hr, "sys/providers?role=operator;") },
+		"another namespace":    func(hr *http.Request) { hr.Header.Set("X-Warden-Namespace", "team-a") },
+		"another operation":    func(hr *http.Request) { hr.Header.Set("X-Warden-Request", "LIST") },
+		"another content type": func(hr *http.Request) { hr.Header.Set("Content-Type", "text/plain") },
+		"another path":         func(hr *http.Request) { setTarget(hr, "sys/mounts?role=operator") },
+		"another method":       func(hr *http.Request) { hr.Method = http.MethodPost },
+	} {
+		t.Run("a replay with "+name+" is refused", func(t *testing.T) {
+			resp, req, err := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", true, tamper)
+			require.NoError(t, err)
+			assertProofRefused(t, resp, proofErrInvalidProof)
+			assert.False(t, req.TicketAdmitted)
+		})
+	}
+
+	t.Run("the body is signed where core reads it", func(t *testing.T) {
+		for name, tc := range map[string]struct{ ct, signed, sent string }{
+			"JSON":  {"application/json", `{"role":"operator"}`, `{"role":"auditor"}`},
+			"form":  {"application/x-www-form-urlencoded", "role=operator", "role=auditor"},
+			"other": {"application/octet-stream", "a", "b"},
+		} {
+			h := map[string]string{"Content-Type": tc.ct}
+			_, req, _ := e.doBound(http.MethodPost, "sys/providers?role=operator", h, tc.signed, true, nil)
+			assert.True(t, req.TicketAdmitted, name)
+
+			resp, req, err := e.doBound(http.MethodPost, "sys/providers?role=operator", h, tc.signed, true, func(hr *http.Request) {
+				hr.Body = io.NopCloser(strings.NewReader(tc.sent))
+			})
+			require.NoError(t, err)
+			assertProofRefused(t, resp, proofErrInvalidProof)
+			assert.False(t, req.TicketAdmitted, name)
+		}
+		_, req, _ := e.doBound(http.MethodDelete, "sys/providers?role=operator", nil, "x", true, func(hr *http.Request) {
+			hr.Body = io.NopCloser(strings.NewReader("y"))
+		})
+		assert.False(t, req.TicketAdmitted, "a DELETE's body, which no parser reads, is signed too")
+	})
+
+	t.Run("an empty body is the empty hash", func(t *testing.T) {
+		_, req, _ := e.doBound(http.MethodPost, "sys/providers?role=operator", nil, "", true, nil)
+		assert.True(t, req.TicketAdmitted)
+	})
+
+	t.Run("a streamed body is not signed", func(t *testing.T) {
+		_, req, _ := e.doBound(http.MethodPost, "fakegw/role/operator/gateway/thing", role, "a", true, func(hr *http.Request) {
+			hr.Body = io.NopCloser(strings.NewReader("b"))
+		})
+		assert.True(t, req.TicketAdmitted, "the documented limit: a gateway's body is not signed")
+	})
+
+	t.Run("a gateway takes its role from X-Warden-Role only", func(t *testing.T) {
+		_, req, _ := e.doBound(http.MethodGet, "fakegw/role/operator/gateway/thing", role, "", true, nil)
+		assert.True(t, req.TicketAdmitted)
+		assert.Equal(t, "group:humans", req.RoleGrant().GrantedBy)
+
+		resp, req, err := e.doBound(http.MethodGet, "fakegw/role/operator/gateway/thing", nil, "", true, nil)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.Contains(t, resp.Err.Error(), noRoleSelectedGateway)
+		assert.False(t, req.TicketAdmitted)
+	})
+
+	t.Run("X-Warden-Provider is signed, on the client's path", func(t *testing.T) {
+		h := map[string]string{"X-Warden-Provider": "fakegw", "X-Warden-Role": "operator"}
+		_, req, _ := e.doBound(http.MethodGet, "thing", h, "", true, nil)
+		assert.True(t, req.TicketAdmitted, "the path is rewritten after the client signed it")
+
+		resp, req, err := e.doBound(http.MethodGet, "fakegw/role/operator/gateway/thing", role, "", true, func(hr *http.Request) {
+			hr.Header.Set("X-Warden-Provider", "fakegw")
+		})
+		require.NoError(t, err)
+		assertProofRefused(t, resp, proofErrInvalidProof)
+		assert.False(t, req.TicketAdmitted)
+	})
+
+	t.Run("a gateway refusal carries the DPoP challenge", func(t *testing.T) {
+		resp, _, err := e.doBound(http.MethodGet, "fakegw/role/operator/gateway/thing", role, "", false, nil)
+		require.NoError(t, err)
+		assertProofRefused(t, resp, proofErrInvalidProof)
+	})
+
+	t.Run("an identity path takes no role header", func(t *testing.T) {
+		resp, req, err := e.doBound(http.MethodGet, "sys/introspect/roles", nil, "", true, nil)
+		require.NoError(t, err)
+		require.Nil(t, resp.Err)
+		require.NotNil(t, req.Discovery)
+		assert.Len(t, resp.Data["roles"].([]admittedRole), 1)
+		assert.NotEmpty(t, req.ProofID)
+
+		resp, _, err = e.doBound(http.MethodGet, "sys/introspect/roles", nil, "", false, nil)
+		require.NoError(t, err)
+		assertProofRefused(t, resp, proofErrInvalidProof)
+	})
 }
 
 // ticketGateway is a streaming gateway that takes its credential as real

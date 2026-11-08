@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/stephnangue/warden/helper/dpop"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/logical"
 )
@@ -34,9 +35,10 @@ var (
 // (setAdmissionMount has run), carry its facts as selector.Claims and have an
 // alias: a ticket nobody can be named by is never issued. It records on the
 // admission, which is still being built (LoginCreateToken has not shared it
-// yet), the kind the mount admitted the credential as and the ticket's issue
-// time, so a cached entry and a decoded one carry the same: a ticket's
-// admission is issued when the ticket is. A ticket's admission is never
+// yet), the kind the mount admitted the credential as, the ticket's issue time
+// and, for a ticket the mount bound to a key (Admission.Binding), the binding
+// completed with the ticket's hash, so a cached entry and a decoded one carry
+// the same: a ticket's admission is issued when the ticket is. A ticket's admission is never
 // audience-bound (AudienceBound): a ticket never rides the user leg.
 //
 // The size is checked against maxTicketLen here as a backstop; the issuing
@@ -78,6 +80,12 @@ func (c *Core) encodeTicket(ctx context.Context, authData *AuthData, entry *Toke
 		MountAccessor: authData.MountAccessor,
 		Facts:         facts,
 	}
+	if b := adm.Binding; b != nil {
+		if !dpop.ValidThumbprint(b.JKT) {
+			return "", nil, errors.New("a ticket is bound only to a key thumbprint")
+		}
+		p.Cnf = &logical.TicketConfirmation{JKT: b.JKT}
+	}
 	if authData.ExpireAt.IsZero() || p.ExpiresAt <= p.IssuedAt {
 		return "", nil, errors.New("a ticket must expire after it is issued")
 	}
@@ -92,15 +100,26 @@ func (c *Core) encodeTicket(ctx context.Context, authData *AuthData, entry *Toke
 	if err != nil {
 		return "", nil, fmt.Errorf("sealing ticket: %w", err)
 	}
+	value := ticketValuePrefix + base64.RawURLEncoding.EncodeToString(sealed)
 	adm.Kind = p.Kind
 	adm.IssuedAt = time.Unix(p.IssuedAt, 0)
 	adm.AudienceBound = false
-	return ticketValuePrefix + base64.RawURLEncoding.EncodeToString(sealed), p, nil
+	adm.Binding = ticketBinding(p, value)
+	return value, p, nil
+}
+
+// ticketBinding is the key binding of the ticket value that carries p, or nil
+// for a bearer ticket.
+func ticketBinding(p *logical.TicketPayload, value string) *logical.KeyBinding {
+	if p.Cnf == nil {
+		return nil
+	}
+	return &logical.KeyBinding{JKT: p.Cnf.JKT, ATH: dpop.Hash([]byte(value))}
 }
 
 // decodeTicket opens a presented ticket value and checks its structure: the
 // payload version, the fields every ticket carries, an expiry after issue, and
-// no proof-of-possession binding (reserved, refused in this release). It does
+// a well-formed key binding when it carries one. It does
 // not check expiry against the clock, nor the mount or the namespace: those are
 // lookupTicket's per-request checks. The facts are returned decoded, as
 // selector.Claims reads them.
@@ -127,8 +146,8 @@ func (c *Core) decodeTicket(ctx context.Context, value string) (*logical.TicketP
 	switch {
 	case p.V != logical.TicketPayloadVersion:
 		return nil, nil, fmt.Errorf("ticket payload version %d is not supported", p.V)
-	case len(p.Cnf) != 0:
-		return nil, nil, errors.New("ticket is bound to a key, which this release does not support")
+	case p.Cnf != nil && !dpop.ValidThumbprint(p.Cnf.JKT):
+		return nil, nil, errors.New("ticket carries a malformed key binding")
 	case !logical.ValidAliasName(p.Alias):
 		return nil, nil, errors.New("ticket carries no valid alias")
 	case p.Kind != logical.EntityKindAgent && p.Kind != logical.EntityKindHuman:

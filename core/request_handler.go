@@ -874,6 +874,14 @@ func (c *Core) LoginCreateToken(ctx context.Context, req *logical.Request, resp 
 		c.setAdmissionMount(ctx, req, auth.Admission)
 	}
 
+	// Only a ticket carries a key binding: a token of any other type issued
+	// for a bound admission would be a bearer token, silently.
+	if auth.Admission != nil && auth.Admission.Binding != nil && auth.TokenType != TypeTicketToken {
+		c.logger.Error("a login bound to a key must issue a ticket",
+			logger.String("token_type", auth.TokenType), logger.String("mount_accessor", mountAccessor))
+		return logical.ErrorResponse(logical.ErrInternal("failed to generate token")), ErrInternalError
+	}
+
 	// A login is an admission: the token carries no role and no credential
 	// spec, which are granted per request.
 	now := time.Now()
@@ -1062,7 +1070,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 		// whatever surface the request is on (admitTicket). An access path is
 		// its provider's surface for a ticket on either header: X-Warden-Token
 		// opts out of implicit auth, not out of the surface.
-		if refusal := c.admitTicket(ctx, req, identityPath, func() (string, func(error) *logical.Response) {
+		if refusal := c.admitTicket(ctx, req, identityPath, true, func() (string, bool, func(error) *logical.Response) {
 			if surface != nil {
 				return providerTicketSurface(req, surface, noRoleSelectedAccess)()
 			}
@@ -1216,7 +1224,7 @@ func (c *Core) handleNonLoginRequest(ctx context.Context, req *logical.Request) 
 
 		// A ticket is admitted before anything else looks at the credential
 		// (admitTicket); implicit auth below then has nothing to do.
-		if refusal := c.admitTicket(ctx, req, identityPath,
+		if refusal := c.admitTicket(ctx, req, identityPath, false,
 			providerTicketSurface(req, matchingBackend, noRoleSelectedGateway)); refusal != nil {
 			return refusal, nil, nil
 		}
@@ -1703,6 +1711,7 @@ func (c *Core) readAndRestoreBody(req *logical.Request, limit int64) ([]byte, er
 
 	// Restore body for potential re-reading (audit, streaming, etc.)
 	req.HTTPRequest.Body = io.NopCloser(bytes.NewReader(body))
+	req.SetBufferedBody(body)
 
 	return body, nil
 }

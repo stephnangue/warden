@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/helper/dpop"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
@@ -65,6 +66,9 @@ var (
 		"sub":              "sub",
 	}
 )
+
+// testJKT has the shape of a key thumbprint.
+const testJKT = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
 
 // ticketEnv is a test core with a ticket-issuing mount.
 type ticketEnv struct {
@@ -129,12 +133,22 @@ func ticketClaims(t *testing.T) map[string]any {
 // and returns the value handed to the client and the response.
 func (e *ticketEnv) login(ctx context.Context, b *ticketIssuer, me *MountEntry, ttl time.Duration) (string, *logical.Response) {
 	e.t.Helper()
+	return e.loginBound(ctx, b, me, ttl, "")
+}
+
+// loginBound is login for a ticket bound to the key whose thumbprint is jkt,
+// or to none when jkt is empty.
+func (e *ticketEnv) loginBound(ctx context.Context, b *ticketIssuer, me *MountEntry, ttl time.Duration, jkt string) (string, *logical.Response) {
+	e.t.Helper()
 	adm := &logical.Admission{
 		Facts:       selector.NewClaims(ticketClaims(e.t)),
 		PrincipalID: "0583-oid",
 		Mount:       b.mf,
 		AuthTime:    time.Now().Add(-time.Minute).Truncate(time.Second),
 		Bytes:       200,
+	}
+	if jkt != "" {
+		adm.Binding = &logical.KeyBinding{JKT: jkt}
 	}
 	ns, err := namespace.FromContext(ctx)
 	require.NoError(e.t, err)
@@ -344,7 +358,9 @@ func TestTicket_Refusals(t *testing.T) {
 		"sealed by a backend's sealer": ticketValuePrefix + base64.RawURLEncoding.EncodeToString(backendSealed),
 		"not JSON":                     e.seal("not a payload"),
 		"payload version 2":            withPayload(func(p *logical.TicketPayload) { p.V = 2 }),
-		"bound to a key":               withPayload(func(p *logical.TicketPayload) { p.Cnf = json.RawMessage(`{"jkt":"x"}`) }),
+		"malformed key binding":        withPayload(func(p *logical.TicketPayload) { p.Cnf = &logical.TicketConfirmation{JKT: "x"} }),
+		"key binding with no jkt":      withPayload(func(p *logical.TicketPayload) { p.Cnf = &logical.TicketConfirmation{} }),
+		"bound to a key, no proof":     withPayload(func(p *logical.TicketPayload) { p.Cnf = &logical.TicketConfirmation{JKT: testJKT} }),
 		"no alias":                     withPayload(func(p *logical.TicketPayload) { p.Alias = "" }),
 		"unknown kind":                 withPayload(func(p *logical.TicketPayload) { p.Kind = "robot" }),
 		"facts not an object":          withPayload(func(p *logical.TicketPayload) { p.Facts = json.RawMessage(`["x"]`) }),
@@ -515,7 +531,7 @@ func TestTicket_SealedRefuses(t *testing.T) {
 	defer atomic.StoreUint32(e.c.sealed, 0)
 	_, err := e.c.LookupToken(e.ctx, value)
 	assert.Error(t, err)
-	_, err = e.c.lookupTicket(e.ctx, value)
+	_, err = e.c.lookupTicket(e.ctx, value, nil)
 	assert.Error(t, err)
 }
 
@@ -617,10 +633,10 @@ const ticketHitAllocs = 3
 func TestTicket_HitAllocations(t *testing.T) {
 	e := newTicketEnv(t)
 	value, _ := e.login(e.ctx, e.issuer, e.mount, time.Hour)
-	_, err := e.c.lookupTicket(e.ctx, value)
+	_, err := e.c.lookupTicket(e.ctx, value, nil)
 	require.NoError(t, err)
 	allocs := testing.AllocsPerRun(100, func() {
-		if _, err := e.c.lookupTicket(e.ctx, value); err != nil {
+		if _, err := e.c.lookupTicket(e.ctx, value, nil); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -630,14 +646,87 @@ func TestTicket_HitAllocations(t *testing.T) {
 func BenchmarkTicketLookupHit(b *testing.B) {
 	e := newTicketEnv(&testing.T{})
 	value, _ := e.login(e.ctx, e.issuer, e.mount, time.Hour)
-	_, _ = e.c.lookupTicket(e.ctx, value)
+	_, _ = e.c.lookupTicket(e.ctx, value, nil)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if _, err := e.c.lookupTicket(e.ctx, value); err != nil {
+		if _, err := e.c.lookupTicket(e.ctx, value, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
+}
+
+// A bound login's cached entry and the entry decoded from its value carry the
+// same binding: the key's thumbprint and the ticket's hash. A path that lost it
+// would turn the ticket into a bearer one, so neither may.
+func TestTicket_BoundEntryCarriesBinding(t *testing.T) {
+	e := newTicketEnv(t)
+	value, _ := e.loginBound(e.ctx, e.issuer, e.mount, time.Hour, testJKT)
+
+	var p logical.TicketPayload
+	require.NoError(t, json.Unmarshal(mustDecodePayload(t, e, value), &p))
+	require.NotNil(t, p.Cnf)
+	assert.Equal(t, testJKT, p.Cnf.JKT)
+
+	id := tokenID(ticketIDPrefix, value)
+	e.c.tokenStore.byID.Wait()
+	issued, found := e.c.tokenStore.byID.Get(id)
+	require.True(t, found, "the login caches its entry")
+	decoded, err := e.c.ticketEntry(e.ctx, id, value)
+	require.NoError(t, err)
+
+	want := &logical.KeyBinding{JKT: testJKT, ATH: dpop.Hash([]byte(value))}
+	assert.Equal(t, want, issued.Admission.Binding)
+	assert.Equal(t, want, decoded.Admission.Binding)
+	assert.Same(t, issued.Admission, issued.Copy().Admission, "every copy shares the binding")
+
+	_, err = e.c.LookupToken(e.ctx, value)
+	assert.ErrorIs(t, err, ErrTokenNotFound, "no lookup without a proof opens it, cached")
+	_, err = e.c.tokenStore.ResolveToken(e.ctx, value)
+	assert.ErrorIs(t, err, ErrTokenNotFound)
+	e.flushCache()
+	_, err = e.c.LookupToken(e.ctx, value)
+	assert.ErrorIs(t, err, ErrTokenNotFound, "nor decoded")
+
+	unbound, _ := e.login(e.ctx, e.issuer, e.mount, time.Hour)
+	_, err = e.c.LookupToken(e.ctx, unbound)
+	assert.NoError(t, err, "a bearer ticket still resolves")
+}
+
+// A login whose admission names something other than a thumbprint issues no
+// ticket.
+func TestTicket_MalformedBindingIssuesNone(t *testing.T) {
+	e := newTicketEnv(t)
+	authData := &AuthData{
+		Admission: &logical.Admission{
+			Facts: selector.NewClaims(ticketClaims(t)), Mount: e.issuer.mf, AliasName: "0583-oid",
+			Binding: &logical.KeyBinding{JKT: "not a thumbprint"},
+		},
+		MountAccessor: e.mount.Accessor,
+		ExpireAt:      time.Now().Add(time.Hour),
+	}
+	_, _, err := e.c.encodeTicket(e.ctx, authData, &TokenEntry{NamespaceID: e.ns.ID, CreatedAt: time.Now()})
+	assert.ErrorContains(t, err, "bound only to a key thumbprint")
+}
+
+// Only a ticket carries a key binding: a login bound to a key that would
+// issue any other token type issues nothing, rather than a bearer token.
+func TestTicket_BoundLoginIssuesOnlyATicket(t *testing.T) {
+	e := newTicketEnv(t)
+	req := &logical.Request{MountAccessor: e.mount.Accessor, MountPoint: authRoutePrefix + e.mount.Path}
+	resp := &logical.Response{Data: map[string]any{}, Auth: &logical.Auth{
+		TokenType: TypeServiceToken, TokenTTL: time.Hour, PrincipalID: "0583-oid",
+		Admission: &logical.Admission{
+			Facts: selector.NewClaims(ticketClaims(t)), PrincipalID: "0583-oid", Mount: e.issuer.mf,
+			Binding: &logical.KeyBinding{JKT: testJKT},
+		},
+	}}
+	_, err := e.c.LoginCreateToken(e.ctx, req, resp)
+	assert.ErrorIs(t, err, ErrInternalError)
+
+	resp.Auth.Admission.Binding = nil
+	_, err = e.c.LoginCreateToken(e.ctx, req, resp)
+	assert.NoError(t, err, "the same login unbound issues its token")
 }
 
 func BenchmarkTicketDecode(b *testing.B) {

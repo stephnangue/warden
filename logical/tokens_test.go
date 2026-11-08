@@ -17,6 +17,7 @@ func TestWardenRequestHeaders(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider", "X-Warden-Namespace",
 		"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token", "X-Warden-Agent",
+		"DPoP",
 	}, WardenRequestHeaders())
 	a := WardenRequestHeaders()
 	a[0] = "changed"

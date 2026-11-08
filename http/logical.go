@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/core"
@@ -109,6 +110,7 @@ func buildLogicalRequest(w http.ResponseWriter, r *http.Request) *logical.Reques
 		ResponseWriter: srw,
 		ClientIP:       clientIP,
 		RequestID:      middleware.GetReqID(r.Context()),
+		ReceivedAt:     time.Now(),
 	}
 }
 

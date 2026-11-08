@@ -519,7 +519,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 	s.mu.RUnlock()
 
 	if isTicketValue(tokenValue) {
-		te, err := s.core.lookupTicket(ctx, tokenValue)
+		te, err := s.core.lookupTicket(ctx, tokenValue, nil)
 		if err != nil {
 			return "", err
 		}
@@ -1422,9 +1422,10 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	s.mu.RUnlock()
 
 	// A ticket is never in storage: its entry is the cache's, or rebuilt from
-	// the value.
+	// the value. Without a request to prove anything, a ticket bound to a key
+	// does not open here; admitTicket opens it.
 	if isTicketValue(tokenValue) {
-		return c.lookupTicket(ctx, tokenValue)
+		return c.lookupTicket(ctx, tokenValue, nil)
 	}
 
 	// Extract namespace from context
