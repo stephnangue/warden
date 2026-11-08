@@ -118,18 +118,15 @@ func TestOIDCLogin_EndToEnd(t *testing.T) {
 	status, body := h.TicketRequest(t, "GET", "sys/providers?warden-list=true&role="+e.role, e.port, ticket, nil)
 	assert.Equal(t, http.StatusOK, status, "?role=: %s", body)
 
-	// Discovery with the ticket, on either header, names the role.
-	for _, hdr := range []map[string]string{nil, {"Authorization": "Bearer " + ticket}} {
-		var status int
-		var body []byte
-		if hdr == nil {
-			status, body = h.TicketRequest(t, "GET", "sys/introspect/roles", e.port, ticket, nil)
-		} else {
-			status, body = h.DoRequest(t, "GET", h.NodeURL(e.port)+"/v1/sys/introspect/roles", hdr, "")
-		}
-		require.Equal(t, http.StatusOK, status, string(body))
-		assert.Contains(t, string(body), e.role)
-	}
+	// Discovery with the ticket names the role. The ticket is bound to the
+	// session's key, so as a bearer token it is refused.
+	status, body = h.TicketRequest(t, "GET", "sys/introspect/roles", e.port, ticket, nil)
+	require.Equal(t, http.StatusOK, status, string(body))
+	assert.Contains(t, string(body), e.role)
+	status, body, respHeaders := h.DoRequestWithResponseHeaders(t, "GET", h.NodeURL(e.port)+"/v1/sys/introspect/roles",
+		map[string]string{"Authorization": "Bearer " + ticket}, "")
+	assert.Equal(t, http.StatusUnauthorized, status, string(body))
+	assert.Contains(t, respHeaders["Www-Authenticate"], `DPoP error="invalid_token", algs="ES256"`)
 
 	// The role is granted by a group pinning the mount: core completed the
 	// admission with its mount, accessor and alias. The requests above
@@ -206,7 +203,9 @@ func TestOIDCLogin_GatewayAndDiscovery(t *testing.T) {
 	require.NoError(t, e.login(t, home, personAda, "-role="+e.role).Err)
 	ticket := h.SessionTicket(t, home)
 
-	status, body := h.TicketRequest(t, "GET", "vault/role/"+reader+"/gateway/v1/secret/data/e2e/app-config", e.port, ticket, nil)
+	// A bound ticket selects its role on a gateway with X-Warden-Role, which
+	// its proof signs.
+	status, body := h.TicketRequest(t, "GET", "vault/role/"+reader+"/gateway/v1/secret/data/e2e/app-config", e.port, ticket, asRole(reader))
 	require.Equal(t, http.StatusOK, status, string(body))
 
 	roles := map[string]h.TicketRole{}
@@ -380,7 +379,8 @@ func TestOIDCLogin_Refusals(t *testing.T) {
 	t.Run("a callback without the login proof", func(t *testing.T) {
 		binding := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 		status, body := h.DoRequest(t, "POST", fmt.Sprintf("%s/v1/auth/%s/auth_url", h.NodeURL(e.port), e.mount), nil,
-			h.JSON(t, map[string]any{"redirect_uri": "http://localhost:8251/oidc/callback", "login_binding": binding}))
+			h.JSON(t, map[string]any{"redirect_uri": "http://localhost:8251/oidc/callback", "login_binding": binding,
+				"dpop_jkt": binding}))
 		require.Equal(t, http.StatusOK, status, string(body))
 		state := h.JSONString(t, body, "data.state")
 		status, body = h.DoRequest(t, "POST", fmt.Sprintf("%s/v1/auth/%s/callback", h.NodeURL(e.port), e.mount), nil,

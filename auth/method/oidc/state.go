@@ -38,6 +38,11 @@ type pendingLogin struct {
 	Binding     string `json:"login_binding"`
 	NamespaceID string `json:"ns"`
 	ExpiresAt   int64  `json:"exp"`
+
+	// JKT is the thumbprint of the key the session is to be bound to, offered
+	// at auth_url (RFC 9449 §10) and proven at callback; empty on a mount that
+	// issues bearer sessions.
+	JKT string `json:"dpop_jkt,omitempty"`
 }
 
 // sealState returns p sealed for this mount, base64url-encoded.

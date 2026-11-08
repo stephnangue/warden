@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -102,8 +103,9 @@ type Want struct {
 	Now time.Time
 
 	// ATH is Hash of the ticket the request presents, and Context what the
-	// request carries. A request proof sets both; a login proof, which signs
-	// neither, sets neither.
+	// request carries. A request proof sets both; a login proof sets neither,
+	// and a proof carrying either is then refused: a request proof is never
+	// taken for a login's.
 	ATH     string
 	Context *Context
 
@@ -210,7 +212,11 @@ func Verify(values []string, want *Want) (Proof, error) {
 	if err := checkHTU(c.HTU, want.Path); err != nil {
 		return Proof{}, err
 	}
-	if want.ATH != "" && c.ATH != want.ATH {
+	login := want.ATH == "" && want.Context == nil
+	switch {
+	case login && (c.ATH != "" || c.Ctx != nil):
+		return Proof{}, refuse("a login proof carries ath or warden_ctx")
+	case want.ATH != "" && c.ATH != want.ATH:
 		return Proof{}, refuse("ath is not the presented ticket's")
 	}
 	now := want.Now.Unix()
@@ -267,6 +273,23 @@ func checkHTU(htu, path string) error {
 		return refuse("htu path %q is not the request's %q", u.EscapedPath(), path)
 	}
 	return nil
+}
+
+// RequestPath is the path r's request line carried, escaped, and whether it
+// parses: the path a proof's htu is compared with. r.URL's may have been
+// rewritten on the way in (the X-Warden-Provider prefix, a role header), and a
+// proof signs the client's, so a request line that does not parse is never
+// replaced by it. A request no client sent (built in process) has no request
+// line, and its URL is its own.
+func RequestPath(r *http.Request) (string, bool) {
+	if r.RequestURI == "" {
+		return r.URL.EscapedPath(), true
+	}
+	u, err := url.ParseRequestURI(r.RequestURI)
+	if err != nil {
+		return "", false
+	}
+	return u.EscapedPath(), true
 }
 
 // EqualPath reports whether the escaped paths a and b name the same path. Only

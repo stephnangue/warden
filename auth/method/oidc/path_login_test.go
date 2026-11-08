@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/helper/dpop"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/logical"
 )
@@ -188,7 +189,8 @@ func TestAuthURL(t *testing.T) {
 	e := newEnv(t)
 	e.mustConfigure(nil)
 	binding, _ := secret()
-	resp := e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding})
+	jkt := e.dpopKey.Thumbprint()
+	resp := e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding, "dpop_jkt": jkt})
 	require.NoError(t, resp.Err)
 	u, err := url.Parse(resp.Data["auth_url"].(string))
 	require.NoError(t, err)
@@ -203,10 +205,10 @@ func TestAuthURL(t *testing.T) {
 	assert.Empty(t, q.Get("code_verifier"), "the verifier never leaves the sealed state")
 
 	for name, data := range map[string]map[string]any{
-		"no binding":           {"redirect_uri": testRedirect},
-		"short binding":        {"redirect_uri": testRedirect, "login_binding": "abc"},
-		"redirect not allowed": {"redirect_uri": "http://evil.example/cb", "login_binding": binding},
-		"no redirect":          {"login_binding": binding},
+		"no binding":           {"redirect_uri": testRedirect, "dpop_jkt": jkt},
+		"short binding":        {"redirect_uri": testRedirect, "login_binding": "abc", "dpop_jkt": jkt},
+		"redirect not allowed": {"redirect_uri": "http://evil.example/cb", "login_binding": binding, "dpop_jkt": jkt},
+		"no redirect":          {"login_binding": binding, "dpop_jkt": jkt},
 	} {
 		resp := e.call(e.b, "auth_url", data)
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, name)
@@ -327,12 +329,149 @@ func TestCheckDistributedClaims(t *testing.T) {
 func TestTicketLen(t *testing.T) {
 	now := time.Unix(1761640000, 0)
 	facts := []byte(`{"oid":"0583-oid","roles":["Warden.Operator"]}`)
-	n := ticketLen("0583-oid", "human", now.Add(-time.Minute), "ns_root", "auth_oidc_00000001", facts, now, time.Hour)
+	n := ticketLen("0583-oid", "human", now.Add(-time.Minute), "ns_root", "auth_oidc_00000001", facts, "", now, time.Hour)
 	want := len(`{"v":1,"alias":"0583-oid","pid":"0583-oid","kind":"human","iat":1761640000,"exp":1761643600,`+
 		`"auth_time":1761639940,"ns":"ns_root","acc":"auth_oidc_00000001","facts":`) + len(facts) + len(`}`)
 	assert.Equal(t, logical.TicketLen(want), n)
 	// "wdt." + base64url(payload + 33 bytes of sealing).
 	assert.Equal(t, 4+base64.RawURLEncoding.EncodedLen(want+33), n)
+
+	// A bound ticket carries its key's thumbprint too.
+	jkt := strings.Repeat("A", 43)
+	bound := ticketLen("0583-oid", "human", now.Add(-time.Minute), "ns_root", "auth_oidc_00000001", facts, jkt, now, time.Hour)
+	assert.Equal(t, logical.TicketLen(want+len(`,"cnf":{"jkt":"`+jkt+`"}`)), bound)
+}
+
+// A mount binds every session to the key the login offers and proves; a
+// mount with dpop_enabled=false issues bearer sessions and ignores the key.
+func TestLogin_DPoP(t *testing.T) {
+	t.Run("bound by default", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(nil)
+		resp := e.login(personClaims())
+		require.NoError(t, resp.Err)
+		require.NotNil(t, resp.Auth.Admission.Binding)
+		assert.Equal(t, e.dpopKey.Thumbprint(), resp.Auth.Admission.Binding.JKT)
+		assert.Equal(t, "true", resp.Data["dpop_bound"])
+	})
+
+	t.Run("bearer when disabled", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(map[string]any{"dpop_enabled": false})
+		resp := e.login(personClaims())
+		require.NoError(t, resp.Err)
+		assert.Nil(t, resp.Auth.Admission.Binding)
+		assert.Nil(t, resp.Data["dpop_bound"])
+
+		binding, _ := secret()
+		resp = e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding})
+		require.NoError(t, resp.Err, "no key is needed")
+	})
+
+	t.Run("a login offering no key is refused before the browser opens", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(nil)
+		binding, _ := secret()
+		resp := e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.ErrorIs(t, resp.Err, errKeyRequired)
+
+		resp = e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding, "dpop_jkt": "short"})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.ErrorContains(t, resp.Err, "RFC 7638")
+	})
+
+	other, err := dpop.GenerateKey()
+	require.NoError(t, err)
+	for name, hr := range map[string]func(e *env) *http.Request{
+		"no proof":      func(e *env) *http.Request { return e.callbackRequest(nil, time.Now()) },
+		"another key":   func(e *env) *http.Request { return e.callbackRequest(other, time.Now()) },
+		"a stale proof": func(e *env) *http.Request { return e.callbackRequest(e.dpopKey, time.Now().Add(-time.Minute)) },
+		"another path": func(e *env) *http.Request {
+			r := e.callbackRequest(e.dpopKey, time.Now())
+			r.RequestURI = "/v1/auth/oidc/auth_url"
+			return r
+		},
+		"another method": func(e *env) *http.Request {
+			r := e.callbackRequest(e.dpopKey, time.Now())
+			r.Method = http.MethodPut
+			return r
+		},
+	} {
+		t.Run("a callback with "+name+" is refused before the code is spent", func(t *testing.T) {
+			e := newEnv(t)
+			e.mustConfigure(nil)
+			e.tp.SetCustomClaims(personClaims())
+			state, proof := e.start(e.b)
+			resp := e.callHTTP(e.b, "callback", map[string]any{"state": state, "code": testAuthCode, "login_proof": proof}, hr(e))
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			assert.ErrorIs(t, resp.Err, errKeyNotProven)
+			assert.Nil(t, resp.Auth)
+
+			resp = e.finish(e.b, state, proof)
+			require.NoError(t, resp.Err, "the code was not spent")
+		})
+	}
+
+	t.Run("switched on mid-login, a login that offered a key is bound", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(map[string]any{"dpop_enabled": false})
+		e.tp.SetCustomClaims(personClaims())
+		state, proof := e.start(e.b)
+		e.mustConfigure(map[string]any{"dpop_enabled": true})
+		resp := e.finish(e.b, state, proof)
+		require.NoError(t, resp.Err)
+		require.NotNil(t, resp.Auth.Admission.Binding)
+		assert.Equal(t, e.dpopKey.Thumbprint(), resp.Auth.Admission.Binding.JKT)
+	})
+
+	t.Run("switched on mid-login, a login that offered no key starts again", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(map[string]any{"dpop_enabled": false})
+		e.tp.SetCustomClaims(personClaims())
+		binding, proof := secret()
+		resp := e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding})
+		require.NoError(t, resp.Err)
+		state := resp.Data["state"].(string)
+		e.mustConfigure(map[string]any{"dpop_enabled": true})
+		resp = e.finish(e.b, state, proof)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.ErrorIs(t, resp.Err, errKeyRequired)
+	})
+
+	t.Run("a malformed key is refused on any mount", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(map[string]any{"dpop_enabled": false})
+		binding, _ := secret()
+		resp := e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding, "dpop_jkt": "short"})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("a request proof is not a login proof", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(nil)
+		e.tp.SetCustomClaims(personClaims())
+		state, proof := e.start(e.b)
+		hr := httptest.NewRequest(http.MethodPost, "/v1/"+testMountPoint+"callback", nil)
+		p, err := e.dpopKey.Sign(dpop.Claims{Method: http.MethodPost, URL: "https://warden.example" + hr.URL.Path,
+			IssuedAt: time.Now(), ATH: dpop.Hash([]byte("wdt.x")), Context: &dpop.Context{}})
+		require.NoError(t, err)
+		hr.Header.Set(dpop.HeaderName, p)
+		resp := e.callHTTP(e.b, "callback", map[string]any{"state": state, "code": testAuthCode, "login_proof": proof}, hr)
+		assert.ErrorIs(t, resp.Err, errKeyNotProven)
+	})
+
+	t.Run("switched off mid-login, the session is a bearer one", func(t *testing.T) {
+		e := newEnv(t)
+		e.mustConfigure(nil)
+		e.tp.SetCustomClaims(personClaims())
+		state, proof := e.start(e.b)
+		e.mustConfigure(map[string]any{"dpop_enabled": false})
+		resp := e.callHTTP(e.b, "callback", map[string]any{"state": state, "code": testAuthCode, "login_proof": proof},
+			e.callbackRequest(nil, time.Now()))
+		require.NoError(t, resp.Err)
+		assert.Nil(t, resp.Auth.Admission.Binding)
+	})
 }
 
 func TestIdPError(t *testing.T) {

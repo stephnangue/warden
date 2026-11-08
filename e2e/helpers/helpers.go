@@ -113,6 +113,7 @@ func doHTTP(method, rawURL string, headers map[string]string, body string) (int,
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	signBoundTicket(req)
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,

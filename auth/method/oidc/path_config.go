@@ -67,6 +67,11 @@ func (b *oidcAuthBackend) pathConfig() *framework.Path {
 			Type:        framework.TypeDurationSecond,
 			Description: "Lifetime of the session a login issues (default 1h, at most 8h). It cannot be revoked before.",
 		},
+		"dpop_enabled": {
+			Type: framework.TypeBool,
+			Description: "Bind every session to a key the warden CLI holds, proven on every request (default true). " +
+				"Off, sessions are bearer tokens other tools can present. A change applies from the next login.",
+		},
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas("an ID token claim name, or a JSON Pointer with a leading / into nested claims", aliasSources))
 
@@ -112,6 +117,7 @@ func (b *oidcAuthBackend) handleConfigRead(_ context.Context, _ *logical.Request
 		"allowed_redirect_uris": slices.Clone(c.AllowedRedirectURIs),
 		"scopes":                slices.Clone(c.Scopes),
 		"session_ttl":           c.SessionTTL.String(),
+		"dpop_enabled":          c.dpop(),
 		"entity_kind":           c.EntityKind,
 		"facts":                 maps.Clone(c.Facts),
 		"alias_name_source":     c.AliasNameSource,
@@ -129,8 +135,10 @@ func (b *oidcAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Requ
 	defer b.configWriteMu.Unlock()
 
 	var next oidcConfig
+	wasBinding := false
 	b.configMu.RLock()
 	if b.config != nil {
+		wasBinding = b.config.dpop()
 		next = *b.config
 		next.SupportedAlgs = slices.Clone(next.SupportedAlgs)
 		next.AllowedRedirectURIs = slices.Clone(next.AllowedRedirectURIs)
@@ -167,6 +175,10 @@ func (b *oidcAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Requ
 	if v, ok := d.GetOk("session_ttl"); ok {
 		// 0 restores the default.
 		next.SessionTTL = time.Duration(v.(int)) * time.Second
+	}
+	if v, ok := d.GetOk("dpop_enabled"); ok {
+		on := v.(bool)
+		next.DPoPEnabled = &on
 	}
 	_, factsSent := d.GetOk("facts")
 	_, kindSent := d.GetOk("entity_kind")
@@ -209,7 +221,12 @@ func (b *oidcAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Requ
 		}
 	}
 	b.installConfig(&next, p)
-	return &logical.Response{StatusCode: http.StatusOK, Data: map[string]any{"message": "configuration updated"}}, nil
+	resp := &logical.Response{StatusCode: http.StatusOK, Data: map[string]any{"message": "configuration updated"}}
+	if wasBinding && !next.dpop() {
+		resp.AddWarning("sessions this mount already issued stay bound to their keys until they expire " +
+			"(at most session_ttl); sessions from the next login on are bearer tokens")
+	}
+	return resp, nil
 }
 
 func badRequest(err error) *logical.Response {

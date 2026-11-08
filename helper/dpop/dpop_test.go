@@ -153,6 +153,25 @@ func TestVerifyLoginProof(t *testing.T) {
 	}
 }
 
+// A request proof is never taken for a login proof: one carrying ath or
+// warden_ctx is refused where neither is expected.
+func TestVerifyLoginProofRefusesRequestProof(t *testing.T) {
+	k := testKey(t)
+	want := testWant(k)
+	want.ATH, want.Context = "", nil
+	for name, edit := range map[string]func(*Claims){
+		"ath":        func(c *Claims) { c.Context = nil },
+		"warden_ctx": func(c *Claims) { c.ATH = "" },
+		"both":       func(*Claims) {},
+	} {
+		c := testClaims()
+		edit(&c)
+		if _, err := Verify([]string{sign(t, k, c)}, want); !errors.Is(err, ErrInvalidProof) {
+			t.Errorf("a login proof carrying %s: err = %v, want refused", name, err)
+		}
+	}
+}
+
 func TestVerifyWindow(t *testing.T) {
 	k := testKey(t)
 	for _, d := range []time.Duration{-Window, Window} {

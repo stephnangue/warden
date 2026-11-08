@@ -16,6 +16,7 @@ import (
 
 	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper/dpop"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -25,6 +26,10 @@ import (
 var (
 	errLoginRefused      = errors.New("the identity provider did not complete the login, or its ID token did not verify")
 	errRedirectNotListed = errors.New("redirect_uri is not one of the mount's allowed_redirect_uris")
+	errKeyRequired       = errors.New("this mount binds sessions to a key the client holds (dpop_enabled), and the login " +
+		"offered none (dpop_jkt): sign in with a current warden CLI, without -no-store, or ask an operator to set " +
+		"dpop_enabled=false on the mount")
+	errKeyNotProven = errors.New("the login's DPoP proof of the key it offered is missing or invalid")
 )
 
 // clientAssertionType is the client_assertion_type of a JWT client assertion
@@ -44,6 +49,11 @@ func (b *oidcAuthBackend) pathAuthURL() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "base64url SHA-256 of a 32-byte secret the client keeps, presented as login_proof at callback.",
 				Required:    true,
+			},
+			"dpop_jkt": {
+				Type: framework.TypeString,
+				Description: "RFC 7638 thumbprint of the P-256 key the session is to be bound to (RFC 9449 §10), proven at " +
+					"callback with a DPoP proof. Required when the mount binds sessions (dpop_enabled).",
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -96,10 +106,13 @@ func (b *oidcAuthBackend) pathCallback() *framework.Path {
 	}
 }
 
-// handleAuthURL starts a login. It checks the redirect URI and the binding,
-// draws a PKCE verifier and a nonce, and seals them with the redirect URI,
-// the binding, the namespace and an expiry into the state; the authorization
-// URL carries that state. Nothing is stored.
+// handleAuthURL starts a login. It checks the redirect URI, the binding and
+// the key thumbprint offered, if any, draws a PKCE verifier and a nonce, and
+// seals them with the redirect URI, the binding, the thumbprint, the namespace
+// and an expiry into the state; the authorization URL carries that state.
+// Nothing is stored. A mount that binds sessions refuses a login offering no
+// key here, before the browser opens; callback binds the session only if the
+// mount binds sessions then.
 func (b *oidcAuthBackend) handleAuthURL(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	cfg, p, release, err := b.live(ctx)
 	if err != nil {
@@ -113,6 +126,15 @@ func (b *oidcAuthBackend) handleAuthURL(ctx context.Context, _ *logical.Request,
 	}
 	if err := checkBinding(binding); err != nil {
 		return badRequest(err), nil
+	}
+	// The key offered is sealed even on a mount that does not bind now, so a
+	// login started before the mount began binding still binds at callback.
+	jkt := d.Get("dpop_jkt").(string)
+	switch {
+	case jkt != "" && !dpop.ValidThumbprint(jkt):
+		return badRequest(errors.New("dpop_jkt must be the base64url SHA-256 thumbprint of a key (RFC 7638)")), nil
+	case jkt == "" && cfg.dpop():
+		return badRequest(errKeyRequired), nil
 	}
 	ns, err := namespace.FromContext(ctx)
 	if err != nil || ns == nil {
@@ -135,6 +157,7 @@ func (b *oidcAuthBackend) handleAuthURL(ctx context.Context, _ *logical.Request,
 		Binding:     binding,
 		NamespaceID: ns.ID,
 		ExpiresAt:   time.Now().Add(stateTTL).Unix(),
+		JKT:         jkt,
 	})
 	if err != nil {
 		return internalError(err), nil
@@ -188,6 +211,22 @@ func (b *oidcAuthBackend) handleCallback(ctx context.Context, req *logical.Reque
 	if !proofMatches(pending.Binding, d.Get("login_proof").(string)) {
 		return badRequest(errProofMismatch), nil
 	}
+	// A mount that binds sessions binds this one to the key the login offered,
+	// once the caller proves it holds it, before the code is spent. A login
+	// that offered none (started by an older client before the mount began
+	// binding) starts again; one finished after the mount stopped binding is
+	// issued a bearer session.
+	var jkt string
+	if cfg.dpop() {
+		if pending.JKT == "" {
+			return badRequest(errKeyRequired), nil
+		}
+		if err := checkLoginProof(req, pending.JKT, now); err != nil {
+			b.logger.Debug("oidc login: key proof refused", logger.Err(err))
+			return badRequest(errKeyNotProven), nil
+		}
+		jkt = pending.JKT
+	}
 	code := d.Get("code").(string)
 	if code == "" {
 		return badRequest(errors.New("code is required")), nil
@@ -224,11 +263,16 @@ func (b *oidcAuthBackend) handleCallback(ctx context.Context, req *logical.Reque
 	}
 	adm.PrincipalID = alias
 
-	if n := ticketLen(alias, naming.Kind, adm.AuthTime, ns.ID, req.MountAccessor, factsJSON, now, cfg.SessionTTL); n > logical.MaxTicketLen {
+	if n := ticketLen(alias, naming.Kind, adm.AuthTime, ns.ID, req.MountAccessor, factsJSON, jkt, now, cfg.SessionTTL); n > logical.MaxTicketLen {
 		return badRequest(fmt.Errorf("the session would be %d bytes (limit %d): the mapped claims are too large; "+
 			"map fewer claims, or claims with fewer values", n, logical.MaxTicketLen)), nil
 	}
 
+	data := map[string]any{"principal_id": alias}
+	if jkt != "" {
+		adm.Binding = &logical.KeyBinding{JKT: jkt}
+		data["dpop_bound"] = "true"
+	}
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
@@ -238,8 +282,29 @@ func (b *oidcAuthBackend) handleCallback(ctx context.Context, req *logical.Reque
 			ClientIP:    req.ClientIP,
 			Admission:   adm,
 		},
-		Data: map[string]any{"principal_id": alias},
+		Data: data,
 	}, nil
+}
+
+// checkLoginProof checks the DPoP proof of the key jkt names that the callback
+// request carries (RFC 9449 §5): over its method and path, fresh at now (when
+// the request arrived, else now). A login proof signs no ticket and no request
+// context.
+func checkLoginProof(req *logical.Request, jkt string, now time.Time) error {
+	if req.HTTPRequest == nil {
+		return errors.New("the callback arrived without its HTTP request")
+	}
+	path, ok := dpop.RequestPath(req.HTTPRequest)
+	if !ok {
+		return errors.New("the request line's target does not parse")
+	}
+	if !req.ReceivedAt.IsZero() {
+		now = req.ReceivedAt
+	}
+	_, err := dpop.Verify(req.HTTPRequest.Header.Values(dpop.HeaderName), &dpop.Want{
+		JKT: jkt, Method: req.HTTPRequest.Method, Path: path, Now: now,
+	})
+	return err
 }
 
 // exchange redeems the code at the token endpoint and returns the verified ID
@@ -371,10 +436,11 @@ func authTime(claims map[string]any) time.Time {
 	return helper.IssuedAt(claims)
 }
 
-// ticketLen is the length of the ticket core would issue for this login, so a
-// login whose ticket would be refused on every request is refused here, with
-// its reason, rather than by core as an internal error.
-func ticketLen(alias, kind string, auth time.Time, nsID, accessor string, facts []byte, now time.Time, ttl time.Duration) int {
+// ticketLen is the length of the ticket core would issue for this login, bound
+// to the key jkt names when it is set, so a login whose ticket would be refused
+// on every request is refused here, with its reason, rather than by core as an
+// internal error.
+func ticketLen(alias, kind string, auth time.Time, nsID, accessor string, facts []byte, jkt string, now time.Time, ttl time.Duration) int {
 	p := logical.TicketPayload{
 		V:             logical.TicketPayloadVersion,
 		Alias:         alias,
@@ -388,6 +454,9 @@ func ticketLen(alias, kind string, auth time.Time, nsID, accessor string, facts 
 	}
 	if !auth.IsZero() {
 		p.AuthTime = auth.Unix()
+	}
+	if jkt != "" {
+		p.Cnf = &logical.TicketConfirmation{JKT: jkt}
 	}
 	plain, err := json.Marshal(p)
 	if err != nil {
