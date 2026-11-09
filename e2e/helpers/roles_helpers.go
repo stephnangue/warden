@@ -21,6 +21,7 @@ type Role struct {
 	Description  string
 	Skill        string
 	ProviderPath string
+	KeyProofOnly bool
 }
 
 func (r Role) body() map[string]any {
@@ -39,6 +40,9 @@ func (r Role) body() map[string]any {
 	}
 	if r.ProviderPath != "" {
 		out["provider_path"] = r.ProviderPath
+	}
+	if r.KeyProofOnly {
+		out["key_proof_only"] = true
 	}
 	return out
 }

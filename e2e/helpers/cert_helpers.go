@@ -514,6 +514,13 @@ func VaultCertTransparentRequestViaMTLS(t *testing.T, method, vaultPath, role st
 	return DoMTLSRequest(t, method, u, nil, "", cert)
 }
 
+// IntrospectRolesViaMTLS reads sys/introspect/roles via direct mTLS connection.
+func IntrospectRolesViaMTLS(t *testing.T, port int, clientCertPEM, clientKeyPEM string) (int, []byte) {
+	t.Helper()
+	cert := parseTLSCert(t, clientCertPEM, clientKeyPEM)
+	return DoMTLSRequest(t, "GET", NodeURL(port)+"/v1/sys/introspect/roles", nil, "", cert)
+}
+
 // VaultCertTransparentRequestViaLBPassthrough makes a transparent vault gateway
 // request through the nginx TLS passthrough port via mTLS.
 func VaultCertTransparentRequestViaLBPassthrough(t *testing.T, method, vaultPath, role, clientCertPEM, clientKeyPEM string) (int, []byte) {

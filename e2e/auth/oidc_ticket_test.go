@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -391,6 +392,50 @@ func TestOIDCLogin_DPoPDisabled(t *testing.T) {
 	assert.Contains(t, headers["Www-Authenticate"], `DPoP error="invalid_token", algs="ES256"`)
 	status, body = h.TicketRequest(t, "GET", "sys/introspect/roles", e.port, bound, nil)
 	assert.Equal(t, http.StatusOK, status, "with its proof: %s", body)
+}
+
+// A key_proof_only role is granted to a bound ticket whose proof was checked,
+// on every node, and is on its menu. A bearer ticket proves nothing: from the
+// next request after the flag is set it is refused the role and no longer
+// finds it.
+func TestOIDCLogin_KeyProofOnly(t *testing.T) {
+	e := newHumanEnv(t)
+	gateway := func(role string) string { return "vault/role/" + role + "/gateway/v1/secret/data/e2e/app-config" }
+	listed := func(ticket, role string) bool {
+		return slices.ContainsFunc(h.TicketListRoles(t, e.port, ticket), func(r h.TicketRole) bool { return r.Name == role })
+	}
+	access := h.Role{Policies: []string{"vault-gateway-access"}, CredSpec: "vault-token-reader", ProviderPath: "vault"}
+
+	proven := h.UniqueMount("e2e-human-proven")
+	flagged := access
+	flagged.KeyProofOnly = true
+	e.grant(t, proven, "", flagged)
+	home := t.TempDir()
+	require.NoError(t, e.login(t, home, personAda, "-role="+e.role).Err)
+	bound := h.SessionTicket(t, home)
+	for _, port := range []int{e.port, standbyOf(e.port)} {
+		status, body := h.TicketRequest(t, "GET", gateway(proven), port, bound, asRole(proven))
+		assert.Equal(t, http.StatusOK, status, "node %d: %s", port, body)
+	}
+	assert.True(t, listed(bound, proven), "a bound ticket finds the role")
+
+	bearerMount := h.UniqueMount("oidc-e2e-bearer")
+	h.EnableAuth(t, e.port, "", bearerMount, "oidc", h.OIDCMountConfig(e.idp, map[string]any{"dpop_enabled": false}))
+	role := h.UniqueMount("e2e-human-bearer")
+	h.GrantRole(t, e.port, bearerMount, role, access, operators)
+	t.Cleanup(func() { h.RevokeRoleBestEffort(e.port, bearerMount, role) })
+	home2 := t.TempDir()
+	require.NoError(t, h.OIDCLogin(t, e.port, home2, personAda, nil, nil, "-path="+bearerMount, "-role="+role).Err)
+	bearer := h.SessionTicket(t, home2)
+	status, body := h.TicketRequest(t, "GET", gateway(role), e.port, bearer, asRole(role))
+	require.Equal(t, http.StatusOK, status, "before the flag: %s", body)
+	assert.True(t, listed(bearer, role), "before the flag")
+
+	h.MustNS(t, e.port, "", "PUT", "sys/roles/"+role, `{"key_proof_only":true}`)
+	status, body = h.TicketRequest(t, "GET", gateway(role), e.port, bearer, asRole(role))
+	assert.Equal(t, http.StatusForbidden, status, "with the flag: %s", body)
+	assert.Contains(t, h.ErrorText(body), "requires proof of key possession")
+	assert.False(t, listed(bearer, role), "a bearer ticket no longer finds the role")
 }
 
 // Disabling the mount ends every session it issued, even once it is enabled
